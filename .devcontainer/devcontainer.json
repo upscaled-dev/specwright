@@ -1,0 +1,31 @@
+{
+  "name": "specwright dev container",
+  "build": { "dockerfile": "Dockerfile" },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+  "remoteUser": "node",
+  "runArgs": [
+    "--memory=4g",
+    "--cpus=2"
+  ],
+  "containerEnv": {
+    // Chromium's sandbox can't start unprivileged inside Docker (seccomp blocks
+    // user namespaces); without this, the integration tests' VS Code dies on launch.
+    // Run them with: xvfb-run -a npm run test:integration
+    "ELECTRON_DISABLE_SANDBOX": "1"
+  },
+  "mounts": [
+    // Overlay node_modules with a named volume: the bind mount above shares the
+    // host checkout, and `npm ci` in here would otherwise replace macOS/Windows
+    // native binaries (esbuild, etc.) with Linux ones, breaking the host repo.
+    "source=specwright-node-modules,target=/workspace/node_modules,type=volume"
+  ],
+  "postCreateCommand": "sudo chown node:node /workspace/node_modules && git config --global --add safe.directory /workspace && npm ci",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}
