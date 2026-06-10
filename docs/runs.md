@@ -39,6 +39,7 @@ Targeting any scenario from the Test Explorer or CodeLens runs a shell command o
 - **Feature-file selection** greps by the `Feature:` title (not the filename), so running one feature can't accidentally match another feature whose scenario titles happen to contain the filename.
 - **Result mapping** back to the Test Explorer reads the Playwright JSON reporter — the extension appends `--reporter=json` alongside whatever reporter you configured so the user-visible output isn't disturbed. Because playwright-bdd's report carries no `.feature` source line, the extension reads the `bddFileData` block embedded in each generated spec to map every result (including `Example #N` outline rows, which the report only labels by index) back to its exact `.feature` path and line. So status sticks to the right tree item even without source annotations.
 - **`bddgen` failures** are parsed for `feature_file:line` markers and republished as `Error`-severity diagnostics on the offending `.feature` line (source `Playwright-BDD`, code `bddgen-error`). These diagnostics clear automatically on the next successful run.
+- **Debug runs split the command.** Instead of chaining everything with `&&`, the executor runs `bddgen` as a separate step first — so the generated specs exist before feature-file breakpoints are mirrored into them — and then launches only the `playwright test` half under the debugger. See [Debugging with breakpoints](#debugging-with-breakpoints).
 - **Parallel execution** appends `--workers=<maxParallelProcesses>` when `playwrightBddRunner.parallelExecution` is `true`. The "Run in Parallel" Test Explorer profile also forces this flag, independent of that setting. On first use in a workspace the profile prompts for a worker count (1 / 2 / 4 / 8 / 16 / Custom) and persists the choice to `playwrightBddRunner.maxParallelProcesses`; subsequent runs use the stored value silently. If `maxParallelProcesses` is ever invalid, the profile auto-adjusts to `CPU cores - 2` (clamped to 1–16).
 - If your `playwright.config.ts` already runs `bddgen` automatically (via `defineBddProject`), set `playwrightBddRunner.bddgenCommand` to an empty string to skip the explicit codegen step.
 
@@ -56,7 +57,7 @@ The tree can be regrouped on the fly via the per-test-item context menu or the o
 
 The Test Explorer Run-button dropdown exposes three profiles:
 - **Run** (default) — sequential Playwright invocation.
-- **Debug** — runs the targeted command under VS Code's JS debugger (a `node-terminal` launch), so breakpoints in your step-definition `.ts` files are hit. It deliberately does *not* use Playwright's `--debug` Inspector.
+- **Debug** — runs `bddgen` first, mirrors any `.feature`-file breakpoints onto the generated spec, then runs the targeted command under VS Code's JS debugger (a `node-terminal` launch), so breakpoints in `.feature` files and in your step-definition `.ts` files are hit. It deliberately does *not* use Playwright's `--debug` Inspector. See [Debugging with breakpoints](#debugging-with-breakpoints).
 - **Run in Parallel** — forces `--workers=N` on the spawned Playwright command regardless of the `playwrightBddRunner.parallelExecution` setting. First use prompts for a worker count and persists it.
 
 ### Scenario Outline rows
@@ -65,6 +66,23 @@ Each row of every `Examples:` block is discovered as its own runnable item named
 
 ![Scenario Outline examples expanded in the Test Explorer](../images/multi_scenario_outline_explorer.png)
 ![Running a single Scenario Outline example row](../images/running_example.gif)
+
+## Debugging with breakpoints
+
+Click the gutter in a `.feature` file to set a breakpoint — the extension enables VS Code's breakpoint gutter for Gherkin — then start any Debug action (Debug Scenario / Scenario Outline / Example, or the Test Explorer Debug profile). What happens on launch:
+
+1. `bddgen` runs first, as a separate step, so the generated specs exist before the debugger starts. If codegen fails, the launch is aborted and the error is logged.
+2. The extension reads the `bddFileData` block in the generated spec under `playwrightBddRunner.featuresGenDir` (default `.features-gen`) and mirrors each feature-file breakpoint onto the corresponding generated-spec line: steps, `Scenario:` lines, and the `Examples:` rows that playwright-bdd maps. Feature lines with no executable counterpart (comments, tags, the `Feature:` line) are ignored.
+3. The Playwright command launches under VS Code's JS debugger (`node-terminal`), which auto-attaches to the spawned Node processes and binds the mirrored breakpoints.
+4. When the debug session ends, the mirrored breakpoints are removed, so your breakpoint list only ever contains what you set yourself. Spec lines shared by concurrent sessions (e.g. `Background` steps) are reference-counted and survive until the last session referencing them ends.
+
+Caveats:
+
+- When paused, the editor shows the **generated spec** — or your step definition once you step in — not the `.feature` file. The JS debugger can only bind to real JavaScript.
+- A breakpoint on a shared `Background` step pauses for every scenario in the session that executes it, not just the scenario you targeted.
+- If your playwright-bdd `outputDir` isn't the default, set `playwrightBddRunner.featuresGenDir` to match. Otherwise the extension can't locate the generated spec and feature-file breakpoints are skipped for that session (step-definition breakpoints still work).
+
+Implemented in [src/core/breakpoint-mirror.ts](../src/core/breakpoint-mirror.ts) and [src/parsers/bdd-file-data-parser.ts](../src/parsers/bdd-file-data-parser.ts).
 
 ## CodeLens
 

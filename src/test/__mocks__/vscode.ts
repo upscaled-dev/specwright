@@ -32,7 +32,23 @@ class Range {
 }
 
 class Location {
-  constructor(public readonly uri: unknown, public readonly range: Range) {}
+  public readonly range: Range;
+  constructor(public readonly uri: unknown, rangeOrPosition: Range | Position) {
+    // Real VS Code normalizes a Position into an empty Range.
+    this.range = rangeOrPosition instanceof Position
+      ? new Range(rangeOrPosition, rangeOrPosition)
+      : rangeOrPosition;
+  }
+}
+
+export class SourceBreakpoint {
+  constructor(
+    public readonly location: Location,
+    public readonly enabled: boolean = true,
+    public readonly condition?: string,
+    public readonly hitCondition?: string,
+    public readonly logMessage?: string
+  ) {}
 }
 
 const Uri = {
@@ -299,9 +315,38 @@ export const tests = {
   createTestController: () => ({ dispose: () => {} }),
 };
 
+type DebugTerminateListener = (session: unknown) => void;
+const __debugTerminateListeners: DebugTerminateListener[] = [];
+
 export const debug = {
+  breakpoints: [] as unknown[],
   startDebugging: (): Promise<boolean> => Promise.resolve(true),
-  onDidTerminateDebugSession: () => ({ dispose: () => {} }),
+  addBreakpoints: (bps: readonly unknown[]): void => {
+    debug.breakpoints.push(...bps);
+  },
+  removeBreakpoints: (bps: readonly unknown[]): void => {
+    debug.breakpoints = debug.breakpoints.filter((bp) => !bps.includes(bp));
+  },
+  onDidChangeBreakpoints: (_listener?: unknown) => ({ dispose: () => { /* no-op */ } }),
+  onDidTerminateDebugSession: (listener?: DebugTerminateListener) => {
+    if (listener) {
+      __debugTerminateListeners.push(listener);
+    }
+    return {
+      dispose: () => {
+        if (!listener) {return;}
+        const i = __debugTerminateListeners.indexOf(listener);
+        if (i > -1) {__debugTerminateListeners.splice(i, 1);}
+      },
+    };
+  },
+  __fireTerminate: (session: unknown): void => {
+    for (const l of __debugTerminateListeners) {l(session);}
+  },
+  __resetDebug: (): void => {
+    debug.breakpoints = [];
+    __debugTerminateListeners.length = 0;
+  },
 };
 
 export const extensions = {

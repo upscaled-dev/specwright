@@ -2,7 +2,7 @@
   "name": "specwright",
   "displayName": "Specwright — Playwright-BDD Test Explorer",
   "description": "Run, debug & explore Playwright-BDD (playwright-bdd) Gherkin tests in the Test Explorer. Full .feature authoring: autocomplete, hover, go-to-definition, find references, diagnostics, snippets, tag filtering, parallel runs, and step-definition generation. Works alongside Cucumber.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "icon": "icon.png",
   "publisher": "upscaled-dev",
   "license": "MIT",
@@ -65,8 +65,13 @@
     "languages": [
       {
         "id": "gherkin",
-        "aliases": ["Gherkin", "feature"],
-        "extensions": [".feature"],
+        "aliases": [
+          "Gherkin",
+          "feature"
+        ],
+        "extensions": [
+          ".feature"
+        ],
         "configuration": "./language-configuration.json",
         "icon": {
           "light": "./icons/gherkin-light.svg",
@@ -87,6 +92,11 @@
         "path": "./snippets/gherkin.code-snippets"
       }
     ],
+    "breakpoints": [
+      {
+        "language": "gherkin"
+      }
+    ],
     "configuration": {
       "type": "object",
       "title": "Specwright",
@@ -105,6 +115,11 @@
           "type": "string",
           "default": "",
           "description": "Command to run before each test execution (e.g., 'npm run build:fixtures'). Empty disables the hook. If the command exits non-zero, the test run is aborted."
+        },
+        "playwrightBddRunner.featuresGenDir": {
+          "type": "string",
+          "default": ".features-gen",
+          "description": "Directory where bddgen writes generated spec files, relative to the working directory. Used to mirror feature-file breakpoints into generated specs when debugging."
         },
         "playwrightBddRunner.workingDirectory": {
           "type": "string",
@@ -547,7 +562,7 @@
     "clean": "rimraf dist out",
     "build": "npm run clean && npm run compile",
     "dev": "npm run watch",
-    "package:vsix": "npm run clean && npm run build:prod && vsce package --no-dependencies --out dist/",
+    "package:vsix": "npm run clean && npm run build:prod && node scripts/package-vsix.mjs",
     "release": "node scripts/release.mjs",
     "release:patch": "node scripts/release.mjs --type patch",
     "release:minor": "node scripts/release.mjs --type minor",

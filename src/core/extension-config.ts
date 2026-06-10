@@ -65,6 +65,11 @@ export class ExtensionConfig {
     return this.config.get<string>("workingDirectory", "");
   }
 
+  public get featuresGenDir(): string {
+    const value = this.config.get<string>("featuresGenDir", ".features-gen");
+    return value.trim() === "" ? ".features-gen" : value;
+  }
+
   public get enableCodeLens(): boolean {
     return this.config.get<boolean>("enableCodeLens", true);
   }

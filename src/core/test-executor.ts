@@ -14,6 +14,8 @@ import { ExtensionConfig } from "./extension-config";
 import { spawn } from "node:child_process";
 import { PlaywrightJsonParser, ScenarioStatus, ScenarioResult } from "../utils/playwright-json-parser";
 import { shellQuote } from "../utils/shell";
+import { BreakpointMirror } from "./breakpoint-mirror";
+import { resolveGeneratedSpecPath } from "../parsers/bdd-file-data-parser";
 
 /**
  * A test run result enriched with the per-scenario outcomes parsed from Playwright's JSON
@@ -89,6 +91,7 @@ export class TestExecutor {
   private readonly runEventEmitter = new vscode.EventEmitter<TestRunEvent>();
   private readonly defaultShellRunner: ShellRunner;
   private shellRunner: ShellRunner;
+  private readonly mirror: BreakpointMirror;
 
   public readonly onTestRunEvent: vscode.Event<TestRunEvent> = this.runEventEmitter.event;
 
@@ -99,9 +102,10 @@ export class TestExecutor {
     config?: ExtensionConfig,
     logger?: Logger,
     playwrightJsonParser?: PlaywrightJsonParser,
-    shellRunner?: ShellRunner
+    shellRunner?: ShellRunner,
+    mirror?: BreakpointMirror
   ): TestExecutor {
-    return new TestExecutor(workspace, window, _debug, config, logger, playwrightJsonParser, shellRunner);
+    return new TestExecutor(workspace, window, _debug, config, logger, playwrightJsonParser, shellRunner, mirror);
   }
 
   constructor(
@@ -111,7 +115,8 @@ export class TestExecutor {
     config?: ExtensionConfig,
     logger?: Logger,
     playwrightJsonParser?: PlaywrightJsonParser,
-    shellRunner?: ShellRunner
+    shellRunner?: ShellRunner,
+    mirror?: BreakpointMirror
   ) {
     this.workspace = workspace;
     this.window = window;
@@ -122,6 +127,9 @@ export class TestExecutor {
     this.defaultShellRunner = (command, workingDir, extraEnv) =>
       this.spawnCommand(command, workingDir, extraEnv);
     this.shellRunner = shellRunner ?? this.defaultShellRunner;
+    // Eager, not lazy: constructing the mirror subscribes to onDidChangeBreakpoints, which
+    // forces VS Code to initialize its lazily-populated `debug.breakpoints` before first use.
+    this.mirror = mirror ?? BreakpointMirror.create(this.debug);
   }
 
   public setContext(context: PlaywrightBddExtensionContext): void {
@@ -159,14 +167,37 @@ export class TestExecutor {
   }
 
   public async debugScenario(options: TestExecutionOptions): Promise<void> {
+    let mirrorId: string | undefined;
     try {
-      // Run the targeted command under VS Code's JS debugger via a `node-terminal`
-      // configuration. js-debug runs the shell command (bddgen && playwright test ...) in a
-      // terminal and auto-attaches to the spawned node processes, so breakpoints in the user's
-      // step-definition .ts files are actually hit. We deliberately avoid Playwright's
-      // `--debug` (Inspector) flag here: that pauses in the Inspector, not in VS Code.
+      // Run the targeted playwright command under VS Code's JS debugger via a `node-terminal`
+      // configuration. js-debug runs the shell command in a terminal and auto-attaches to the
+      // spawned node processes, so breakpoints in the user's step-definition .ts files are
+      // actually hit. We deliberately avoid Playwright's `--debug` (Inspector) flag here: that
+      // pauses in the Inspector, not in VS Code.
+      //
+      // bddgen runs separately FIRST (not chained into the debugged command) so the generated
+      // specs exist before we mirror feature-file breakpoints into them.
       const workingDir = this.getWorkingDirectory();
-      const command = this.commandBuilder().buildDebugCommand(options);
+      const { bddgenCommand, playwrightCommand } =
+        this.commandBuilder().buildDebugCommandParts(options);
+
+      if (bddgenCommand !== undefined) {
+        const result = await this.shellRunner(bddgenCommand, workingDir);
+        if (!result.success) {
+          const detail = result.error.trim() === "" ? result.output : result.error;
+          throw new Error(`bddgen failed (exit code ${result.returnCode}): ${detail}`);
+        }
+      }
+
+      const specPath = resolveGeneratedSpecPath(
+        workingDir,
+        this.config.featuresGenDir,
+        options.filePath
+      );
+      if (specPath !== undefined) {
+        mirrorId = this.mirror.mirrorBreakpoints(options.filePath, specPath);
+      }
+
       const folder =
         this.workspace.workspaceFolders?.find(
           (f) => workingDir === f.uri.fsPath || workingDir.startsWith(f.uri.fsPath + path.sep)
@@ -176,14 +207,20 @@ export class TestExecutor {
         type: "node-terminal",
         request: "launch",
         name: "Debug Playwright-BDD Scenario",
-        command,
+        command: playwrightCommand,
         cwd: workingDir,
+        ...(mirrorId === undefined ? {} : { [BreakpointMirror.SESSION_KEY]: mirrorId }),
       });
 
       if (!started) {
         throw new Error("VS Code declined to start the debug session");
       }
     } catch (error) {
+      // No session will ever terminate for a failed launch, so the mirror must be released
+      // here or the mirrored breakpoints leak until deactivation.
+      if (mirrorId !== undefined) {
+        this.mirror.release(mirrorId);
+      }
       const msg = errMsg(error);
       this.logger.error(`Failed to start debug session: ${msg}`, {
         filePath: options.filePath,
@@ -292,6 +329,7 @@ export class TestExecutor {
     }
     this.terminalCloseSubscription?.dispose();
     this.terminalCloseSubscription = undefined;
+    this.mirror.dispose();
     this.runEventEmitter.dispose();
   }
 

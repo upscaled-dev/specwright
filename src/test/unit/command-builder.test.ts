@@ -116,23 +116,48 @@ describe("CommandBuilder", () => {
     expect(cmd).toContain("--list");
   });
 
-  it("greps the targeted scenario without the Inspector --debug flag", async () => {
+  it("splits debug into a bddgen half and a playwright half grepped without the Inspector --debug flag", () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildDebugCommand({
+    const { bddgenCommand, playwrightCommand } = builder.buildDebugCommandParts({
       filePath: "/abs/features/a.feature",
       scenarioName: "Passing",
     });
+    expect(bddgenCommand).toBe("npx bddgen");
     // The Playwright Inspector flag must NOT be present — debugging runs under VS Code's
     // JS debugger (node-terminal), not the Inspector.
-    expect(cmd).not.toContain("--debug");
-    expect(cmd).toContain('--grep "Passing"');
+    expect(playwrightCommand).not.toContain("--debug");
+    expect(playwrightCommand).not.toContain("bddgen");
+    expect(playwrightCommand).toContain('--grep "Passing"');
   });
 
-  it("greps the feature basename when no scenario is targeted for debug", async () => {
+  it("carries --tags on the bddgen half of the debug command", () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = builder.buildDebugCommand({ filePath: "/abs/features/login.feature" });
-    expect(cmd).not.toContain("--debug");
-    expect(cmd).toContain('--grep "login"');
+    const { bddgenCommand, playwrightCommand } = builder.buildDebugCommandParts({
+      filePath: "/abs/features/a.feature",
+      scenarioName: "Passing",
+      tags: "@smoke and not @wip",
+    });
+    expect(bddgenCommand).toBe('npx bddgen --tags "@smoke and not @wip"');
+    expect(playwrightCommand).not.toContain("--tags");
+  });
+
+  it("yields bddgenCommand undefined for debug when bddgenCommand config is empty", () => {
+    const builder = CommandBuilder.create(makeConfig({ bddgenCommand: "" }) as never, loggerStub());
+    const { bddgenCommand, playwrightCommand } = builder.buildDebugCommandParts({
+      filePath: "/abs/features/a.feature",
+      scenarioName: "Passing",
+    });
+    expect(bddgenCommand).toBeUndefined();
+    expect(playwrightCommand).toMatch(/^npx playwright test/);
+  });
+
+  it("greps the feature basename when no scenario is targeted for debug", () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const { playwrightCommand } = builder.buildDebugCommandParts({
+      filePath: "/abs/features/login.feature",
+    });
+    expect(playwrightCommand).not.toContain("--debug");
+    expect(playwrightCommand).toContain('--grep "login"');
   });
 
   it("filters by feature-file basename for a feature run when no title is known", async () => {

@@ -9,6 +9,7 @@ All settings live under `playwrightBddRunner.*` in your VS Code Settings (`Cmd/C
 | `playwrightCommand` | string | `npx playwright test` | Use `pnpm exec playwright test`, `yarn playwright test`, etc. as appropriate. |
 | `bddgenCommand` | string | `npx bddgen` | Set empty to skip codegen if your `playwright.config.ts` already runs `bddgen` via `defineBddProject`. |
 | `preRunCommand` | string | `` | Command to run before each test execution (e.g. `npm run build:fixtures`). Empty disables. A non-zero exit aborts the run and writes the error to the output channel. |
+| `featuresGenDir` | string | `.features-gen` | Directory where `bddgen` writes generated specs, relative to the working directory. Set it if you customized playwright-bdd's `outputDir`. Used to mirror `.feature`-file breakpoints into the generated specs when debugging — see [runs.md](runs.md#debugging-with-breakpoints). |
 | `workingDirectory` | string | `` (workspace root) | Override if your playwright config isn't at the workspace root. |
 | `testFilePattern` | string | `**/*.feature` | Glob for feature-file discovery. Also used by tag autocompletion. |
 | `tags` | string | `` | Default tag expression, e.g. `@smoke and not @wip`. |

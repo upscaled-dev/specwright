@@ -12,7 +12,7 @@ Specwright integrates [playwright-bdd](https://vitalets.github.io/playwright-bdd
 ## Why Specwright?
 
 - **Results land on the right scenario.** Pass/fail maps back to the exact `.feature` line — including individual Scenario Outline example rows — instead of leaving you to scan terminal output.
-- **Real debugging.** Set a breakpoint in your step-definition `.ts` file, hit the debug icon, and step through — no `--debug` inspector workarounds.
+- **Real debugging.** Set a breakpoint in the `.feature` file itself or in your step-definition `.ts` file, hit the debug icon, and step through — no `--debug` inspector workarounds.
 - **Your steps are connected.** Autocomplete steps from your actual step definitions, hover to see the matching pattern, Ctrl+Click to jump to it, and see usage counts above every definition.
 - **No setup beyond playwright-bdd itself.** Discovery, `bddgen`, runs, and result mapping are all automatic.
 
@@ -29,7 +29,7 @@ Only your playwright-bdd configuration is required. If your project layout diffe
 ### Test Explorer integration
 
 - **Automatic discovery** of every `.feature` file, kept live by a file watcher — create, edit, or delete a feature and the tree updates without a reload.
-- **Three run profiles**: Run, Debug (breakpoints in your step-definition `.ts` files just work), and Run in Parallel (prompts once for a worker count, then remembers it).
+- **Three run profiles**: Run, Debug (breakpoints in `.feature` files and step-definition `.ts` files just work), and Run in Parallel (prompts once for a worker count, then remembers it).
 - **Five organization strategies**, switchable on the fly: hierarchical by feature, by tag, by file, by scenario type, or flat.
 - **Scenario Outline rows as first-class items** — every `Examples:` row is individually runnable and individually reported.
 - **Exact result mapping** back to the right `.feature` line via playwright-bdd's embedded source data, so pass/fail status sticks to the correct tree item — even for outline example rows.
@@ -53,6 +53,12 @@ Wherever you're looking at a scenario, there's a way to run it:
 ![Running a single Scenario Outline example row](images/running_example.gif)
 
 → [docs/runs.md](docs/runs.md)
+
+### Debugging with breakpoints
+
+Set breakpoints directly in the `.feature` file — the breakpoint gutter is enabled for Gherkin — or in your step-definition `.ts` files, then start any Debug action. The extension runs `bddgen` first, mirrors your feature-file breakpoints onto the matching lines of the generated spec (steps, `Scenario:` lines, and `Examples:` rows), launches VS Code's JS debugger, and removes the mirrored breakpoints when the session ends. While paused, the editor shows the generated spec (or your step definition once you step in), not the `.feature` file. If you customized playwright-bdd's `outputDir`, point `playwrightBddRunner.featuresGenDir` at it.
+
+→ [docs/runs.md](docs/runs.md#debugging-with-breakpoints)
 
 ### Step intelligence
 

@@ -35,6 +35,7 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   bddgenCommand: (c) => c.bddgenCommand,
   preRunCommand: (c) => c.preRunCommand,
   workingDirectory: (c) => c.workingDirectory,
+  featuresGenDir: (c) => c.featuresGenDir,
   testFilePattern: (c) => c.testFilePattern,
   enableCodeLens: (c) => c.enableCodeLens,
   parallelExecution: (c) => c.parallelExecution,

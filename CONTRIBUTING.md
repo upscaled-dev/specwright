@@ -66,7 +66,7 @@ npm run lint:fix
 ```bash
 npm run build          # clean + check-types + lint + esbuild
 npm run build:prod     # check-types + lint + vitest + esbuild --production
-npm run package:vsix   # clean + build:prod + vsce package into dist/
+npm run package:vsix   # clean + build:prod + patch-bump version + vsce package into packages/ (filename stamped with version + git sha + dirty marker)
 npm run release        # bump version, update CHANGELOG, package, commit, tag (scripts/release.mjs)
 ```
 

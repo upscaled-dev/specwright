@@ -66,12 +66,14 @@ src/
     extension-config.ts                   # reads playwrightBddRunner.* settings
     command-builder.ts                    # composes `bddgen && playwright test …`
     test-executor.ts                      # runs in terminal + spawns for JSON parsing
+    breakpoint-mirror.ts                  # mirrors .feature breakpoints onto generated specs for debug
     test-discovery-manager.ts             # globs + caches .feature files
     test-organization.ts                  # 5 tree-grouping strategies
     provider-registry.ts                  # owns lifecycle of reactive providers
   generators/step-stub-generator.ts       # pure: parameter inference, keyword normalization, stub formatting
   parsers/
     feature-parser.ts                     # Gherkin parser
+    bdd-file-data-parser.ts               # extracts the bddFileData block from generated specs
     tag-regex.ts                          # shared @tag pattern source
   providers/
     scenario-boundary.ts                  # shared SCENARIO_BOUNDARY_RE constant

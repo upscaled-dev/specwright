@@ -111,15 +111,17 @@ export class CommandBuilder {
   }
 
   /**
-   * Debug command. Runs the targeted scenario/feature under VS Code's JS debugger (the caller
-   * launches this via a `node-terminal` debug configuration), so breakpoints in step-definition
-   * files are hit. We do NOT add Playwright's `--debug` flag here — that opens the Playwright
-   * Inspector and pauses there instead of in VS Code.
+   * Debug command, split into its bddgen and playwright halves. The executor runs bddgen
+   * itself (so the generated specs exist before breakpoints are mirrored into them) and then
+   * launches ONLY the playwright half under VS Code's JS debugger via a `node-terminal`
+   * configuration, so breakpoints in step-definition files are hit. We do NOT add Playwright's
+   * `--debug` flag here — that opens the Playwright Inspector and pauses there instead of in
+   * VS Code.
    */
-  public buildDebugCommand(options: TestExecutionOptions): string {
-    const parts: string[] = [];
-    const gen = this.buildBddgen(options.tags);
-    if (gen) {parts.push(gen);}
+  public buildDebugCommandParts(
+    options: TestExecutionOptions
+  ): { bddgenCommand: string | undefined; playwrightCommand: string } {
+    const bddgenCommand = this.buildBddgen(options.tags);
 
     const playwrightParts: string[] = [this.config.playwrightCommand];
     if (options.scenarioName) {
@@ -130,8 +132,7 @@ export class CommandBuilder {
       const base = path.basename(options.filePath).replace(/\.feature$/, "");
       if (base) {playwrightParts.push("--grep", this.quote(this.gripPattern(base)));}
     }
-    parts.push(playwrightParts.join(" "));
-    return parts.join(" && ");
+    return { bddgenCommand, playwrightCommand: playwrightParts.join(" ") };
   }
 
   public buildAllTestsCommand(): string {

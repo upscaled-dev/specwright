@@ -5,6 +5,7 @@ import { ExtensionConfig } from "../../core/extension-config";
 import { Logger } from "../../utils/logger";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { CommandBuilder } from "../../core/command-builder";
+import { BreakpointMirror } from "../../core/breakpoint-mirror";
 import { PlaywrightBddExtensionContext } from "../../types";
 import { BddgenDiagnosticsProvider } from "../../providers/bddgen-diagnostics-provider";
 
@@ -15,7 +16,7 @@ interface ShellCall {
 }
 
 function makeConfig(
-  values: { preRunCommand?: string; workingDirectory?: string } = {}
+  values: { preRunCommand?: string; workingDirectory?: string; bddgenCommand?: string } = {}
 ): ExtensionConfig {
   const stub = {
     get: <T>(key: string, defaultValue?: T): T | undefined => {
@@ -24,6 +25,9 @@ function makeConfig(
       }
       if (key === "workingDirectory") {
         return (values.workingDirectory ?? "") as unknown as T;
+      }
+      if (key === "bddgenCommand" && values.bddgenCommand !== undefined) {
+        return values.bddgenCommand as unknown as T;
       }
       return defaultValue;
     },
@@ -43,6 +47,7 @@ interface FakeTerminal {
 interface FakeWindow {
   terminals: FakeTerminal[];
   closeListeners: Array<(t: unknown) => void>;
+  errorMessages: string[];
   fireClose(terminal: FakeTerminal): void;
   window: typeof vscode.window;
 }
@@ -50,6 +55,7 @@ interface FakeWindow {
 function makeFakeWindow(): FakeWindow {
   const terminals: FakeTerminal[] = [];
   const closeListeners: Array<(t: unknown) => void> = [];
+  const errorMessages: string[] = [];
   const window = {
     createTerminal: (): FakeTerminal => {
       const terminal: FakeTerminal = {
@@ -68,11 +74,15 @@ function makeFakeWindow(): FakeWindow {
     },
     showInformationMessage: (): Promise<unknown> => Promise.resolve(undefined),
     showWarningMessage: (): Promise<unknown> => Promise.resolve(undefined),
-    showErrorMessage: (): Promise<unknown> => Promise.resolve(undefined),
+    showErrorMessage: (message: string): Promise<unknown> => {
+      errorMessages.push(message);
+      return Promise.resolve(undefined);
+    },
   } as unknown as typeof vscode.window;
   return {
     terminals,
     closeListeners,
+    errorMessages,
     fireClose(terminal: FakeTerminal): void {
       for (const l of closeListeners) { l(terminal); }
     },
@@ -80,11 +90,46 @@ function makeFakeWindow(): FakeWindow {
   };
 }
 
+interface FakeDebug {
+  startCalls: Array<{ folder: unknown; config: Record<string, unknown> }>;
+  breakpoints: unknown[];
+  debug: typeof vscode.debug;
+}
+
+function makeFakeDebug(
+  onStart?: () => void,
+  start?: () => Promise<boolean>
+): FakeDebug {
+  const startCalls: Array<{ folder: unknown; config: Record<string, unknown> }> = [];
+  const breakpoints: unknown[] = [];
+  const debug = {
+    breakpoints,
+    addBreakpoints: (bps: readonly unknown[]): void => {
+      breakpoints.push(...bps);
+    },
+    removeBreakpoints: (bps: readonly unknown[]): void => {
+      for (const bp of bps) {
+        const i = breakpoints.indexOf(bp);
+        if (i > -1) { breakpoints.splice(i, 1); }
+      }
+    },
+    onDidTerminateDebugSession: () => ({ dispose: () => { /* no-op */ } }),
+    onDidChangeBreakpoints: () => ({ dispose: () => { /* no-op */ } }),
+    startDebugging: (folder: unknown, config: Record<string, unknown>): Promise<boolean> => {
+      onStart?.();
+      startCalls.push({ folder, config });
+      return start ? start() : Promise.resolve(true);
+    },
+  } as unknown as typeof vscode.debug;
+  return { startCalls, breakpoints, debug };
+}
+
 interface ExecutorDeps {
   workspace?: typeof vscode.workspace;
   window?: typeof vscode.window;
   debug?: typeof vscode.debug;
   bddgenDiagnostics?: BddgenDiagnosticsProvider;
+  mirror?: BreakpointMirror;
 }
 
 function makeExecutor(
@@ -100,7 +145,8 @@ function makeExecutor(
     config,
     logger,
     PlaywrightJsonParser.create(logger),
-    shellRunner
+    shellRunner,
+    deps.mirror
   );
   const commandBuilder = CommandBuilder.create(config, logger);
   const context: PlaywrightBddExtensionContext = {
@@ -249,6 +295,160 @@ describe("TestExecutor run events", () => {
     expect(final?.kind).toBe("failure");
     expect(final?.passed).toBe(1);
     expect(final?.failed).toBe(1);
+  });
+});
+
+describe("TestExecutor debugScenario", () => {
+  it("runs bddgen via the shell runner before starting the debug session", async () => {
+    const sequence: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      sequence.push(`shell:${command}`);
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const fakeDebug = makeFakeDebug(() => sequence.push("startDebugging"));
+    const { executor } = makeExecutor(makeConfig(), shell, { debug: fakeDebug.debug });
+
+    await executor.debugScenario({ filePath: "/abs/features/a.feature", scenarioName: "Passing" });
+
+    expect(sequence).toEqual(["shell:npx bddgen", "startDebugging"]);
+  });
+
+  it("passes only the playwright half as the debugged command", async () => {
+    const okShell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const fakeDebug = makeFakeDebug();
+    const { executor } = makeExecutor(makeConfig(), okShell, { debug: fakeDebug.debug });
+
+    await executor.debugScenario({ filePath: "/abs/features/a.feature", scenarioName: "Passing" });
+
+    expect(fakeDebug.startCalls).toHaveLength(1);
+    const command = fakeDebug.startCalls[0]!.config["command"] as string;
+    expect(command).toMatch(/^npx playwright test/);
+    expect(command).not.toContain("bddgen");
+    expect(command).toContain('--grep "Passing"');
+  });
+
+  it("does not start debugging and shows an error when bddgen fails", async () => {
+    const failingShell: ShellRunner = async () => ({
+      success: false,
+      output: "",
+      error: "Parse error in feature file",
+      returnCode: 1,
+    });
+    const fakeDebug = makeFakeDebug();
+    const fakeWindow = makeFakeWindow();
+    const { executor } = makeExecutor(makeConfig(), failingShell, {
+      debug: fakeDebug.debug,
+      window: fakeWindow.window,
+    });
+
+    await executor.debugScenario({ filePath: "/abs/features/a.feature", scenarioName: "Passing" });
+
+    expect(fakeDebug.startCalls).toHaveLength(0);
+    expect(fakeWindow.errorMessages).toHaveLength(1);
+    expect(fakeWindow.errorMessages[0]).toContain("Parse error in feature file");
+  });
+
+  const FEATURE_PATH = "/work/features/background.feature";
+  const mirrorSpecText = `const bddFileData = [ // bdd-data-start
+  {"pwTestLine":11,"pickleLine":8,"steps":[{"pwStepLine":7,"gherkinStepLine":5},{"pwStepLine":12,"gherkinStepLine":9}]},
+]; // bdd-data-end`;
+  const okShell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+
+  function makeWorkWorkspace(): typeof vscode.workspace {
+    return {
+      ...vscode.workspace,
+      workspaceFolders: [{ uri: { fsPath: "/work" } }],
+    } as unknown as typeof vscode.workspace;
+  }
+
+  function pushFeatureBreakpoint(fakeDebug: FakeDebug): void {
+    // 0-based line 8 = gherkin line 9 → pwStepLine 12 → spec line 11
+    fakeDebug.breakpoints.push(
+      new vscode.SourceBreakpoint(
+        new vscode.Location(vscode.Uri.file(FEATURE_PATH), new vscode.Position(8, 0))
+      )
+    );
+  }
+
+  function specBreakpointLines(fakeDebug: FakeDebug): number[] {
+    return fakeDebug.breakpoints
+      .filter(
+        (bp): bp is vscode.SourceBreakpoint =>
+          bp instanceof vscode.SourceBreakpoint && bp.location.uri.fsPath.endsWith(".spec.js")
+      )
+      .map((bp) => bp.location.range.start.line);
+  }
+
+  it("mirrors feature breakpoints into the generated spec and tags the debug config", async () => {
+    const fakeDebug = makeFakeDebug();
+    pushFeatureBreakpoint(fakeDebug);
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      mirror,
+    });
+
+    await executor.debugScenario({ filePath: FEATURE_PATH, scenarioName: "Passing" });
+
+    expect(specBreakpointLines(fakeDebug)).toEqual([11]);
+    expect(fakeDebug.startCalls).toHaveLength(1);
+    const config = fakeDebug.startCalls[0]!.config;
+    expect(typeof config[BreakpointMirror.SESSION_KEY]).toBe("string");
+  });
+
+  it("releases the mirrored breakpoints when startDebugging rejects", async () => {
+    const fakeDebug = makeFakeDebug(undefined, () => Promise.reject(new Error("no js-debug")));
+    pushFeatureBreakpoint(fakeDebug);
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const fakeWindow = makeFakeWindow();
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      window: fakeWindow.window,
+      mirror,
+    });
+
+    await executor.debugScenario({ filePath: FEATURE_PATH, scenarioName: "Passing" });
+
+    expect(fakeWindow.errorMessages[0]).toContain("no js-debug");
+    expect(specBreakpointLines(fakeDebug)).toEqual([]);
+    expect(fakeDebug.breakpoints).toHaveLength(1);
+  });
+
+  it("releases the mirrored breakpoints when VS Code declines to start the session", async () => {
+    const fakeDebug = makeFakeDebug(undefined, () => Promise.resolve(false));
+    pushFeatureBreakpoint(fakeDebug);
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const fakeWindow = makeFakeWindow();
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      window: fakeWindow.window,
+      mirror,
+    });
+
+    await executor.debugScenario({ filePath: FEATURE_PATH, scenarioName: "Passing" });
+
+    expect(fakeWindow.errorMessages).toHaveLength(1);
+    expect(specBreakpointLines(fakeDebug)).toEqual([]);
+  });
+
+  it("skips the shell call and goes straight to debugging when bddgenCommand is empty", async () => {
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const fakeDebug = makeFakeDebug();
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      debug: fakeDebug.debug,
+    });
+
+    await executor.debugScenario({ filePath: "/abs/features/a.feature", scenarioName: "Passing" });
+
+    expect(calls).toHaveLength(0);
+    expect(fakeDebug.startCalls).toHaveLength(1);
   });
 });
 
