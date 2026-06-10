@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows: Test Explorer statuses now map correctly after runs — Playwright JSON report keys and their lookups are canonically forward-slash on all platforms (previously Windows users could get blank or wrong pass/fail icons).
+- Windows: node_modules watcher events no longer invalidate the step-file cache (separator-dependent filter).
+- Windows: step-definition generation keeps absolute glob prefixes instead of falling back to the default steps directory.
+
 
 ## [0.1.5] - 2026-06-10
 ### Fixed

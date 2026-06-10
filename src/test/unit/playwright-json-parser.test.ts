@@ -146,6 +146,20 @@ describe("PlaywrightJsonParser", () => {
       expect(out).toContain("1 scenario · 0 passed, 1 failed");
     });
 
+    it("renders Windows-style failure locations relative with forward slashes", () => {
+      const out = plain(parser.formatResults(
+        [{
+          scenarioName: "Adds to cart",
+          status: "failed",
+          featurePath: "C:\\repo\\features\\cart.feature",
+          lineNumber: 9,
+          errorMessage: "AssertionError: nope",
+        }],
+        "C:\\repo"
+      ));
+      expect(out).toContain("      features/cart.feature:9");
+    });
+
     it("colors passed steps green and failed steps red", () => {
       const out = parser.formatResults([{
         scenarioName: "X",
@@ -324,21 +338,52 @@ describe("PlaywrightJsonParser", () => {
   it("toStatusMap resolves relative report paths to absolute keys against the cwd", () => {
     // The working directory differs from the workspace root; the absolute keys are what
     // lets the test provider still match when its relative keys are rooted elsewhere.
-    const cwd = path.join(path.sep, "repo", "app");
+    // Keys are always forward-slash normalized, regardless of platform.
     const map = parser.toStatusMap(
       [{
-        featurePath: path.join("features", "x.feature"),
+        featurePath: "features/x.feature",
         scenarioName: "S",
         status: "passed",
         lineNumber: 5,
       }],
-      cwd
+      "/repo/app"
     );
-    const abs = path.join(cwd, "features", "x.feature");
-    expect(map[`${abs}:5`]).toBe("passed");
-    expect(map[`${abs}::S`]).toBe("passed");
-    expect(map[`${path.join("features", "x.feature")}:5`]).toBe("passed");
-    expect(map[`${path.join("features", "x.feature")}::S`]).toBe("passed");
+    expect(map["/repo/app/features/x.feature:5"]).toBe("passed");
+    expect(map["/repo/app/features/x.feature::S"]).toBe("passed");
+    expect(map["features/x.feature:5"]).toBe("passed");
+    expect(map["features/x.feature::S"]).toBe("passed");
+  });
+
+  it("toStatusMap normalizes Windows-style absolute paths and cwd to forward-slash keys", () => {
+    const map = parser.toStatusMap(
+      [{
+        featurePath: "C:\\repo\\features\\x.feature",
+        scenarioName: "S",
+        status: "passed",
+        lineNumber: 7,
+      }],
+      "C:\\repo"
+    );
+    expect(map["C:/repo/features/x.feature:7"]).toBe("passed");
+    expect(map["features/x.feature:7"]).toBe("passed");
+    expect(map["C:/repo/features/x.feature::S"]).toBe("passed");
+    expect(map["features/x.feature::S"]).toBe("passed");
+  });
+
+  it("toStatusMap resolves Windows-style relative report paths against a Windows cwd", () => {
+    const map = parser.toStatusMap(
+      [{
+        featurePath: "features\\x.feature",
+        scenarioName: "S",
+        status: "passed",
+        lineNumber: 5,
+      }],
+      "C:\\repo\\app"
+    );
+    expect(map["C:/repo/app/features/x.feature:5"]).toBe("passed");
+    expect(map["C:/repo/app/features/x.feature::S"]).toBe("passed");
+    expect(map["features/x.feature:5"]).toBe("passed");
+    expect(map["features/x.feature::S"]).toBe("passed");
   });
 
   it("paints with real ESC control characters at runtime", () => {

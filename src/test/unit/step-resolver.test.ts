@@ -554,6 +554,19 @@ describe("StepResolver.findStepFiles file-list cache", () => {
     expect(findFilesMock).toHaveBeenCalledTimes(1);
     resolver.dispose();
   });
+
+  it("node_modules events with Windows-style fsPaths do not invalidate the cache", async () => {
+    const resolver = makeResolver();
+    const globs = ["**/*.ts"];
+
+    await resolver.findStepFiles(globs);
+    expect(findFilesMock).toHaveBeenCalledTimes(1);
+
+    watchers[0]!.triggerCreate(vscode.Uri.file("C:\\ws\\node_modules\\foo\\bar.ts"));
+    await resolver.findStepFiles(globs);
+    expect(findFilesMock).toHaveBeenCalledTimes(1);
+    resolver.dispose();
+  });
 });
 
 describe("StepResolver.parseStepFile mtime cache", () => {

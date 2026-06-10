@@ -21,6 +21,7 @@ import {
   PlaywrightJsonParser,
   ScenarioStatus,
   ScenarioResult,
+  normalizePathKey,
 } from "../utils/playwright-json-parser";
 import { CommandBuilder } from "../core/command-builder";
 import {
@@ -912,17 +913,18 @@ export class PlaywrightBddTestProvider {
     const line = this.lineFromId(item.id);
     const name = item.label;
 
+    // Status-map keys are forward-slash normalized (see toStatusMap); fsPaths on Windows are not.
     if (featurePath && line) {
-      const absKey = `${featurePath}:${line}`;
+      const absKey = `${normalizePathKey(featurePath)}:${line}`;
       if (results[absKey]) {return results[absKey];}
-      const relKey = `${path.relative(workspaceRoot, featurePath)}:${line}`;
+      const relKey = `${normalizePathKey(path.relative(workspaceRoot, featurePath))}:${line}`;
       if (results[relKey]) {return results[relKey];}
     }
 
     if (featurePath && name) {
-      const relKey = `${path.relative(workspaceRoot, featurePath)}::${name}`;
+      const relKey = `${normalizePathKey(path.relative(workspaceRoot, featurePath))}::${name}`;
       if (results[relKey]) {return results[relKey];}
-      const absKey = `${featurePath}::${name}`;
+      const absKey = `${normalizePathKey(featurePath)}::${name}`;
       if (results[absKey]) {return results[absKey];}
     }
 

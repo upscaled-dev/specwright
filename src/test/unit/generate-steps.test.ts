@@ -49,6 +49,24 @@ describe("inferDefaultStepsDir", () => {
       `${path.sep}abs${path.sep}steps`
     );
   });
+
+  it("keeps a forward-slash absolute glob prefix absolute on any platform", () => {
+    expect(inferDefaultStepsDir(["/abs/steps/**/*.ts"], ROOT)).toBe(
+      path.normalize("/abs/steps")
+    );
+  });
+
+  it("extracts the prefix from a Windows drive-absolute backslash glob", () => {
+    expect(inferDefaultStepsDir(["C:\\abs\\steps\\**\\*.ts"], ROOT)).toBe(
+      path.normalize("C:/abs/steps")
+    );
+  });
+
+  it("joins a Windows-style relative backslash glob prefix onto the workspace root", () => {
+    expect(inferDefaultStepsDir(["tests\\steps\\**\\*.ts"], ROOT)).toBe(
+      path.join(ROOT, "tests/steps")
+    );
+  });
 });
 
 describe("defaultNewFilePath", () => {

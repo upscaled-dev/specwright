@@ -131,6 +131,20 @@ interface RawTest {
 const GHERKIN_STEP = /^(Given|When|Then|And|But|\*)\s/;
 
 /**
+ * Canonical form for status-map keys: forward slashes on every platform, so keys built from
+ * Windows fsPaths (backslashes) and the Playwright JSON report (forward slashes) always agree.
+ * Consumers must normalize their lookups the same way.
+ */
+export function normalizePathKey(p: string): string {
+  return p.replaceAll("\\", "/");
+}
+
+// path.posix.isAbsolute alone misses normalized win32 drive paths like `C:/repo`.
+function isAbsolutePathKey(p: string): boolean {
+  return path.posix.isAbsolute(p) || /^[A-Za-z]:\//.test(p);
+}
+
+/**
  * Parses the JSON reporter output that Playwright produces when run with `--reporter=json`.
  *
  * playwright-bdd emits an annotation on each generated test like:
@@ -191,9 +205,10 @@ export class PlaywrightJsonParser {
    * Convenience: build a status lookup keyed by `featurePath:lineNumber` AND
    * `featurePath::scenarioName`, so callers can resolve either way. Each shape is emitted
    * with both the absolute path (relative report paths are resolved against `cwd`) and the
-   * cwd-relative path, so consumers match regardless of how they normalize paths. When the
-   * same scenario ran more than once (e.g. multi-project chromium+firefox), the worst
-   * status wins: failed > skipped > passed.
+   * cwd-relative path. All paths in keys are normalized to forward slashes (see
+   * {@link normalizePathKey}) — lookups must be normalized the same way. When the same
+   * scenario ran more than once (e.g. multi-project chromium+firefox), the worst status
+   * wins: failed > skipped > passed.
    */
   public toStatusMap(
     results: ScenarioResult[],
@@ -206,10 +221,14 @@ export class PlaywrightJsonParser {
         out[key] = status;
       }
     };
+    const normCwd = cwd === undefined ? undefined : normalizePathKey(cwd);
     for (const r of results) {
+      const featurePath = normalizePathKey(r.featurePath);
       const abs =
-        !cwd || path.isAbsolute(r.featurePath) ? r.featurePath : path.resolve(cwd, r.featurePath);
-      const rel = cwd ? path.relative(cwd, abs) : r.featurePath;
+        !normCwd || isAbsolutePathKey(featurePath)
+          ? featurePath
+          : path.posix.join(normCwd, featurePath);
+      const rel = normCwd ? path.posix.relative(normCwd, abs) : featurePath;
       for (const file of new Set([abs, rel])) {
         if (r.lineNumber) {
           put(`${file}:${r.lineNumber}`, r.status);
@@ -462,12 +481,13 @@ export class PlaywrightJsonParser {
     if (!r.featurePath) {return "";}
     // Relativize only when we have an absolute path inside the workspace; otherwise show the
     // basename so an unresolved/relative path never renders as a "../../.." chain.
-    let file = r.featurePath;
-    if (path.isAbsolute(r.featurePath) && workspaceRoot) {
-      const rel = path.relative(workspaceRoot, r.featurePath);
-      file = rel.startsWith("..") ? path.basename(r.featurePath) : rel;
-    } else if (!path.isAbsolute(r.featurePath)) {
-      file = path.basename(r.featurePath);
+    const featurePath = normalizePathKey(r.featurePath);
+    let file = featurePath;
+    if (isAbsolutePathKey(featurePath) && workspaceRoot) {
+      const rel = path.posix.relative(normalizePathKey(workspaceRoot), featurePath);
+      file = rel.startsWith("..") ? path.posix.basename(featurePath) : rel;
+    } else if (!isAbsolutePathKey(featurePath)) {
+      file = path.posix.basename(featurePath);
     }
     return r.lineNumber ? `${file}:${r.lineNumber}` : file;
   }

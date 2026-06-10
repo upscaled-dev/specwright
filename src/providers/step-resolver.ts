@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { Logger } from "../utils/logger";
 import {
   extractStepDefsFromSource,
@@ -107,9 +106,8 @@ export class StepResolver implements vscode.Disposable {
 
   private installFileListWatchers(globs: string[]): void {
     this.disposeWatchers();
-    const nodeModulesFragment = `${path.sep}node_modules${path.sep}`;
     const onAny = (uri: vscode.Uri): void => {
-      if (uri.fsPath.includes(nodeModulesFragment)) {return;}
+      if (uri.fsPath.replaceAll("\\", "/").includes("/node_modules/")) {return;}
       this.fileListCache = undefined;
     };
     for (const glob of globs) {

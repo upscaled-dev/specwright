@@ -26,7 +26,11 @@ export function inferDefaultStepsDir(globs: string[], workspaceRoot: string): st
   for (const glob of globs) {
     const stripped = stripGlobTail(glob);
     if (stripped.length === 0) {continue;}
-    if (path.isAbsolute(stripped)) {return stripped;}
+    // Prefixes come back slash-normalized; accept posix-absolute and win32 drive-absolute
+    // forms, then hand back a platform path.
+    if (path.posix.isAbsolute(stripped) || path.win32.isAbsolute(stripped)) {
+      return path.normalize(stripped);
+    }
     return path.join(workspaceRoot, stripped);
   }
   return path.join(workspaceRoot, DEFAULT_BASE_DIR);
@@ -57,10 +61,12 @@ export function validateNewFilePath(
   return undefined;
 }
 
+// Globs should always use forward slashes, but Windows users sometimes configure
+// backslash paths — treat both as segment separators.
 function stripGlobTail(glob: string): string {
-  const parts = glob.split("/");
+  const parts = glob.replaceAll("\\", "/").split("/");
   const idx = parts.findIndex((p) => p.includes("*"));
-  if (idx === -1) {return glob;}
+  if (idx === -1) {return parts.join("/");}
   return parts.slice(0, idx).join("/");
 }
 
