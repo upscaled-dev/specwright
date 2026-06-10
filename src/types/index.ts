@@ -70,6 +70,12 @@ export interface TestExecutionOptions {
   scenarioName?: string;
   outlineName?: string;
   debug?: boolean;
+  waitForSessionEnd?: boolean | undefined;
+  /**
+   * When set, a debug run writes Playwright's JSON report to this file (the debugged command
+   * runs in a terminal, so stdout capture isn't available). Unset → no JSON reporter is added.
+   */
+  jsonReportPath?: string | undefined;
   tags?: string;
   parallel?: boolean;
   reporter?: string;

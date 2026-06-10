@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Debugging from the Test Explorer now hits feature-file breakpoints: the debug run profile creates a real test run and stays alive until the debug session ends.
+- The debugger now disconnects automatically when the test process exits (the `node-terminal` parent session is stopped once its last child session terminates) and mirrored breakpoints are reliably cleaned up afterwards.
+- Test Explorer and feature-file gutter icons now show the real pass/fail/skipped outcome after a debug run, via a file-based Playwright JSON report captured from the debugged command.
+- `npm ci` works on fresh checkouts again: package-lock.json was stale (old package name, wrong `@types/node` major, missing `@playwright/test`).
+
+### Added
+
+- Dev container is now tested and functional: Electron/VS Code system libraries and xvfb for integration tests, `ELECTRON_DISABLE_SANDBOX` for Chromium-in-Docker, and a named-volume overlay on `node_modules` so container installs don't break the host checkout.
+
 
 ## [0.1.2] - 2026-06-10
 ### Added

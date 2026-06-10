@@ -151,6 +151,25 @@ describe("CommandBuilder", () => {
     expect(playwrightCommand).toMatch(/^npx playwright test/);
   });
 
+  it("adds the json reporter alongside the configured one on the debug playwright half when jsonReportPath is set", () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const { playwrightCommand } = builder.buildDebugCommandParts({
+      filePath: "/abs/features/a.feature",
+      scenarioName: "Passing",
+      jsonReportPath: "/tmp/report.json",
+    });
+    expect(playwrightCommand).toContain("--reporter=list,json");
+  });
+
+  it("emits no reporter flag on the debug playwright half when jsonReportPath is unset", () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const { playwrightCommand } = builder.buildDebugCommandParts({
+      filePath: "/abs/features/a.feature",
+      scenarioName: "Passing",
+    });
+    expect(playwrightCommand).not.toContain("--reporter");
+  });
+
   it("greps the feature basename when no scenario is targeted for debug", () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
     const { playwrightCommand } = builder.buildDebugCommandParts({

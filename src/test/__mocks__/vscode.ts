@@ -315,12 +315,35 @@ export const tests = {
   createTestController: () => ({ dispose: () => {} }),
 };
 
-type DebugTerminateListener = (session: unknown) => void;
-const __debugTerminateListeners: DebugTerminateListener[] = [];
+type DebugSessionListener = (session: unknown) => void;
+const __debugTerminateListeners: DebugSessionListener[] = [];
+const __debugStartListeners: DebugSessionListener[] = [];
+
+function subscription(registry: DebugSessionListener[], listener?: DebugSessionListener) {
+  if (listener) {
+    registry.push(listener);
+  }
+  return {
+    dispose: () => {
+      if (!listener) {return;}
+      const i = registry.indexOf(listener);
+      if (i > -1) {registry.splice(i, 1);}
+    },
+  };
+}
 
 export const debug = {
   breakpoints: [] as unknown[],
-  startDebugging: (): Promise<boolean> => Promise.resolve(true),
+  __startDebuggingCalls: [] as Array<{ folder: unknown; config: Record<string, unknown> }>,
+  __stopDebuggingCalls: [] as unknown[],
+  startDebugging: (folder?: unknown, config?: unknown): Promise<boolean> => {
+    debug.__startDebuggingCalls.push({ folder, config: config as Record<string, unknown> });
+    return Promise.resolve(true);
+  },
+  stopDebugging: (session?: unknown): Promise<void> => {
+    debug.__stopDebuggingCalls.push(session);
+    return Promise.resolve();
+  },
   addBreakpoints: (bps: readonly unknown[]): void => {
     debug.breakpoints.push(...bps);
   },
@@ -328,24 +351,22 @@ export const debug = {
     debug.breakpoints = debug.breakpoints.filter((bp) => !bps.includes(bp));
   },
   onDidChangeBreakpoints: (_listener?: unknown) => ({ dispose: () => { /* no-op */ } }),
-  onDidTerminateDebugSession: (listener?: DebugTerminateListener) => {
-    if (listener) {
-      __debugTerminateListeners.push(listener);
-    }
-    return {
-      dispose: () => {
-        if (!listener) {return;}
-        const i = __debugTerminateListeners.indexOf(listener);
-        if (i > -1) {__debugTerminateListeners.splice(i, 1);}
-      },
-    };
+  onDidStartDebugSession: (listener?: DebugSessionListener) =>
+    subscription(__debugStartListeners, listener),
+  onDidTerminateDebugSession: (listener?: DebugSessionListener) =>
+    subscription(__debugTerminateListeners, listener),
+  __fireStart: (session: unknown): void => {
+    for (const l of __debugStartListeners) {l(session);}
   },
   __fireTerminate: (session: unknown): void => {
     for (const l of __debugTerminateListeners) {l(session);}
   },
   __resetDebug: (): void => {
     debug.breakpoints = [];
+    debug.__startDebuggingCalls.length = 0;
+    debug.__stopDebuggingCalls.length = 0;
     __debugTerminateListeners.length = 0;
+    __debugStartListeners.length = 0;
   },
 };
 

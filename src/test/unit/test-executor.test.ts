@@ -92,7 +92,10 @@ function makeFakeWindow(): FakeWindow {
 
 interface FakeDebug {
   startCalls: Array<{ folder: unknown; config: Record<string, unknown> }>;
+  stopCalls: unknown[];
   breakpoints: unknown[];
+  fireStart(session: unknown): void;
+  fireTerminate(session: unknown): void;
   debug: typeof vscode.debug;
 }
 
@@ -101,7 +104,10 @@ function makeFakeDebug(
   start?: () => Promise<boolean>
 ): FakeDebug {
   const startCalls: Array<{ folder: unknown; config: Record<string, unknown> }> = [];
+  const stopCalls: unknown[] = [];
   const breakpoints: unknown[] = [];
+  const startListeners: Array<(session: unknown) => void> = [];
+  const terminateListeners: Array<(session: unknown) => void> = [];
   const debug = {
     breakpoints,
     addBreakpoints: (bps: readonly unknown[]): void => {
@@ -113,15 +119,37 @@ function makeFakeDebug(
         if (i > -1) { breakpoints.splice(i, 1); }
       }
     },
-    onDidTerminateDebugSession: () => ({ dispose: () => { /* no-op */ } }),
+    onDidStartDebugSession: (listener: (session: unknown) => void) => {
+      startListeners.push(listener);
+      return { dispose: () => { /* no-op */ } };
+    },
+    onDidTerminateDebugSession: (listener: (session: unknown) => void) => {
+      terminateListeners.push(listener);
+      return { dispose: () => { /* no-op */ } };
+    },
     onDidChangeBreakpoints: () => ({ dispose: () => { /* no-op */ } }),
     startDebugging: (folder: unknown, config: Record<string, unknown>): Promise<boolean> => {
       onStart?.();
       startCalls.push({ folder, config });
       return start ? start() : Promise.resolve(true);
     },
+    stopDebugging: (session: unknown): Promise<void> => {
+      stopCalls.push(session);
+      return Promise.resolve();
+    },
   } as unknown as typeof vscode.debug;
-  return { startCalls, breakpoints, debug };
+  return {
+    startCalls,
+    stopCalls,
+    breakpoints,
+    fireStart(session: unknown): void {
+      for (const l of startListeners) { l(session); }
+    },
+    fireTerminate(session: unknown): void {
+      for (const l of terminateListeners) { l(session); }
+    },
+    debug,
+  };
 }
 
 interface ExecutorDeps {
@@ -321,10 +349,13 @@ describe("TestExecutor debugScenario", () => {
     await executor.debugScenario({ filePath: "/abs/features/a.feature", scenarioName: "Passing" });
 
     expect(fakeDebug.startCalls).toHaveLength(1);
-    const command = fakeDebug.startCalls[0]!.config["command"] as string;
+    const config = fakeDebug.startCalls[0]!.config;
+    const command = config["command"] as string;
     expect(command).toMatch(/^npx playwright test/);
     expect(command).not.toContain("bddgen");
     expect(command).toContain('--grep "Passing"');
+    // The session key is stamped even when nothing mirrors, so session-end tracking always works.
+    expect(typeof config[BreakpointMirror.SESSION_KEY]).toBe("string");
   });
 
   it("does not start debugging and shows an error when bddgen fails", async () => {
@@ -432,6 +463,116 @@ describe("TestExecutor debugScenario", () => {
 
     expect(fakeWindow.errorMessages).toHaveLength(1);
     expect(specBreakpointLines(fakeDebug)).toEqual([]);
+  });
+
+  it("resolves after start when waitForSessionEnd is not set", async () => {
+    const fakeDebug = makeFakeDebug();
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      mirror,
+    });
+
+    await executor.debugScenario({ filePath: FEATURE_PATH, scenarioName: "Passing" });
+
+    expect(fakeDebug.startCalls).toHaveLength(1);
+  });
+
+  it("waits for the mirror release before resolving when waitForSessionEnd is set", async () => {
+    const fakeDebug = makeFakeDebug();
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      mirror,
+    });
+
+    let resolved = false;
+    const pending = executor
+      .debugScenario({ filePath: FEATURE_PATH, scenarioName: "Passing", waitForSessionEnd: true })
+      .then(() => { resolved = true; });
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fakeDebug.startCalls).toHaveLength(1);
+    expect(resolved).toBe(false);
+
+    const id = fakeDebug.startCalls[0]!.config[BreakpointMirror.SESSION_KEY];
+    fakeDebug.fireTerminate({ configuration: { [BreakpointMirror.SESSION_KEY]: id } });
+    await pending;
+    expect(resolved).toBe(true);
+  });
+
+  it("resolves a waitForSessionEnd debug when the last child session terminates", async () => {
+    const fakeDebug = makeFakeDebug();
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      mirror,
+    });
+
+    let resolved = false;
+    const pending = executor
+      .debugScenario({ filePath: FEATURE_PATH, scenarioName: "Passing", waitForSessionEnd: true })
+      .then(() => { resolved = true; });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const id = fakeDebug.startCalls[0]!.config[BreakpointMirror.SESSION_KEY];
+    const root = { id: "root", configuration: { [BreakpointMirror.SESSION_KEY]: id } };
+    const child = { id: "child", configuration: { type: "pwa-node" }, parentSession: root };
+    fakeDebug.fireStart(child);
+    fakeDebug.fireTerminate(child);
+
+    await pending;
+    expect(resolved).toBe(true);
+    expect(fakeDebug.stopCalls).toEqual([root]);
+  });
+
+  it("does not hang a waitForSessionEnd debug when the launch fails", async () => {
+    const fakeDebug = makeFakeDebug(undefined, () => Promise.resolve(false));
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const fakeWindow = makeFakeWindow();
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      window: fakeWindow.window,
+      mirror,
+    });
+
+    await executor.debugScenario({
+      filePath: FEATURE_PATH,
+      scenarioName: "Passing",
+      waitForSessionEnd: true,
+    });
+
+    expect(fakeWindow.errorMessages).toHaveLength(1);
+  });
+
+  it("sets PLAYWRIGHT_JSON_OUTPUT_NAME on the debug config when jsonReportPath is set", async () => {
+    const fakeDebug = makeFakeDebug();
+    const { executor } = makeExecutor(makeConfig(), okShell, { debug: fakeDebug.debug });
+
+    await executor.debugScenario({
+      filePath: "/abs/features/a.feature",
+      scenarioName: "Passing",
+      jsonReportPath: "/tmp/report.json",
+    });
+
+    expect(fakeDebug.startCalls).toHaveLength(1);
+    expect(fakeDebug.startCalls[0]!.config["env"]).toEqual({
+      PLAYWRIGHT_JSON_OUTPUT_NAME: "/tmp/report.json",
+    });
+  });
+
+  it("omits env from the debug config when jsonReportPath is unset", async () => {
+    const fakeDebug = makeFakeDebug();
+    const { executor } = makeExecutor(makeConfig(), okShell, { debug: fakeDebug.debug });
+
+    await executor.debugScenario({ filePath: "/abs/features/a.feature", scenarioName: "Passing" });
+
+    expect(fakeDebug.startCalls).toHaveLength(1);
+    expect(fakeDebug.startCalls[0]!.config["env"]).toBeUndefined();
   });
 
   it("skips the shell call and goes straight to debugging when bddgenCommand is empty", async () => {

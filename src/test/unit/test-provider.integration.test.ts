@@ -19,6 +19,7 @@ import { TestOrganizationManager } from "../../core/test-organization";
 import { ExtensionConfig } from "../../core/extension-config";
 import { Logger } from "../../utils/logger";
 import { PlaywrightBddExtensionContext } from "../../types";
+import { BreakpointMirror } from "../../core/breakpoint-mirror";
 import { FakeTestController, FakeTestItem } from "./helpers/fake-test-controller";
 
 const FEATURE = [
@@ -93,6 +94,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
   let origReadFile: typeof vscode.workspace.fs.readFile;
 
   beforeEach(() => {
+    vscode.debug.__resetDebug();
     fixture = makeFixture();
     origReadFile = vscode.workspace.fs.readFile;
     // discovery + re-parse read the feature through the vscode fs shim.
@@ -214,5 +216,145 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
     const output = run.outcome.output.join("\n");
     expect(output).toContain("No results were attributed to");
     expect(output).toContain("**/*.feature");
+  });
+
+  it("debugTests applies the real status from the JSON report the debugged run wrote", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    const leaf = controller.find(`${fixture.featurePath}:4`);
+    const debugProfile = controller.profile("Debug");
+    const pending = Promise.resolve(
+      debugProfile!.runHandler(new vscode.TestRunRequest([leaf!]))
+    );
+
+    await vi.waitFor(() => {
+      expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
+    });
+
+    const config = vscode.debug.__startDebuggingCalls[0]!.config;
+    const env = config["env"] as Record<string, string>;
+    const reportPath = env["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
+    expect(reportPath).toBeTruthy();
+    // Simulate the debugged playwright process writing the file-based JSON report.
+    fs.writeFileSync(
+      reportPath,
+      reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "passed" }])
+    );
+    vscode.debug.__fireTerminate({
+      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
+    });
+
+    await pending;
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.skipped).not.toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.ended).toBe(true);
+    expect(fs.existsSync(reportPath), "tmp report should be deleted after the run").toBe(false);
+  });
+
+  it("debugTests leaves the status unset when no JSON report was written", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    const leaf = controller.find(`${fixture.featurePath}:4`);
+    const debugProfile = controller.profile("Debug");
+    const pending = Promise.resolve(
+      debugProfile!.runHandler(new vscode.TestRunRequest([leaf!]))
+    );
+
+    await vi.waitFor(() => {
+      expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
+    });
+
+    const config = vscode.debug.__startDebuggingCalls[0]!.config;
+    vscode.debug.__fireTerminate({
+      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
+    });
+
+    await pending;
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.started).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.passed).toEqual([]);
+    expect(run.outcome.failed).toEqual([]);
+    expect(run.outcome.skipped).toEqual([]);
+    expect(run.outcome.ended).toBe(true);
+  });
+
+  it("debugTests rolls a feature item up from the report's per-scenario statuses", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    const featureItem = controller.find(fixture.featurePath);
+    expect(featureItem, "feature item should be discovered").toBeTruthy();
+    const debugProfile = controller.profile("Debug");
+    const pending = Promise.resolve(
+      debugProfile!.runHandler(new vscode.TestRunRequest([featureItem!]))
+    );
+
+    await vi.waitFor(() => {
+      expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
+    });
+
+    const config = vscode.debug.__startDebuggingCalls[0]!.config;
+    const env = config["env"] as Record<string, string>;
+    fs.writeFileSync(
+      env["PLAYWRIGHT_JSON_OUTPUT_NAME"]!,
+      reportJson(fixture, [
+        { title: "Passing scenario", line: 6, status: "passed" },
+        { title: "Example #1", line: 18, status: "passed" },
+        { title: "Example #2", line: 24, status: "failed" },
+      ])
+    );
+    vscode.debug.__fireTerminate({
+      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
+    });
+
+    await pending;
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.passed).toContain(`${fixture.featurePath}:12`);
+    expect(run.outcome.failed.map((f) => f.id)).toContain(`${fixture.featurePath}:13`);
+    // Any failing scenario fails the feature item itself.
+    expect(run.outcome.failed.map((f) => f.id)).toContain(fixture.featurePath);
+  });
+
+  it("debugTests wraps the session in a TestRun and ends it only when the session ends", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    const leaf = controller.find(`${fixture.featurePath}:4`);
+    expect(leaf, "scenario leaf should be discovered").toBeTruthy();
+    const debugProfile = controller.profile("Debug");
+    expect(debugProfile, "Debug profile should be registered").toBeTruthy();
+
+    let handlerDone = false;
+    const pending = Promise.resolve(
+      debugProfile!.runHandler(new vscode.TestRunRequest([leaf!]))
+    ).then(() => { handlerDone = true; });
+
+    await vi.waitFor(() => {
+      expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
+    });
+
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.started).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.ended).toBe(false);
+    expect(handlerDone).toBe(false);
+
+    const sessionKey =
+      vscode.debug.__startDebuggingCalls[0]!.config[BreakpointMirror.SESSION_KEY];
+    expect(typeof sessionKey).toBe("string");
+    vscode.debug.__fireTerminate({
+      configuration: { [BreakpointMirror.SESSION_KEY]: sessionKey },
+    });
+
+    await pending;
+    expect(handlerDone).toBe(true);
+    expect(run.outcome.ended).toBe(true);
   });
 });

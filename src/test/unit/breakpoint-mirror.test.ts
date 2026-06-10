@@ -4,11 +4,19 @@ import { BreakpointMirror } from "../../core/breakpoint-mirror";
 
 interface StatefulDebug {
   breakpoints: vscode.Breakpoint[];
+  __stopDebuggingCalls: unknown[];
+  __fireStart: (session: unknown) => void;
   __fireTerminate: (session: unknown) => void;
   __resetDebug: () => void;
 }
 
 const debugApi = vscode.debug as unknown as StatefulDebug;
+
+interface TrackedSession {
+  id: string;
+  configuration: Record<string, unknown>;
+  parentSession?: TrackedSession;
+}
 
 const FEATURE = "/work/features/background.feature";
 const SPEC = "/work/.features-gen/features/background.feature.spec.js";
@@ -63,10 +71,10 @@ describe("BreakpointMirror", () => {
     expect(mirroredLines()).toEqual([10]);
   });
 
-  it("skips unmapped feature lines silently and returns undefined when nothing maps", () => {
+  it("skips unmapped feature lines silently but still tracks an id when nothing maps", () => {
     debugApi.breakpoints.push(featureBreakpoint(99));
     const mirror = makeMirror();
-    expect(mirror.mirrorBreakpoints(FEATURE, SPEC)).toBeUndefined();
+    expect(mirror.mirrorBreakpoints(FEATURE, SPEC)).toBeDefined();
     expect(mirroredLines()).toEqual([]);
   });
 
@@ -93,7 +101,7 @@ describe("BreakpointMirror", () => {
       )
     );
     const mirror = makeMirror();
-    expect(mirror.mirrorBreakpoints(FEATURE, SPEC)).toBeUndefined();
+    expect(mirror.mirrorBreakpoints(FEATURE, SPEC)).toBeDefined();
     expect(mirroredLines()).toEqual([11]);
   });
 
@@ -149,7 +157,7 @@ describe("BreakpointMirror", () => {
     debugApi.breakpoints.push(featureBreakpoint(9));
     const mirror = makeMirror();
     const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
-    mirror.release(id!);
+    mirror.release(id);
     expect(mirroredLines()).toEqual([]);
   });
 
@@ -162,10 +170,141 @@ describe("BreakpointMirror", () => {
     expect(mirroredLines()).toEqual([]);
   });
 
-  it("returns undefined when the spec is unreadable or unparseable", () => {
+  it("still tracks an id when the spec is unreadable or unparseable", () => {
     debugApi.breakpoints.push(featureBreakpoint(9));
-    expect(makeMirror(() => undefined).mirrorBreakpoints(FEATURE, SPEC)).toBeUndefined();
-    expect(makeMirror(() => "no markers here").mirrorBreakpoints(FEATURE, SPEC)).toBeUndefined();
+    expect(makeMirror(() => undefined).mirrorBreakpoints(FEATURE, SPEC)).toBeDefined();
+    expect(makeMirror(() => "no markers here").mirrorBreakpoints(FEATURE, SPEC)).toBeDefined();
     expect(mirroredLines()).toEqual([]);
+  });
+
+  it("tracks an id with no breakpoints and releases it cleanly", async () => {
+    const mirror = makeMirror();
+    const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+    expect(typeof id).toBe("string");
+    const waited = mirror.waitForRelease(id);
+    mirror.release(id);
+    await waited;
+    expect(mirroredLines()).toEqual([]);
+  });
+
+  describe("child session tracking", () => {
+    function makeSessions(id: string): { root: TrackedSession; child: TrackedSession } {
+      const root: TrackedSession = {
+        id: "root",
+        configuration: { [BreakpointMirror.SESSION_KEY]: id },
+      };
+      const child: TrackedSession = {
+        id: "child-1",
+        configuration: { type: "pwa-node" },
+        parentSession: root,
+      };
+      return { root, child };
+    }
+
+    it("releases the mirror and stops the root when the last child terminates", () => {
+      debugApi.breakpoints.push(featureBreakpoint(9));
+      const mirror = makeMirror();
+      const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+      const { root, child } = makeSessions(id);
+
+      debugApi.__fireStart(child);
+      expect(mirroredLines()).toEqual([11]);
+
+      debugApi.__fireTerminate(child);
+      expect(mirroredLines()).toEqual([]);
+      expect(debugApi.__stopDebuggingCalls).toEqual([root]);
+    });
+
+    it("keeps the mirror while another child is still alive", () => {
+      debugApi.breakpoints.push(featureBreakpoint(9));
+      const mirror = makeMirror();
+      const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+      const { root, child } = makeSessions(id);
+      const sibling: TrackedSession = {
+        id: "child-2",
+        configuration: { type: "pwa-node" },
+        parentSession: root,
+      };
+
+      debugApi.__fireStart(child);
+      debugApi.__fireStart(sibling);
+      debugApi.__fireTerminate(child);
+      expect(mirroredLines()).toEqual([11]);
+      expect(debugApi.__stopDebuggingCalls).toEqual([]);
+
+      debugApi.__fireTerminate(sibling);
+      expect(mirroredLines()).toEqual([]);
+      expect(debugApi.__stopDebuggingCalls).toEqual([root]);
+    });
+
+    it("matches a grandchild through a two-level parentSession chain", () => {
+      debugApi.breakpoints.push(featureBreakpoint(9));
+      const mirror = makeMirror();
+      const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+      const { root, child } = makeSessions(id);
+      const grandchild: TrackedSession = {
+        id: "grandchild-1",
+        configuration: { type: "pwa-node" },
+        parentSession: child,
+      };
+
+      debugApi.__fireStart(child);
+      debugApi.__fireStart(grandchild);
+      debugApi.__fireTerminate(child);
+      expect(mirroredLines()).toEqual([11]);
+
+      debugApi.__fireTerminate(grandchild);
+      expect(mirroredLines()).toEqual([]);
+      expect(debugApi.__stopDebuggingCalls).toEqual([root]);
+    });
+
+    it("manual parent disconnect releases without calling stopDebugging", () => {
+      debugApi.breakpoints.push(featureBreakpoint(9));
+      const mirror = makeMirror();
+      const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+      const { root, child } = makeSessions(id);
+
+      debugApi.__fireStart(child);
+      debugApi.__fireTerminate(root);
+      expect(mirroredLines()).toEqual([]);
+      expect(debugApi.__stopDebuggingCalls).toEqual([]);
+
+      // The child terminates afterwards; the mirror is already gone, so nothing fires again.
+      debugApi.__fireTerminate(child);
+      expect(debugApi.__stopDebuggingCalls).toEqual([]);
+    });
+  });
+
+  describe("waitForRelease", () => {
+    it("resolves when the mirror is released", async () => {
+      const mirror = makeMirror();
+      const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+      let resolved = false;
+      const waited = mirror.waitForRelease(id).then(() => { resolved = true; });
+
+      await new Promise((r) => setTimeout(r, 0));
+      expect(resolved).toBe(false);
+
+      mirror.release(id);
+      await waited;
+      expect(resolved).toBe(true);
+    });
+
+    it("resolves immediately for unknown or already-released ids", async () => {
+      const mirror = makeMirror();
+      await mirror.waitForRelease("mirror-does-not-exist");
+
+      const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+      mirror.release(id);
+      await mirror.waitForRelease(id);
+    });
+
+    it("dispose() resolves pending waiters", async () => {
+      const mirror = makeMirror();
+      const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+      const waited = mirror.waitForRelease(id);
+      mirror.dispose();
+      await waited;
+    });
   });
 });

@@ -132,6 +132,13 @@ export class CommandBuilder {
       const base = path.basename(options.filePath).replace(/\.feature$/, "");
       if (base) {playwrightParts.push("--grep", this.quote(this.gripPattern(base)));}
     }
+    if (options.jsonReportPath) {
+      // The debugged run reports through PLAYWRIGHT_JSON_OUTPUT_NAME (file output); keep the
+      // user-visible reporter alongside json so the terminal output stays legible.
+      const reporter = this.config.reporter;
+      const reporters = reporter ? `${reporter},json` : "json";
+      playwrightParts.push(`--reporter=${reporters}`);
+    }
     return { bddgenCommand, playwrightCommand: playwrightParts.join(" ") };
   }
 

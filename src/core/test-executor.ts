@@ -194,9 +194,7 @@ export class TestExecutor {
         this.config.featuresGenDir,
         options.filePath
       );
-      if (specPath !== undefined) {
-        mirrorId = this.mirror.mirrorBreakpoints(options.filePath, specPath);
-      }
+      mirrorId = this.mirror.mirrorBreakpoints(options.filePath, specPath);
 
       const folder =
         this.workspace.workspaceFolders?.find(
@@ -209,11 +207,20 @@ export class TestExecutor {
         name: "Debug Playwright-BDD Scenario",
         command: playwrightCommand,
         cwd: workingDir,
-        ...(mirrorId === undefined ? {} : { [BreakpointMirror.SESSION_KEY]: mirrorId }),
+        ...(options.jsonReportPath
+          ? { env: { PLAYWRIGHT_JSON_OUTPUT_NAME: options.jsonReportPath } }
+          : {}),
+        [BreakpointMirror.SESSION_KEY]: mirrorId,
       });
 
       if (!started) {
         throw new Error("VS Code declined to start the debug session");
+      }
+
+      if (options.waitForSessionEnd) {
+        // The testing service treats a Debug-kind run as finished when its handler resolves;
+        // resolving at session start tears the run down before the debuggee attaches.
+        await this.mirror.waitForRelease(mirrorId);
       }
     } catch (error) {
       // No session will ever terminate for a failed launch, so the mirror must be released

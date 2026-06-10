@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import { FeatureParser } from "../parsers/feature-parser";
 import { groupScenariosByOutline } from "./group-scenarios";
 import { OUTLINE_ID_SEPARATOR } from "./constants";
@@ -66,6 +68,9 @@ export function suggestedFeatureGlob(featurePath: string, workspaceRoot?: string
 }
 
 type RunStatus = "started" | "passed" | "failed";
+
+// Disambiguates report paths when several items are debugged within the same millisecond.
+let debugReportSequence = 0;
 
 /** workspaceState key under which the chosen organization strategy type is persisted. */
 const ORG_STRATEGY_STATE_KEY = "playwrightBddRunner.organizationStrategyType";
@@ -937,6 +942,10 @@ export class PlaywrightBddTestProvider {
       return;
     }
     this.isTestRunning = true;
+    // The testing service considers a Debug-kind request done once the handler resolves and its
+    // TestRun ends; returning at session start made VS Code tear down the run before the
+    // debuggee attached, so feature-file breakpoints never bound from the Test Explorer.
+    const run = this.testController.createTestRun(request);
     try {
       for (const test of this.requestedItems(request)) {
         try {
@@ -946,13 +955,28 @@ export class PlaywrightBddTestProvider {
             const line = this.lineFromId(test.id);
             const scenario = this.scenarioByTestId.get(test.id);
             const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
-            await this.context.testExecutor.debugScenario({
-              filePath: test.uri.fsPath,
-              ...(line ? { lineNumber: line } : {}),
-              ...(scenarioName ? { scenarioName } : {}),
-              ...(outlineName ? { outlineName } : {}),
-              debug: true,
-            });
+            // The debugged command runs in a terminal (no stdout capture), so the only way to
+            // learn the outcome is Playwright's file-based JSON report.
+            debugReportSequence += 1;
+            const jsonReportPath = path.join(
+              os.tmpdir(),
+              `playwright-bdd-debug-report-${process.pid}-${Date.now()}-${debugReportSequence}.json`
+            );
+            run.started(test);
+            try {
+              await this.context.testExecutor.debugScenario({
+                filePath: test.uri.fsPath,
+                ...(line ? { lineNumber: line } : {}),
+                ...(scenarioName ? { scenarioName } : {}),
+                ...(outlineName ? { outlineName } : {}),
+                debug: true,
+                waitForSessionEnd: true,
+                jsonReportPath,
+              });
+              this.applyDebugReportStatus(test, run, jsonReportPath);
+            } finally {
+              try { fs.unlinkSync(jsonReportPath); } catch { /* best effort */ }
+            }
           }
         } catch (testError) {
           const msg = errMsg(testError);
@@ -961,7 +985,60 @@ export class PlaywrightBddTestProvider {
         }
       }
     } finally {
+      run.end();
       this.isTestRunning = false;
+    }
+  }
+
+  // When the report is missing or unparseable the status is left unset — a stale icon is less
+  // wrong than marking a passing debug run skipped/failed.
+  private applyDebugReportStatus(
+    test: vscode.TestItem,
+    run: vscode.TestRun,
+    reportPath: string
+  ): void {
+    if (!fs.existsSync(reportPath)) {
+      this.context.logger.debug(
+        `No JSON report at ${reportPath} after the debug session; leaving the test status unset`
+      );
+      return;
+    }
+    const details = this.context.playwrightJsonParser.parseFromFile(reportPath);
+    if (details.length === 0) {
+      this.context.logger.debug(
+        `Debug JSON report at ${reportPath} contained no scenario results; leaving the test status unset`
+      );
+      return;
+    }
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    const results = this.context.playwrightJsonParser.toStatusMap(details, workspaceRoot);
+    const featurePath = test.uri?.fsPath;
+
+    if (test.children.size > 0) {
+      this.applyResultsToChildren(
+        test,
+        run,
+        {
+          success: !details.some((d) => d.status === "failed"),
+          output: "",
+          duration: 1,
+          scenarioResults: results,
+          scenarioDetails: details,
+        },
+        featurePath
+      );
+      return;
+    }
+
+    const status = this.resolveStatusForItem(test, results, featurePath, workspaceRoot);
+    if (status === "passed") {
+      run.passed(test, this.findDetailForItem(test, details)?.durationMs);
+      this.testStatusCache.set(test.id, "passed");
+    } else if (status === "failed") {
+      run.failed(test, this.failureMessage(test, details, "Test failed"));
+      this.testStatusCache.set(test.id, "failed");
+    } else if (status === "skipped") {
+      run.skipped(test);
     }
   }
 
