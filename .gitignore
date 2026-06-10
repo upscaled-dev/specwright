@@ -1,0 +1,26 @@
+node_modules/
+dist/
+out/
+coverage/
+
+# Husky generated internals (not the hook scripts under .husky/<name>)
+.husky/_/
+
+# VS Code test scratch + extension dev artifacts
+.vscode-test/
+*.vsix
+
+# Playwright outputs
+playwright-report/
+test-results/
+.features-gen/
+
+# Integration-test scratch fixtures (created/torn down per run)
+**/watcher-scratch/
+
+# OS / editor noise
+.DS_Store
+*.log
+
+.claude/
+scripts/claude-sandbox.sh

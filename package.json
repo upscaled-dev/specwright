@@ -1,0 +1,585 @@
+{
+  "name": "specwright",
+  "displayName": "Specwright — Playwright-BDD Test Explorer",
+  "description": "Run, debug & explore Playwright-BDD (playwright-bdd) Gherkin tests in the Test Explorer. Full .feature authoring: autocomplete, hover, go-to-definition, find references, diagnostics, snippets, tag filtering, parallel runs, and step-definition generation. Works alongside Cucumber.",
+  "version": "0.1.0",
+  "icon": "icon.png",
+  "publisher": "upscaled-dev",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/upscaled-dev/specwright.git"
+  },
+  "homepage": "https://github.com/upscaled-dev/specwright#readme",
+  "bugs": {
+    "url": "https://github.com/upscaled-dev/specwright/issues"
+  },
+  "engines": {
+    "vscode": "^1.99.0"
+  },
+  "categories": [
+    "Testing",
+    "Programming Languages",
+    "Debuggers",
+    "Formatters",
+    "Snippets",
+    "Linters"
+  ],
+  "keywords": [
+    "playwright-bdd",
+    "playwright",
+    "playwright test",
+    "bdd",
+    "behavior driven development",
+    "behaviour driven development",
+    "gherkin",
+    "gherkin syntax highlighting",
+    "cucumber",
+    "test explorer",
+    "test runner",
+    "feature",
+    "feature files",
+    "scenario",
+    "scenario outline",
+    "step definitions",
+    "given when then",
+    "e2e",
+    "end-to-end",
+    "testing",
+    "test automation",
+    "acceptance testing",
+    "living documentation",
+    "qa",
+    "codelens",
+    "debug tests",
+    "tags",
+    "examples",
+    "cucumber.js",
+    "specwright"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "gherkin",
+        "aliases": ["Gherkin", "feature"],
+        "extensions": [".feature"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/gherkin-light.svg",
+          "dark": "./icons/gherkin-dark.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "gherkin",
+        "scopeName": "text.gherkin.feature",
+        "path": "./syntaxes/gherkin.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "gherkin",
+        "path": "./snippets/gherkin.code-snippets"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Specwright",
+      "properties": {
+        "playwrightBddRunner.playwrightCommand": {
+          "type": "string",
+          "default": "npx playwright test",
+          "description": "Command to run Playwright tests (e.g., 'npx playwright test', 'pnpm exec playwright test', 'yarn playwright test')"
+        },
+        "playwrightBddRunner.bddgenCommand": {
+          "type": "string",
+          "default": "npx bddgen",
+          "description": "Command to generate Playwright spec files from .feature files (playwright-bdd's codegen step). Set to empty to skip if your playwright.config.ts already runs bddgen via defineBddProject."
+        },
+        "playwrightBddRunner.preRunCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command to run before each test execution (e.g., 'npm run build:fixtures'). Empty disables the hook. If the command exits non-zero, the test run is aborted."
+        },
+        "playwrightBddRunner.workingDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Working directory for running tests (empty = workspace root)"
+        },
+        "playwrightBddRunner.testFilePattern": {
+          "type": "string",
+          "default": "**/*.feature",
+          "description": "Glob pattern for feature file discovery"
+        },
+        "playwrightBddRunner.enableCodeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable CodeLens buttons on feature files (disable if conflicting with other extensions)"
+        },
+        "playwrightBddRunner.parallelExecution": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pass --workers to Playwright to enable parallel execution"
+        },
+        "playwrightBddRunner.maxParallelProcesses": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 16,
+          "description": "Maximum number of Playwright workers when parallel execution is enabled"
+        },
+        "playwrightBddRunner.reporter": {
+          "type": "string",
+          "enum": [
+            "list",
+            "line",
+            "dot",
+            "html",
+            "json",
+            "junit"
+          ],
+          "default": "list",
+          "description": "Reporter for Playwright test output (terminal display only; result mapping always uses the JSON reporter)"
+        },
+        "playwrightBddRunner.tags": {
+          "type": "string",
+          "default": "",
+          "description": "Default tag expression passed to bddgen --tags (e.g., '@smoke and not @wip')"
+        },
+        "playwrightBddRunner.dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Playwright --list to see what tests would be executed without running them"
+        },
+        "playwrightBddRunner.stepDefinitionPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "features/steps/**/*.ts",
+            "features/steps/**/*.js",
+            "tests/steps/**/*.ts",
+            "steps/**/*.ts"
+          ],
+          "description": "Glob patterns for TypeScript/JavaScript files containing playwright-bdd Given/When/Then step definitions. Used for 'Go to Definition' navigation from steps in .feature files."
+        },
+        "playwrightBddRunner.enableStepDefinitionNavigation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable 'Go to Definition' from a Gherkin step to its TypeScript step definition. Disable if conflicting with another extension."
+        },
+        "playwrightBddRunner.enableStepDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Highlight Gherkin steps in .feature files that have no matching playwright-bdd step definition. Provides a 'Create step definition' quick fix."
+        },
+        "playwrightBddRunner.enableStepAutocomplete": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Suggest existing playwright-bdd step definitions when typing a step in a .feature file. 'auto' disables completions when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate suggestions. 'on' always enables. 'off' always disables."
+        },
+        "playwrightBddRunner.enableTagAutocomplete": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Suggest existing tags when typing @ in a .feature file. 'auto' disables completions when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate suggestions. 'on' always enables. 'off' always disables."
+        },
+        "playwrightBddRunner.enableStepHover": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Show the matching playwright-bdd step definition's pattern and source location when hovering over a step in a .feature file. 'auto' disables the hover when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate tooltips. 'on' always enables. 'off' always disables."
+        },
+        "playwrightBddRunner.enableStepReferences": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Enable 'Find All References' on a playwright-bdd step definition to list every Gherkin step in .feature files that matches it. 'auto' disables references when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate results. 'on' always enables. 'off' always disables."
+        },
+        "playwrightBddRunner.enableStepUsageCodeLens": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Show a 'Used N times' CodeLens above each Given/When/Then step definition. Clicking the CodeLens opens VS Code's References panel. 'auto' disables the CodeLens when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate annotations. 'on' always enables. 'off' always disables."
+        },
+        "playwrightBddRunner.enableUnusedStepDiagnostics": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Publish an Information-severity diagnostic on each playwright-bdd step definition that has zero matching steps across all .feature files in the workspace. 'auto' disables the diagnostic when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate annotations. 'on' always enables. 'off' always disables."
+        },
+        "playwrightBddRunner.enableStepLiteralPromotion": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Offer a refactor on a Gherkin step that promotes a hard-coded literal (\"foo\", 42, 3.14) into a Cucumber-expression parameter ({string}, {int}, {float}), updating both the .feature file and the matching step definition. 'auto' disables when the Cucumber (Gherkin) Full Support extension is installed. 'on' always enables. 'off' always disables."
+        },
+        "playwrightBddRunner.enableTableFormatting": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Auto-align Gherkin data tables (| col | col |) when VS Code's 'Format Document' runs on a .feature file. 'auto' disables when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate formatting. 'on' always enables. 'off' always disables."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "playwrightBddRunner.discoverTests",
+        "title": "Discover Tests",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.refreshTests",
+        "title": "Refresh Tests",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.runAllTests",
+        "title": "Run All Tests",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.runScenario",
+        "title": "Run Scenario",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.debugScenario",
+        "title": "Debug Scenario",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.runAllTestsParallel",
+        "title": "Run All Tests in Parallel",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.runFeatureFile",
+        "title": "Run Feature File",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.runScenarioWithTags",
+        "title": "Run Scenario with Tags",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.runFeatureFileWithTags",
+        "title": "Run Feature File with Tags",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.runScenarioWithContext",
+        "title": "Run Scenario",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.debugScenarioWithContext",
+        "title": "Debug Scenario",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.runFeatureFileWithContext",
+        "title": "Run Feature File",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.setOrganizationStrategy",
+        "title": "Set Organization Strategy",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.setTagBasedOrganization",
+        "title": "Organize by Tags",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.setFileBasedOrganization",
+        "title": "Organize by File",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.setScenarioTypeOrganization",
+        "title": "Organize by Scenario Type",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.setFlatOrganization",
+        "title": "Flat Organization",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.setFeatureBasedOrganization",
+        "title": "Hierarchical Organization",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.debugOrganization",
+        "title": "Debug Organization Strategy",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.showOutput",
+        "title": "Show Test Output",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.validateConfiguration",
+        "title": "Validate Configuration",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.generateStepDefinitions",
+        "title": "Generate Missing Step Definitions",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.generateStepDefinitionForStep",
+        "title": "Create Step Definition For Step",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.goToStepDefinition",
+        "title": "Go to Step Definition",
+        "category": "Specwright"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "playwrightBddRunner.discoverTests",
+          "when": "resourceExtname == .feature"
+        },
+        {
+          "command": "playwrightBddRunner.refreshTests",
+          "when": "resourceExtname == .feature"
+        },
+        {
+          "command": "playwrightBddRunner.runAllTests",
+          "when": "resourceExtname == .feature"
+        },
+        {
+          "command": "playwrightBddRunner.runAllTestsParallel",
+          "when": "resourceExtname == .feature"
+        },
+        {
+          "command": "playwrightBddRunner.runFeatureFile",
+          "when": "resourceExtname == .feature"
+        },
+        {
+          "command": "playwrightBddRunner.generateStepDefinitions",
+          "when": "resourceExtname == .feature"
+        },
+        {
+          "command": "playwrightBddRunner.goToStepDefinition",
+          "when": "resourceExtname == .feature"
+        },
+        {
+          "command": "playwrightBddRunner.generateStepDefinitionForStep",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.runScenarioWithContext",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.debugScenarioWithContext",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.runFeatureFileWithContext",
+          "when": "false"
+        }
+      ],
+      "editor/context": [
+        {
+          "submenu": "playwrightBddRunner.contextSubmenu",
+          "when": "resourceExtname == .feature && editorTextFocus && resourceScheme == file",
+          "group": "playwrightBddRunner@1"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "submenu": "playwrightBddRunner.contextSubmenu",
+          "when": "resourceExtname == .feature && resourceScheme == file",
+          "group": "playwrightBddRunner@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "submenu": "playwrightBddRunner.contextSubmenu",
+          "when": "resourceExtname == .feature && resourceScheme == file",
+          "group": "playwrightBddRunner@1"
+        }
+      ],
+      "testing/item/context": [
+        {
+          "submenu": "playwrightBddRunner.organizationSubmenu",
+          "group": "playwrightBddRunner@1"
+        }
+      ],
+      "testing/view/context": [
+        {
+          "command": "playwrightBddRunner.discoverTests",
+          "group": "playwrightBddRunner@1"
+        }
+      ],
+      "playwrightBddRunner.contextSubmenu": [
+        {
+          "command": "playwrightBddRunner.runScenarioWithContext",
+          "when": "resourceExtname == .feature && resourceScheme == file",
+          "group": "1_run@1"
+        },
+        {
+          "command": "playwrightBddRunner.runFeatureFileWithContext",
+          "when": "resourceExtname == .feature && resourceScheme == file",
+          "group": "1_run@2"
+        },
+        {
+          "command": "playwrightBddRunner.runAllTests",
+          "when": "resourceExtname == .feature && resourceScheme == file",
+          "group": "1_run@4"
+        },
+        {
+          "command": "playwrightBddRunner.debugScenarioWithContext",
+          "when": "resourceExtname == .feature && resourceScheme == file",
+          "group": "2_debug@1"
+        },
+        {
+          "command": "playwrightBddRunner.goToStepDefinition",
+          "when": "resourceExtname == .feature && resourceScheme == file",
+          "group": "3_tools@0"
+        },
+        {
+          "command": "playwrightBddRunner.generateStepDefinitions",
+          "when": "resourceExtname == .feature && resourceScheme == file",
+          "group": "3_tools@1"
+        },
+        {
+          "command": "playwrightBddRunner.refreshTests",
+          "when": "resourceExtname == .feature && resourceScheme == file",
+          "group": "3_tools@2"
+        }
+      ],
+      "playwrightBddRunner.organizationSubmenu": [
+        {
+          "command": "playwrightBddRunner.setTagBasedOrganization"
+        },
+        {
+          "command": "playwrightBddRunner.setFileBasedOrganization"
+        },
+        {
+          "command": "playwrightBddRunner.setScenarioTypeOrganization"
+        },
+        {
+          "command": "playwrightBddRunner.setFlatOrganization"
+        },
+        {
+          "command": "playwrightBddRunner.setFeatureBasedOrganization"
+        }
+      ]
+    },
+    "submenus": [
+      {
+        "id": "playwrightBddRunner.organizationSubmenu",
+        "label": "Organization Strategy"
+      },
+      {
+        "id": "playwrightBddRunner.contextSubmenu",
+        "label": "Specwright"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "npm run check-types && npm run lint && node scripts/build/esbuild.cjs",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node scripts/build/esbuild.cjs --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "build:prod": "npm run check-types && npm run lint && npm test && node scripts/build/esbuild.cjs --production",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "compile:integration": "tsc -p tsconfig.integration.json",
+    "test:integration": "npm run build && npm run compile:integration && node ./out/test/integration/runTest.js",
+    "test:all": "npm test && npm run test:integration",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "clean": "rimraf dist out",
+    "build": "npm run clean && npm run compile",
+    "dev": "npm run watch",
+    "package:vsix": "npm run clean && npm run build:prod && vsce package --no-dependencies --out dist/",
+    "release": "node scripts/release.mjs",
+    "release:patch": "node scripts/release.mjs --type patch",
+    "release:minor": "node scripts/release.mjs --type minor",
+    "release:major": "node scripts/release.mjs --type major",
+    "release:dry-run": "node scripts/release.mjs --type patch --dry-run",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.0.1",
+    "@commitlint/config-conventional": "^21.0.1",
+    "@playwright/test": "^1.60.0",
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.99.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.3",
+    "@typescript-eslint/parser": "^8.59.3",
+    "@vitest/coverage-v8": "^2.1.9",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.4.0",
+    "glob": "^13.0.6",
+    "husky": "^9.1.7",
+    "mocha": "^11.7.6",
+    "npm-run-all": "^4.1.5",
+    "playwright-bdd": "^8.5.1",
+    "rimraf": "^6.1.3",
+    "typescript": "^6.0.3",
+    "vitest": "^2.1.9"
+  },
+  "attribution": {
+    "icon": "Designed by Freepik from https://www.freepik.com/"
+  }
+}

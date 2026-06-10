@@ -1,0 +1,67 @@
+{
+  "Feature": {
+    "prefix": "feat",
+    "body": [
+      "Feature: ${1:short description}",
+      "",
+      "  As a ${2:user}",
+      "  I want to ${3:action}",
+      "  So that ${4:benefit}",
+      "",
+      "  Scenario: ${5:first scenario}",
+      "    Given $0"
+    ],
+    "description": "Feature with user story preamble + first scenario"
+  },
+  "Scenario": {
+    "prefix": "scen",
+    "body": [
+      "Scenario: ${1:scenario name}",
+      "  Given ${2:precondition}",
+      "  When ${3:action}",
+      "  Then ${0:expected outcome}"
+    ],
+    "description": "Scenario skeleton"
+  },
+  "Background": {
+    "prefix": "bg",
+    "body": [
+      "Background:",
+      "  Given $0"
+    ],
+    "description": "Background block"
+  },
+  "Scenario Outline": {
+    "prefix": "outline",
+    "body": [
+      "Scenario Outline: ${1:outline name}",
+      "  Given ${2:precondition with} <${3:value}>",
+      "  When ${4:action}",
+      "  Then ${5:expected with} <${6:result}>",
+      "",
+      "  Examples:",
+      "    | ${3:value} | ${6:result} |",
+      "    | $0      |        |"
+    ],
+    "description": "Scenario Outline with Examples"
+  },
+  "Examples": {
+    "prefix": "ex",
+    "body": [
+      "Examples:",
+      "  | ${1:col1} | ${2:col2} |",
+      "  | $0    |       |"
+    ],
+    "description": "Examples block"
+  },
+  "Rule": {
+    "prefix": "rule",
+    "body": [
+      "Rule: ${1:rule name}",
+      "",
+      "  Example: ${2:example name}",
+      "    Given $0"
+    ],
+    "description": "Rule block with one Example"
+  }
+}

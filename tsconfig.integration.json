@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "out",
+    "rootDir": "src",
+    "types": ["node", "mocha"],
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src/test/integration/**/*"],
+  "exclude": ["node_modules", "dist", "src/test/integration/fixtures/**"]
+}

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <title>Gherkin feature file (dark)</title>
+  <g fill="none" stroke="#a5d6a7" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11.5 3.5 C13.5 5.5 13.5 9 11.5 11 C9.5 13 6 13 4 11 C2 9 2 5.5 4 3.5 C5.5 2 8 1.8 9.6 2.7 L11 1.5 L11.5 3.5 Z" fill="#2e7d32" />
+    <circle cx="6.2" cy="6.4" r="0.45" fill="#a5d6a7" stroke="none"/>
+    <circle cx="8.5" cy="5.5" r="0.45" fill="#a5d6a7" stroke="none"/>
+    <circle cx="9.4" cy="8.0" r="0.45" fill="#a5d6a7" stroke="none"/>
+    <circle cx="6.8" cy="9.1" r="0.45" fill="#a5d6a7" stroke="none"/>
+    <circle cx="8.0" cy="10.5" r="0.45" fill="#a5d6a7" stroke="none"/>
+  </g>
+</svg>

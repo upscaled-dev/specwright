@@ -1,0 +1,40 @@
+# Source — only the bundled output ships
+src/**
+scripts/**
+features/**
+playwright.config.ts
+
+# Tooling configs — only meaningful at dev time
+tsconfig.json
+tsconfig.integration.json
+vitest.config.ts
+eslint.config.mjs
+commitlint.config.mjs
+.husky/**
+.claude/**
+
+# Build/test artifacts
+dist/*.vsix
+out/**
+coverage/**
+**/*.map
+**/*.test.ts
+**/*.test.js
+**/__mocks__/**
+.features-gen/**
+.vscode/**
+test-results/**
+
+# Repo hygiene
+.git/**
+.gitignore
+.vscodeignore
+.github/**
+.devcontainer/**
+.DS_Store
+node_modules/**
+package-lock.json
+
+# Dev-only assets that don't need to ship
+images/**
+icon.psd
