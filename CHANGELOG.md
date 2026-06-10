@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.1.6] - 2026-06-10
 ### Fixed
 
 - Windows: Test Explorer statuses now map correctly after runs — Playwright JSON report keys and their lookups are canonically forward-slash on all platforms (previously Windows users could get blank or wrong pass/fail icons).
