@@ -202,5 +202,97 @@ describe("StepDefinitionProvider helpers", () => {
       const src = "foo.Given('not a real step', () => {});";
       expect(extractStepDefsFromSource(src)).toHaveLength(0);
     });
+
+    it("ignores awaited step invocations (bddgen-generated specs)", () => {
+      // Shape of a .features-gen/**.spec.js file: steps are *invoked*, not defined.
+      const src = [
+        'test("Scenario", async ({ Given, When, Then }) => {',
+        '  await Given("I am logged in");',
+        '  await When("I open the dashboard");',
+        '  await Then("I see my widgets");',
+        "});",
+      ].join("\n");
+      expect(extractStepDefsFromSource(src)).toHaveLength(0);
+    });
+
+    it("ignores returned and yielded step invocations", () => {
+      const src = [
+        'function run() { return Given("a returned step"); }',
+        'function* gen() { yield When("a yielded step"); }',
+      ].join("\n");
+      expect(extractStepDefsFromSource(src)).toHaveLength(0);
+    });
+
+    it("ignores handler-less invocations even without await (report copies)", () => {
+      const src = [
+        'Given("I am logged in");',
+        'When("I open the dashboard");',
+        'Then("I see my widgets")',
+      ].join("\n");
+      expect(extractStepDefsFromSource(src)).toHaveLength(0);
+    });
+
+    it("ignores invocations passing null fixtures (bddgen world-passing shape)", () => {
+      const src = [
+        'Given("a step with fixtures", null, { page });',
+        'When("another step", null, { todoPage, page });',
+      ].join("\n");
+      expect(extractStepDefsFromSource(src)).toHaveLength(0);
+    });
+
+    it("skips an entire bddgen-generated file via its header comment", () => {
+      const src = [
+        "// Generated from: features/todo.feature",
+        'import { test } from "playwright-bdd";',
+        "test.describe('Todo', () => {",
+        "  test('Add item', async ({ Given, When, Then }) => {",
+        // Definition-shaped on purpose: the header alone must reject the file.
+        "    Given('I am on the todo page', async () => {});",
+        "  });",
+        "});",
+      ].join("\n");
+      expect(extractStepDefsFromSource(src)).toHaveLength(0);
+    });
+
+    it("keeps definitions with an options object before the handler", () => {
+      const src = "Given('a tagged step', { tags: '@mobile' }, async () => {});";
+      const defs = extractStepDefsFromSource(src);
+      expect(defs).toHaveLength(1);
+      expect(defs[0]!.pattern).toBe("a tagged step");
+    });
+
+    it("keeps definitions whose handler is a named function reference", () => {
+      const src = "When('I do the thing', doTheThing);";
+      const defs = extractStepDefsFromSource(src);
+      expect(defs).toHaveLength(1);
+      expect(defs[0]!.pattern).toBe("I do the thing");
+    });
+
+    it("keeps regex-literal definitions and drops regex-literal invocations", () => {
+      const src = [
+        "Then(/^the count is (\\d+)$/, async ({}, n) => {});",
+        "Then(/^an invoked regex step$/);",
+      ].join("\n");
+      const defs = extractStepDefsFromSource(src);
+      expect(defs).toHaveLength(1);
+      expect(defs[0]!.pattern).toBe("^the count is (\\d+)$");
+    });
+
+    it("still parses real definitions alongside awaited invocations", () => {
+      const src = [
+        "Given('a real definition', async () => {});",
+        '  await Given("an invocation of it");',
+      ].join("\n");
+      const defs = extractStepDefsFromSource(src);
+      expect(defs).toHaveLength(1);
+      expect(defs[0]!.pattern).toBe("a real definition");
+    });
+
+    it("does not skip definitions whose pattern merely contains the word await", () => {
+      const src = "Given('I await the result', async () => {});";
+      const defs = extractStepDefsFromSource(src);
+      expect(defs).toHaveLength(1);
+      expect(defs[0]!.pattern).toBe("I await the result");
+    });
   });
 });

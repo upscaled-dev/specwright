@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Step *invocations* are no longer mistaken for step *definitions*, regardless of what directory they live in (generated specs, reports, test-results). The extractor now only accepts calls that actually *register a handler*: it skips files stamped with bddgen's `// Generated from:` header, calls prefixed with `await`/`return`/`yield`, handler-less calls like `Given("text")`, and bddgen's fixture-passing shape `Given("text", null, { page })`. This removes spurious "Step matches multiple definitions" warnings at the source, with zero configuration, even when such files match the discovery globs or are open in the editor.
+
 
 ## [0.1.10] - 2026-06-12
 ### Added
