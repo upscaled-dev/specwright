@@ -258,6 +258,37 @@ describe("BreakpointMirror", () => {
       expect(debugApi.__stopDebuggingCalls).toEqual([root]);
     });
 
+    it("forceStop stops the root tracked at session start and resolves waiters", async () => {
+      const mirror = makeMirror();
+      const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+      const root: TrackedSession = {
+        id: "root-1",
+        configuration: { [BreakpointMirror.SESSION_KEY]: id },
+      };
+      // The root session starts but NO child session ever attaches — the natural
+      // last-child-terminated teardown can never fire (pnpm process-tree shape).
+      debugApi.__fireStart(root);
+
+      let resolved = false;
+      const waited = mirror.waitForRelease(id).then(() => { resolved = true; });
+
+      await mirror.forceStop(id);
+      await waited;
+
+      expect(resolved).toBe(true);
+      expect(debugApi.__stopDebuggingCalls).toEqual([root]);
+    });
+
+    it("forceStop releases even when no root session was ever tracked", async () => {
+      const mirror = makeMirror();
+      const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+
+      await mirror.forceStop(id);
+      await mirror.waitForRelease(id);
+
+      expect(debugApi.__stopDebuggingCalls).toEqual([]);
+    });
+
     it("manual parent disconnect releases without calling stopDebugging", () => {
       debugApi.breakpoints.push(featureBreakpoint(9));
       const mirror = makeMirror();

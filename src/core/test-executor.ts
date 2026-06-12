@@ -221,7 +221,7 @@ export class TestExecutor {
       if (options.waitForSessionEnd) {
         // The testing service treats a Debug-kind run as finished when its handler resolves;
         // resolving at session start tears the run down before the debuggee attaches.
-        await this.mirror.waitForRelease(mirrorId);
+        await this.waitForDebugCompletion(mirrorId, options.jsonReportPath);
       }
     } catch (error) {
       // No session will ever terminate for a failed launch, so the mirror must be released
@@ -424,6 +424,50 @@ export class TestExecutor {
         duration: Math.max(1, Date.now() - start),
       };
     }
+  }
+
+  /** Test hooks: shrink the debug watchdog timings so tests don't wait seconds. */
+  public debugWatchdogPollMs = 1000;
+  public debugWatchdogGraceMs = 5000;
+
+  /**
+   * Wait for the debug session to settle. Normally the mirror releases when the last
+   * child debug session terminates. That chain can wedge — pnpm process trees leave a
+   * debug-attached child (web server, extra node layer) alive, or no child session
+   * ever attaches — so when a JSON report path is in play, watch for the report file:
+   * Playwright writes it only AFTER the tests finish (a paused breakpoint delays it,
+   * so the watchdog can never fire mid-debug). Once it appears, give natural teardown
+   * a grace period, then force the session down.
+   */
+  private async waitForDebugCompletion(
+    mirrorId: string,
+    reportPath: string | undefined
+  ): Promise<void> {
+    let settled = false;
+    const isSettled = (): boolean => settled;
+    const released = this.mirror.waitForRelease(mirrorId).then(() => { settled = true; });
+    if (!reportPath) {
+      await released;
+      return;
+    }
+
+    const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+    const watchdog = (async (): Promise<void> => {
+      while (!isSettled() && !fs.existsSync(reportPath)) {
+        await delay(this.debugWatchdogPollMs);
+      }
+      if (isSettled()) {return;}
+      await delay(this.debugWatchdogGraceMs);
+      if (isSettled()) {return;}
+      this.logger.info(
+        "Debug session did not settle after the JSON report was written; forcing teardown",
+        { mirrorId, reportPath }
+      );
+      await this.mirror.forceStop(mirrorId);
+    })();
+    watchdog.catch(() => { /* logged in forceStop path; never block completion */ });
+
+    await released;
   }
 
   private async runPreRunHook(workingDir: string): Promise<string | undefined> {

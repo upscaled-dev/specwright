@@ -76,6 +76,18 @@ export class BreakpointMirror {
   ) {
     this.subscriptions = [
       debugApi.onDidStartDebugSession((session) => {
+        const ownId = session.configuration?.[BreakpointMirror.SESSION_KEY] as unknown;
+        if (typeof ownId === "string" && this.mirrors.has(ownId)) {
+          // The root session itself: record it so forceStop can tear it down even
+          // when no child session ever attaches (the chain that otherwise stops it).
+          const existing = this.childSessions.get(ownId);
+          if (existing) {
+            existing.rootSession = session;
+          } else {
+            this.childSessions.set(ownId, { childIds: new Set(), rootSession: session });
+          }
+          return;
+        }
         const tracked = this.findTrackedAncestor(session);
         if (!tracked) {
           return;
@@ -206,6 +218,28 @@ export class BreakpointMirror {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Force the session for a mirror down: stop its root session (when known) and
+   * release the mirror. Used as a watchdog escape when the natural teardown chain
+   * (last child session terminates → root stopped) wedges — e.g. pnpm process trees
+   * leaving a debug-attached child alive, or no child session ever attaching.
+   */
+  public async forceStop(mirrorId: string): Promise<void> {
+    const root = this.childSessions.get(mirrorId)?.rootSession;
+    if (root) {
+      try {
+        await this.debugApi.stopDebugging(root);
+      } catch {
+        // The session may already be gone.
+      }
+    }
+    // stopDebugging normally triggers the terminate handler, which releases; if the
+    // event never arrives (or no root was tracked), release directly so waiters resolve.
+    if (this.mirrors.has(mirrorId)) {
+      this.release(mirrorId);
+    }
   }
 
   public waitForRelease(mirrorId: string): Promise<void> {

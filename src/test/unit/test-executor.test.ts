@@ -650,6 +650,46 @@ describe("TestExecutor spawn settles when a grandchild holds the stdio pipes", (
   }, 10_000);
 });
 
+describe("TestExecutor debug watchdog (pnpm session teardown wedge)", () => {
+  const okShell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+
+  it("settles the debug run via the JSON report watchdog when no child session ever attaches", async () => {
+    const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "debug-watchdog-"));
+    const reportPath = nodePath.join(tmpDir, "report.json");
+    // Report already written = tests finished; the session chain just never tears down.
+    fs.writeFileSync(reportPath, "{}");
+
+    // Root session starts (carrying the mirror key) but NO child ever attaches,
+    // so last-child-terminated teardown can never fire.
+    const fakeDebug: FakeDebug = makeFakeDebug(undefined, async () => {
+      // Runs after construction completes, so the self-reference is safe.
+      const cfg = fakeDebug.startCalls.at(-1)!.config;
+      fakeDebug.fireStart({ id: "root-1", configuration: cfg });
+      return true;
+    });
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => undefined);
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      mirror,
+    });
+    executor.debugWatchdogPollMs = 25;
+    executor.debugWatchdogGraceMs = 50;
+
+    const start = Date.now();
+    await executor.debugScenario({
+      filePath: nodePath.join(tmpDir, "x.feature"),
+      scenarioName: "s",
+      waitForSessionEnd: true,
+      jsonReportPath: reportPath,
+    });
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(3000);
+    expect(fakeDebug.stopCalls).toHaveLength(1);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }, 10_000);
+});
+
 describe("TestExecutor working-directory inference (monorepo)", () => {
   let calls: ShellCall[];
   let recordingShell: ShellRunner;
