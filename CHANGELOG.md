@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Step-definition discovery is now hard-restricted to TypeScript/JavaScript sources (`.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`). Whatever the configured globs match, report logs and `.html`/`.txt`/`.json` attachments that echo `Given("...")` calls are never parsed as step-definition files.
+
 
 ## [0.1.11] - 2026-06-12
 ### Fixed

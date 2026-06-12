@@ -717,6 +717,54 @@ describe("StepResolver.findStepFiles per-folder discovery (monorepo)", () => {
   });
 });
 
+describe("StepResolver file-type restriction", () => {
+  const originalFindFiles = vscode.workspace.findFiles;
+
+  afterEach(() => {
+    (vscode.workspace as { findFiles: unknown }).findFiles = originalFindFiles;
+  });
+
+  it("findStepFiles keeps only TypeScript/JavaScript sources, whatever the glob matched", async () => {
+    (vscode.workspace as { findFiles: unknown }).findFiles = async () => [
+      vscode.Uri.file("/ws/e2e/steps/login.steps.ts"),
+      vscode.Uri.file("/ws/e2e/steps/common.steps.js"),
+      vscode.Uri.file("/ws/reports/run.log"),
+      vscode.Uri.file("/ws/reports/index.html"),
+      vscode.Uri.file("/ws/reports/attachment.txt"),
+      vscode.Uri.file("/ws/reports/results.json"),
+      vscode.Uri.file("/ws/features/login.feature"),
+    ];
+    (vscode.workspace as { createFileSystemWatcher: unknown }).createFileSystemWatcher =
+      (): unknown => ({
+        onDidCreate: () => ({ dispose: () => {} }),
+        onDidDelete: () => ({ dispose: () => {} }),
+        dispose: () => {},
+      });
+
+    const resolver = makeResolver();
+    const files = await resolver.findStepFiles(["**/*"]);
+
+    const sorted = [...files].sort((a, b) => a.localeCompare(b));
+    expect(sorted).toEqual([
+      "/ws/e2e/steps/common.steps.js",
+      "/ws/e2e/steps/login.steps.ts",
+    ]);
+    resolver.dispose();
+  });
+
+  it("parseStepFile refuses non-script files even when called directly", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "step-resolver-ext-"));
+    const logPath = path.join(tmpDir, "run.log");
+    fs.writeFileSync(logPath, "Given('echoed into a log', async () => {});");
+
+    const resolver = makeResolver();
+    expect(resolver.parseStepFile(logPath)).toEqual([]);
+
+    resolver.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
 describe("StepResolver.loadAllStepDefs structural-copy dedupe", () => {
   const originalFolders = vscode.workspace.workspaceFolders;
   let tmpDir: string;
