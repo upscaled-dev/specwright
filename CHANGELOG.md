@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.1.9] - 2026-06-12
 ### Fixed
 
 - Monorepo: step-definition discovery is now scoped per workspace folder. `playwrightBddRunner.stepDefinitionPaths` is `resource`-scoped, so each package can declare its own step directories in its `.vscode/settings.json`, and each folder's globs are resolved against that folder (no more bleeding across packages or being forced into a broad `**/` glob).
