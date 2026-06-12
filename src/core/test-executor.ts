@@ -14,6 +14,7 @@ import { ExtensionConfig } from "./extension-config";
 import { spawn } from "node:child_process";
 import { PlaywrightJsonParser, ScenarioStatus, ScenarioResult } from "../utils/playwright-json-parser";
 import { shellQuote } from "../utils/shell";
+import { findNearestPlaywrightConfigDir, workspaceFolderRootFor } from "../utils/working-dir";
 import { BreakpointMirror } from "./breakpoint-mirror";
 import { resolveGeneratedSpecPath } from "../parsers/bdd-file-data-parser";
 
@@ -163,7 +164,7 @@ export class TestExecutor {
   public async runScenario(options: TestExecutionOptions): Promise<void> {
     await Promise.resolve();
     const command = this.commandBuilder().buildScenarioCommand(options);
-    this.executeCommand(command, this.getWorkingDirectory());
+    this.executeCommand(command, this.getWorkingDirectory(options.filePath));
   }
 
   public async debugScenario(options: TestExecutionOptions): Promise<void> {
@@ -177,7 +178,7 @@ export class TestExecutor {
       //
       // bddgen runs separately FIRST (not chained into the debugged command) so the generated
       // specs exist before we mirror feature-file breakpoints into them.
-      const workingDir = this.getWorkingDirectory();
+      const workingDir = this.getWorkingDirectory(options.filePath);
       const { bddgenCommand, playwrightCommand } =
         this.commandBuilder().buildDebugCommandParts(options);
 
@@ -241,7 +242,7 @@ export class TestExecutor {
   public async runFeatureFile(options: FeatureExecutionOptions): Promise<void> {
     await Promise.resolve();
     const command = this.commandBuilder().buildFeatureCommand(options);
-    this.executeCommand(command, this.getWorkingDirectory());
+    this.executeCommand(command, this.getWorkingDirectory(options.filePath));
   }
 
   public async runAllTests(): Promise<void> {
@@ -258,7 +259,8 @@ export class TestExecutor {
 
   public async runTestsInParallel(options: ParallelExecutionOptions): Promise<void> {
     await Promise.resolve();
-    const workingDir = this.getWorkingDirectory();
+    // Parallel runs span one suite; infer the cwd from the first feature file.
+    const workingDir = this.getWorkingDirectory(options.featureFiles[0]);
     this.window.showInformationMessage(
       `Running playwright-bdd with ${options.maxProcesses} workers across ${options.featureFiles.length} feature file(s)`
     );
@@ -298,13 +300,19 @@ export class TestExecutor {
   public async runScenarioWithOutput(
     options: TestExecutionOptions
   ): Promise<RunOutputResult> {
-    return this.runWithJsonReport(() => this.commandBuilder().buildScenarioCommand(options));
+    return this.runWithJsonReport(
+      () => this.commandBuilder().buildScenarioCommand(options),
+      options.filePath
+    );
   }
 
   public async runFeatureFileWithOutput(
     options: FeatureExecutionOptions
   ): Promise<RunOutputResult> {
-    return this.runWithJsonReport(() => this.commandBuilder().buildFeatureCommand(options));
+    return this.runWithJsonReport(
+      () => this.commandBuilder().buildFeatureCommand(options),
+      options.filePath
+    );
   }
 
   public async runAllTestsWithTagsOutput(
@@ -341,10 +349,11 @@ export class TestExecutor {
   }
 
   private async runWithJsonReport(
-    buildCommand: () => string
+    buildCommand: () => string,
+    forFile?: string
   ): Promise<RunOutputResult> {
     const start = Date.now();
-    const workingDir = this.getWorkingDirectory();
+    const workingDir = this.getWorkingDirectory(forFile);
 
     this.runEventEmitter.fire({ kind: "running", passed: 0, failed: 0 });
 
@@ -502,13 +511,30 @@ export class TestExecutor {
     });
   }
 
-  private getWorkingDirectory(): string {
-    const root = this.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  /**
+   * Resolve the cwd for spawned bddgen/playwright commands.
+   *
+   * An explicit `workingDirectory` setting always wins. Otherwise, when the run
+   * targets a feature file, infer the package that owns the playwright-bdd setup
+   * by walking up from the file to the nearest `playwright.config.*` (stopping at
+   * the file's workspace folder). This makes monorepos work without configuration:
+   * pnpm links binaries only into the declaring package's `node_modules/.bin`, so
+   * `npx bddgen` resolves only when spawned from that package — not the repo root.
+   */
+  private getWorkingDirectory(forFile?: string): string {
+    const folders = this.workspace.workspaceFolders;
+    const firstRoot = folders?.[0]?.uri.fsPath;
     const configured = this.config.workingDirectory;
     if (configured) {
       // A relative setting must resolve against the workspace, not the extension host's cwd.
-      return path.isAbsolute(configured) ? configured : path.resolve(root ?? process.cwd(), configured);
+      return path.isAbsolute(configured) ? configured : path.resolve(firstRoot ?? process.cwd(), configured);
     }
-    return root ?? process.cwd();
+    if (forFile) {
+      const folderRoot = workspaceFolderRootFor(forFile, folders) ?? firstRoot;
+      if (folderRoot) {
+        return findNearestPlaywrightConfigDir(forFile, folderRoot) ?? folderRoot;
+      }
+    }
+    return firstRoot ?? process.cwd();
   }
 }

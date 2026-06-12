@@ -124,7 +124,7 @@
         "playwrightBddRunner.workingDirectory": {
           "type": "string",
           "default": "",
-          "description": "Working directory for running tests (empty = workspace root)"
+          "description": "Working directory for running tests. Empty = inferred per run: the directory of the nearest playwright.config.* above the feature file (so monorepo packages resolve their own bddgen/playwright binaries), falling back to the file's workspace folder."
         },
         "playwrightBddRunner.testFilePattern": {
           "type": "string",

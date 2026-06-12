@@ -10,7 +10,7 @@ All settings live under `playwrightBddRunner.*` in your VS Code Settings (`Cmd/C
 | `bddgenCommand` | string | `npx bddgen` | Set empty to skip codegen if your `playwright.config.ts` already runs `bddgen` via `defineBddProject`. |
 | `preRunCommand` | string | `` | Command to run before each test execution (e.g. `npm run build:fixtures`). Empty disables. A non-zero exit aborts the run and writes the error to the output channel. |
 | `featuresGenDir` | string | `.features-gen` | Directory where `bddgen` writes generated specs, relative to the working directory. Set it if you customized playwright-bdd's `outputDir`. Used to mirror `.feature`-file breakpoints into the generated specs when debugging — see [runs.md](runs.md#debugging-with-breakpoints). |
-| `workingDirectory` | string | `` (workspace root) | Override if your playwright config isn't at the workspace root. |
+| `workingDirectory` | string | `` (inferred) | Empty = inferred per run: the directory of the nearest `playwright.config.*` above the feature file, falling back to the file's workspace folder. In a monorepo this runs `bddgen`/`playwright` from the package that declares them — required with pnpm, which links binaries only into the declaring package's `node_modules/.bin`. Set explicitly to override. |
 | `testFilePattern` | string | `**/*.feature` | Glob for feature-file discovery. Also used by tag autocompletion. |
 | `tags` | string | `` | Default tag expression, e.g. `@smoke and not @wip`. |
 | `parallelExecution` | boolean | `false` | Adds `--workers=<maxParallelProcesses>` to Playwright. |

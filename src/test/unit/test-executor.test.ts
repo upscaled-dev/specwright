@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as nodePath from "node:path";
 import * as vscode from "vscode";
 import { TestExecutor, ShellRunner, TestRunEvent } from "../../core/test-executor";
 import { ExtensionConfig } from "../../core/extension-config";
@@ -620,5 +623,91 @@ describe("TestExecutor terminal lifecycle", () => {
     await executor.runScenario({ filePath: "/abs/y.feature", scenarioName: "t" });
 
     expect(fake.terminals).toHaveLength(1);
+  });
+});
+
+describe("TestExecutor working-directory inference (monorepo)", () => {
+  let calls: ShellCall[];
+  let recordingShell: ShellRunner;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    calls = [];
+    recordingShell = async (command, workingDir, extraEnv) => {
+      calls.push({ command, workingDir, ...(extraEnv ? { extraEnv } : {}) });
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "executor-cwd-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeWorkspace(): typeof vscode.workspace {
+    return {
+      ...vscode.workspace,
+      workspaceFolders: [
+        { name: "ws", index: 0, uri: vscode.Uri.file(tmpDir) },
+      ],
+    } as unknown as typeof vscode.workspace;
+  }
+
+  function write(relPath: string, content = ""): string {
+    const abs = nodePath.join(tmpDir, ...relPath.split("/"));
+    fs.mkdirSync(nodePath.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content);
+    return abs;
+  }
+
+  it("runs from the package owning the nearest playwright.config, not the workspace root", async () => {
+    write("packages/e2e/playwright.config.ts", "export default {};");
+    const feature = write("packages/e2e/features/login.feature", "Feature: F");
+    const { executor } = makeExecutor(makeConfig(), recordingShell, {
+      workspace: makeWorkspace(),
+    });
+
+    await executor.runScenarioWithOutput({ filePath: feature, scenarioName: "s" });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.workingDir).toBe(nodePath.join(tmpDir, "packages", "e2e"));
+  });
+
+  it("falls back to the workspace folder root when no playwright.config exists", async () => {
+    const feature = write("packages/e2e/features/login.feature", "Feature: F");
+    const { executor } = makeExecutor(makeConfig(), recordingShell, {
+      workspace: makeWorkspace(),
+    });
+
+    await executor.runScenarioWithOutput({ filePath: feature, scenarioName: "s" });
+
+    expect(calls[0]!.workingDir).toBe(tmpDir);
+  });
+
+  it("an explicit workingDirectory setting always wins over inference", async () => {
+    write("packages/e2e/playwright.config.ts", "export default {};");
+    const feature = write("packages/e2e/features/login.feature", "Feature: F");
+    const { executor } = makeExecutor(
+      makeConfig({ workingDirectory: "packages/other" }),
+      recordingShell,
+      { workspace: makeWorkspace() }
+    );
+
+    await executor.runScenarioWithOutput({ filePath: feature, scenarioName: "s" });
+
+    expect(calls[0]!.workingDir).toBe(nodePath.join(tmpDir, "packages", "other"));
+  });
+
+  it("stops the config walk at the workspace folder boundary", async () => {
+    // A config placed in os.tmpdir() (above the workspace root) must not be picked up;
+    // the walk stops at the workspace folder.
+    const feature = write("features/login.feature", "Feature: F");
+    const { executor } = makeExecutor(makeConfig(), recordingShell, {
+      workspace: makeWorkspace(),
+    });
+
+    await executor.runScenarioWithOutput({ filePath: feature, scenarioName: "s" });
+
+    expect(calls[0]!.workingDir).toBe(tmpDir);
   });
 });
