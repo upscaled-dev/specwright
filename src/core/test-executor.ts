@@ -493,15 +493,30 @@ export class TestExecutor {
 
         let stdout = "";
         let stderr = "";
-        child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
-        child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
-        child.on("close", (code: number | null) => {
+        let settled = false;
+        const settle = (code: number | null): void => {
+          if (settled) {return;}
+          settled = true;
           const returnCode = code ?? 1;
           resolve({ success: returnCode === 0, output: stdout, error: stderr, returnCode });
+        };
+        child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
+        child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
+        child.on("close", (code: number | null) => { settle(code); });
+        child.on("exit", (code: number | null) => {
+          // `close` additionally waits for all stdio pipes to close. A grandchild that
+          // inherited them (web server, browser process — common on Windows) keeps the
+          // run hanging forever after playwright itself exited. Results come from the
+          // JSON report file, not stdout, so after a short flush grace settle anyway.
+          const timer = setTimeout(() => { settle(code); }, 2000);
+          timer.unref?.();
         });
         child.on("error", (error: Error) => {
           this.logger.error(`Command execution error: ${error.message}`, { command, workingDir });
-          resolve({ success: false, output: "", error: error.message, returnCode: 1 });
+          if (!settled) {
+            settled = true;
+            resolve({ success: false, output: "", error: error.message, returnCode: 1 });
+          }
         });
       } catch (error) {
         const msg = errMsg(error);

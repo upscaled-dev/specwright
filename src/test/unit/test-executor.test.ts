@@ -626,6 +626,30 @@ describe("TestExecutor terminal lifecycle", () => {
   });
 });
 
+describe("TestExecutor spawn settles when a grandchild holds the stdio pipes", () => {
+  it("resolves shortly after the command exits even if an inherited-stdio child lives on", async () => {
+    // The pre-run command exits (code 1) after 200ms but first spawns a child that
+    // inherits stdout/stderr and sleeps 5s — the shape of a web server or browser
+    // process outliving `playwright test`. Waiting on `close` would hang ~5s; the
+    // exit+grace path must settle in ~2s.
+    const orphanCommand =
+      "node -e \"const cp=require('child_process');" +
+      "cp.spawn(process.execPath,['-e','setTimeout(()=>{},5000)'],{stdio:'inherit'});" +
+      "setTimeout(()=>process.exit(1),200)\"";
+    const config = makeConfig({ preRunCommand: orphanCommand });
+    // No injected shell runner: exercise the real spawn-based runner.
+    const { executor } = makeExecutor(config, undefined as unknown as ShellRunner);
+
+    const start = Date.now();
+    const result = await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature" });
+    const elapsed = Date.now() - start;
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("preRunCommand");
+    expect(elapsed).toBeLessThan(4500);
+  }, 10_000);
+});
+
 describe("TestExecutor working-directory inference (monorepo)", () => {
   let calls: ShellCall[];
   let recordingShell: ShellRunner;

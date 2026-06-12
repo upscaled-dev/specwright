@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Test Explorer runs no longer hang after the tests finish. The run resolved only when every stdio pipe closed; a process that inherited them and outlived `playwright test` (a `webServer`, a browser/driver process — common on Windows) kept the run spinning forever. The run now settles shortly after the command exits (results are read from the JSON report file, so trailing pipe output isn't needed).
+
 
 ## [0.1.12] - 2026-06-12
 ### Fixed
