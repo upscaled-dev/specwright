@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.1.10] - 2026-06-12
 ### Added
 
 - New setting `playwrightBddRunner.stepDefinitionExcludePaths` (resource-scoped, default `[]`): extra glob patterns excluded from step-definition discovery, merged with the built-in excludes (`node_modules`, the generated `featuresGenDir`, `playwright-report`, `test-results`). Use it to exclude generated or report directories whose files contain `Given/When/Then` invocations that would otherwise be mistaken for step definitions and produce spurious "Step matches multiple definitions" warnings.
