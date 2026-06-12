@@ -32,10 +32,44 @@ const STEP_LINE_WITH_KEYWORD_RE = new RegExp(`^\\s*(${STEP_KEYWORDS})\\s+(.+?)\\
 
 const CONFIG_NAMESPACE = "playwrightBddRunner";
 const STEP_PATHS_KEY = "stepDefinitionPaths";
+const FEATURES_GEN_KEY = "featuresGenDir";
+const DEFAULT_FEATURES_GEN_DIR = ".features-gen";
+
+// Output directories whose files must never be scanned for step definitions.
+// bddgen's generated specs and the Playwright report/results contain Given/When/Then
+// *invocations* that are syntactically identical to step *definitions*, so scanning
+// them produces phantom duplicate defs and false "matches multiple definitions" noise.
+const ALWAYS_EXCLUDED_DIRS = ["node_modules", "playwright-report", "test-results"];
 
 interface DiscoveryTarget {
   folder: vscode.WorkspaceFolder | undefined;
   globs: string[];
+  // Brace-glob of directories excluded from findFiles (node_modules, generated/output dirs).
+  exclude: string;
+  // Directory names (slash-normalized) used to filter watcher events.
+  excludeFragments: string[];
+}
+
+function normalizeDirFragment(dir: string): string {
+  return dir.replaceAll("\\", "/").replace(/^\.?\//, "").replace(/\/+$/, "");
+}
+
+function readFeaturesGenDir(resource: vscode.Uri | undefined): string {
+  const value = vscode.workspace
+    .getConfiguration(CONFIG_NAMESPACE, resource)
+    .get<string>(FEATURES_GEN_KEY, DEFAULT_FEATURES_GEN_DIR);
+  return value.trim() === "" ? DEFAULT_FEATURES_GEN_DIR : value;
+}
+
+function excludedDirFragments(featuresGenDir: string): string[] {
+  const gen = normalizeDirFragment(featuresGenDir);
+  const dirs = [...ALWAYS_EXCLUDED_DIRS];
+  if (gen && !dirs.includes(gen)) {dirs.push(gen);}
+  return dirs;
+}
+
+function buildExcludeGlob(fragments: string[]): string {
+  return `{${fragments.map((d) => `**/${d}/**`).join(",")}}`;
 }
 
 /**
@@ -44,20 +78,35 @@ interface DiscoveryTarget {
  * workspace each folder can declare its own step directories. We read the folder-scoped
  * value and bind discovery to that folder via RelativePattern, so a folder's globs only
  * ever match inside that folder — discovery never reaches outside the directories a
- * folder declares. Falls back to the caller-supplied globs when there are no workspace
- * folders (unit tests, loose-file windows).
+ * folder declares. Each folder's generated `featuresGenDir` (plus the Playwright
+ * report/results dirs) is excluded, so even a broad glob can't mistake generated
+ * Given/When/Then invocations for definitions. Falls back to the caller-supplied globs
+ * when there are no workspace folders (unit tests, loose-file windows).
  */
 function resolveDiscoveryTargets(fallbackGlobs: string[]): DiscoveryTarget[] {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
-    return [{ folder: undefined, globs: fallbackGlobs }];
+    const fragments = excludedDirFragments(readFeaturesGenDir(undefined));
+    return [
+      {
+        folder: undefined,
+        globs: fallbackGlobs,
+        exclude: buildExcludeGlob(fragments),
+        excludeFragments: fragments,
+      },
+    ];
   }
-  return folders.map((folder) => ({
-    folder,
-    globs: vscode.workspace
-      .getConfiguration(CONFIG_NAMESPACE, folder.uri)
-      .get<string[]>(STEP_PATHS_KEY, fallbackGlobs),
-  }));
+  return folders.map((folder) => {
+    const fragments = excludedDirFragments(readFeaturesGenDir(folder.uri));
+    return {
+      folder,
+      globs: vscode.workspace
+        .getConfiguration(CONFIG_NAMESPACE, folder.uri)
+        .get<string[]>(STEP_PATHS_KEY, fallbackGlobs),
+      exclude: buildExcludeGlob(fragments),
+      excludeFragments: fragments,
+    };
+  });
 }
 
 export class StepResolver implements vscode.Disposable {
@@ -110,7 +159,7 @@ export class StepResolver implements vscode.Disposable {
   public async findStepFiles(globs: string[]): Promise<string[]> {
     const targets = resolveDiscoveryTargets(globs);
     const globsKey = targets
-      .map((t) => `${t.folder?.uri.toString() ?? ""}${[...t.globs].sort().join("\0")}`)
+      .map((t) => `${t.folder?.uri.toString() ?? ""}${[...t.globs].sort().join("\0")}|${t.exclude}`)
       .sort()
       .join("");
     if (this.fileListCache?.globsKey === globsKey) {
@@ -124,7 +173,7 @@ export class StepResolver implements vscode.Disposable {
           t.globs.map((glob) =>
             vscode.workspace.findFiles(
               t.folder ? new vscode.RelativePattern(t.folder, glob) : glob,
-              "**/node_modules/**"
+              t.exclude
             )
           )
         )
@@ -142,14 +191,16 @@ export class StepResolver implements vscode.Disposable {
     const files = Array.from(seen);
     this.fileListCache = { globsKey, files };
     const watchGlobs = Array.from(new Set(targets.flatMap((t) => t.globs)));
-    this.installFileListWatchers(watchGlobs);
+    const excludeFragments = Array.from(new Set(targets.flatMap((t) => t.excludeFragments)));
+    this.installFileListWatchers(watchGlobs, excludeFragments);
     return files;
   }
 
-  private installFileListWatchers(globs: string[]): void {
+  private installFileListWatchers(globs: string[], excludeFragments: string[]): void {
     this.disposeWatchers();
     const onAny = (uri: vscode.Uri): void => {
-      if (uri.fsPath.replaceAll("\\", "/").includes("/node_modules/")) {return;}
+      const normalized = uri.fsPath.replaceAll("\\", "/");
+      if (excludeFragments.some((frag) => normalized.includes(`/${frag}/`))) {return;}
       this.fileListCache = undefined;
     };
     for (const glob of globs) {

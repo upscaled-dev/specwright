@@ -611,8 +611,10 @@ describe("StepResolver.findStepFiles per-folder discovery (monorepo)", () => {
       _ns: string,
       resource?: vscode.Uri
     ) => ({
-      get: <T>(_key: string, fallback: T): T =>
-        (resource ? (perFolder[resource.fsPath] as unknown as T) : undefined) ?? fallback,
+      get: <T>(key: string, fallback: T): T =>
+        key === "stepDefinitionPaths" && resource
+          ? ((perFolder[resource.fsPath] as unknown as T) ?? fallback)
+          : fallback,
     });
 
     const resolver = makeResolver();
@@ -640,8 +642,10 @@ describe("StepResolver.findStepFiles per-folder discovery (monorepo)", () => {
       _ns: string,
       resource?: vscode.Uri
     ) => ({
-      get: <T>(_key: string, fallback: T): T =>
-        (resource ? (perFolder[resource.fsPath] as unknown as T) : undefined) ?? fallback,
+      get: <T>(key: string, fallback: T): T =>
+        key === "stepDefinitionPaths" && resource
+          ? ((perFolder[resource.fsPath] as unknown as T) ?? fallback)
+          : fallback,
     });
 
     const resolver = makeResolver();
@@ -655,6 +659,39 @@ describe("StepResolver.findStepFiles per-folder discovery (monorepo)", () => {
     expect(patterns.find((p) => p.baseUri.fsPath === lib.uri.fsPath)!.pattern).toBe(
       "src/steps/**/*.ts"
     );
+    resolver.dispose();
+  });
+
+  it("excludes node_modules, the generated featuresGenDir, and Playwright output dirs", async () => {
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+    (vscode.workspace as { getConfiguration: unknown }).getConfiguration = () => ({
+      get: <T>(key: string, fallback: T): T =>
+        key === "featuresGenDir" ? (".features-gen" as unknown as T) : fallback,
+    });
+
+    const resolver = makeResolver();
+    await resolver.findStepFiles(["**/*.ts"]);
+
+    const exclude = findFilesMock.mock.calls[0]![1] as string;
+    expect(exclude).toContain("**/node_modules/**");
+    expect(exclude).toContain("**/.features-gen/**");
+    expect(exclude).toContain("**/playwright-report/**");
+    expect(exclude).toContain("**/test-results/**");
+    resolver.dispose();
+  });
+
+  it("honors a custom featuresGenDir in the exclude", async () => {
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+    (vscode.workspace as { getConfiguration: unknown }).getConfiguration = () => ({
+      get: <T>(key: string, fallback: T): T =>
+        key === "featuresGenDir" ? ("build/.bdd-gen" as unknown as T) : fallback,
+    });
+
+    const resolver = makeResolver();
+    await resolver.findStepFiles(["**/*.ts"]);
+
+    const exclude = findFilesMock.mock.calls[0]![1] as string;
+    expect(exclude).toContain("**/build/.bdd-gen/**");
     resolver.dispose();
   });
 });

@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
 
+- Monorepo: step-definition discovery is now scoped per workspace folder. `playwrightBddRunner.stepDefinitionPaths` is `resource`-scoped, so each package can declare its own step directories in its `.vscode/settings.json`, and each folder's globs are resolved against that folder (no more bleeding across packages or being forced into a broad `**/` glob).
+- Monorepo: discovery now excludes the generated `featuresGenDir` (default `.features-gen`) plus `playwright-report` and `test-results`. bddgen's generated `*.spec.js` files contain `Given/When/Then` invocations that are indistinguishable from step definitions, so scanning them produced phantom duplicates and spurious "Step matches multiple definitions" warnings. They are now never scanned for step defs.
 
 
 ## [0.1.8] - 2026-06-12
