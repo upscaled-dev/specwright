@@ -30,6 +30,36 @@ export interface ParsedStepDefWithFile extends ParsedStepDef {
 
 const STEP_LINE_WITH_KEYWORD_RE = new RegExp(`^\\s*(${STEP_KEYWORDS})\\s+(.+?)\\s*$`);
 
+const CONFIG_NAMESPACE = "playwrightBddRunner";
+const STEP_PATHS_KEY = "stepDefinitionPaths";
+
+interface DiscoveryTarget {
+  folder: vscode.WorkspaceFolder | undefined;
+  globs: string[];
+}
+
+/**
+ * Resolve where to scan for step definitions, scoped per workspace folder.
+ * `stepDefinitionPaths` is a `resource`-scoped setting, so in a multi-root / monorepo
+ * workspace each folder can declare its own step directories. We read the folder-scoped
+ * value and bind discovery to that folder via RelativePattern, so a folder's globs only
+ * ever match inside that folder — discovery never reaches outside the directories a
+ * folder declares. Falls back to the caller-supplied globs when there are no workspace
+ * folders (unit tests, loose-file windows).
+ */
+function resolveDiscoveryTargets(fallbackGlobs: string[]): DiscoveryTarget[] {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    return [{ folder: undefined, globs: fallbackGlobs }];
+  }
+  return folders.map((folder) => ({
+    folder,
+    globs: vscode.workspace
+      .getConfiguration(CONFIG_NAMESPACE, folder.uri)
+      .get<string[]>(STEP_PATHS_KEY, fallbackGlobs),
+  }));
+}
+
 export class StepResolver implements vscode.Disposable {
   private readonly logger: Logger;
   private readonly cache = new Map<string, { mtimeMs: number; defs: ParsedStepDef[] }>();
@@ -78,7 +108,11 @@ export class StepResolver implements vscode.Disposable {
   }
 
   public async findStepFiles(globs: string[]): Promise<string[]> {
-    const globsKey = [...globs].sort().join("\0");
+    const targets = resolveDiscoveryTargets(globs);
+    const globsKey = targets
+      .map((t) => `${t.folder?.uri.toString() ?? ""}${[...t.globs].sort().join("\0")}`)
+      .sort()
+      .join("");
     if (this.fileListCache?.globsKey === globsKey) {
       return this.fileListCache.files;
     }
@@ -86,7 +120,14 @@ export class StepResolver implements vscode.Disposable {
     let uriArrays: vscode.Uri[][];
     try {
       uriArrays = await Promise.all(
-        globs.map((glob) => vscode.workspace.findFiles(glob, "**/node_modules/**"))
+        targets.flatMap((t) =>
+          t.globs.map((glob) =>
+            vscode.workspace.findFiles(
+              t.folder ? new vscode.RelativePattern(t.folder, glob) : glob,
+              "**/node_modules/**"
+            )
+          )
+        )
       );
     } catch (error) {
       this.logger.warn("Failed to find step files", {
@@ -100,7 +141,8 @@ export class StepResolver implements vscode.Disposable {
     }
     const files = Array.from(seen);
     this.fileListCache = { globsKey, files };
-    this.installFileListWatchers(globs);
+    const watchGlobs = Array.from(new Set(targets.flatMap((t) => t.globs)));
+    this.installFileListWatchers(watchGlobs);
     return files;
   }
 

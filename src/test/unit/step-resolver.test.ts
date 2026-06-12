@@ -569,6 +569,96 @@ describe("StepResolver.findStepFiles file-list cache", () => {
   });
 });
 
+describe("StepResolver.findStepFiles per-folder discovery (monorepo)", () => {
+  const originalFindFiles = vscode.workspace.findFiles;
+  const originalGetConfiguration = vscode.workspace.getConfiguration;
+  const originalFolders = vscode.workspace.workspaceFolders;
+  let findFilesMock: ReturnType<typeof vi.fn>;
+
+  function folder(name: string): { name: string; index: number; uri: vscode.Uri } {
+    return { name, index: 0, uri: vscode.Uri.file(`/repo/packages/${name}`) };
+  }
+
+  beforeEach(() => {
+    findFilesMock = vi.fn(async () => []);
+    (vscode.workspace as { findFiles: unknown }).findFiles = findFilesMock;
+    (vscode.workspace as { createFileSystemWatcher: unknown }).createFileSystemWatcher =
+      (): unknown => ({
+        onDidCreate: () => ({ dispose: () => {} }),
+        onDidChange: () => ({ dispose: () => {} }),
+        onDidDelete: () => ({ dispose: () => {} }),
+        dispose: () => {},
+      });
+  });
+
+  afterEach(() => {
+    (vscode.workspace as { findFiles: unknown }).findFiles = originalFindFiles;
+    (vscode.workspace as { getConfiguration: unknown }).getConfiguration =
+      originalGetConfiguration;
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = originalFolders;
+  });
+
+  it("reads each folder's own stepDefinitionPaths and binds discovery to that folder", async () => {
+    const app = folder("app");
+    const lib = folder("lib");
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [app, lib];
+
+    const perFolder: Record<string, string[]> = {
+      [app.uri.fsPath]: ["tests/steps/**/*.ts"],
+      [lib.uri.fsPath]: ["src/steps/**/*.ts"],
+    };
+    (vscode.workspace as { getConfiguration: unknown }).getConfiguration = (
+      _ns: string,
+      resource?: vscode.Uri
+    ) => ({
+      get: <T>(_key: string, fallback: T): T =>
+        (resource ? (perFolder[resource.fsPath] as unknown as T) : undefined) ?? fallback,
+    });
+
+    const resolver = makeResolver();
+    // Caller-supplied (merged) globs are the fallback; per-folder config wins.
+    await resolver.findStepFiles(["features/steps/**/*.ts"]);
+
+    expect(findFilesMock).toHaveBeenCalledTimes(2);
+    const patterns = findFilesMock.mock.calls.map((c) => c[0] as vscode.RelativePattern);
+    expect(patterns[0]!.baseUri.fsPath).toBe(app.uri.fsPath);
+    expect(patterns[0]!.pattern).toBe("tests/steps/**/*.ts");
+    expect(patterns[1]!.baseUri.fsPath).toBe(lib.uri.fsPath);
+    expect(patterns[1]!.pattern).toBe("src/steps/**/*.ts");
+    resolver.dispose();
+  });
+
+  it("falls back to a folder's value when only some folders override the setting", async () => {
+    const app = folder("app");
+    const lib = folder("lib");
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [app, lib];
+
+    const perFolder: Record<string, string[]> = {
+      [lib.uri.fsPath]: ["src/steps/**/*.ts"],
+    };
+    (vscode.workspace as { getConfiguration: unknown }).getConfiguration = (
+      _ns: string,
+      resource?: vscode.Uri
+    ) => ({
+      get: <T>(_key: string, fallback: T): T =>
+        (resource ? (perFolder[resource.fsPath] as unknown as T) : undefined) ?? fallback,
+    });
+
+    const resolver = makeResolver();
+    await resolver.findStepFiles(["steps/**/*.ts"]);
+
+    const patterns = findFilesMock.mock.calls.map((c) => c[0] as vscode.RelativePattern);
+    // app has no override -> uses the caller-supplied fallback glob
+    expect(patterns.find((p) => p.baseUri.fsPath === app.uri.fsPath)!.pattern).toBe(
+      "steps/**/*.ts"
+    );
+    expect(patterns.find((p) => p.baseUri.fsPath === lib.uri.fsPath)!.pattern).toBe(
+      "src/steps/**/*.ts"
+    );
+    resolver.dispose();
+  });
+});
+
 describe("StepResolver.parseStepFile mtime cache", () => {
   it("re-parses the file when its mtime changes after first read", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "step-resolver-"));

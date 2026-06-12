@@ -173,6 +173,7 @@
         },
         "playwrightBddRunner.stepDefinitionPaths": {
           "type": "array",
+          "scope": "resource",
           "items": {
             "type": "string"
           },
@@ -182,7 +183,7 @@
             "tests/steps/**/*.ts",
             "steps/**/*.ts"
           ],
-          "description": "Glob patterns for TypeScript/JavaScript files containing playwright-bdd Given/When/Then step definitions. Used for 'Go to Definition' navigation from steps in .feature files."
+          "description": "Glob patterns for TypeScript/JavaScript files containing playwright-bdd Given/When/Then step definitions. Globs resolve per workspace folder, so each package in a monorepo can point at its own step directories. Used for 'Go to Definition' navigation from steps in .feature files."
         },
         "playwrightBddRunner.enableStepDefinitionNavigation": {
           "type": "boolean",

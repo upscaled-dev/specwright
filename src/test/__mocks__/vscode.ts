@@ -125,6 +125,20 @@ export const commands = {
   executeCommand: () => Promise.resolve(),
 };
 
+export class RelativePattern {
+  public readonly baseUri: { fsPath: string };
+  public readonly base: string;
+  constructor(
+    base: { uri?: { fsPath: string }; fsPath?: string } | string,
+    public readonly pattern: string
+  ) {
+    const fsPath =
+      typeof base === "string" ? base : base.uri?.fsPath ?? base.fsPath ?? "";
+    this.baseUri = { fsPath };
+    this.base = fsPath;
+  }
+}
+
 interface LanguageCounters {
   codeLensRegisterCount: number;
   codeLensDisposeCount: number;
