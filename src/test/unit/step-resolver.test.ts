@@ -717,6 +717,73 @@ describe("StepResolver.findStepFiles per-folder discovery (monorepo)", () => {
   });
 });
 
+describe("StepResolver.loadAllStepDefs structural-copy dedupe", () => {
+  const originalFolders = vscode.workspace.workspaceFolders;
+  let tmpDir: string;
+  let resolver: StepResolver;
+
+  const STEP_SOURCE = [
+    "import { createBdd } from 'playwright-bdd';",
+    "const { Given } = createBdd();",
+    "Given('I open the dashboard', async () => {});",
+  ].join("\n");
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "step-resolver-copies-"));
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+      { name: "ws", index: 0, uri: vscode.Uri.file(tmpDir) },
+    ];
+    resolver = makeResolver();
+  });
+
+  afterEach(() => {
+    resolver.dispose();
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = originalFolders;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function write(relPath: string, content: string): string {
+    const abs = path.join(tmpDir, ...relPath.split("/"));
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content);
+    return abs;
+  }
+
+  it("drops a report copy that mirrors the original's path structure", async () => {
+    const original = write("e2e/steps/login.steps.ts", STEP_SOURCE);
+    const copy = write("reports/e2e/steps/login.steps.ts", STEP_SOURCE);
+    vi.spyOn(resolver, "findStepFiles").mockResolvedValue([copy, original]);
+
+    const defs = await resolver.loadAllStepDefs(["**/*.ts"]);
+
+    expect(defs).toHaveLength(1);
+    expect(defs[0]!.filePath).toBe(original);
+  });
+
+  it("keeps both files when paths are not nested (genuine runtime ambiguity)", async () => {
+    const a = write("e2e/steps/login.steps.ts", STEP_SOURCE);
+    const b = write("e2e/steps-old/login.steps.ts", STEP_SOURCE);
+    vi.spyOn(resolver, "findStepFiles").mockResolvedValue([a, b]);
+
+    const defs = await resolver.loadAllStepDefs(["**/*.ts"]);
+
+    expect(defs).toHaveLength(2);
+  });
+
+  it("keeps a nested-path file whose definitions differ from the shallower one", async () => {
+    const original = write("e2e/steps/login.steps.ts", STEP_SOURCE);
+    const different = write(
+      "reports/e2e/steps/login.steps.ts",
+      STEP_SOURCE.replace("I open the dashboard", "I open the settings page")
+    );
+    vi.spyOn(resolver, "findStepFiles").mockResolvedValue([different, original]);
+
+    const defs = await resolver.loadAllStepDefs(["**/*.ts"]);
+
+    expect(defs).toHaveLength(2);
+  });
+});
+
 describe("StepResolver.parseStepFile mtime cache", () => {
   it("re-parses the file when its mtime changes after first read", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "step-resolver-"));
