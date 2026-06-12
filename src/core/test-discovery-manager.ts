@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
 import { ExtensionConfig } from "./extension-config";
 import { CacheEntry, DiscoveryOptions } from "../types";
+import { buildExcludeGlob, excludedDirFragments } from "../utils/discovery-excludes";
 
 export class TestDiscoveryManager {
   private cache = new Map<string, CacheEntry<string[]>>();
@@ -95,7 +96,9 @@ export class TestDiscoveryManager {
         const relativePattern = new vscode.RelativePattern(folder, pattern);
         const foundFiles = await vscode.workspace.findFiles(
           relativePattern,
-          "**/node_modules/**"
+          // Generated specs and report/results dirs can contain copies of executed
+          // feature content — those must never surface as tests in the Explorer.
+          buildExcludeGlob(excludedDirFragments(folder.uri))
         );
 
         files.push(...foundFiles.map((file) => file.fsPath));

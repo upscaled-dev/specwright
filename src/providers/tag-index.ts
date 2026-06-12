@@ -1,8 +1,12 @@
 import * as vscode from "vscode";
-import * as path from "node:path";
 import { ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
 import { TAG_TOKEN_PATTERN } from "../parsers/tag-regex";
+import {
+  isUnderExcludedDir,
+  workspaceExcludeFragments,
+  workspaceExcludeGlob,
+} from "../utils/discovery-excludes";
 
 const DEFAULT_FEATURE_PATTERN = "**/*.feature";
 
@@ -49,7 +53,7 @@ export class TagIndex implements vscode.Disposable {
     this.installWatcher(pattern);
     let uris: vscode.Uri[];
     try {
-      uris = await vscode.workspace.findFiles(pattern, "**/node_modules/**");
+      uris = await vscode.workspace.findFiles(pattern, workspaceExcludeGlob());
     } catch (error) {
       this.logger.warn("TagIndex: findFiles failed", {
         error: error instanceof Error ? error.message : String(error),
@@ -62,9 +66,9 @@ export class TagIndex implements vscode.Disposable {
 
   private installWatcher(pattern: string): void {
     if (this.disposed) {return;}
-    const nodeModulesFragment = `${path.sep}node_modules${path.sep}`;
+    const excluded = workspaceExcludeFragments();
     const isIgnored = (uri: vscode.Uri): boolean =>
-      uri.fsPath.includes(nodeModulesFragment);
+      isUnderExcludedDir(uri.fsPath, excluded);
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
     const refresh = (uri: vscode.Uri): void => {
       if (isIgnored(uri)) {return;}

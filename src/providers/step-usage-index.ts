@@ -1,9 +1,13 @@
 import * as vscode from "vscode";
-import * as path from "node:path";
 import { ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
 import { ParsedStepDefWithFile, StepResolver } from "./step-resolver";
 import { computeSkipRanges } from "./feature-skip-ranges";
+import {
+  isUnderExcludedDir,
+  workspaceExcludeFragments,
+  workspaceExcludeGlob,
+} from "../utils/discovery-excludes";
 
 const DEFAULT_FEATURE_PATTERN = "**/*.feature";
 
@@ -130,7 +134,7 @@ export class StepUsageIndex implements vscode.Disposable {
 
     let uris: vscode.Uri[];
     try {
-      uris = await vscode.workspace.findFiles(featurePattern, "**/node_modules/**");
+      uris = await vscode.workspace.findFiles(featurePattern, workspaceExcludeGlob());
     } catch (error) {
       this.logger.warn("StepUsageIndex: findFiles failed", {
         error: error instanceof Error ? error.message : String(error),
@@ -199,9 +203,9 @@ export class StepUsageIndex implements vscode.Disposable {
 
   private installFeatureWatcher(pattern: string): void {
     if (this.disposed) {return;}
-    const nodeModulesFragment = `${path.sep}node_modules${path.sep}`;
+    const excluded = workspaceExcludeFragments();
     const isIgnored = (uri: vscode.Uri): boolean =>
-      uri.fsPath.includes(nodeModulesFragment);
+      isUnderExcludedDir(uri.fsPath, excluded);
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
     const refresh = (uri: vscode.Uri): void => {
       if (isIgnored(uri)) {return;}
@@ -220,9 +224,9 @@ export class StepUsageIndex implements vscode.Disposable {
   private installStepDefWatchers(globs: readonly string[]): void {
     if (this.disposed) {return;}
     if (globs.length === 0) {return;}
-    const nodeModulesFragment = `${path.sep}node_modules${path.sep}`;
+    const excluded = workspaceExcludeFragments();
     const onAny = (uri: vscode.Uri): void => {
-      if (uri.fsPath.includes(nodeModulesFragment)) {return;}
+      if (isUnderExcludedDir(uri.fsPath, excluded)) {return;}
       this.invalidateAll();
     };
     for (const glob of globs) {

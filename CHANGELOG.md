@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Step *invocations* are no longer mistaken for step *definitions*, regardless of what directory they live in (generated specs, reports, test-results). The extractor now only accepts calls that actually *register a handler*: it skips files stamped with bddgen's `// Generated from:` header, calls prefixed with `await`/`return`/`yield`, handler-less calls like `Given("text")`, and bddgen's fixture-passing shape `Given("text", null, { page })`. This removes spurious "Step matches multiple definitions" warnings at the source, with zero configuration, even when such files match the discovery globs or are open in the editor.
+- Step *invocations* are no longer mistaken for step *definitions*, regardless of what directory they live in (generated specs, reports, test-results). The extractor now only accepts calls that actually *register a handler*: it skips files stamped with bddgen's `// Generated from:` header, calls prefixed with `await`/`return`/`yield`, handler-less calls like `Given("text")` (e.g. code echoed into report logs), and bddgen's fixture-passing shape `Given("text", null, { page })`. This removes spurious "Step matches multiple definitions" warnings at the source, with zero configuration, even when such files match the discovery globs or are open in the editor.
+- Feature-file scanning (Test Explorer discovery, the step-usage index behind "Used N times"/unused-step diagnostics, and tag autocompletion) now applies the same built-in excludes as step discovery — `node_modules`, the generated `featuresGenDir`, `playwright-report`, `test-results`. Copies of executed feature content inside generated/report directories no longer surface as duplicate tests, inflate usage counts, or pollute tag suggestions.
+- Windows: the step-usage-index and tag-index file watchers filtered `node_modules` events with a platform-dependent separator check that never matched on Windows; they now normalize paths before filtering.
 
 
 ## [0.1.10] - 2026-06-12

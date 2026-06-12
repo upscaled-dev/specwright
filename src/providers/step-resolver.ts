@@ -9,6 +9,7 @@ import {
 import { STEP_KEYWORDS } from "./step-keywords";
 import { SCENARIO_BOUNDARY_RE } from "./scenario-boundary";
 import { computeSkipRanges } from "./feature-skip-ranges";
+import { buildExcludeGlob, excludedDirFragments } from "../utils/discovery-excludes";
 
 export interface UnmatchedStep {
   line: number;
@@ -33,14 +34,6 @@ const STEP_LINE_WITH_KEYWORD_RE = new RegExp(`^\\s*(${STEP_KEYWORDS})\\s+(.+?)\\
 const CONFIG_NAMESPACE = "playwrightBddRunner";
 const STEP_PATHS_KEY = "stepDefinitionPaths";
 const STEP_EXCLUDE_PATHS_KEY = "stepDefinitionExcludePaths";
-const FEATURES_GEN_KEY = "featuresGenDir";
-const DEFAULT_FEATURES_GEN_DIR = ".features-gen";
-
-// Output directories whose files must never be scanned for step definitions.
-// bddgen's generated specs and the Playwright report/results contain Given/When/Then
-// *invocations* that are syntactically identical to step *definitions*, so scanning
-// them produces phantom duplicate defs and false "matches multiple definitions" noise.
-const ALWAYS_EXCLUDED_DIRS = ["node_modules", "playwright-report", "test-results"];
 
 interface DiscoveryTarget {
   folder: vscode.WorkspaceFolder | undefined;
@@ -51,35 +44,12 @@ interface DiscoveryTarget {
   excludeFragments: string[];
 }
 
-function normalizeDirFragment(dir: string): string {
-  return dir.replaceAll("\\", "/").replace(/^\.?\//, "").replace(/\/+$/, "");
-}
-
-function readFeaturesGenDir(resource: vscode.Uri | undefined): string {
-  const value = vscode.workspace
-    .getConfiguration(CONFIG_NAMESPACE, resource)
-    .get<string>(FEATURES_GEN_KEY, DEFAULT_FEATURES_GEN_DIR);
-  return value.trim() === "" ? DEFAULT_FEATURES_GEN_DIR : value;
-}
-
-function excludedDirFragments(featuresGenDir: string): string[] {
-  const gen = normalizeDirFragment(featuresGenDir);
-  const dirs = [...ALWAYS_EXCLUDED_DIRS];
-  if (gen && !dirs.includes(gen)) {dirs.push(gen);}
-  return dirs;
-}
-
 function readExcludePaths(resource: vscode.Uri | undefined): string[] {
   return vscode.workspace
     .getConfiguration(CONFIG_NAMESPACE, resource)
     .get<string[]>(STEP_EXCLUDE_PATHS_KEY, [])
     .map((g) => g.trim())
     .filter((g) => g.length > 0);
-}
-
-function buildExcludeGlob(fragments: string[], extraGlobs: string[]): string {
-  const patterns = [...fragments.map((d) => `**/${d}/**`), ...extraGlobs];
-  return `{${patterns.join(",")}}`;
 }
 
 /**
@@ -97,7 +67,7 @@ function buildExcludeGlob(fragments: string[], extraGlobs: string[]): string {
 function resolveDiscoveryTargets(fallbackGlobs: string[]): DiscoveryTarget[] {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
-    const fragments = excludedDirFragments(readFeaturesGenDir(undefined));
+    const fragments = excludedDirFragments(undefined);
     return [
       {
         folder: undefined,
@@ -108,7 +78,7 @@ function resolveDiscoveryTargets(fallbackGlobs: string[]): DiscoveryTarget[] {
     ];
   }
   return folders.map((folder) => {
-    const fragments = excludedDirFragments(readFeaturesGenDir(folder.uri));
+    const fragments = excludedDirFragments(folder.uri);
     return {
       folder,
       globs: vscode.workspace
