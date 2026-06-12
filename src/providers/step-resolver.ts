@@ -32,6 +32,7 @@ const STEP_LINE_WITH_KEYWORD_RE = new RegExp(`^\\s*(${STEP_KEYWORDS})\\s+(.+?)\\
 
 const CONFIG_NAMESPACE = "playwrightBddRunner";
 const STEP_PATHS_KEY = "stepDefinitionPaths";
+const STEP_EXCLUDE_PATHS_KEY = "stepDefinitionExcludePaths";
 const FEATURES_GEN_KEY = "featuresGenDir";
 const DEFAULT_FEATURES_GEN_DIR = ".features-gen";
 
@@ -68,8 +69,17 @@ function excludedDirFragments(featuresGenDir: string): string[] {
   return dirs;
 }
 
-function buildExcludeGlob(fragments: string[]): string {
-  return `{${fragments.map((d) => `**/${d}/**`).join(",")}}`;
+function readExcludePaths(resource: vscode.Uri | undefined): string[] {
+  return vscode.workspace
+    .getConfiguration(CONFIG_NAMESPACE, resource)
+    .get<string[]>(STEP_EXCLUDE_PATHS_KEY, [])
+    .map((g) => g.trim())
+    .filter((g) => g.length > 0);
+}
+
+function buildExcludeGlob(fragments: string[], extraGlobs: string[]): string {
+  const patterns = [...fragments.map((d) => `**/${d}/**`), ...extraGlobs];
+  return `{${patterns.join(",")}}`;
 }
 
 /**
@@ -80,8 +90,9 @@ function buildExcludeGlob(fragments: string[]): string {
  * ever match inside that folder — discovery never reaches outside the directories a
  * folder declares. Each folder's generated `featuresGenDir` (plus the Playwright
  * report/results dirs) is excluded, so even a broad glob can't mistake generated
- * Given/When/Then invocations for definitions. Falls back to the caller-supplied globs
- * when there are no workspace folders (unit tests, loose-file windows).
+ * Given/When/Then invocations for definitions; users can exclude additional
+ * directories via `stepDefinitionExcludePaths`. Falls back to the caller-supplied
+ * globs when there are no workspace folders (unit tests, loose-file windows).
  */
 function resolveDiscoveryTargets(fallbackGlobs: string[]): DiscoveryTarget[] {
   const folders = vscode.workspace.workspaceFolders;
@@ -91,7 +102,7 @@ function resolveDiscoveryTargets(fallbackGlobs: string[]): DiscoveryTarget[] {
       {
         folder: undefined,
         globs: fallbackGlobs,
-        exclude: buildExcludeGlob(fragments),
+        exclude: buildExcludeGlob(fragments, readExcludePaths(undefined)),
         excludeFragments: fragments,
       },
     ];
@@ -103,7 +114,7 @@ function resolveDiscoveryTargets(fallbackGlobs: string[]): DiscoveryTarget[] {
       globs: vscode.workspace
         .getConfiguration(CONFIG_NAMESPACE, folder.uri)
         .get<string[]>(STEP_PATHS_KEY, fallbackGlobs),
-      exclude: buildExcludeGlob(fragments),
+      exclude: buildExcludeGlob(fragments, readExcludePaths(folder.uri)),
       excludeFragments: fragments,
     };
   });

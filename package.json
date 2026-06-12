@@ -185,6 +185,15 @@
           ],
           "description": "Glob patterns for TypeScript/JavaScript files containing playwright-bdd Given/When/Then step definitions. Globs resolve per workspace folder, so each package in a monorepo can point at its own step directories. Used for 'Go to Definition' navigation from steps in .feature files."
         },
+        "playwrightBddRunner.stepDefinitionExcludePaths": {
+          "type": "array",
+          "scope": "resource",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional glob patterns excluded from step-definition discovery, merged with the built-in excludes (node_modules, the generated featuresGenDir, playwright-report, test-results). Use this to exclude generated or report directories whose files contain Given/When/Then invocations that would otherwise be mistaken for step definitions. Example: \"**/reports/**\". Resolves per workspace folder."
+        },
         "playwrightBddRunner.enableStepDefinitionNavigation": {
           "type": "boolean",
           "default": true,

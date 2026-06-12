@@ -44,6 +44,7 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   tags: (c) => c.tags,
   dryRun: (c) => c.dryRun,
   stepDefinitionPaths: (c) => c.stepDefinitionPaths,
+  stepDefinitionExcludePaths: (c) => c.stepDefinitionExcludePaths,
   enableStepDefinitionNavigation: (c) => c.enableStepDefinitionNavigation,
   enableStepDiagnostics: (c) => c.enableStepDiagnostics,
   enableStepAutocomplete: (c) => c.stepAutocompleteMode,

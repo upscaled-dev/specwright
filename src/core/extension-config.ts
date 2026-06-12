@@ -107,6 +107,10 @@ export class ExtensionConfig {
     ]);
   }
 
+  public get stepDefinitionExcludePaths(): string[] {
+    return this.config.get<string[]>("stepDefinitionExcludePaths", []);
+  }
+
   public get enableStepDefinitionNavigation(): boolean {
     return this.config.get<boolean>("enableStepDefinitionNavigation", true);
   }

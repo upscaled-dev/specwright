@@ -28,9 +28,28 @@ All settings live under `playwrightBddRunner.*` in your VS Code Settings (`Cmd/C
 | `enableUnusedStepDiagnostics` | `auto` / `on` / `off` | `auto` | Information diagnostic on step definitions that no `.feature` step matches. |
 | `enableStepLiteralPromotion` | `auto` / `on` / `off` | `auto` | Refactor: promote a hard-coded literal in a step to a `{string}`/`{int}`/`{float}` parameter, updating both files. |
 | `enableTableFormatting` | `auto` / `on` / `off` | `auto` | Auto-align Gherkin data tables on Format Document. |
-| `stepDefinitionPaths` | string[] | `["features/steps/**/*.ts", "features/steps/**/*.js", "tests/steps/**/*.ts", "steps/**/*.ts"]` | Globs for step-definition lookup. Used by navigation, autocompletion, references, the CodeLens, the unused-step diagnostic, the literal-promotion refactor, and the generator. |
+| `stepDefinitionPaths` | string[] | `["features/steps/**/*.ts", "features/steps/**/*.js", "tests/steps/**/*.ts", "steps/**/*.ts"]` | Globs for step-definition lookup. Used by navigation, autocompletion, references, the CodeLens, the unused-step diagnostic, the literal-promotion refactor, and the generator. Resource-scoped — set per workspace folder so each package in a monorepo can point at its own step directories. |
+| `stepDefinitionExcludePaths` | string[] | `[]` | Extra globs excluded from step-definition discovery, merged with the built-in excludes (`node_modules`, the generated `featuresGenDir`, `playwright-report`, `test-results`). Exclude generated/report directories whose files contain `Given/When/Then` invocations that would otherwise be mistaken for definitions — e.g. `"**/reports/**"`. Resource-scoped. |
 
 Per-feature deep dives: [features.md](features.md).
+
+## Example: scoping step discovery in a monorepo
+
+`stepDefinitionPaths` and `stepDefinitionExcludePaths` are **resource-scoped**, so each package can configure its own step directories in that package's `.vscode/settings.json`:
+
+```jsonc
+// packages/web/.vscode/settings.json
+{
+  // Look for step definitions only inside this package's step folder.
+  "playwrightBddRunner.stepDefinitionPaths": ["tests/steps/**/*.ts"],
+
+  // Exclude a custom report/output directory whose generated files contain
+  // Given/When/Then invocations that would otherwise be read as definitions.
+  "playwrightBddRunner.stepDefinitionExcludePaths": ["**/reports/**"]
+}
+```
+
+Why the exclude matters: bddgen's generated specs (and some report formats) call `Given("…")`, `When("…")`, `Then("…")` as **invocations**, which look identical to step **definitions** to the matcher. If discovery reaches those files, a single step appears to match several definitions and gets flagged as ambiguous. The built-in excludes already cover `node_modules`, the generated `featuresGenDir` (default `.features-gen`), `playwright-report`, and `test-results`; use `stepDefinitionExcludePaths` for any additional directory specific to your setup.
 
 ## `auto` / `on` / `off` semantics
 

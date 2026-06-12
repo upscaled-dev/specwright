@@ -694,6 +694,27 @@ describe("StepResolver.findStepFiles per-folder discovery (monorepo)", () => {
     expect(exclude).toContain("**/build/.bdd-gen/**");
     resolver.dispose();
   });
+
+  it("merges user-configured stepDefinitionExcludePaths into the exclude", async () => {
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+    (vscode.workspace as { getConfiguration: unknown }).getConfiguration = () => ({
+      get: <T>(key: string, fallback: T): T =>
+        key === "stepDefinitionExcludePaths"
+          ? (["**/reports/**", "  ", "**/generated/**"] as unknown as T)
+          : fallback,
+    });
+
+    const resolver = makeResolver();
+    await resolver.findStepFiles(["**/*.ts"]);
+
+    const exclude = findFilesMock.mock.calls[0]![1] as string;
+    // built-in excludes still present
+    expect(exclude).toContain("**/node_modules/**");
+    // user globs merged in, blank entries dropped
+    expect(exclude).toContain("**/reports/**");
+    expect(exclude).toContain("**/generated/**");
+    resolver.dispose();
+  });
 });
 
 describe("StepResolver.parseStepFile mtime cache", () => {
