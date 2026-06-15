@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.2.1] - 2026-06-15
 ### Added
 
 - New setting `playwrightBddRunner.useConfigReporters` (default `false`): run the reporters declared in your Playwright config instead of the extension injecting its own `--reporter` flags, so a custom reporter (e.g. one with a runtime-computed output path) runs alongside the extension's Test Results panel. Add a bare `['json']` entry (no `outputFile`) to your config's `reporter` array — the extension steers it to its temp file via `PLAYWRIGHT_JSON_OUTPUT_NAME` and parses that for result mapping.
