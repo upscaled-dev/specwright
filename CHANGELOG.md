@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.2.2] - 2026-06-15
 ### Fixed
 
 - Running or debugging a single Scenario Outline example row now targets exactly that row. playwright-bdd substitutes the example values into each generated test title, so no `--grep` on the source title (which still holds the raw `<placeholders>`) can isolate one row: it either matched every expanded row of the outline (and every row of any same-named outline) or, when the row's full label was used, matched nothing ("no results attributed to … add its path to defineBddConfig"). Runs and debugs now resolve the precise generated test via `<generatedSpec>:<pwTestLine>` from the spec's `bddFileData` line map, falling back to the previous name `--grep` only when no line can be resolved.
