@@ -68,6 +68,22 @@ export class CommandBuilder {
     return parts.join(" && ");
   }
 
+  /**
+   * Same as {@link buildScenarioCommand} but split into its bddgen and playwright halves, so the
+   * executor can run bddgen FIRST and then resolve a precise `<spec>:<pwTestLine>` target from the
+   * freshly generated spec before running playwright (mirrors {@link buildDebugCommandParts}).
+   * `bddgenCommand` is undefined when bddgen is disabled (empty config) or generation is delegated
+   * to `defineBddProject`.
+   */
+  public buildScenarioCommandParts(
+    options: TestExecutionOptions
+  ): { bddgenCommand: string | undefined; playwrightCommand: string } {
+    return {
+      bddgenCommand: this.buildBddgen(options.tags),
+      playwrightCommand: this.buildPlaywright(options, /*greppedByName*/ true),
+    };
+  }
+
   public buildFeatureCommand(options: FeatureExecutionOptions): string {
     const parts: string[] = [];
     const gen = this.buildBddgen(options.tags);
@@ -124,7 +140,11 @@ export class CommandBuilder {
     const bddgenCommand = this.buildBddgen(options.tags);
 
     const playwrightParts: string[] = [this.config.playwrightCommand];
-    if (options.scenarioName) {
+    if (options.specLineTarget) {
+      // Preferred: target the exact generated test by `<spec>:<pwTestLine>`. This is the only way
+      // to debug a single Scenario Outline example row (grep on the source title can't isolate one).
+      playwrightParts.push(this.quote(options.specLineTarget));
+    } else if (options.scenarioName) {
       playwrightParts.push("--grep", this.quote(this.gripPattern(options.scenarioName, options.outlineName)));
     } else {
       // No specific scenario (e.g. debugging a whole feature file): narrow to the feature's
@@ -166,9 +186,15 @@ export class CommandBuilder {
     // outline node passes only `outlineName`) — by the outline name, which matches every expanded
     // example row. Without this, an outline run with no scenarioName produced no `--grep` and ran
     // the entire suite.
-    const grepName = nonEmpty(options.scenarioName) ?? nonEmpty(options.outlineName);
-    if (greppedByName && grepName) {
-      parts.push("--grep", this.quote(this.gripPattern(grepName, options.outlineName)));
+    if (greppedByName && options.specLineTarget) {
+      // Preferred: precise `<spec>:<pwTestLine>` target (see TestExecutionOptions.specLineTarget).
+      // Falls through to name-grep below only when no spec line could be resolved.
+      parts.push(this.quote(options.specLineTarget));
+    } else {
+      const grepName = nonEmpty(options.scenarioName) ?? nonEmpty(options.outlineName);
+      if (greppedByName && grepName) {
+        parts.push("--grep", this.quote(this.gripPattern(grepName, options.outlineName)));
+      }
     }
 
     this.appendCommonFlags(parts, {

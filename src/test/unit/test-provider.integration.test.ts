@@ -174,11 +174,15 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
     // The report titles examples "Example #N" with the generated spec line; only the
     // bddFileData line-mapping connects them to the right .feature example row.
     const shell: ShellRunner = async (_cmd, _dir, env) => {
+      // bddgen runs first as its own step (no JSON env) — succeed so the playwright run proceeds.
+      if (!env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+        return { success: true, output: "", error: "", returnCode: 0 };
+      }
       const out = reportJson(fixture, [
         { title: "Example #1", line: 18, status: "passed" },
         { title: "Example #2", line: 24, status: "failed" },
       ]);
-      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);}
+      fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);
       return { success: false, output: "", error: "", returnCode: 1 };
     };
     const { provider, controller } = buildProvider(shell);
@@ -200,10 +204,12 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
 
   it("flags an out-of-scope run (no results attributed) in the Test Results output", async () => {
     const shell: ShellRunner = async (_cmd, _dir, env) => {
-      // Grep matched nothing — Playwright reports no tests and writes an empty report.
-      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
-        fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], JSON.stringify({ suites: [] }));
+      // bddgen step (no JSON env) succeeds; the playwright run then matches nothing — Playwright
+      // reports "no tests found" and writes an empty report.
+      if (!env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+        return { success: true, output: "", error: "", returnCode: 0 };
       }
+      fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], JSON.stringify({ suites: [] }));
       return { success: false, output: "", error: "Error: No tests found", returnCode: 1 };
     };
     const { provider, controller } = buildProvider(shell);

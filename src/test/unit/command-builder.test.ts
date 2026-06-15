@@ -108,6 +108,46 @@ describe("CommandBuilder", () => {
     expect(new RegExp(grep).test("Login as admin with pro plan")).toBe(true);
   });
 
+  it("prefers a specLineTarget over --grep for a scenario run (precise single-row targeting)", async () => {
+    // Grep on an outline title can't isolate one example row — playwright-bdd substitutes the
+    // example values into the title — so a resolved `<spec>:<pwTestLine>` target wins instead.
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const cmd = await builder.buildScenarioCommand({
+      filePath: "/abs/features/products.feature",
+      scenarioName: "1: Create a product (<name>) - name: Widget",
+      outlineName: "Create a product (<name>)",
+      lineNumber: 10,
+      specLineTarget: ".features-gen/features/products.feature.spec.js:8",
+    });
+    expect(cmd).toContain('npx playwright test ".features-gen/features/products.feature.spec.js:8"');
+    expect(cmd).not.toContain("--grep");
+  });
+
+  it("prefers a specLineTarget over --grep on the debug playwright half", () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const { playwrightCommand } = builder.buildDebugCommandParts({
+      filePath: "/abs/features/products.feature",
+      scenarioName: "1: Create a product (<name>) - name: Widget",
+      outlineName: "Create a product (<name>)",
+      lineNumber: 10,
+      specLineTarget: ".features-gen/features/products.feature.spec.js:8",
+    });
+    expect(playwrightCommand).toContain('".features-gen/features/products.feature.spec.js:8"');
+    expect(playwrightCommand).not.toContain("--grep");
+  });
+
+  it("falls back to name --grep when no specLineTarget is resolved", async () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const cmd = await builder.buildScenarioCommand({
+      filePath: "/abs/features/products.feature",
+      outlineName: "Create a product (<name>)",
+      lineNumber: 10,
+    });
+    expect(cmd).toContain("--grep");
+    expect(cmd).toContain("Create a product");
+    expect(cmd).not.toContain(".spec.js:");
+  });
+
   it("omits the injected --reporter when useConfigReporters is set, so config reporters survive", async () => {
     const builder = CommandBuilder.create(makeConfig({ useConfigReporters: true }) as never, loggerStub());
     const cmd = await builder.buildAllTestsCommand();

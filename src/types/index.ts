@@ -69,6 +69,15 @@ export interface TestExecutionOptions {
   lineNumber?: number;
   scenarioName?: string;
   outlineName?: string;
+  /**
+   * Preferred precise target: a `<generatedSpec>:<pwTestLine>` filter that selects exactly one
+   * generated test. Resolved from the spec's `bddFileData` (pickleLine→pwTestLine). When set, the
+   * command builder uses it INSTEAD of `--grep`, which is the only reliable way to target a single
+   * Scenario Outline example row — playwright-bdd substitutes the example values into the test
+   * title, so no grep on the source title (with raw `<placeholders>`) can pick one row. Unset →
+   * the builder falls back to grepping by scenario/outline name.
+   */
+  specLineTarget?: string;
   debug?: boolean;
   waitForSessionEnd?: boolean | undefined;
   /**

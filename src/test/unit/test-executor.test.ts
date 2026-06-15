@@ -210,7 +210,8 @@ describe("TestExecutor preRunCommand", () => {
   });
 
   it("does not exec a pre-run command when the setting is empty", async () => {
-    const config = makeConfig({ preRunCommand: "" });
+    // bddgen disabled so this stays focused on pre-run sequencing (bddgen-first is covered separately).
+    const config = makeConfig({ preRunCommand: "", bddgenCommand: "" });
     const { executor, events } = makeExecutor(config, recordingShell);
 
     await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 1 });
@@ -221,7 +222,7 @@ describe("TestExecutor preRunCommand", () => {
   });
 
   it("execs the configured pre-run command before the playwright run", async () => {
-    const config = makeConfig({ preRunCommand: "npm run build:fixtures" });
+    const config = makeConfig({ preRunCommand: "npm run build:fixtures", bddgenCommand: "" });
     const { executor } = makeExecutor(config, recordingShell);
 
     await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 1 });
@@ -254,7 +255,7 @@ describe("TestExecutor preRunCommand", () => {
   });
 
   it("continues to playwright when the pre-run command exits zero", async () => {
-    const config = makeConfig({ preRunCommand: "echo ok" });
+    const config = makeConfig({ preRunCommand: "echo ok", bddgenCommand: "" });
     const { executor, events } = makeExecutor(config, recordingShell);
 
     await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 1 });
@@ -263,6 +264,59 @@ describe("TestExecutor preRunCommand", () => {
     expect(calls[0]!.command).toBe("echo ok");
     const last = events[events.length - 1];
     expect(last?.kind === "success" || last?.kind === "failure").toBe(true);
+  });
+});
+
+describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
+  let calls: Array<{ command: string }>;
+  let recordingShell: ShellRunner;
+
+  beforeEach(() => {
+    calls = [];
+    recordingShell = async (command) => {
+      calls.push({ command });
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+  });
+
+  it("runs bddgen as its own step before playwright, so the spec line map is fresh", async () => {
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), recordingShell);
+
+    await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 5 });
+
+    // Two separate shell calls (not one `bddgen && playwright` chain): bddgen, then playwright.
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.command).toBe("npx bddgen");
+    expect(calls[1]!.command).not.toContain("bddgen");
+    expect(calls[1]!.command).toContain("--reporter=json");
+  });
+
+  it("aborts before playwright and reports failure when bddgen fails", async () => {
+    const failingBddgen: ShellRunner = async (command) => {
+      calls.push({ command });
+      if (command === "npx bddgen") {
+        return { success: false, output: "Missing step definitions", error: "", returnCode: 1 };
+      }
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    const { executor, events } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), failingBddgen);
+
+    const result = await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 5 });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.command).toBe("npx bddgen");
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("bddgen failed");
+    expect(events[events.length - 1]?.kind).toBe("failure");
+  });
+
+  it("skips the separate bddgen step when bddgenCommand is empty (defineBddProject auto-gen)", async () => {
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), recordingShell);
+
+    await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 5 });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.command).toContain("--reporter=json");
   });
 });
 
@@ -299,7 +353,8 @@ describe("TestExecutor run events", () => {
   });
 
   it("emits failure with counts when at least one scenario fails", async () => {
-    const config = makeConfig();
+    // bddgen disabled so the single mocked failing result maps to the playwright run, not bddgen.
+    const config = makeConfig({ bddgenCommand: "" });
     const shell: ShellRunner = async () => ({
       success: false,
       output: JSON.stringify({
@@ -727,7 +782,7 @@ describe("TestExecutor working-directory inference (monorepo)", () => {
   it("runs from the package owning the nearest playwright.config, not the workspace root", async () => {
     write("packages/e2e/playwright.config.ts", "export default {};");
     const feature = write("packages/e2e/features/login.feature", "Feature: F");
-    const { executor } = makeExecutor(makeConfig(), recordingShell, {
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), recordingShell, {
       workspace: makeWorkspace(),
     });
 

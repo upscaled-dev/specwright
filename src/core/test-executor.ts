@@ -16,7 +16,7 @@ import { PlaywrightJsonParser, ScenarioStatus, ScenarioResult } from "../utils/p
 import { shellQuote } from "../utils/shell";
 import { canonicalCwd, findNearestPlaywrightConfigDir, workspaceFolderRootFor } from "../utils/working-dir";
 import { BreakpointMirror } from "./breakpoint-mirror";
-import { resolveGeneratedSpecPath } from "../parsers/bdd-file-data-parser";
+import { parseBddFileData, resolveGeneratedSpecPath } from "../parsers/bdd-file-data-parser";
 
 /**
  * A test run result enriched with the per-scenario outcomes parsed from Playwright's JSON
@@ -163,7 +163,7 @@ export class TestExecutor {
   // single `await Promise.resolve()` keeps the lint rule happy and the contract stable.
   public async runScenario(options: TestExecutionOptions): Promise<void> {
     await Promise.resolve();
-    const command = this.commandBuilder().buildScenarioCommand(options);
+    const command = this.commandBuilder().buildScenarioCommand(this.withSpecLineTarget(options));
     this.executeCommand(command, this.getWorkingDirectory(options.filePath));
   }
 
@@ -179,8 +179,7 @@ export class TestExecutor {
       // bddgen runs separately FIRST (not chained into the debugged command) so the generated
       // specs exist before we mirror feature-file breakpoints into them.
       const workingDir = this.getWorkingDirectory(options.filePath);
-      const { bddgenCommand, playwrightCommand } =
-        this.commandBuilder().buildDebugCommandParts(options);
+      const { bddgenCommand } = this.commandBuilder().buildDebugCommandParts(options);
 
       if (bddgenCommand !== undefined) {
         const result = await this.shellRunner(bddgenCommand, workingDir);
@@ -196,6 +195,12 @@ export class TestExecutor {
         options.filePath
       );
       mirrorId = this.mirror.mirrorBreakpoints(options.filePath, specPath);
+
+      // Resolve the precise spec target from the freshly generated spec (bddgen just ran), so a
+      // single Scenario Outline row debugs exactly one test instead of grepping its title.
+      const { playwrightCommand } = this.commandBuilder().buildDebugCommandParts(
+        this.withSpecLineTarget(options, specPath)
+      );
 
       const folder =
         this.workspace.workspaceFolders?.find(
@@ -300,10 +305,62 @@ export class TestExecutor {
   public async runScenarioWithOutput(
     options: TestExecutionOptions
   ): Promise<RunOutputResult> {
-    return this.runWithJsonReport(
-      () => this.commandBuilder().buildScenarioCommand(options),
-      options.filePath
+    const start = Date.now();
+    const workingDir = this.getWorkingDirectory(options.filePath);
+
+    this.runEventEmitter.fire({ kind: "running", passed: 0, failed: 0 });
+
+    const preRunFailure = await this.runPreRunHook(workingDir);
+    if (preRunFailure) {
+      this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
+      return { success: false, output: "", error: preRunFailure, duration: Math.max(1, Date.now() - start) };
+    }
+
+    // Run bddgen separately FIRST (not chained with `&&`) so the generated spec — and its
+    // pickleLine→pwTestLine map — is fresh before we resolve the precise `<spec>:<pwTestLine>`
+    // target. This makes single-row targeting airtight even right after the feature was edited
+    // (mirrors the debug path). When bddgenCommand is undefined (empty config or defineBddProject
+    // auto-gen), generation happens inside `playwright test`, so we resolve from the existing spec.
+    const { bddgenCommand } = this.commandBuilder().buildScenarioCommandParts(options);
+    if (bddgenCommand !== undefined) {
+      try {
+        const gen = await this.shellRunner(bddgenCommand, workingDir);
+        this.publishBddgenDiagnostics(gen, workingDir);
+        if (!gen.success) {
+          this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
+          const detail = gen.error.trim() === "" ? gen.output : gen.error;
+          return {
+            success: false,
+            output: gen.output,
+            error: `bddgen failed (exit code ${gen.returnCode}): ${detail}`,
+            duration: Math.max(1, Date.now() - start),
+          };
+        }
+      } catch (error) {
+        this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
+        return { success: false, output: "", error: errMsg(error), duration: Math.max(1, Date.now() - start) };
+      }
+    }
+
+    const enriched = this.withSpecLineTarget(options);
+    const { playwrightCommand } = this.commandBuilder().buildScenarioCommandParts(enriched);
+
+    reportSequence += 1;
+    const reportPath = path.join(
+      os.tmpdir(),
+      `playwright-bdd-report-${process.pid}-${Date.now()}-${reportSequence}.json`
     );
+    const command = this.config.useConfigReporters ? playwrightCommand : `${playwrightCommand} --reporter=json`;
+
+    try {
+      const result = await this.shellRunner(command, workingDir, {
+        PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath,
+      });
+      return this.buildOutputResult(result, reportPath, workingDir, start);
+    } catch (error) {
+      this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
+      return { success: false, output: "", error: errMsg(error), duration: Math.max(1, Date.now() - start) };
+    }
   }
 
   public async runFeatureFileWithOutput(
@@ -348,6 +405,61 @@ export class TestExecutor {
     this.runEventEmitter.dispose();
   }
 
+  /**
+   * Enrich options with a precise `specLineTarget` when one can be resolved, leaving them untouched
+   * otherwise (the command builder then falls back to name-based --grep). `specPath` is supplied by
+   * the debug path, which resolves it after running bddgen so the line map is fresh.
+   */
+  private withSpecLineTarget(
+    options: TestExecutionOptions,
+    specPath?: string
+  ): TestExecutionOptions {
+    if (options.specLineTarget !== undefined) {
+      return options;
+    }
+    const target = this.resolveSpecLineTarget(options.filePath, options.lineNumber, specPath);
+    return target ? { ...options, specLineTarget: target } : options;
+  }
+
+  /**
+   * Resolve `<generatedSpec>:<pwTestLine>` for a single scenario/outline row by reading the
+   * generated spec's `bddFileData` (pickleLine→pwTestLine). This is the only reliable way to target
+   * one Scenario Outline example row, since playwright-bdd substitutes example values into the test
+   * title (so no grep on the source title can isolate a row). Returns undefined — caller falls back
+   * to name-grep — when there's no line, the spec can't be located/read, or the line isn't mapped.
+   */
+  private resolveSpecLineTarget(
+    filePath: string,
+    lineNumber?: number,
+    specPathArg?: string
+  ): string | undefined {
+    if (lineNumber === undefined || lineNumber <= 0) {
+      return undefined;
+    }
+    const workingDir = this.getWorkingDirectory(filePath);
+    const specPath =
+      specPathArg ?? resolveGeneratedSpecPath(workingDir, this.config.featuresGenDir, filePath);
+    if (!specPath) {
+      return undefined;
+    }
+    let content: string;
+    try {
+      content = fs.readFileSync(specPath, "utf8");
+    } catch {
+      return undefined;
+    }
+    const pwTestLine = parseBddFileData(content)?.testLines.get(lineNumber);
+    if (pwTestLine === undefined) {
+      return undefined;
+    }
+    // A cwd-relative spec path keeps the Playwright filter short and dodges the Windows drive-colon
+    // (`C:\…`) clashing with the trailing `:line`. Fall back to the absolute path when the spec sits
+    // outside the working dir (a `..` chain would be brittle).
+    const rel = path.relative(workingDir, specPath);
+    const specArg = rel === "" || rel.startsWith("..") || path.isAbsolute(rel) ? specPath : rel;
+    return `${specArg}:${pwTestLine}`;
+  }
+
   private async runWithJsonReport(
     buildCommand: () => string,
     forFile?: string
@@ -384,35 +496,8 @@ export class TestExecutor {
       const result = await this.shellRunner(command, workingDir, {
         PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath,
       });
-      const duration = Math.max(1, Date.now() - start);
-
-      const bddgenDiagnostics = this.context?.bddgenDiagnostics;
-      if (bddgenDiagnostics) {
-        if (result.success) {
-          bddgenDiagnostics.clear();
-        } else {
-          bddgenDiagnostics.publish(`${result.output}\n${result.error}`, workingDir);
-        }
-      }
-
-      const scenarioDetails = this.readScenarioDetails(reportPath, result.output);
-      const scenarioResults = this.playwrightJsonParser.toStatusMap(scenarioDetails, workingDir);
-
-      const { passed, failed } = countScenarioStatuses(scenarioDetails);
-      this.runEventEmitter.fire({
-        kind: result.success && failed === 0 ? "success" : "failure",
-        passed,
-        failed,
-      });
-
-      return {
-        success: result.success,
-        output: result.output,
-        error: result.error,
-        duration,
-        scenarioResults,
-        scenarioDetails,
-      };
+      this.publishBddgenDiagnostics(result, workingDir);
+      return this.buildOutputResult(result, reportPath, workingDir, start);
     } catch (error) {
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return {
@@ -422,6 +507,44 @@ export class TestExecutor {
         duration: Math.max(1, Date.now() - start),
       };
     }
+  }
+
+  /** Mirror bddgen output into the Problems panel: clear on success, publish the errors on failure. */
+  private publishBddgenDiagnostics(result: CommandResult, workingDir: string): void {
+    const bddgenDiagnostics = this.context?.bddgenDiagnostics;
+    if (!bddgenDiagnostics) {
+      return;
+    }
+    if (result.success) {
+      bddgenDiagnostics.clear();
+    } else {
+      bddgenDiagnostics.publish(`${result.output}\n${result.error}`, workingDir);
+    }
+  }
+
+  /** Parse the JSON report into a RunOutputResult and fire the matching success/failure event. */
+  private buildOutputResult(
+    result: CommandResult,
+    reportPath: string,
+    workingDir: string,
+    start: number
+  ): RunOutputResult {
+    const scenarioDetails = this.readScenarioDetails(reportPath, result.output);
+    const scenarioResults = this.playwrightJsonParser.toStatusMap(scenarioDetails, workingDir);
+    const { passed, failed } = countScenarioStatuses(scenarioDetails);
+    this.runEventEmitter.fire({
+      kind: result.success && failed === 0 ? "success" : "failure",
+      passed,
+      failed,
+    });
+    return {
+      success: result.success,
+      output: result.output,
+      error: result.error,
+      duration: Math.max(1, Date.now() - start),
+      scenarioResults,
+      scenarioDetails,
+    };
   }
 
   /**
