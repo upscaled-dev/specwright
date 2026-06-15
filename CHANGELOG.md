@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- New setting `playwrightBddRunner.useConfigReporters` (default `false`): run the reporters declared in your Playwright config instead of the extension injecting its own `--reporter` flags, so a custom reporter (e.g. one with a runtime-computed output path) runs alongside the extension's Test Results panel. Add a bare `['json']` entry (no `outputFile`) to your config's `reporter` array — the extension steers it to its temp file via `PLAYWRIGHT_JSON_OUTPUT_NAME` and parses that for result mapping.
+
+### Fixed
+
+- Scenario Outlines whose title contains placeholders (e.g. `Scenario Outline: Login as <role>`) failed to run on Windows ("cannot find the tests"). playwright-bdd substitutes the placeholders in the generated test titles, and `<`/`>` are redirection operators in `cmd.exe`/PowerShell, so the `--grep` was mangled and matched nothing. The grep now wildcards `<…>` placeholders to `.*`, which matches the expanded example titles and removes the shell-hostile characters.
+- Windows: scenario results were not attributed back to their feature, so scenarios showed as skipped behind a false "outside the playwright-bdd `features` scope" warning. VS Code's `uri.fsPath` lowercases the drive letter (`c:\`) while Playwright's JSON report uses uppercase (`C:\`); the extension compared those paths verbatim. Path keys and comparisons now canonicalize the drive letter, and the spawned working directory is normalized the same way.
 
 
 ## [0.2.0] - 2026-06-12
