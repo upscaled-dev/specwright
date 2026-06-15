@@ -629,7 +629,11 @@ export class PlaywrightBddTestProvider {
   private outOfScopeWarning(result: RunOutputResult, targetFeaturePath?: string): string {
     if (!targetFeaturePath) {return "";}
     const details = result.scenarioDetails ?? [];
-    if (details.some((d) => d.featurePath === targetFeaturePath)) {return "";}
+    // Compare through normalizePathKey: targetFeaturePath comes from VS Code (lowercase Windows
+    // drive) while d.featurePath is resolved from Playwright's JSON report (uppercase drive). A
+    // raw === here misses on Windows and fires this warning even when results were attributed.
+    const target = normalizePathKey(targetFeaturePath);
+    if (details.some((d) => normalizePathKey(d.featurePath) === target)) {return "";}
 
     const combined = `${result.output ?? ""}\n${result.error ?? ""}`;
     const noTestsFound = /no tests found/i.test(combined);

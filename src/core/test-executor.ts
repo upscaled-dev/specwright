@@ -14,7 +14,7 @@ import { ExtensionConfig } from "./extension-config";
 import { spawn } from "node:child_process";
 import { PlaywrightJsonParser, ScenarioStatus, ScenarioResult } from "../utils/playwright-json-parser";
 import { shellQuote } from "../utils/shell";
-import { findNearestPlaywrightConfigDir, workspaceFolderRootFor } from "../utils/working-dir";
+import { canonicalCwd, findNearestPlaywrightConfigDir, workspaceFolderRootFor } from "../utils/working-dir";
 import { BreakpointMirror } from "./breakpoint-mirror";
 import { resolveGeneratedSpecPath } from "../parsers/bdd-file-data-parser";
 
@@ -374,7 +374,11 @@ export class TestExecutor {
       `playwright-bdd-report-${process.pid}-${Date.now()}-${reportSequence}.json`
     );
     const baseCommand = buildCommand();
-    const command = `${baseCommand} --reporter=json`;
+    // Normally we force `--reporter=json` for result mapping. With useConfigReporters the user's
+    // config owns the reporter list (so a custom reporter survives) — a `--reporter` here would
+    // override it. We still set PLAYWRIGHT_JSON_OUTPUT_NAME below, which steers a bare `['json']`
+    // reporter in their config to our temp file.
+    const command = this.config.useConfigReporters ? baseCommand : `${baseCommand} --reporter=json`;
 
     try {
       const result = await this.shellRunner(command, workingDir, {
@@ -391,13 +395,7 @@ export class TestExecutor {
         }
       }
 
-      let scenarioDetails: ScenarioResult[];
-      if (fs.existsSync(reportPath)) {
-        scenarioDetails = this.playwrightJsonParser.parseFromFile(reportPath);
-        try { fs.unlinkSync(reportPath); } catch { /* ignore */ }
-      } else {
-        scenarioDetails = this.playwrightJsonParser.parse(result.output);
-      }
+      const scenarioDetails = this.readScenarioDetails(reportPath, result.output);
       const scenarioResults = this.playwrightJsonParser.toStatusMap(scenarioDetails, workingDir);
 
       const { passed, failed } = countScenarioStatuses(scenarioDetails);
@@ -424,6 +422,29 @@ export class TestExecutor {
         duration: Math.max(1, Date.now() - start),
       };
     }
+  }
+
+  /**
+   * Resolve parsed scenario results from the run: prefer the JSON report file (written via
+   * PLAYWRIGHT_JSON_OUTPUT_NAME), falling back to parsing stdout. With useConfigReporters the
+   * report only appears if the user's config has a bare `['json']` reporter for the env var to
+   * steer; no file + no parseable stdout almost always means that entry is missing, so we point
+   * at the fix directly rather than letting it surface as a generic "out of scope" warning.
+   */
+  private readScenarioDetails(reportPath: string, output: string): ScenarioResult[] {
+    if (fs.existsSync(reportPath)) {
+      const details = this.playwrightJsonParser.parseFromFile(reportPath);
+      try { fs.unlinkSync(reportPath); } catch { /* ignore */ }
+      return details;
+    }
+    const details = this.playwrightJsonParser.parse(output);
+    if (this.config.useConfigReporters && details.length === 0) {
+      this.logger.warn(
+        "useConfigReporters is on but no JSON report was produced. Add a bare ['json'] entry " +
+          "(no outputFile) to the reporter array in your Playwright config so results can be mapped."
+      );
+    }
+    return details;
   }
 
   /** Test hooks: shrink the debug watchdog timings so tests don't wait seconds. */
@@ -581,6 +602,13 @@ export class TestExecutor {
    * `npx bddgen` resolves only when spawned from that package — not the repo root.
    */
   private getWorkingDirectory(forFile?: string): string {
+    // Canonicalize the result so the spawn cwd has an uppercase Windows drive letter.
+    // VS Code's `uri.fsPath` lowercases it, which makes playwright-bdd treat every feature
+    // as "outside the features scope" on Windows (see canonicalCwd).
+    return canonicalCwd(this.resolveWorkingDirectory(forFile));
+  }
+
+  private resolveWorkingDirectory(forFile?: string): string {
     const folders = this.workspace.workspaceFolders;
     const firstRoot = folders?.[0]?.uri.fsPath;
     const configured = this.config.workingDirectory;

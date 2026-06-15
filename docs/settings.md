@@ -16,6 +16,7 @@ All settings live under `playwrightBddRunner.*` in your VS Code Settings (`Cmd/C
 | `parallelExecution` | boolean | `false` | Adds `--workers=<maxParallelProcesses>` to Playwright. |
 | `maxParallelProcesses` | number (1–16) | `4` | Worker count when parallel is enabled. |
 | `reporter` | enum | `list` | One of `list`/`line`/`dot`/`html`/`json`/`junit`. The JSON reporter is appended in addition, for result mapping. |
+| `useConfigReporters` | boolean | `false` | Run the reporters declared in your Playwright config instead of injecting `--reporter` flags, so a custom reporter can run alongside the extension's Test Results panel. Requires a bare `['json']` entry (no `outputFile`) in your config's `reporter` array — the extension steers it to its temp file via `PLAYWRIGHT_JSON_OUTPUT_NAME` and parses that. |
 | `dryRun` | boolean | `false` | Passes `--list` to Playwright. |
 | `enableCodeLens` | boolean | `true` | Run/debug CodeLens on feature files. Disable if conflicting with another extension. |
 | `enableStepDefinitionNavigation` | boolean | `true` | Go to Definition from a Gherkin step to its TypeScript step definition. |

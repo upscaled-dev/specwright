@@ -19,6 +19,29 @@ function comparable(p: string, caseInsensitive: boolean): string {
   return caseInsensitive ? normalized.toLowerCase() : normalized;
 }
 
+/**
+ * Canonicalize a path for use as a spawned process's working directory.
+ *
+ * VS Code's `Uri.fsPath` lowercases the Windows drive letter (`C:\repo` → `c:\repo`),
+ * and every cwd the extension infers ultimately derives from a `uri.fsPath`. Node and
+ * the filesystem, however, report absolute paths with an uppercase drive. playwright-bdd
+ * decides whether each feature lives inside `featuresRoot` by string-comparing resolved
+ * paths case-sensitively, so a lowercase-drive cwd makes every feature look "outside the
+ * features scope" — but only on Windows, where drive letters exist. `path.normalize`
+ * fixes separators but never touches drive-letter case, so we uppercase it here to keep
+ * the spawn cwd consistent with the paths bddgen resolves internally.
+ */
+export function canonicalCwd(
+  dir: string,
+  isWindows: boolean = process.platform === "win32"
+): string {
+  const normalized = path.normalize(dir);
+  if (isWindows && /^[a-z]:/.test(normalized)) {
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
+  return normalized;
+}
+
 /** Root of the workspace folder containing the file (multi-root aware), or undefined. */
 export function workspaceFolderRootFor(
   filePath: string,

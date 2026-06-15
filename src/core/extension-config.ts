@@ -90,6 +90,10 @@ export class ExtensionConfig {
     return this.config.get<string>("reporter", "list");
   }
 
+  public get useConfigReporters(): boolean {
+    return this.config.get<boolean>("useConfigReporters", false);
+  }
+
   public get tags(): string {
     return this.config.get<string>("tags", "");
   }

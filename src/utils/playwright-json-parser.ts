@@ -136,7 +136,14 @@ const GHERKIN_STEP = /^(Given|When|Then|And|But|\*)\s/;
  * Consumers must normalize their lookups the same way.
  */
 export function normalizePathKey(p: string): string {
-  return p.replaceAll("\\", "/");
+  const slashed = p.replaceAll("\\", "/");
+  // VS Code's uri.fsPath lowercases the Windows drive letter (`c:/repo`) while Playwright's
+  // JSON report keeps it uppercase (`C:/repo`). Canonicalize the drive so keys/comparisons
+  // built from either source agree — otherwise every Windows lookup misses and scenarios
+  // show as skipped (and the "outside features scope" warning fires falsely).
+  return /^[a-z]:\//.test(slashed)
+    ? slashed.charAt(0).toUpperCase() + slashed.slice(1)
+    : slashed;
 }
 
 // path.posix.isAbsolute alone misses normalized win32 drive paths like `C:/repo`.

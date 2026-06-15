@@ -41,6 +41,7 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   parallelExecution: (c) => c.parallelExecution,
   maxParallelProcesses: (c) => c.maxParallelProcesses,
   reporter: (c) => c.reporter,
+  useConfigReporters: (c) => c.useConfigReporters,
   tags: (c) => c.tags,
   dryRun: (c) => c.dryRun,
   stepDefinitionPaths: (c) => c.stepDefinitionPaths,

@@ -16,6 +16,7 @@ interface ConfigStub {
   bddgenCommand: string;
   tags: string;
   reporter: string;
+  useConfigReporters: boolean;
   parallelExecution: boolean;
   maxParallelProcesses: number;
   dryRun: boolean;
@@ -28,6 +29,7 @@ function makeConfig(overrides: Partial<ConfigStub> = {}): ConfigStub {
     bddgenCommand: "npx bddgen",
     tags: "",
     reporter: "list",
+    useConfigReporters: false,
     parallelExecution: false,
     maxParallelProcesses: 4,
     dryRun: false,
@@ -86,6 +88,36 @@ describe("CommandBuilder", () => {
       scenarioName: "Some plain scenario",
     });
     expect(cmd).toContain('--grep "Some plain scenario"');
+  });
+
+  it("wildcards <placeholders> in an outline title so the grep matches expanded example titles", async () => {
+    // playwright-bdd substitutes placeholders in the generated test titles ("<role>" -> "admin"),
+    // so a literal `<role>` grep only matched the parent describe; `< >` are also cmd.exe/PowerShell
+    // redirection operators, which broke the run on Windows ("cannot find the tests").
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const cmd = await builder.buildScenarioCommand({
+      filePath: "/abs/features/login.feature",
+      outlineName: "Login as <role> with <plan> plan",
+    });
+    expect(cmd).toContain('--grep "Login as .* with .* plan"');
+    // No shell-hostile angle brackets survive into the command.
+    expect(cmd).not.toContain("<");
+    expect(cmd).not.toContain(">");
+    // The wildcarded pattern matches playwright-bdd's expanded example title.
+    const grep = /--grep "([^"]*)"/.exec(cmd)?.[1] ?? "";
+    expect(new RegExp(grep).test("Login as admin with pro plan")).toBe(true);
+  });
+
+  it("omits the injected --reporter when useConfigReporters is set, so config reporters survive", async () => {
+    const builder = CommandBuilder.create(makeConfig({ useConfigReporters: true }) as never, loggerStub());
+    const cmd = await builder.buildAllTestsCommand();
+    expect(cmd).not.toContain("--reporter");
+  });
+
+  it("still injects --reporter when useConfigReporters is off (default)", async () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const cmd = await builder.buildAllTestsCommand();
+    expect(cmd).toContain("--reporter=list");
   });
 
   it("passes --tags to bddgen", async () => {

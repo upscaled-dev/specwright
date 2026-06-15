@@ -201,6 +201,12 @@ export class CommandBuilder {
     } else if (opts.parallel) {
       parts.push(`--workers=${resolveWorkerCount(this.config, this.logger)}`);
     }
+    // When useConfigReporters is set, defer entirely to the reporters declared in the user's
+    // Playwright config — injecting any `--reporter` here would override them (a CLI --reporter
+    // replaces the config's reporter array), dropping their custom reporter.
+    if (this.config.useConfigReporters) {
+      return;
+    }
     // Always emit the reporter explicitly (including the default `list`). When the executor
     // later appends `--reporter=json` for result mapping, Playwright keeps both reporters —
     // omitting `list` here would let `--reporter=json` clobber the implicit default and leave
@@ -218,7 +224,16 @@ export class CommandBuilder {
    */
   private gripPattern(scenarioName: string, outlineName?: string): string {
     const base = nonEmpty(outlineName) ?? scenarioName;
-    return base.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Escape regex specials, THEN turn Gherkin `<placeholders>` into `.*` wildcards. playwright-bdd
+    // expands an outline's example rows into tests whose titles have the placeholders substituted
+    // (`<role>` → `admin`), so grepping the literal `<role>` only ever matched the parent describe —
+    // and the `<`/`>` are redirection operators in cmd.exe / PowerShell, which mangled the command
+    // on Windows and made the run find no tests at all. Wildcarding both fixes the match and drops
+    // the shell-hostile characters. Order matters: escape first (placeholder names rarely contain
+    // specials, but the surrounding text may), then substitute the (unescaped) `<...>` tokens.
+    return base
+      .replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replaceAll(/<[^>]*>/g, ".*");
   }
 
   private quote(value: string): string {
