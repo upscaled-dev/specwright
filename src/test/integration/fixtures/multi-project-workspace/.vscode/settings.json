@@ -1,0 +1,5 @@
+{
+  "playwrightBddRunner.bddgenCommand": "npx bddgen",
+  "playwrightBddRunner.playwrightCommand": "npx playwright test",
+  "playwrightBddRunner.parallelExecution": false
+}
