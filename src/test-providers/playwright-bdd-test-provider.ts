@@ -493,6 +493,10 @@ export class PlaywrightBddTestProvider {
         const isOutline = test.id.includes(OUTLINE_ID_SEPARATOR);
 
         if (isFeatureFile) {
+          // A feature/outline run executes every descendant with one command — mark them all
+          // started so the Explorer shows what is actually running, not just the clicked parent
+          // (which read as "one scenario running" while N results later appeared).
+          this.markDescendantsStarted(test, run);
           const result = await this.context.testExecutor.runFeatureFileWithOutput({
             filePath: test.uri.fsPath,
             featureName: this.featureTitleByPath.get(test.uri.fsPath) ?? test.label,
@@ -500,6 +504,7 @@ export class PlaywrightBddTestProvider {
           this.appendRunOutput(run, result, test, test.uri.fsPath);
           this.applyResultsToChildren(test, run, result, test.uri.fsPath);
         } else if (isOutline) {
+          this.markDescendantsStarted(test, run);
           const scenario = this.scenarioByTestId.get(test.id);
           // On a lookup miss the name is unknown — omit it rather than pass "", which downstream
           // turned into a --grep that matched the entire suite.
@@ -673,6 +678,15 @@ export class PlaywrightBddTestProvider {
     return [result.output, result.error]
       .filter((s): s is string => typeof s === "string" && s.trim() !== "")
       .join("\n");
+  }
+
+  /** Mark every descendant of a parent item as started, so a feature/outline run shows all the
+   *  scenarios it actually executes as running — not just the clicked parent node. */
+  private markDescendantsStarted(parent: vscode.TestItem, run: vscode.TestRun): void {
+    parent.children.forEach((child) => {
+      run.started(child);
+      this.markDescendantsStarted(child, run);
+    });
   }
 
   private applyResultsToChildren(
