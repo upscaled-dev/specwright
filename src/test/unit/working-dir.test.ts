@@ -15,12 +15,10 @@ describe("canonicalCwd", () => {
       expect(win("C:\\repo")).toBe("C:\\repo");
     });
 
-    it("uppercases the drive regardless of slash style", () => {
-      // Assert the drive-casing property only: separator normalization is delegated to
-      // path.normalize, whose behavior is platform-dependent (and the test host is POSIX).
-      const out = win("c:/repo/packages/ui");
-      expect(out.startsWith("C:")).toBe(true);
-      expect(out.startsWith("c:")).toBe(false);
+    it("uppercases the drive and normalizes separators regardless of slash style", () => {
+      // canonicalCwd picks path.win32/path.posix from the isWindows flag, so the full
+      // normalized output is deterministic on every test host.
+      expect(win("c:/repo/packages/ui")).toBe("C:\\repo\\packages\\ui");
     });
 
     it("does not alter UNC paths (no drive letter)", () => {

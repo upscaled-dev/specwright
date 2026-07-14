@@ -35,7 +35,12 @@ export function canonicalCwd(
   dir: string,
   isWindows: boolean = process.platform === "win32"
 ): string {
-  const normalized = path.normalize(dir);
+  // Derive the path implementation from the flag rather than the host module. At runtime the
+  // flag always matches the host, so production behavior is identical — but it makes the
+  // function (and its unit tests) host-independent: the bare `path.normalize` rewrote the
+  // POSIX test paths with backslashes on the windows-latest CI runner.
+  const impl = isWindows ? path.win32 : path.posix;
+  const normalized = impl.normalize(dir);
   if (isWindows && /^[a-z]:/.test(normalized)) {
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
   }
