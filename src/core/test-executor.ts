@@ -417,47 +417,66 @@ export class TestExecutor {
     if (options.specLineTarget !== undefined) {
       return options;
     }
-    const target = this.resolveSpecLineTarget(options.filePath, options.lineNumber, specPath);
-    return target ? { ...options, specLineTarget: target } : options;
+    const resolution = this.resolveSpecLineTarget(options.filePath, options.lineNumber, specPath);
+    if ("target" in resolution) {
+      return { ...options, specLineTarget: resolution.target };
+    }
+    // Falling back to name-grep. For a plain scenario that grep is precise, but for an outline
+    // row it matches EVERY example row of the outline — surface why, so N tests fanning out
+    // across Playwright's workers isn't a silent mystery.
+    if (options.outlineName !== undefined && options.lineNumber !== undefined) {
+      this.logger.warn(
+        `Could not target example row ${options.filePath}:${options.lineNumber} by generated spec line: ${resolution.reason}. ` +
+          `Falling back to --grep on the outline title, which runs ALL example rows of "${options.outlineName}".`
+      );
+    }
+    return options;
   }
 
   /**
    * Resolve `<generatedSpec>:<pwTestLine>` for a single scenario/outline row by reading the
    * generated spec's `bddFileData` (pickleLine→pwTestLine). This is the only reliable way to target
    * one Scenario Outline example row, since playwright-bdd substitutes example values into the test
-   * title (so no grep on the source title can isolate a row). Returns undefined — caller falls back
-   * to name-grep — when there's no line, the spec can't be located/read, or the line isn't mapped.
+   * title (so no grep on the source title can isolate a row). Returns a `reason` — caller falls
+   * back to name-grep — when there's no line, the spec can't be located/read, or the line isn't
+   * mapped.
    */
   private resolveSpecLineTarget(
     filePath: string,
     lineNumber?: number,
     specPathArg?: string
-  ): string | undefined {
+  ): { target: string } | { reason: string } {
     if (lineNumber === undefined || lineNumber <= 0) {
-      return undefined;
+      return { reason: "the test item has no line number" };
     }
     const workingDir = this.getWorkingDirectory(filePath);
     const specPath =
       specPathArg ?? resolveGeneratedSpecPath(workingDir, this.config.featuresGenDir, filePath);
     if (!specPath) {
-      return undefined;
+      return { reason: `the feature is outside the working directory ${workingDir}` };
     }
     let content: string;
     try {
       content = fs.readFileSync(specPath, "utf8");
     } catch {
-      return undefined;
+      return {
+        reason:
+          `no generated spec at ${specPath} — ` +
+          "check that 'playwrightBddRunner.featuresGenDir' matches your bddgen outputDir",
+      };
     }
     const pwTestLine = parseBddFileData(content)?.testLines.get(lineNumber);
     if (pwTestLine === undefined) {
-      return undefined;
+      return {
+        reason: `line ${lineNumber} has no bddFileData mapping in ${specPath} (stale spec or feature/spec drift)`,
+      };
     }
     // A cwd-relative spec path keeps the Playwright filter short and dodges the Windows drive-colon
     // (`C:\…`) clashing with the trailing `:line`. Fall back to the absolute path when the spec sits
     // outside the working dir (a `..` chain would be brittle).
     const rel = path.relative(workingDir, specPath);
     const specArg = rel === "" || rel.startsWith("..") || path.isAbsolute(rel) ? specPath : rel;
-    return `${specArg}:${pwTestLine}`;
+    return { target: `${specArg}:${pwTestLine}` };
   }
 
   private async runWithJsonReport(
