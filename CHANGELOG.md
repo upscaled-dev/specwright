@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+
+- Windows: shell arguments were quoted POSIX-style, but `cmd.exe` does not treat backslash as an escape character — the extra backslashes leaked through to Playwright verbatim. This corrupted any `--grep` pattern containing regex escapes (a title with a `.` matched nothing) and doubled the backslashes in precise `spec.js:line` targets, silently degrading a single Scenario Outline example-row run into a whole-outline `--grep` that fanned out across all Playwright workers (one browser per worker). Quoting is now platform-aware: `CommandLineToArgvW` rules on Windows, POSIX escaping elsewhere.
+- When a single example-row run cannot be targeted by its generated spec line, the fallback to the outline-title `--grep` (which runs **all** example rows) is no longer silent: a warning in the Specwright output channel names the exact reason (no generated spec at the expected path, unmapped line, feature outside the working directory).
+- Test Explorer: running a feature file or a Scenario Outline node now marks all its descendant scenarios as running while the command executes, instead of showing only the clicked node spinning and then surfacing N results at once.
+- CI: the windows-latest unit-test job (red since v0.2.1) — `canonicalCwd` used the host's `path.normalize`, which rewrote the POSIX test paths with backslashes on Windows runners. It now pins `path.win32`/`path.posix` to its `isWindows` flag (identical behavior at runtime, deterministic under test).
+
+### Changed
+
+- Marketplace display name is now "Specwright BDD - Playwright-BDD Test Explorer".
 
 ## [0.2.2] - 2026-06-15
 ### Fixed
