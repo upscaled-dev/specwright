@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.2.3] - 2026-07-15
 ### Fixed
 
 - Windows: shell arguments were quoted POSIX-style, but `cmd.exe` does not treat backslash as an escape character — the extra backslashes leaked through to Playwright verbatim. This corrupted any `--grep` pattern containing regex escapes (a title with a `.` matched nothing) and doubled the backslashes in precise `spec.js:line` targets, silently degrading a single Scenario Outline example-row run into a whole-outline `--grep` that fanned out across all Playwright workers (one browser per worker). Quoting is now platform-aware: `CommandLineToArgvW` rules on Windows, POSIX escaping elsewhere.
