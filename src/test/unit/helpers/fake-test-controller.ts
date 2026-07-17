@@ -13,6 +13,8 @@ export interface RunOutcome {
   started: string[];
   output: string[];
   ended: boolean;
+  /** Duration (ms) last passed to run.passed/run.failed for each item id. */
+  durations: Record<string, number | undefined>;
 }
 
 export class FakeTestItemCollection {
@@ -45,14 +47,18 @@ export class FakeTestItem {
 
 export class FakeTestRun {
   public readonly outcome: RunOutcome = {
-    passed: [], failed: [], skipped: [], started: [], output: [], ended: false,
+    passed: [], failed: [], skipped: [], started: [], output: [], ended: false, durations: {},
   };
   constructor(public readonly request: unknown) {}
 
   started(item: FakeTestItem): void { this.outcome.started.push(item.id); }
-  passed(item: FakeTestItem): void { this.outcome.passed.push(item.id); }
-  failed(item: FakeTestItem, message: { message: string }): void {
+  passed(item: FakeTestItem, duration?: number): void {
+    this.outcome.passed.push(item.id);
+    this.outcome.durations[item.id] = duration;
+  }
+  failed(item: FakeTestItem, message: { message: string }, duration?: number): void {
     this.outcome.failed.push({ id: item.id, message: message?.message ?? String(message) });
+    this.outcome.durations[item.id] = duration;
   }
   skipped(item: FakeTestItem): void { this.outcome.skipped.push(item.id); }
   appendOutput(text: string): void { this.outcome.output.push(text); }
@@ -63,7 +69,7 @@ export interface FakeRunProfile {
   label: string;
   kind: number;
   configureHandler?: () => void;
-  runHandler: (request: unknown) => void | Promise<void>;
+  runHandler: (request: unknown, token?: unknown) => void | Promise<void>;
   dispose(): void;
 }
 
@@ -81,7 +87,7 @@ export class FakeTestController {
   createRunProfile(
     label: string,
     kind: number,
-    runHandler: (request: unknown) => void | Promise<void>
+    runHandler: (request: unknown, token?: unknown) => void | Promise<void>
   ): FakeRunProfile {
     const profile: FakeRunProfile = { label, kind, runHandler, dispose() { /* no-op */ } };
     this.profiles.push(profile);

@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { FeatureParser } from "../parsers/feature-parser";
+import { FeatureParser, isOutlineExampleRow } from "../parsers/feature-parser";
 import { groupScenariosByOutline } from "./group-scenarios";
 import { OUTLINE_ID_SEPARATOR } from "./constants";
 import { TestExecutor, RunOutputResult, ShellRunner } from "../core/test-executor";
@@ -24,6 +24,7 @@ import {
   normalizePathKey,
 } from "../utils/playwright-json-parser";
 import { CommandBuilder } from "../core/command-builder";
+import { isUnderExcludedDir, workspaceExcludeFragments } from "../utils/discovery-excludes";
 import {
   ensureWorkerCount,
   resolveWorkerCountDetailed,
@@ -161,7 +162,7 @@ export class PlaywrightBddTestProvider {
     const runProfile = this.testController.createRunProfile(
       "Run",
       vscode.TestRunProfileKind.Run,
-      async (request) => { await this.runTests(request); }
+      async (request, token) => { await this.runTests(request, token); }
     );
     runProfile.configureHandler = () => { /* no-op */ };
     this.runProfiles.push(runProfile);
@@ -177,7 +178,7 @@ export class PlaywrightBddTestProvider {
     const parallelProfile = this.testController.createRunProfile(
       "Run in Parallel",
       vscode.TestRunProfileKind.Run,
-      async (request) => {
+      async (request, token) => {
         const resolution: WorkerCountResolution | undefined = this.workspaceState
           ? await ensureWorkerCount(this.workspaceState, this.context.config, this.context.logger)
           : resolveWorkerCountDetailed(this.context.config, this.context.logger);
@@ -193,7 +194,7 @@ export class PlaywrightBddTestProvider {
 
         this.context.testExecutor.setForceParallel(true, resolution.workers);
         try {
-          await this.runTests(request);
+          await this.runTests(request, token);
         } finally {
           this.context.testExecutor.setForceParallel(false);
         }
@@ -217,10 +218,64 @@ export class PlaywrightBddTestProvider {
     this.fileWatcher?.dispose();
     this.watchedPattern = this.context.config.testFilePattern;
     const watcher = vscode.workspace.createFileSystemWatcher(this.watchedPattern);
-    watcher.onDidCreate(() => { this.refreshTests().catch(() => { /* logged */ }); });
-    watcher.onDidChange(() => { this.refreshTests().catch(() => { /* logged */ }); });
-    watcher.onDidDelete(() => { this.refreshTests().catch(() => { /* logged */ }); });
+    watcher.onDidCreate((uri) => this.onFeatureFileTouched(uri).catch(() => { /* logged */ }));
+    watcher.onDidChange((uri) => this.onFeatureFileTouched(uri).catch(() => { /* logged */ }));
+    watcher.onDidDelete((uri) => this.onFeatureFileRemoved(uri).catch(() => { /* logged */ }));
     this.fileWatcher = watcher;
+  }
+
+  /**
+   * Watcher create/change. In the file-rooted FeatureBased view a .feature file maps to exactly
+   * one tree root, so we re-read just that file instead of re-globbing and re-parsing the whole
+   * workspace. Every other strategy groups by content (tags, scenario type, …), where editing one
+   * file can move scenarios between groups, so those keep the full refresh. Incremental updates
+   * run on the discoveryQueue so they can't interleave with a concurrent full pass.
+   */
+  private onFeatureFileTouched(uri: vscode.Uri): Promise<void> {
+    if (!this.isFeatureBasedStrategy()) {return this.refreshTests();}
+    // The raw watcher doesn't apply discovery's excludes, so a generated copy of a feature under
+    // .features-gen/report/results could surface here; skip it (full discovery would filter it).
+    if (isUnderExcludedDir(uri.fsPath, workspaceExcludeFragments())) {return Promise.resolve();}
+    this.discoveryQueue = this.discoveryQueue.then(() => this.updateFeatureFile(uri));
+    return this.discoveryQueue;
+  }
+
+  private onFeatureFileRemoved(uri: vscode.Uri): Promise<void> {
+    if (!this.isFeatureBasedStrategy()) {return this.refreshTests();}
+    if (isUnderExcludedDir(uri.fsPath, workspaceExcludeFragments())) {return Promise.resolve();}
+    this.discoveryQueue = this.discoveryQueue.then(() => { this.removeFeatureFile(uri.fsPath); });
+    return this.discoveryQueue;
+  }
+
+  private isFeatureBasedStrategy(): boolean {
+    return this.context.organizationManager.getStrategy().strategyType === "FeatureBasedOrganization";
+  }
+
+  private async updateFeatureFile(uri: vscode.Uri): Promise<void> {
+    this.pruneFileState(uri.fsPath);
+    await this.addFeatureFileToTestController(uri);
+    // addFeatureFileToTestController only warns and returns on unparsable content, so a file that
+    // stopped parsing leaves no fresh item — delete the stale tree node rather than keep it.
+    if (!this.discoveredTests.has(uri.fsPath)) {
+      this.testController.items.delete(uri.fsPath);
+    }
+  }
+
+  private removeFeatureFile(fsPath: string): void {
+    this.testController.items.delete(fsPath);
+    this.pruneFileState(fsPath);
+  }
+
+  /** Drop every cached entry keyed to one feature file: its scenario ids, discovered item, title. */
+  private pruneFileState(fsPath: string): void {
+    this.discoveredTests.delete(fsPath);
+    this.featureTitleByPath.delete(fsPath);
+    // scenarioByTestId ids for this file all start with `${fsPath}:` — both `${fsPath}:${line}`
+    // and `${fsPath}:outline:...` (OUTLINE_ID_SEPARATOR) shapes.
+    const prefix = `${fsPath}:`;
+    for (const id of [...this.scenarioByTestId.keys()]) {
+      if (id.startsWith(prefix)) {this.scenarioByTestId.delete(id);}
+    }
   }
 
   // --- Discovery --------------------------------------------------------------
@@ -290,7 +345,9 @@ export class PlaywrightBddTestProvider {
 
   public async refreshTests(): Promise<void> {
     try {
-      await this.context.discoveryManager.refreshCache();
+      // No refreshCache() here: discoverTests → performDiscovery already runs with
+      // forceRefresh: true, so calling it would re-sweep every cached pattern a second time on
+      // every watcher event.
       await this.discoverTests();
     } catch (error) {
       const msg = errMsg(error);
@@ -426,26 +483,45 @@ export class PlaywrightBddTestProvider {
 
   // --- Execution --------------------------------------------------------------
 
-  private async runTests(request: vscode.TestRunRequest): Promise<void> {
+  private async runTests(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
     if (this.isTestRunning) {
       vscode.window.showWarningMessage("A test run is already in progress.");
       return;
     }
     this.isTestRunning = true;
     const run = this.testController.createTestRun(request);
+    // One AbortController per run: cancelling the Test Explorer aborts the spawned Playwright
+    // process (see spawnCommand). runSingleTopLevelItem also reads token to skip — rather than
+    // fail — a subtree whose process was killed mid-run.
+    const abort = new AbortController();
+    const cancelSub = token.onCancellationRequested(() => abort.abort());
 
     try {
+      // Once the stop button is hit between items, the rest never run — mark them (and their
+      // descendants) skipped instead of leaving them queued.
+      let cancelled = false;
       for (const test of this.requestedItems(request)) {
+        if (cancelled || token.isCancellationRequested) {
+          cancelled = true;
+          this.markSubtreeSkipped(test, run);
+          continue;
+        }
         run.started(test);
-        await this.runSingleTopLevelItem(test, run);
+        await this.runSingleTopLevelItem(test, run, abort.signal);
       }
     } catch (error) {
       const msg = errMsg(error);
       this.context.logger.error(`Error running tests: ${msg}`);
     } finally {
+      cancelSub.dispose();
       run.end();
       this.isTestRunning = false;
     }
+  }
+
+  private markSubtreeSkipped(item: vscode.TestItem, run: vscode.TestRun): void {
+    run.skipped(item);
+    item.children.forEach((child) => this.markSubtreeSkipped(child, run));
   }
 
   /**
@@ -486,7 +562,11 @@ export class PlaywrightBddTestProvider {
     return found;
   }
 
-  private async runSingleTopLevelItem(test: vscode.TestItem, run: vscode.TestRun): Promise<void> {
+  private async runSingleTopLevelItem(
+    test: vscode.TestItem,
+    run: vscode.TestRun,
+    signal: AbortSignal
+  ): Promise<void> {
     try {
       if (test.uri) {
         const isFeatureFile = this.isFeatureFileTest(test.id);
@@ -500,7 +580,9 @@ export class PlaywrightBddTestProvider {
           const result = await this.context.testExecutor.runFeatureFileWithOutput({
             filePath: test.uri.fsPath,
             featureName: this.featureTitleByPath.get(test.uri.fsPath) ?? test.label,
+            signal,
           });
+          if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
           this.appendRunOutput(run, result, test, test.uri.fsPath);
           this.applyResultsToChildren(test, run, result, test.uri.fsPath);
         } else if (isOutline) {
@@ -511,9 +593,11 @@ export class PlaywrightBddTestProvider {
           const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
           const options: TestExecutionOptions = {
             filePath: test.uri.fsPath,
+            signal,
             ...(outlineName ? { outlineName } : {}),
           };
           const result = await this.context.testExecutor.runScenarioWithOutput(options);
+          if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
           this.appendRunOutput(run, result, test, test.uri.fsPath);
           this.applyResultsToChildren(test, run, result, test.uri.fsPath);
         } else {
@@ -522,16 +606,18 @@ export class PlaywrightBddTestProvider {
           const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
           const options: TestExecutionOptions = {
             filePath: test.uri.fsPath,
+            signal,
             ...(lineNumber ? { lineNumber } : {}),
             scenarioName: test.label,
             ...(outlineName ? { outlineName } : {}),
           };
           const result = await this.context.testExecutor.runScenarioWithOutput(options);
+          if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
           this.appendRunOutput(run, result, test, test.uri.fsPath);
           this.applyStatusToItem(test, run, result, test.uri.fsPath);
         }
       } else if (test.id.startsWith("group:") || test.id.startsWith("tag:")) {
-        await this.runGroupOrTag(test, run);
+        await this.runGroupOrTag(test, run, signal);
       }
     } catch (error) {
       const msg = errMsg(error);
@@ -541,10 +627,15 @@ export class PlaywrightBddTestProvider {
     }
   }
 
-  private async runGroupOrTag(test: vscode.TestItem, run: vscode.TestRun): Promise<void> {
+  private async runGroupOrTag(
+    test: vscode.TestItem,
+    run: vscode.TestRun,
+    signal: AbortSignal
+  ): Promise<void> {
     if (test.id.startsWith("tag:")) {
       const tag = test.id.slice("tag:".length) || test.label;
-      const result = await this.context.testExecutor.runAllTestsWithTagsOutput(tag);
+      const result = await this.context.testExecutor.runAllTestsWithTagsOutput(tag, signal);
+      if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
       this.appendRunOutput(run, result, test);
       this.applyResultsToChildren(test, run, result);
       return;
@@ -559,8 +650,12 @@ export class PlaywrightBddTestProvider {
       const featureName = this.featureTitleByPath.get(filePath);
       const result = await this.context.testExecutor.runFeatureFileWithOutput({
         filePath,
+        signal,
         ...(featureName ? { featureName } : {}),
       });
+      // Killed mid-group: don't aggregate the killed file's red result, and skip the whole subtree
+      // rather than leaving the earlier files' statuses half-applied.
+      if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
       this.appendRunOutput(run, result, test, filePath);
       if (!result.success) {success = false;}
       if (result.scenarioResults) {Object.assign(aggregated, result.scenarioResults);}
@@ -600,7 +695,7 @@ export class PlaywrightBddTestProvider {
     if (typeof run.appendOutput !== "function") {return;}
 
     const parts = [
-      this.outOfScopeWarning(result, targetFeaturePath) + this.formatRunOutput(result, targetFeaturePath),
+      this.outOfScopeWarning(result, test, targetFeaturePath) + this.formatRunOutput(result, targetFeaturePath),
       this.missingStepsSection(result),
     ].filter((s) => s.trim() !== "");
     const text = parts.join("\n\n");
@@ -631,7 +726,11 @@ export class PlaywrightBddTestProvider {
    * features produced results, or Playwright explicitly found no tests) so a genuine build/parse
    * failure — which leaves no results for a different reason — isn't mislabelled as out-of-scope.
    */
-  private outOfScopeWarning(result: RunOutputResult, targetFeaturePath?: string): string {
+  private outOfScopeWarning(
+    result: RunOutputResult,
+    test: vscode.TestItem,
+    targetFeaturePath?: string
+  ): string {
     if (!targetFeaturePath) {return "";}
     const details = result.scenarioDetails ?? [];
     // Compare through normalizePathKey: targetFeaturePath comes from VS Code (lowercase Windows
@@ -639,6 +738,11 @@ export class PlaywrightBddTestProvider {
     // raw === here misses on Windows and fires this warning even when results were attributed.
     const target = normalizePathKey(targetFeaturePath);
     if (details.some((d) => normalizePathKey(d.featurePath) === target)) {return "";}
+    // When the report's source resolution failed, d.featurePath falls back to the generated spec
+    // path and can never equal the target — yet statuses still attribute by title, the same way
+    // resolveStatusForItem's suffix scan does. Don't warn about results we did attribute.
+    const titles = this.subtreeTitles(test);
+    if (details.some((d) => titles.has(d.scenarioName))) {return "";}
 
     const combined = `${result.output ?? ""}\n${result.error ?? ""}`;
     const noTestsFound = /no tests found/i.test(combined);
@@ -659,6 +763,22 @@ export class PlaywrightBddTestProvider {
     );
   }
 
+  /** Every title a report entry for this subtree could carry: item labels plus the substituted
+   *  outline titles playwright-bdd generates when an outline title has `<placeholders>`. */
+  private subtreeTitles(item: vscode.TestItem): Set<string> {
+    const titles = new Set<string>();
+    const visit = (i: vscode.TestItem): void => {
+      titles.add(i.label);
+      const scenario = this.scenarioByTestId.get(i.id);
+      if (scenario && isOutlineExampleRow(scenario) && scenario.substitutedName) {
+        titles.add(scenario.substitutedName);
+      }
+      i.children.forEach(visit);
+    };
+    visit(item);
+    return titles;
+  }
+
   private formatRunOutput(result: RunOutputResult, targetFeaturePath?: string): string {
     let details = result.scenarioDetails ?? [];
     // When a single feature/scenario was targeted, scope the summary to that file. A name-based
@@ -666,12 +786,18 @@ export class PlaywrightBddTestProvider {
     // status mapping already ignores those, so narrow the summary too (only when at least one
     // result belongs to the target — otherwise keep all, which aids diagnosing a mis-targeted run).
     if (targetFeaturePath && details.length > 0) {
-      const scoped = details.filter((d) => d.featurePath === targetFeaturePath);
+      // Compare through normalizePathKey: targetFeaturePath comes from VS Code (lowercase Windows
+      // drive) while d.featurePath is resolved from the report (uppercase drive), so a raw === here
+      // never scopes on Windows (see outOfScopeWarning).
+      const target = normalizePathKey(targetFeaturePath);
+      const scoped = details.filter((d) => normalizePathKey(d.featurePath) === target);
       if (scoped.length > 0) {details = scoped;}
     }
     if (details.length > 0) {
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      return this.context.playwrightJsonParser.formatResults(details, workspaceRoot);
+      // Prefer the executor's measured wall time; summing per-scenario durations double-counts
+      // multi-project/retry entries and overstates elapsed time.
+      return this.context.playwrightJsonParser.formatResults(details, workspaceRoot, result.duration);
     }
     // No parsed scenarios (e.g. a pre-run hook or bddgen failure): show the raw output so the
     // user still sees why the run produced nothing.
@@ -704,12 +830,13 @@ export class PlaywrightBddTestProvider {
     const walk = (item: vscode.TestItem): void => {
       if (item.children.size === 0) {
         const status = this.resolveStatusForItem(item, results, fallbackFeaturePath, workspaceRoot);
+        const durationMs = this.findDetailForItem(item, result.scenarioDetails)?.durationMs;
         if (status === "passed") {
-          run.passed(item);
+          run.passed(item, durationMs);
           this.testStatusCache.set(item.id, "passed");
           anyPassed = true;
         } else if (status === "failed") {
-          run.failed(item, this.failureMessage(item, result.scenarioDetails, "Test failed"));
+          run.failed(item, this.failureMessage(item, result.scenarioDetails, "Test failed"), durationMs);
           this.testStatusCache.set(item.id, "failed");
           anyFailed = true;
         } else {
@@ -729,6 +856,14 @@ export class PlaywrightBddTestProvider {
     } else if (anyPassed) {
       run.passed(parent);
       this.testStatusCache.set(parent.id, "passed");
+    } else if (result.success === false && !/no tests found/i.test(`${result.output ?? ""}\n${result.error ?? ""}`)) {
+      // No child resolved a status yet the run failed: a bddgen/compile error produced no
+      // per-scenario results, so blanket-skipping the subtree would hide the failure entirely.
+      // Fail the parent (children stay skipped) — but not for the deliberate "no tests found"
+      // out-of-scope case, which outOfScopeWarning already explains as skipped.
+      const message = result.error?.trim() ? result.error : "Test failed — see the Test Results output panel.";
+      run.failed(parent, new vscode.TestMessage(message));
+      this.testStatusCache.set(parent.id, "failed");
     } else {
       run.skipped(parent);
     }
@@ -742,13 +877,14 @@ export class PlaywrightBddTestProvider {
   ): void {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     const status = this.resolveStatusForItem(item, result.scenarioResults ?? {}, featurePath, workspaceRoot);
+    const durationMs = this.findDetailForItem(item, result.scenarioDetails)?.durationMs;
 
     if (status === "passed" || (!status && result.success)) {
-      run.passed(item);
+      run.passed(item, durationMs);
       this.testStatusCache.set(item.id, "passed");
     } else if (status === "failed" || (!status && !result.success)) {
       const fallback = result.error?.trim() ? result.error : "Test failed — see the Test Results output panel.";
-      run.failed(item, this.failureMessage(item, result.scenarioDetails, fallback));
+      run.failed(item, this.failureMessage(item, result.scenarioDetails, fallback), durationMs);
       this.testStatusCache.set(item.id, "failed");
     } else {
       run.skipped(item);
@@ -842,11 +978,12 @@ export class PlaywrightBddTestProvider {
     if (item.children.size === 0) {
       if (item.uri?.fsPath !== filePath) {return undefined;}
       const status = this.resolveStatusForItem(item, results, filePath, workspaceRoot);
+      const durationMs = this.findDetailForItem(item, result.scenarioDetails)?.durationMs;
       if (status === "passed") {
-        run.passed(item);
+        run.passed(item, durationMs);
         this.testStatusCache.set(item.id, "passed");
       } else if (status === "failed") {
-        run.failed(item, this.failureMessage(item, result.scenarioDetails, "Test failed"));
+        run.failed(item, this.failureMessage(item, result.scenarioDetails, "Test failed"), durationMs);
         this.testStatusCache.set(item.id, "failed");
       } else if (status === "skipped") {
         run.skipped(item);
@@ -919,6 +1056,9 @@ export class PlaywrightBddTestProvider {
    *   - `${featurePath}:${lineNumber}` (when annotations are present)
    *   - `${relFeaturePath}::${scenarioName}` (always)
    *   - `${featurePath}::${scenarioName}` (always)
+   * Outline example rows get the same name-key attempts with their substituted title too:
+   * playwright-bdd substitutes the row's values into the generated test title when the outline
+   * title carries `<placeholders>`, so the report never uses the tree's synthetic example label.
    * Returns undefined if no key matches — the caller decides whether to mark skipped.
    */
   private resolveStatusForItem(
@@ -930,6 +1070,9 @@ export class PlaywrightBddTestProvider {
     const featurePath = item.uri?.fsPath ?? fallbackFeaturePath;
     const line = this.lineFromId(item.id);
     const name = item.label;
+    const scenario = this.scenarioByTestId.get(item.id);
+    const substitutedName =
+      scenario && isOutlineExampleRow(scenario) ? scenario.substitutedName : undefined;
 
     // Status-map keys are forward-slash normalized (see toStatusMap); fsPaths on Windows are not.
     if (featurePath && line) {
@@ -946,11 +1089,25 @@ export class PlaywrightBddTestProvider {
       if (results[absKey]) {return results[absKey];}
     }
 
+    if (featurePath && substitutedName) {
+      const relKey = `${normalizePathKey(path.relative(workspaceRoot, featurePath))}::${substitutedName}`;
+      if (results[relKey]) {return results[relKey];}
+      const absKey = `${normalizePathKey(featurePath)}::${substitutedName}`;
+      if (results[absKey]) {return results[absKey];}
+    }
+
     // Last resort: any key whose suffix matches the scenario name. Useful when playwright-bdd
     // tags scenarios with their feature title rather than their source location.
     if (name) {
       for (const [key, status] of Object.entries(results)) {
         if (key.endsWith(`::${name}`)) {return status;}
+      }
+    }
+    // Same scan with the substituted title — the only match possible when source resolution
+    // failed AND the outline title had placeholders (the user-reported skipped-outline case).
+    if (substitutedName) {
+      for (const [key, status] of Object.entries(results)) {
+        if (key.endsWith(`::${substitutedName}`)) {return status;}
       }
     }
     return undefined;
@@ -983,6 +1140,11 @@ export class PlaywrightBddTestProvider {
               `playwright-bdd-debug-report-${process.pid}-${Date.now()}-${debugReportSequence}.json`
             );
             run.started(test);
+            // Debugging a feature/outline runs every descendant with one command; mark them all
+            // started so the Explorer shows what is actually running (mirrors runSingleTopLevelItem).
+            if (test.children.size > 0) {
+              this.markDescendantsStarted(test, run);
+            }
             try {
               await this.context.testExecutor.debugScenario({
                 filePath: test.uri.fsPath,

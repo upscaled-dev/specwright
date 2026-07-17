@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -382,6 +382,80 @@ describe("TestExecutor run events", () => {
     expect(final?.passed).toBe(1);
     expect(final?.failed).toBe(1);
   });
+
+  it("counts a scenario as failed under any project even when its passing project is reported first", async () => {
+    // Multi-project run: chromium passed (listed first), firefox failed. Worst status must win, so
+    // the one scenario is counted failed regardless of report order — not passed (first-wins bug).
+    const config = makeConfig({ bddgenCommand: "" });
+    const shell: ShellRunner = async () => ({
+      success: false,
+      output: JSON.stringify({
+        suites: [{
+          specs: [{
+            title: "scenario A",
+            file: "/abs/x.feature",
+            tests: [
+              { results: [{ status: "passed" }] },
+              { results: [{ status: "failed" }] },
+            ],
+          }],
+        }],
+      }),
+      error: "",
+      returnCode: 1,
+    });
+    const { executor, events } = makeExecutor(config, shell);
+
+    await executor.runScenarioWithOutput({ filePath: "/abs/x.feature" });
+
+    const final = events[events.length - 1];
+    expect(final?.kind).toBe("failure");
+    expect(final?.passed).toBe(0);
+    expect(final?.failed).toBe(1);
+  });
+});
+
+describe("TestExecutor bddgen diagnostics from the playwright result", () => {
+  function makeSpy(): { publish: ReturnType<typeof vi.fn>; clear: ReturnType<typeof vi.fn> } {
+    return { publish: vi.fn(), clear: vi.fn() };
+  }
+
+  it("publishes bddgen diagnostics when the playwright run fails with bddgen-style errors", async () => {
+    // With bddgenCommand empty, bddgen runs inside `playwright test` (defineBddProject auto-gen), so
+    // its errors surface on the playwright result — which must reach the Problems panel via publish.
+    const spy = makeSpy();
+    const shell: ShellRunner = async () => ({
+      success: false,
+      output: "Missing step definitions in features/login.feature:3:1",
+      error: "",
+      returnCode: 1,
+    });
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      bddgenDiagnostics: spy as unknown as BddgenDiagnosticsProvider,
+    });
+
+    await executor.runScenarioWithOutput({ filePath: "/abs/features/login.feature", lineNumber: 3 });
+
+    expect(spy.publish).toHaveBeenCalledTimes(1);
+    expect(spy.publish).toHaveBeenCalledWith(
+      expect.stringContaining("Missing step definitions"),
+      expect.any(String)
+    );
+    expect(spy.clear).not.toHaveBeenCalled();
+  });
+
+  it("clears bddgen diagnostics when the playwright run succeeds", async () => {
+    const spy = makeSpy();
+    const shell: ShellRunner = async () => ({ success: true, output: "{}", error: "", returnCode: 0 });
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      bddgenDiagnostics: spy as unknown as BddgenDiagnosticsProvider,
+    });
+
+    await executor.runScenarioWithOutput({ filePath: "/abs/features/login.feature", lineNumber: 3 });
+
+    expect(spy.clear).toHaveBeenCalledTimes(1);
+    expect(spy.publish).not.toHaveBeenCalled();
+  });
 });
 
 describe("TestExecutor debugScenario", () => {
@@ -743,6 +817,110 @@ describe("TestExecutor debug watchdog (pnpm session teardown wedge)", () => {
     expect(fakeDebug.stopCalls).toHaveLength(1);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }, 10_000);
+});
+
+describe("TestExecutor cancellation", () => {
+  // A node process that keeps its event loop alive for 10s — the shape of a `playwright test` run
+  // that must be killed when the user hits Stop. Exercised through the REAL spawn runner (no
+  // injected shell) via the pre-run hook, so spawnCommand's abort/kill path is what's under test.
+  const longLived = 'node -e "setTimeout(()=>{},10000)"';
+
+  it("kills the spawned tree and settles as Cancelled when the signal aborts mid-run", async () => {
+    const config = makeConfig({ preRunCommand: longLived });
+    const { executor, events } = makeExecutor(config, undefined as unknown as ShellRunner);
+    const controller = new AbortController();
+
+    const start = Date.now();
+    const pending = executor.runScenarioWithOutput({
+      filePath: "/tmp/x.feature",
+      signal: controller.signal,
+    });
+    // Let the child spawn, then hit Stop.
+    await new Promise((r) => setTimeout(r, 300));
+    controller.abort();
+    const result = await pending;
+    const elapsed = Date.now() - start;
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("Cancelled");
+    // Would hang ~10s if the process weren't killed; the kill+grace settles it fast.
+    expect(elapsed).toBeLessThan(4000);
+    // A cancelled run fires "cancelled" (so the status bar settles), never "failure".
+    expect(events.some((e) => e.kind === "failure")).toBe(false);
+    expect(events.some((e) => e.kind === "cancelled")).toBe(true);
+  }, 15_000);
+
+  it("resolves immediately with Cancelled when the signal is already aborted", async () => {
+    const config = makeConfig({ preRunCommand: longLived });
+    const { executor } = makeExecutor(config, undefined as unknown as ShellRunner);
+    const controller = new AbortController();
+    controller.abort();
+
+    const start = Date.now();
+    const result = await executor.runScenarioWithOutput({
+      filePath: "/tmp/x.feature",
+      signal: controller.signal,
+    });
+    const elapsed = Date.now() - start;
+
+    expect(result.error).toBe("Cancelled");
+    expect(elapsed).toBeLessThan(1000);
+  }, 15_000);
+});
+
+describe("TestExecutor missing-binary hint", () => {
+  it("appends an actionable hint when the playwright run fails with exit 127 / command not found", async () => {
+    const config = makeConfig({ bddgenCommand: "" });
+    const shell: ShellRunner = async () => ({
+      success: false,
+      output: "",
+      error: "sh: npx: command not found",
+      returnCode: 127,
+    });
+    const { executor } = makeExecutor(config, shell);
+
+    const result = await executor.runScenarioWithOutput({ filePath: "/abs/x.feature" });
+
+    expect(result.error).toContain('The command "npx" was not found');
+    expect(result.error).toContain("playwrightBddRunner.playwrightCommand");
+    // The original shell noise is preserved above the hint.
+    expect(result.error).toContain("command not found");
+  });
+
+  it("names the attempted binary from the bddgen step and surfaces it through the bddgen failure", async () => {
+    const shell: ShellRunner = async (command) =>
+      command.includes("bddgen")
+        ? {
+            success: false,
+            output: "",
+            error: "'npx' is not recognized as an internal or external command",
+            returnCode: 1,
+          }
+        : { success: true, output: "{}", error: "", returnCode: 0 };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), shell);
+
+    const result = await executor.runScenarioWithOutput({ filePath: "/abs/x.feature" });
+
+    expect(result.error).toContain("bddgen failed");
+    expect(result.error).toContain('The command "npx" was not found');
+  });
+
+  it("does not append the hint to an ordinary test failure", async () => {
+    const config = makeConfig({ bddgenCommand: "" });
+    const shell: ShellRunner = async () => ({
+      success: false,
+      output: JSON.stringify({
+        suites: [{ specs: [{ title: "s", file: "/abs/x.feature", tests: [{ results: [{ status: "failed" }] }] }] }],
+      }),
+      error: "1 failed",
+      returnCode: 1,
+    });
+    const { executor } = makeExecutor(config, shell);
+
+    const result = await executor.runScenarioWithOutput({ filePath: "/abs/x.feature" });
+
+    expect(result.error).not.toContain("was not found");
+  });
 });
 
 describe("TestExecutor working-directory inference (monorepo)", () => {

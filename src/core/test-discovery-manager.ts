@@ -169,23 +169,6 @@ export class TestDiscoveryManager {
 
 
   /**
-   * Force refresh of cached data
-   */
-  public async refreshCache(pattern?: string): Promise<void> {
-    const patterns = pattern
-      ? [pattern]
-      : Array.from(this.cache.keys()).map((key) =>
-          key.replace("discovery:", "")
-        );
-
-    for (const p of patterns) {
-      await this.discoverTestFiles({ pattern: p, forceRefresh: true });
-    }
-
-    this.logger.info("Cache refresh completed", { patterns });
-  }
-
-  /**
    * Dispose of the manager and clean up resources
    */
   public dispose(): void {

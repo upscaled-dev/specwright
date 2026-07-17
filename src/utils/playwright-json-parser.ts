@@ -272,8 +272,14 @@ export class PlaywrightJsonParser {
     const resolved = this.resolveSourceLocation(ctx, spec.file, spec.line);
     // Outline examples are titled "Example #N" and nested under a describe named after the
     // outline; capture that so the summary can show "Scenario Outline: <name> — Example #N".
+    // When the outline TITLE itself carries `<placeholders>`, playwright-bdd substitutes the row
+    // values into each test title instead — the raw placeholders then only survive on the
+    // enclosing describe, so recognize that shape too (feature titles virtually never have `<...>`).
     const outlineName =
-      /^Example #\d+/.test(scenarioName) && enclosingSuiteTitle ? enclosingSuiteTitle : undefined;
+      enclosingSuiteTitle &&
+      (/^Example #\d+/.test(scenarioName) || /<[^>]+>/.test(enclosingSuiteTitle))
+        ? enclosingSuiteTitle
+        : undefined;
 
     for (const test of spec.tests ?? []) {
       acc.push(this.buildResult(spec, test, scenarioName, resolved, outlineName));
@@ -292,6 +298,8 @@ export class PlaywrightJsonParser {
     const lineNumber = annotation?.lineNumber ?? resolved?.lineNumber;
     const lastResult = (test.results ?? []).at(-1);
     const steps = this.extractSteps(lastResult);
+    const duration = lastResult?.duration;
+    const errorMessage = lastResult?.error?.message;
     const stack = lastResult?.error?.stack;
 
     return {
@@ -300,8 +308,8 @@ export class PlaywrightJsonParser {
       featurePath,
       ...(lineNumber !== undefined ? { lineNumber } : {}),
       ...(outlineName !== undefined ? { outlineName } : {}),
-      ...(this.lastDuration(test) !== undefined ? { durationMs: this.lastDuration(test) } : {}),
-      ...(this.lastError(test) !== undefined ? { errorMessage: this.lastError(test) } : {}),
+      ...(duration !== undefined ? { durationMs: duration } : {}),
+      ...(errorMessage !== undefined ? { errorMessage: stripAnsi(errorMessage) } : {}),
       ...(stack !== undefined ? { errorStack: stripAnsi(stack) } : {}),
       ...(steps.length > 0 ? { steps } : {}),
     };
@@ -373,32 +381,35 @@ export class PlaywrightJsonParser {
     return { featurePath, lineMap };
   }
 
+  /**
+   * Status of one test entry, decided from its LAST attempt only. Entries in `results[]` are
+   * retries of the same test, so a [failed, passed] sequence is Playwright's "flaky" case: the
+   * final attempt passed and the run exits 0, so we collapse it to passed (not failed). Empty
+   * results means nothing ran → skipped. Cross-entry worst-wins (multi-project / repeat-each
+   * emit separate entries) is applied later in toStatusMap.
+   */
   private aggregateStatus(test: RawTest): ScenarioStatus {
-    const statuses = (test.results ?? []).map((r) => (r.status ?? "").toLowerCase());
-    if (statuses.length === 0) {return "skipped";}
-    if (statuses.includes("failed") || statuses.includes("timedout") || statuses.includes("interrupted")) {
-      return "failed";
-    }
-    if (statuses.every((s) => s === "skipped")) {return "skipped";}
+    const last = (test.results ?? []).at(-1);
+    if (!last) {return "skipped";}
+    const status = (last.status ?? "").toLowerCase();
+    if (status === "failed" || status === "timedout" || status === "interrupted") {return "failed";}
+    if (status === "skipped") {return "skipped";}
     return "passed";
-  }
-
-  private lastDuration(test: RawTest): number | undefined {
-    const results = test.results ?? [];
-    return results[results.length - 1]?.duration;
-  }
-
-  private lastError(test: RawTest): string | undefined {
-    const message = (test.results ?? []).at(-1)?.error?.message;
-    return message === undefined ? undefined : stripAnsi(message);
   }
 
   /**
    * Render parsed scenario results as a compact, human-readable summary for the Test Explorer's
    * "Test Results" output panel. Far more legible than the raw JSON reporter payload that the
    * `--reporter=json` run would otherwise dump there.
+   *
+   * `totalDurationMs`, when given, is the run's measured wall-clock time; the footer prefers it
+   * over summing per-scenario durations, which double-counts multi-project/retry entries.
    */
-  public formatResults(results: ScenarioResult[], workspaceRoot?: string): string {
+  public formatResults(
+    results: ScenarioResult[],
+    workspaceRoot?: string,
+    totalDurationMs?: number
+  ): string {
     if (results.length === 0) {
       return "No scenarios were executed.";
     }
@@ -418,7 +429,7 @@ export class PlaywrightJsonParser {
       ...(counts.failed > 0 ? [`${counts.failed} failed`] : []),
       ...(counts.skipped > 0 ? [`${counts.skipped} skipped`] : []),
     ].join(", ");
-    const total = formatDuration(totalMs);
+    const total = formatDuration(totalDurationMs ?? totalMs);
     const scenarioWord = results.length === 1 ? "scenario" : "scenarios";
 
     const divider = "─".repeat(48);

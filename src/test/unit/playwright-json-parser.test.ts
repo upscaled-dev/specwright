@@ -41,6 +41,27 @@ describe("PlaywrightJsonParser", () => {
     expect(parser.parse(report)[0]?.status).toBe("failed");
   });
 
+  it("collapses a flaky retry sequence [failed, passed] into passed", () => {
+    // Retries within one test entry: the last attempt passed, so Playwright exits 0 (flaky).
+    const report = JSON.stringify({
+      suites: [{
+        specs: [{
+          title: "Flaky scenario",
+          tests: [{
+            results: [
+              { status: "failed", error: { message: "transient" } },
+              { status: "passed", duration: 12 },
+            ],
+          }],
+        }],
+      }],
+    });
+    const r = parser.parse(report)[0];
+    expect(r?.status).toBe("passed");
+    expect(r?.durationMs).toBe(12);
+    expect(r?.errorMessage).toBeUndefined();
+  });
+
   it("extracts feature path + line from annotation", () => {
     const report = JSON.stringify({
       suites: [{
@@ -73,6 +94,40 @@ describe("PlaywrightJsonParser", () => {
       }],
     });
     expect(parser.parse(report)[0]?.errorMessage).toBe("expected 1 to equal 2");
+  });
+
+  it("captures outlineName from a placeholder-bearing suite title when spec titles are substituted", () => {
+    // An outline TITLE with `<placeholders>` makes playwright-bdd substitute the row values into
+    // each generated test title (no "Example #N" shape); the raw placeholders only survive on the
+    // enclosing describe, so that suite title is the outline name.
+    const report = JSON.stringify({
+      suites: [{
+        title: "Title repro",
+        suites: [{
+          title: "Add (<count1>/<count2>) widgets",
+          specs: [{
+            title: "Add (2/2) widgets",
+            tests: [{ results: [{ status: "passed" }] }],
+          }],
+        }],
+      }],
+    });
+    const r = parser.parse(report)[0];
+    expect(r?.scenarioName).toBe("Add (2/2) widgets");
+    expect(r?.outlineName).toBe("Add (<count1>/<count2>) widgets");
+  });
+
+  it("does not treat a plain (placeholder-free) suite title as an outline for a plain-titled spec", () => {
+    const report = JSON.stringify({
+      suites: [{
+        title: "Plain feature",
+        specs: [{
+          title: "Plain scenario",
+          tests: [{ results: [{ status: "passed" }] }],
+        }],
+      }],
+    });
+    expect(parser.parse(report)[0]?.outlineName).toBeUndefined();
   });
 
   describe("formatResults", () => {
@@ -158,6 +213,29 @@ describe("PlaywrightJsonParser", () => {
         "C:\\repo"
       ));
       expect(out).toContain("      features/cart.feature:9");
+    });
+
+    it("uses the provided wall-clock total for the footer instead of the per-scenario sum", () => {
+      // Two entries for the same scenario (e.g. chromium + firefox) each report 5s; summing them
+      // would overstate elapsed time as 10.0s. The measured wall-clock total wins when supplied.
+      const out = plain(parser.formatResults(
+        [
+          { scenarioName: "Runs", status: "passed", featurePath: "", durationMs: 5000 },
+          { scenarioName: "Runs", status: "passed", featurePath: "", durationMs: 5000 },
+        ],
+        undefined,
+        6000
+      ));
+      expect(out).toContain("· 6.0s");
+      expect(out).not.toContain("10.0s");
+    });
+
+    it("falls back to the summed per-scenario durations when no wall-clock total is given", () => {
+      const out = plain(parser.formatResults([
+        { scenarioName: "A", status: "passed", featurePath: "", durationMs: 500 },
+        { scenarioName: "B", status: "passed", featurePath: "", durationMs: 700 },
+      ]));
+      expect(out).toContain("· 1.2s");
     });
 
     it("colors passed steps green and failed steps red", () => {

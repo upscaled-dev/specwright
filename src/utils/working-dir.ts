@@ -20,6 +20,22 @@ function comparable(p: string, caseInsensitive: boolean): string {
 }
 
 /**
+ * True when `child` is `root` itself or a directory nested inside it. Compares canonicalized
+ * forms (case-insensitively on Windows) so a cwd that `canonicalCwd` uppercased the drive on still
+ * matches the raw lowercase-drive `uri.fsPath` VS Code hands back — a case-sensitive `===` there
+ * never matches on Windows, dropping multi-root runs back to folders[0].
+ */
+export function isSameOrInsideDir(
+  child: string,
+  root: string,
+  caseInsensitive: boolean = process.platform === "win32"
+): boolean {
+  const c = comparable(child, caseInsensitive);
+  const r = comparable(root, caseInsensitive);
+  return c === r || c.startsWith(`${r}${path.sep}`);
+}
+
+/**
  * Canonicalize a path for use as a spawned process's working directory.
  *
  * VS Code's `Uri.fsPath` lowercases the Windows drive letter (`C:\repo` → `c:\repo`),

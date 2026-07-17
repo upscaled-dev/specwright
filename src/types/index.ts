@@ -41,6 +41,12 @@ export interface OutlineExampleRow extends ScenarioBase {
   examplesBlockLineNumber: number;
   examplesBlockName?: string | undefined;
   examplesBlockTags?: string[] | undefined;
+  /**
+   * The outline title with this row's example values substituted for its `<placeholder>` tokens —
+   * the exact test title playwright-bdd generates when the outline title carries placeholders.
+   * Unset when the title has none (those generated tests are titled "Example #N" instead).
+   */
+  substitutedName?: string | undefined;
 }
 
 export interface OutlineStub extends ScenarioBase {
@@ -89,6 +95,8 @@ export interface TestExecutionOptions {
   parallel?: boolean;
   reporter?: string;
   dryRun?: boolean;
+  /** Aborts the spawned run when the Test Explorer stop button is pressed. */
+  signal?: AbortSignal | undefined;
 }
 
 /**
@@ -115,6 +123,8 @@ export interface FeatureExecutionOptions {
   parallel?: boolean;
   reporter?: string;
   dryRun?: boolean;
+  /** Aborts the spawned run when the Test Explorer stop button is pressed. */
+  signal?: AbortSignal | undefined;
 }
 
 export type CommandArguments = unknown[];

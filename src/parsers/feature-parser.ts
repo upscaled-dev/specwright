@@ -379,6 +379,12 @@ export class FeatureParser {
         continue;
       }
 
+      // playwright-bdd titles a generated test with the row's values substituted into the
+      // outline title whenever that title carries `<placeholder>` tokens (only placeholder-free
+      // titles produce the "Example #N" shape). Capture the substituted title so run reports
+      // keyed by it can be mapped back onto this row.
+      const titleHasPlaceholders = /<[^>]+>/.test(outline.scenario.name);
+
       let exampleIndex = 0;
       for (const block of outline.examplesBlocks) {
         for (let i = 0; i < block.data.length; i++) {
@@ -409,6 +415,16 @@ export class FeatureParser {
             featureLineNumber,
             examplesBlockLineNumber: block.blockLineNumber,
           };
+          if (titleHasPlaceholders) {
+            // Same substitution Gherkin performs when compiling pickles: each `<header>` token
+            // is replaced by the row's value; tokens with no matching header stay literal.
+            let substituted = outline.scenario.name;
+            for (const [idx, value] of row.entries()) {
+              const header = block.headers[idx];
+              if (header) {substituted = substituted.replaceAll(`<${header}>`, value);}
+            }
+            exampleScenario.substitutedName = substituted;
+          }
           if (block.name) {exampleScenario.examplesBlockName = block.name;}
           if (block.tags.length > 0) {exampleScenario.examplesBlockTags = block.tags;}
           if (outline.scenario.ruleName) {exampleScenario.ruleName = outline.scenario.ruleName;}
@@ -455,13 +471,12 @@ export class FeatureParser {
     const startLine = scenarioLineNumber - 1; // Convert to 0-based
     let endLine = startLine;
 
-    // Find the end of this scenario (next scenario or end of file)
+    // Stop at the next scenario (any keyword synonym), a Rule, or the next Feature.
     for (let i = scenarioLineNumber; i < lines.length; i++) {
       const line = lines[i]?.trim() ?? "";
-      // Stop at next scenario, scenario outline, or feature
       if (
-        line.startsWith("Scenario:") ||
-        line.startsWith("Scenario Outline:") ||
+        SCENARIO_KEYWORDS.some((k) => line.startsWith(k)) ||
+        line.startsWith("Rule:") ||
         line.startsWith("Feature:")
       ) {
         break;
@@ -497,14 +512,13 @@ export class FeatureParser {
     for (const line of lines) {
       const trimmed = line.trim();
 
-      if (
-        trimmed.startsWith("Scenario:") ||
-        trimmed.startsWith("Scenario Outline:")
-      ) {
-        const isScenarioOutline = trimmed.startsWith("Scenario Outline:");
-        const scenarioName = isScenarioOutline
-          ? trimmed.substring(17).trim()
-          : trimmed.substring(9).trim();
+      // SCENARIO_KEYWORDS is ordered longest-prefix first, so "Scenario Outline:" wins over
+      // "Scenario:" and the synonyms ("Scenario Template:", "Example:") get lenses too.
+      const scenarioKeyword = SCENARIO_KEYWORDS.find((k) => trimmed.startsWith(k));
+      if (scenarioKeyword) {
+        const isScenarioOutline =
+          scenarioKeyword === "Scenario Outline:" || scenarioKeyword === "Scenario Template:";
+        const scenarioName = trimmed.substring(scenarioKeyword.length).trim();
 
         // Calculate the range for this scenario (multiline)
         const scenarioRange = this.getScenarioRange(lines, lineNumber);
@@ -581,8 +595,9 @@ export class FeatureParser {
         for (let i = featureLineIndex + 1; i < lines.length; i++) {
           const line = lines[i]?.trim() ?? "";
           if (
-            line.startsWith("Scenario:") ||
-            line.startsWith("Scenario Outline:")
+            SCENARIO_KEYWORDS.some((k) => line.startsWith(k)) ||
+            line.startsWith("Rule:") ||
+            line.startsWith("Feature:")
           ) {
             break;
           }

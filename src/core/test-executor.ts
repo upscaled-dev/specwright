@@ -11,10 +11,15 @@ import {
 } from "../types/index";
 import { Logger } from "../utils/logger";
 import { ExtensionConfig } from "./extension-config";
-import { spawn } from "node:child_process";
+import { spawn, ChildProcess } from "node:child_process";
 import { PlaywrightJsonParser, ScenarioStatus, ScenarioResult } from "../utils/playwright-json-parser";
 import { shellQuote } from "../utils/shell";
-import { canonicalCwd, findNearestPlaywrightConfigDir, workspaceFolderRootFor } from "../utils/working-dir";
+import {
+  canonicalCwd,
+  findNearestPlaywrightConfigDir,
+  isSameOrInsideDir,
+  workspaceFolderRootFor,
+} from "../utils/working-dir";
 import { BreakpointMirror } from "./breakpoint-mirror";
 import { parseBddFileData, resolveGeneratedSpecPath } from "../parsers/bdd-file-data-parser";
 
@@ -32,6 +37,15 @@ function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error occurred";
 }
 
+// Worst status wins when one scenario ran under several projects (failed > skipped > passed), so
+// a chromium-passed / firefox-failed scenario counts as failed no matter which result the report
+// lists first. Mirrors PlaywrightJsonParser.toStatusMap's own severity rule.
+const STATUS_SEVERITY: Record<ScenarioStatus, number> = {
+  passed: 0,
+  skipped: 1,
+  failed: 2,
+};
+
 function countScenarioStatuses(
   results: ScenarioResult[]
 ): { passed: number; failed: number } {
@@ -40,7 +54,10 @@ function countScenarioStatuses(
   const byScenario = new Map<string, ScenarioStatus>();
   for (const r of results) {
     const key = `${r.featurePath}::${r.lineNumber ?? ""}::${r.scenarioName}`;
-    if (!byScenario.has(key)) { byScenario.set(key, r.status); }
+    const prev = byScenario.get(key);
+    if (prev === undefined || STATUS_SEVERITY[r.status] > STATUS_SEVERITY[prev]) {
+      byScenario.set(key, r.status);
+    }
   }
   let passed = 0;
   let failed = 0;
@@ -58,12 +75,14 @@ type CommandResult = { success: boolean; output: string; error: string; returnCo
 export type TestRunEvent =
   | { kind: "running"; passed: number; failed: number }
   | { kind: "success"; passed: number; failed: number }
-  | { kind: "failure"; passed: number; failed: number };
+  | { kind: "failure"; passed: number; failed: number }
+  | { kind: "cancelled"; passed: number; failed: number };
 
 export type ShellRunner = (
   command: string,
   workingDir: string,
-  extraEnv?: NodeJS.ProcessEnv
+  extraEnv?: NodeJS.ProcessEnv,
+  signal?: AbortSignal
 ) => Promise<CommandResult>;
 
 /**
@@ -125,8 +144,8 @@ export class TestExecutor {
     this.config = config ?? ExtensionConfig.create();
     this.logger = logger ?? Logger.create();
     this.playwrightJsonParser = playwrightJsonParser ?? PlaywrightJsonParser.create(this.logger);
-    this.defaultShellRunner = (command, workingDir, extraEnv) =>
-      this.spawnCommand(command, workingDir, extraEnv);
+    this.defaultShellRunner = (command, workingDir, extraEnv, signal) =>
+      this.spawnCommand(command, workingDir, extraEnv, signal);
     this.shellRunner = shellRunner ?? this.defaultShellRunner;
     // Eager, not lazy: constructing the mirror subscribes to onDidChangeBreakpoints, which
     // forces VS Code to initialize its lazily-populated `debug.breakpoints` before first use.
@@ -203,9 +222,8 @@ export class TestExecutor {
       );
 
       const folder =
-        this.workspace.workspaceFolders?.find(
-          (f) => workingDir === f.uri.fsPath || workingDir.startsWith(f.uri.fsPath + path.sep)
-        ) ?? this.workspace.workspaceFolders?.[0];
+        this.workspace.workspaceFolders?.find((f) => isSameOrInsideDir(workingDir, f.uri.fsPath)) ??
+        this.workspace.workspaceFolders?.[0];
 
       const started = await this.debug.startDebugging(folder, {
         type: "node-terminal",
@@ -307,11 +325,13 @@ export class TestExecutor {
   ): Promise<RunOutputResult> {
     const start = Date.now();
     const workingDir = this.getWorkingDirectory(options.filePath);
+    const signal = options.signal;
 
     this.runEventEmitter.fire({ kind: "running", passed: 0, failed: 0 });
 
-    const preRunFailure = await this.runPreRunHook(workingDir);
+    const preRunFailure = await this.runPreRunHook(workingDir, signal);
     if (preRunFailure) {
+      if (signal?.aborted) { return this.cancelledResult(start); }
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return { success: false, output: "", error: preRunFailure, duration: Math.max(1, Date.now() - start) };
     }
@@ -324,7 +344,8 @@ export class TestExecutor {
     const { bddgenCommand } = this.commandBuilder().buildScenarioCommandParts(options);
     if (bddgenCommand !== undefined) {
       try {
-        const gen = await this.shellRunner(bddgenCommand, workingDir);
+        const gen = this.withBinaryHint(await this.shellRunner(bddgenCommand, workingDir, undefined, signal), bddgenCommand);
+        if (signal?.aborted) { return this.cancelledResult(start); }
         this.publishBddgenDiagnostics(gen, workingDir);
         if (!gen.success) {
           this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
@@ -337,6 +358,7 @@ export class TestExecutor {
           };
         }
       } catch (error) {
+        if (signal?.aborted) { return this.cancelledResult(start); }
         this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
         return { success: false, output: "", error: errMsg(error), duration: Math.max(1, Date.now() - start) };
       }
@@ -353,11 +375,19 @@ export class TestExecutor {
     const command = this.config.useConfigReporters ? playwrightCommand : `${playwrightCommand} --reporter=json`;
 
     try {
-      const result = await this.shellRunner(command, workingDir, {
-        PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath,
-      });
+      const result = this.withBinaryHint(
+        await this.shellRunner(command, workingDir, { PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath }, signal),
+        command
+      );
+      if (signal?.aborted) { return this.cancelledResult(start); }
+      // When bddgenCommand is undefined (defineBddProject auto-gen) bddgen runs inside
+      // `playwright test`, so its errors surface here rather than in the separate step above.
+      // publish() is a no-op parse+clear on non-bddgen failures, so calling it unconditionally
+      // is safe and is the only path those errors reach the Problems panel.
+      this.publishBddgenDiagnostics(result, workingDir);
       return this.buildOutputResult(result, reportPath, workingDir, start);
     } catch (error) {
+      if (signal?.aborted) { return this.cancelledResult(start); }
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return { success: false, output: "", error: errMsg(error), duration: Math.max(1, Date.now() - start) };
     }
@@ -368,14 +398,16 @@ export class TestExecutor {
   ): Promise<RunOutputResult> {
     return this.runWithJsonReport(
       () => this.commandBuilder().buildFeatureCommand(options),
-      options.filePath
+      options.filePath,
+      options.signal
     );
   }
 
   public async runAllTestsWithTagsOutput(
-    tag: string
+    tag: string,
+    signal?: AbortSignal
   ): Promise<RunOutputResult> {
-    return this.runWithJsonReport(() => this.commandBuilder().buildTagCommand(tag));
+    return this.runWithJsonReport(() => this.commandBuilder().buildTagCommand(tag), undefined, signal);
   }
 
   public async discoverFeatureFiles(): Promise<string[]> {
@@ -481,15 +513,17 @@ export class TestExecutor {
 
   private async runWithJsonReport(
     buildCommand: () => string,
-    forFile?: string
+    forFile?: string,
+    signal?: AbortSignal
   ): Promise<RunOutputResult> {
     const start = Date.now();
     const workingDir = this.getWorkingDirectory(forFile);
 
     this.runEventEmitter.fire({ kind: "running", passed: 0, failed: 0 });
 
-    const preRunFailure = await this.runPreRunHook(workingDir);
+    const preRunFailure = await this.runPreRunHook(workingDir, signal);
     if (preRunFailure) {
+      if (signal?.aborted) { return this.cancelledResult(start); }
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return {
         success: false,
@@ -512,12 +546,15 @@ export class TestExecutor {
     const command = this.config.useConfigReporters ? baseCommand : `${baseCommand} --reporter=json`;
 
     try {
-      const result = await this.shellRunner(command, workingDir, {
-        PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath,
-      });
+      const result = this.withBinaryHint(
+        await this.shellRunner(command, workingDir, { PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath }, signal),
+        command
+      );
+      if (signal?.aborted) { return this.cancelledResult(start); }
       this.publishBddgenDiagnostics(result, workingDir);
       return this.buildOutputResult(result, reportPath, workingDir, start);
     } catch (error) {
+      if (signal?.aborted) { return this.cancelledResult(start); }
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return {
         success: false,
@@ -526,6 +563,42 @@ export class TestExecutor {
         duration: Math.max(1, Date.now() - start),
       };
     }
+  }
+
+  // A cancelled run fires "cancelled", never success/failure — the killed process exits
+  // non-zero, and announcing a failure would misrepresent a deliberate stop. Without any event
+  // the status bar would sit on "running…" until the next run, so the distinct kind lets it
+  // settle. The caller marks the affected items skipped.
+  private cancelledResult(start: number): RunOutputResult {
+    this.runEventEmitter.fire({ kind: "cancelled", passed: 0, failed: 0 });
+    return { success: false, output: "", error: "Cancelled", duration: Math.max(1, Date.now() - start) };
+  }
+
+  /**
+   * With `shell: true` a missing npx/playwright/bddgen binary surfaces only as raw shell noise
+   * (exit 127 + "command not found" on POSIX, "'npx' is not recognized" on Windows). Detect that
+   * shape and return an actionable hint naming the attempted binary; undefined otherwise.
+   */
+  private missingBinaryHint(result: CommandResult, command: string): string | undefined {
+    if (result.success) { return undefined; }
+    const haystack = `${result.error}\n${result.output}`;
+    const looksMissing =
+      result.returnCode === 127 ||
+      /command not found|is not recognized as an internal or external command|ENOENT/i.test(haystack);
+    if (!looksMissing) { return undefined; }
+    const bin = command.trim().split(/\s+/)[0] ?? command;
+    return (
+      `The command "${bin}" was not found. Install the project dependencies ` +
+      "(npm i -D playwright-bdd @playwright/test) or adjust the " +
+      "'playwrightBddRunner.playwrightCommand' / 'playwrightBddRunner.bddgenCommand' settings."
+    );
+  }
+
+  /** Append the missing-binary hint to a failed result's error so it reaches the failure surfaces. */
+  private withBinaryHint(result: CommandResult, command: string): CommandResult {
+    const hint = this.missingBinaryHint(result, command);
+    if (hint === undefined) { return result; }
+    return { ...result, error: result.error.trim() === "" ? hint : `${result.error}\n\n${hint}` };
   }
 
   /** Mirror bddgen output into the Problems panel: clear on success, publish the errors on failure. */
@@ -633,16 +706,18 @@ export class TestExecutor {
     await released;
   }
 
-  private async runPreRunHook(workingDir: string): Promise<string | undefined> {
+  private async runPreRunHook(workingDir: string, signal?: AbortSignal): Promise<string | undefined> {
     const command = this.config.preRunCommand.trim();
     if (command === "") { return undefined; }
 
     this.logger.info(`Running preRunCommand: ${command}`);
-    const result = await this.shellRunner(command, workingDir);
+    const result = await this.shellRunner(command, workingDir, undefined, signal);
     if (result.success) { return undefined; }
 
     const detail = result.error?.trim() === "" ? result.output : result.error;
-    const message = `preRunCommand "${command}" failed with exit code ${result.returnCode}. Test run aborted.`;
+    const base = `preRunCommand "${command}" failed with exit code ${result.returnCode}. Test run aborted.`;
+    const hint = this.missingBinaryHint(result, command);
+    const message = hint ? `${base}\n\n${hint}` : base;
     this.logger.error(message, { detail });
     this.logger.showOutput();
     return message;
@@ -668,7 +743,8 @@ export class TestExecutor {
         });
       }
       this.terminal.show();
-      this.terminal.sendText("clear");
+      // cmd.exe has no `clear`; PowerShell accepts either, so `cls` is the safe Windows choice.
+      this.terminal.sendText(process.platform === "win32" ? "cls" : "clear");
       if (workingDir && workingDir !== process.cwd()) {
         this.terminal.sendText(`cd ${shellQuote(workingDir)}`);
       }
@@ -683,17 +759,26 @@ export class TestExecutor {
   private async spawnCommand(
     command: string,
     workingDir: string,
-    extraEnv?: NodeJS.ProcessEnv
+    extraEnv?: NodeJS.ProcessEnv,
+    signal?: AbortSignal
   ): Promise<CommandResult> {
     return new Promise((resolve) => {
       if (!command || command.trim() === "") {
         resolve({ success: false, output: "", error: "Command cannot be empty", returnCode: 1 });
         return;
       }
+      if (signal?.aborted) {
+        resolve({ success: false, output: "", error: "Cancelled", returnCode: 130 });
+        return;
+      }
       try {
         const child = spawn(command, {
           cwd: workingDir,
           shell: true,
+          // POSIX: detach so the child leads its own process group; killing that group on
+          // cancellation reaches playwright + browsers. With shell:true, signalling only the
+          // shell would orphan playwright. Windows uses taskkill /T instead (see killTree).
+          ...(process.platform === "win32" ? {} : { detached: true }),
           env: { ...process.env, ...(extraEnv ?? {}) },
           stdio: ["pipe", "pipe", "pipe"],
         });
@@ -701,12 +786,28 @@ export class TestExecutor {
         let stdout = "";
         let stderr = "";
         let settled = false;
+        let cancelled = false;
         const settle = (code: number | null): void => {
           if (settled) {return;}
           settled = true;
+          signal?.removeEventListener("abort", onAbort);
+          // A killed process exits non-zero; report the stop, not a failure.
+          if (cancelled) {
+            resolve({ success: false, output: stdout, error: "Cancelled", returnCode: 130 });
+            return;
+          }
           const returnCode = code ?? 1;
           resolve({ success: returnCode === 0, output: stdout, error: stderr, returnCode });
         };
+        const onAbort = (): void => {
+          cancelled = true;
+          this.killTree(child);
+          // If the tree's `close` never arrives (grandchild holding pipes), force the stop after
+          // the same flush grace the exit path uses.
+          const timer = setTimeout(() => { settle(130); }, 2000);
+          timer.unref?.();
+        };
+        signal?.addEventListener("abort", onAbort);
         child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
         child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
         child.on("close", (code: number | null) => { settle(code); });
@@ -722,6 +823,7 @@ export class TestExecutor {
           this.logger.error(`Command execution error: ${error.message}`, { command, workingDir });
           if (!settled) {
             settled = true;
+            signal?.removeEventListener("abort", onAbort);
             resolve({ success: false, output: "", error: error.message, returnCode: 1 });
           }
         });
@@ -731,6 +833,25 @@ export class TestExecutor {
         resolve({ success: false, output: "", error: msg, returnCode: 1 });
       }
     });
+  }
+
+  /** Kill the whole spawned tree (shell + playwright + browsers), not just the shell. */
+  private killTree(child: ChildProcess): void {
+    if (child.pid === undefined) { return; }
+    try {
+      if (process.platform === "win32") {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+        killer.on("error", () => { /* taskkill unavailable; best effort */ });
+      } else {
+        // Negative pid targets the process group the detached spawn made this child lead.
+        process.kill(-child.pid, "SIGTERM");
+      }
+    } catch (error) {
+      // ESRCH: the group already exited between close and kill — nothing left to signal.
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        this.logger.warn(`Failed to kill process tree: ${errMsg(error)}`);
+      }
+    }
   }
 
   /**

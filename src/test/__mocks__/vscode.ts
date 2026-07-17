@@ -72,6 +72,13 @@ interface StubStatusBarItem {
   dispose(): void;
 }
 
+interface TreeViewCounters {
+  createCount: number;
+  disposeCount: number;
+}
+
+const __treeViewCounters: TreeViewCounters = { createCount: 0, disposeCount: 0 };
+
 export const window = {
   createOutputChannel: () => new StubOutputChannel(),
   createTerminal: () => ({ show: () => {}, sendText: () => {}, dispose: () => {} }),
@@ -87,11 +94,27 @@ export const window = {
     hide(): void { this.shown = false; },
     dispose(): void { this.disposed = true; },
   }),
+  createTreeView: (_viewId: string, _options: unknown) => {
+    __treeViewCounters.createCount += 1;
+    return {
+      dispose: (): void => { __treeViewCounters.disposeCount += 1; },
+      onDidDispose: () => ({ dispose: () => {} }),
+    };
+  },
+  // Settable by tests that exercise active-editor commands (insert step, go to definition).
+  activeTextEditor: undefined as unknown,
   showInformationMessage: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showWarningMessage: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showErrorMessage: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showQuickPick: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showInputBox: (..._args: unknown[]): Promise<string | undefined> => Promise.resolve(undefined),
+  showSaveDialog: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
+  showTextDocument: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
+  __treeViewCounters,
+  __resetTreeViewCounters: (): void => {
+    __treeViewCounters.createCount = 0;
+    __treeViewCounters.disposeCount = 0;
+  },
 };
 
 export const StatusBarAlignment = { Left: 1, Right: 2 };
@@ -104,17 +127,60 @@ const defaultConfiguration = {
   inspect: (key: string): { key: string } => ({ key }),
 };
 
+type FileWatcherListener = (uri: { fsPath: string }) => unknown;
+type FileWatcherEventKind = "create" | "change" | "delete";
+
+interface StubFileWatcher {
+  onDidCreate: (l: FileWatcherListener) => { dispose: () => void };
+  onDidChange: (l: FileWatcherListener) => { dispose: () => void };
+  onDidDelete: (l: FileWatcherListener) => { dispose: () => void };
+  dispose: () => void;
+  __fire: (kind: FileWatcherEventKind, uri: { fsPath: string }) => Promise<void>;
+}
+
+const __fileWatchers: StubFileWatcher[] = [];
+
+function createStubFileWatcher(): StubFileWatcher {
+  const buckets: Record<FileWatcherEventKind, FileWatcherListener[]> = {
+    create: [], change: [], delete: [],
+  };
+  const register = (bucket: FileWatcherListener[]) => (l: FileWatcherListener) => {
+    bucket.push(l);
+    return { dispose: () => { const i = bucket.indexOf(l); if (i > -1) {bucket.splice(i, 1);} } };
+  };
+  const watcher: StubFileWatcher = {
+    onDidCreate: register(buckets.create),
+    onDidChange: register(buckets.change),
+    onDidDelete: register(buckets.delete),
+    dispose: () => { /* no-op */ },
+    // Listeners return the provider's incremental-update promise; await them so a test can assert
+    // on the settled tree after firing an event.
+    __fire: async (kind, uri) => { await Promise.all(buckets[kind].map((l) => l(uri))); },
+  };
+  __fileWatchers.push(watcher);
+  return watcher;
+}
+
+/** Fire an event on the most recently created file-system watcher (integration-test seam). */
+export function __fireFileWatcher(
+  kind: FileWatcherEventKind,
+  uri: { fsPath: string }
+): Promise<void> {
+  const last = __fileWatchers.at(-1);
+  return last ? last.__fire(kind, uri) : Promise.resolve();
+}
+
+export function __resetFileWatchers(): void {
+  __fileWatchers.length = 0;
+}
+
 export const workspace = {
   getConfiguration: (..._args: unknown[]) => defaultConfiguration,
   onDidChangeConfiguration: () => ({ dispose: () => {} }),
   findFiles: () => Promise.resolve([]),
-  createFileSystemWatcher: () => ({
-    onDidCreate: () => ({ dispose: () => {} }),
-    onDidChange: () => ({ dispose: () => {} }),
-    onDidDelete: () => ({ dispose: () => {} }),
-    dispose: () => {},
-  }),
+  createFileSystemWatcher: (): StubFileWatcher => createStubFileWatcher(),
   workspaceFolders: undefined as ReadonlyArray<unknown> | undefined,
+  getWorkspaceFolder: (_uri: unknown): unknown => undefined,
   fs: {
     readFile: () => Promise.resolve(new Uint8Array()),
   },
@@ -325,6 +391,22 @@ export class EventEmitter<T> {
   }
 }
 
+export class CancellationTokenSource {
+  private readonly emitter = new EventEmitter<unknown>();
+  public readonly token = {
+    isCancellationRequested: false,
+    onCancellationRequested: this.emitter.event,
+  };
+  public cancel(): void {
+    if (this.token.isCancellationRequested) { return; }
+    this.token.isCancellationRequested = true;
+    this.emitter.fire(undefined);
+  }
+  public dispose(): void {
+    this.emitter.dispose();
+  }
+}
+
 export const tests = {
   createTestController: () => ({ dispose: () => {} }),
 };
@@ -492,6 +574,25 @@ export class CompletionItem {
 
 export class SnippetString {
   constructor(public value: string) {}
+}
+
+export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
+
+export class TreeItem {
+  public description?: string | boolean;
+  public tooltip?: string;
+  public contextValue?: string;
+  public iconPath?: unknown;
+  public command?: unknown;
+  public resourceUri?: unknown;
+  constructor(
+    public label: string,
+    public collapsibleState: number = TreeItemCollapsibleState.None
+  ) {}
+}
+
+export class ThemeIcon {
+  constructor(public readonly id: string, public readonly color?: unknown) {}
 }
 
 export class MarkdownString {

@@ -44,6 +44,9 @@ export class StatusBar implements vscode.Disposable {
     this.lastRunAt = new Date();
     if (event.kind === "success") {
       this.item.text = `$(check) Specwright: passed ${event.passed}`;
+    } else if (event.kind === "cancelled") {
+      // A deliberate stop is neither pass nor fail; without this the spinner outlives the run.
+      this.item.text = "$(circle-slash) Specwright: cancelled";
     } else {
       this.item.text = `$(error) Specwright: ${event.passed} passed, ${event.failed} failed`;
     }

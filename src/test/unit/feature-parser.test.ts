@@ -386,6 +386,32 @@ describe("FeatureParser.provideScenarioCodeLenses — counts per fixture", () =>
   });
 });
 
+describe("FeatureParser.provideScenarioCodeLenses — Gherkin keyword synonyms", () => {
+  it("emits Run/Debug lenses for 'Scenario Template:' (treated as an outline) and 'Example:'", () => {
+    const parser = FeatureParser.create();
+    const content = lines(
+      "Feature: Synonyms",
+      "",
+      "  Scenario Template: Adding",
+      "    Given I have <start> widgets",
+      "",
+      "    Examples:",
+      "      | start |",
+      "      | 0     |",
+      "",
+      "  Example: Solo",
+      "    Given I have 0 widgets"
+    );
+    const titles = parser
+      .provideScenarioCodeLenses(content, "synonyms.feature")
+      .map((l) => l.command?.title ?? "");
+    expect(titles).toContain("▶️ Run Scenario Outline");
+    expect(titles).toContain("🐛 Debug Scenario Outline");
+    expect(titles).toContain("▶️ Run Scenario");
+    expect(titles).toContain("🐛 Debug Scenario");
+  });
+});
+
 describe("FeatureParser.parseFeatureContent — hyphenated tag extraction", () => {
   it("preserves hyphenated tags like @rule-scoped in both scenario tags and CodeLens tag list", () => {
     const parser = FeatureParser.create();
@@ -660,6 +686,70 @@ describe("FeatureParser.parseFeatureContent — outlineName field on expanded ro
     if (!s.isScenarioOutline) {throw new Error("expected outline");}
     expect(s.outlineName).toBe("Greeter");
     expect(s.name).toContain("Alice - Smith");
+  });
+});
+
+describe("FeatureParser.parseFeatureContent — substitutedName on expanded rows", () => {
+  // playwright-bdd substitutes example values into the generated test title whenever the outline
+  // TITLE carries `<placeholder>` tokens; substitutedName captures that title so run results can
+  // be mapped back onto the row (the report never uses the tree's synthetic example label).
+  it("substitutes every matching <header> token with the row's value", () => {
+    const parser = FeatureParser.create();
+    const content = lines(
+      "Feature: Substituted",
+      "",
+      "  Scenario Outline: Add (<a>/<b>) widgets",
+      "    Given I add <a> widgets",
+      "",
+      "    Examples:",
+      "      | a | b |",
+      "      | 2 | 2 |",
+      "      | 3 | 4 |"
+    );
+    const parsed = parser.parseFeatureContent(content);
+    expect(parsed).not.toBeNull();
+    const rows = parsed!.scenarios.filter(isOutlineExampleRow);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.substitutedName).toBe("Add (2/2) widgets");
+    expect(rows[1]!.substitutedName).toBe("Add (3/4) widgets");
+  });
+
+  it("leaves a placeholder with no matching Examples header literal", () => {
+    const parser = FeatureParser.create();
+    const content = lines(
+      "Feature: PartialMatch",
+      "",
+      "  Scenario Outline: Add <a> then <missing>",
+      "    Given I add <a> widgets",
+      "",
+      "    Examples:",
+      "      | a |",
+      "      | 2 |"
+    );
+    const parsed = parser.parseFeatureContent(content);
+    expect(parsed).not.toBeNull();
+    const rows = parsed!.scenarios.filter(isOutlineExampleRow);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.substitutedName).toBe("Add 2 then <missing>");
+  });
+
+  it("stays unset when the outline title has no placeholders (report shape is \"Example #N\")", () => {
+    const parser = FeatureParser.create();
+    const content = lines(
+      "Feature: PlainTitle",
+      "",
+      "  Scenario Outline: Adding",
+      "    Given I have <start> widgets",
+      "",
+      "    Examples:",
+      "      | start |",
+      "      | 0     |"
+    );
+    const parsed = parser.parseFeatureContent(content);
+    expect(parsed).not.toBeNull();
+    const rows = parsed!.scenarios.filter(isOutlineExampleRow);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.substitutedName).toBeUndefined();
   });
 });
 

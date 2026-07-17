@@ -102,6 +102,14 @@ describe("StatusBar", () => {
     expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2} — click to show test output$/);
   });
 
+  it("settles to a cancelled state instead of staying on the spinner", () => {
+    executor.fire({ kind: "running", passed: 0, failed: 0 });
+    executor.fire({ kind: "cancelled", passed: 0, failed: 0 });
+    const item = captured[0]!;
+    expect(item.text).toBe("$(circle-slash) Specwright: cancelled");
+    expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2} — click to show test output$/);
+  });
+
   it("preserves the last-run tooltip when transitioning back to running", () => {
     executor.fire({ kind: "success", passed: 1, failed: 0 });
     const tooltipAfterSuccess = captured[0]!.tooltip;
