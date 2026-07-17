@@ -463,7 +463,7 @@
       "activitybar": [
         {
           "id": "specwright",
-          "title": "Specwright",
+          "title": "Specwright BDD",
           "icon": "media/activity-bar-icon.svg"
         }
       ]

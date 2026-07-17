@@ -1,5 +1,6 @@
 import { FeatureParser, isOutlineExampleRow } from "../parsers/feature-parser";
 import { OutlineExampleRow, OutlineStub, RegularScenario, Scenario } from "../types/index";
+import { escapeHtml } from "./html-escape";
 import { MarkdownSlugger } from "./markdown-slugger";
 
 interface FeatureInput {
@@ -37,6 +38,15 @@ interface PreparedSection {
   features: PreparedFeature[];
 }
 
+/** Per-feature counts backing one Summary-table row. */
+interface FeatureCounts {
+  regular: number;
+  outlines: number;
+  exampleRows: number;
+  /** Runnable scenarios: regular + expanded example rows. */
+  total: number;
+}
+
 export function renderScenariosMarkdown(
   sections: ScenarioSection[],
   options?: ScenarioOptions,
@@ -52,8 +62,9 @@ export function renderScenariosMarkdown(
   // Fixed headings claim their slugs first so a folder or feature sharing their text still
   // gets the -N anchor GitHub would assign it.
   slugger.slug("Feature Catalog");
-  slugger.slug("Summary");
   slugger.slug("Contents");
+  slugger.slug("Summary");
+  slugger.slug("Tags");
   const prepared = sections.map((section): PreparedSection =>
     prepareSection(parser, section, filter, slugger, multiRoot),
   );
@@ -63,12 +74,13 @@ export function renderScenariosMarkdown(
 
   const out: string[] = ["# Feature Catalog"];
   if (options?.brandLine) {out.push(`_${options.brandLine}_`);}
-  pushBlock(out, renderSummary(prepared, filterNote));
   pushBlock(out, renderContents(prepared, multiRoot));
+  pushBlock(out, renderSummary(prepared, multiRoot, filterNote));
+  pushBlock(out, renderTags(prepared));
 
   for (const section of prepared) {
     if (multiRoot) {
-      pushBlock(out, [`## ${section.folderName}`]);
+      pushBlock(out, [`## ${escapeHtml(section.folderName ?? "")}`]);
     }
     for (const feature of section.features) {
       pushBlock(out, renderFeature(feature, featureLevel, scenarioLevel));
@@ -100,7 +112,8 @@ function prepareSection(
     collected.push({ pathRel: feature.pathRel, title: parsed.feature, units, rawLines });
   }
   collected.sort((a, b) => a.pathRel.localeCompare(b.pathRel));
-  // Slugs are claimed in emission order: the folder heading precedes its features.
+  // Slugs are claimed in emission order: the folder heading precedes its features. The slugger
+  // gets the RAW title (not entity-escaped) so anchors match GitHub's slugs of the rendered text.
   const folderSlug = multiRoot ? slugger.slug(section.folderName ?? "") : undefined;
   const features = collected.map((f): PreparedFeature => ({
     ...f,
@@ -113,18 +126,123 @@ function renderContents(sections: PreparedSection[], multiRoot: boolean): string
   const lines: string[] = [];
   for (const section of sections) {
     if (multiRoot) {
-      lines.push(`- [${section.folderName}](#${section.folderSlug})`);
+      lines.push(`- [${escapeHtml(section.folderName ?? "")}](#${section.folderSlug})`);
       for (const feature of section.features) {
-        lines.push(`  - [${feature.title ?? feature.pathRel}](#${feature.slug})`);
+        lines.push(`  - [${escapeHtml(feature.title ?? feature.pathRel)}](#${feature.slug})`);
       }
     } else {
       for (const feature of section.features) {
-        lines.push(`- [${feature.title ?? feature.pathRel}](#${feature.slug})`);
+        lines.push(`- [${escapeHtml(feature.title ?? feature.pathRel)}](#${feature.slug})`);
       }
     }
   }
   if (lines.length === 0) {return [];}
   return ["## Contents", ...lines];
+}
+
+function featureCounts(feature: PreparedFeature): FeatureCounts {
+  let regular = 0;
+  let outlines = 0;
+  let exampleRows = 0;
+  for (const unit of feature.units) {
+    if (unit.kind === "regular") {
+      regular += 1;
+    } else if (unit.kind === "stub") {
+      outlines += 1;
+    } else {
+      outlines += 1;
+      exampleRows += unit.rows.length;
+    }
+  }
+  return { regular, outlines, exampleRows, total: regular + exampleRows };
+}
+
+/**
+ * Collapsible per-feature Summary table with a grand-total row. The Total column counts
+ * runnable scenarios (regular + expanded example rows); outline declarations are broken out
+ * separately so the table explains the Total rather than mystifying it.
+ */
+function renderSummary(
+  sections: PreparedSection[],
+  multiRoot: boolean,
+  filterNote?: string,
+): string[] {
+  const lines = [
+    "<details open>",
+    "<summary><strong>Summary</strong></summary>",
+    "",
+    "## Summary",
+  ];
+  if (filterNote) {
+    lines.push(`_${escapeHtml(filterNote)}_`, "");
+  }
+
+  const folderCol = multiRoot ? "| Folder " : "";
+  const folderSep = multiRoot ? "|---" : "";
+  lines.push(
+    `${folderCol}| Feature | Regular | Outlines | Example rows | Total |`,
+    `${folderSep}|---|---:|---:|---:|---:|`,
+  );
+
+  const grand: FeatureCounts = { regular: 0, outlines: 0, exampleRows: 0, total: 0 };
+  for (const section of sections) {
+    for (const feature of section.features) {
+      const c = featureCounts(feature);
+      grand.regular += c.regular;
+      grand.outlines += c.outlines;
+      grand.exampleRows += c.exampleRows;
+      grand.total += c.total;
+      const folder = multiRoot ? `| ${escapeHtml(section.folderName ?? "")} ` : "";
+      const name = escapeHtml(feature.title ?? feature.pathRel);
+      lines.push(
+        `${folder}| ${name} | ${c.regular} | ${c.outlines} | ${c.exampleRows} | ${c.total} |`,
+      );
+    }
+  }
+  const totalFolder = multiRoot ? "| " : "";
+  lines.push(
+    `${totalFolder}| **Total** | **${grand.regular}** | **${grand.outlines}** | **${grand.exampleRows}** | **${grand.total}** |`,
+    "",
+    "</details>",
+  );
+  return lines;
+}
+
+function collectTagCounts(sections: PreparedSection[]): Map<string, number> {
+  const tagCounts = new Map<string, number>();
+  const scenarios = sections
+    .flatMap((s) => s.features)
+    .flatMap((f) => f.units)
+    .flatMap((u) => unitScenarios(u));
+  for (const scenario of scenarios) {
+    for (const tag of scenario.tags ?? []) {
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+  return tagCounts;
+}
+
+/** Collapsible tag-frequency table; omitted entirely when the catalog carries no tags. */
+function renderTags(sections: PreparedSection[]): string[] {
+  const tagCounts = collectTagCounts(sections);
+  if (tagCounts.size === 0) {return [];}
+
+  const sorted = [...tagCounts.entries()].sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  );
+  const lines = [
+    "<details open>",
+    "<summary><strong>Tags</strong></summary>",
+    "",
+    "## Tags",
+    "| Tag | Count |",
+    "|---|---:|",
+  ];
+  for (const [tag, count] of sorted) {
+    lines.push(`| ${tag} | ${count} |`);
+  }
+  lines.push("", "</details>");
+  return lines;
 }
 
 function renderFeature(
@@ -135,15 +253,16 @@ function renderFeature(
   if (feature.title === null) {
     return [`${featureLevel} ${feature.pathRel}`, "", "_Could not parse_"];
   }
+  const title = escapeHtml(feature.title);
   const units = [...feature.units].sort((a, b) => a.sortLine - b.sortLine);
   const count = units.length === 1 ? "1 scenario" : `${units.length} scenarios`;
   // The heading lives inside the details block so its anchor exists; the blank lines after
   // <summary> and before </details> are required for the inner Markdown to render.
   const lines = [
     "<details open>",
-    `<summary><strong>${feature.title}</strong> — ${count}</summary>`,
+    `<summary><strong>${title}</strong> — ${count}</summary>`,
     "",
-    `${featureLevel} ${feature.title}`,
+    `${featureLevel} ${title}`,
     `\`${feature.pathRel}\``,
   ];
   for (const unit of units) {
@@ -192,14 +311,14 @@ function unitMatches(unit: Unit, filter: Set<string> | undefined): boolean {
 function renderUnit(unit: Unit, scenarioLevel: string, rawLines: string[]): string[] {
   if (unit.kind === "regular") {
     return renderScenarioLines(
-      `${scenarioLevel} Scenario: ${unit.scenario.name}`,
+      `${scenarioLevel} Scenario: ${escapeHtml(unit.scenario.name)}`,
       unit.scenario.tags ?? [],
       unit.scenario.steps,
     );
   }
   if (unit.kind === "stub") {
     const lines = renderScenarioLines(
-      `${scenarioLevel} Scenario Outline: ${unit.scenario.outlineName}`,
+      `${scenarioLevel} Scenario Outline: ${escapeHtml(unit.scenario.outlineName)}`,
       unit.scenario.tags ?? [],
       unit.scenario.steps,
     );
@@ -210,7 +329,7 @@ function renderUnit(unit: Unit, scenarioLevel: string, rawLines: string[]): stri
   const first = unit.rows[0];
   if (!first) {return [];}
   const lines = renderScenarioLines(
-    `${scenarioLevel} Scenario Outline: ${first.outlineName}`,
+    `${scenarioLevel} Scenario Outline: ${escapeHtml(first.outlineName)}`,
     outlineLevelTags(first),
     first.steps,
   );
@@ -218,7 +337,15 @@ function renderUnit(unit: Unit, scenarioLevel: string, rawLines: string[]): stri
   for (const row of unit.rows) {
     if (seenBlocks.has(row.examplesBlockLineNumber)) {continue;}
     seenBlocks.add(row.examplesBlockLineNumber);
-    lines.push("", examplesLabel(row), ...sliceExamplesTable(rawLines, row.examplesBlockLineNumber));
+    // The verbatim table goes inside a fence: alignment survives exactly and the raw `<...>`
+    // header/cell text needs no escaping there.
+    lines.push(
+      "",
+      examplesLabel(row),
+      "```",
+      ...sliceExamplesTable(rawLines, row.examplesBlockLineNumber),
+      "```",
+    );
   }
   return lines;
 }
@@ -226,7 +353,9 @@ function renderUnit(unit: Unit, scenarioLevel: string, rawLines: string[]): stri
 function renderScenarioLines(heading: string, tags: string[], steps: string[]): string[] {
   const lines = [heading];
   if (tags.length > 0) {lines.push(`Tags: ${tags.join(" ")}`);}
-  for (const step of steps) {lines.push(`- ${step}`);}
+  // Steps are prose list items, so outline placeholders like `<user>` must be entity-escaped
+  // or the renderer swallows them as HTML tags.
+  for (const step of steps) {lines.push(`- ${escapeHtml(step)}`);}
   return lines;
 }
 
@@ -239,7 +368,7 @@ function outlineLevelTags(row: OutlineExampleRow): string[] {
 }
 
 function examplesLabel(row: OutlineExampleRow): string {
-  return row.examplesBlockName ? `Examples: ${row.examplesBlockName}` : "Examples:";
+  return row.examplesBlockName ? `Examples: ${escapeHtml(row.examplesBlockName)}` : "Examples:";
 }
 
 // The table is copied straight from the source so cell alignment survives; we take the
@@ -252,53 +381,6 @@ function sliceExamplesTable(rawLines: string[], examplesBlockLineNumber: number)
     rows.push(trimmed);
   }
   return rows;
-}
-
-function renderSummary(sections: PreparedSection[], filterNote?: string): string[] {
-  const features = sections.flatMap((s) => s.features);
-  const units = features.flatMap((f) => f.units);
-
-  let regular = 0;
-  let outlines = 0;
-  let exampleRows = 0;
-  const tagCounts = new Map<string, number>();
-  for (const unit of units) {
-    if (unit.kind === "regular") {
-      regular += 1;
-    } else if (unit.kind === "stub") {
-      outlines += 1;
-    } else {
-      outlines += 1;
-      exampleRows += unit.rows.length;
-    }
-    for (const scenario of unitScenarios(unit)) {
-      for (const tag of scenario.tags ?? []) {
-        tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
-      }
-    }
-  }
-
-  const summary = ["## Summary"];
-  if (filterNote) {
-    summary.push(filterNote, "");
-  }
-  summary.push(
-    `- Features: ${features.length}`,
-    `- Regular scenarios: ${regular}`,
-    `- Scenario outlines: ${outlines}`,
-    `- Outline example rows: ${exampleRows}`,
-  );
-
-  const sortedTags = [...tagCounts.entries()].sort(
-    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
-  );
-  if (sortedTags.length > 0) {
-    summary.push("", "Tags:");
-    for (const [tag, count] of sortedTags) {
-      summary.push(`- ${tag} — ${count}`);
-    }
-  }
-  return summary;
 }
 
 function pushBlock(out: string[], block: string[]): void {

@@ -39,20 +39,32 @@ describe("renderScenariosMarkdown", () => {
       [
         "# Feature Catalog",
         "",
-        "## Summary",
-        "- Features: 1",
-        "- Regular scenarios: 1",
-        "- Scenario outlines: 1",
-        "- Outline example rows: 2",
-        "",
-        "Tags:",
-        "- @feature — 3",
-        "- @block — 2",
-        "- @outline — 2",
-        "- @smoke — 1",
-        "",
         "## Contents",
         "- [Checkout](#checkout)",
+        "",
+        "<details open>",
+        "<summary><strong>Summary</strong></summary>",
+        "",
+        "## Summary",
+        "| Feature | Regular | Outlines | Example rows | Total |",
+        "|---|---:|---:|---:|---:|",
+        "| Checkout | 1 | 1 | 2 | 3 |",
+        "| **Total** | **1** | **1** | **2** | **3** |",
+        "",
+        "</details>",
+        "",
+        "<details open>",
+        "<summary><strong>Tags</strong></summary>",
+        "",
+        "## Tags",
+        "| Tag | Count |",
+        "|---|---:|",
+        "| @feature | 3 |",
+        "| @block | 2 |",
+        "| @outline | 2 |",
+        "| @smoke | 1 |",
+        "",
+        "</details>",
         "",
         "<details open>",
         "<summary><strong>Checkout</strong> — 2 scenarios</summary>",
@@ -67,13 +79,15 @@ describe("renderScenariosMarkdown", () => {
         "",
         "### Scenario Outline: Sign in",
         "Tags: @feature @outline",
-        `- Given I sign in as "<user>"`,
-        `- Then I land on "<page>"`,
+        `- Given I sign in as "&lt;user&gt;"`,
+        `- Then I land on "&lt;page&gt;"`,
         "",
         "Examples:",
+        "```",
         "| user  | page      |",
         "| admin | dashboard |",
         "| guest | home      |",
+        "```",
         "",
         "</details>",
         "",
@@ -91,20 +105,32 @@ describe("renderScenariosMarkdown", () => {
       [
         "# Feature Catalog",
         "",
-        "## Summary",
-        "Filtered by tag @smoke — 1 of 1 features included.",
-        "",
-        "- Features: 1",
-        "- Regular scenarios: 1",
-        "- Scenario outlines: 0",
-        "- Outline example rows: 0",
-        "",
-        "Tags:",
-        "- @feature — 1",
-        "- @smoke — 1",
-        "",
         "## Contents",
         "- [Checkout](#checkout)",
+        "",
+        "<details open>",
+        "<summary><strong>Summary</strong></summary>",
+        "",
+        "## Summary",
+        "_Filtered by tag @smoke — 1 of 1 features included._",
+        "",
+        "| Feature | Regular | Outlines | Example rows | Total |",
+        "|---|---:|---:|---:|---:|",
+        "| Checkout | 1 | 0 | 0 | 1 |",
+        "| **Total** | **1** | **0** | **0** | **1** |",
+        "",
+        "</details>",
+        "",
+        "<details open>",
+        "<summary><strong>Tags</strong></summary>",
+        "",
+        "## Tags",
+        "| Tag | Count |",
+        "|---|---:|",
+        "| @feature | 1 |",
+        "| @smoke | 1 |",
+        "",
+        "</details>",
         "",
         "<details open>",
         "<summary><strong>Checkout</strong> — 1 scenario</summary>",
@@ -136,8 +162,8 @@ describe("renderScenariosMarkdown", () => {
       { tagFilter: ["@smoke"], filterNote: "Filtered by tag @smoke — 1 of 2 features included." }
     );
 
-    expect(md).toContain("Filtered by tag @smoke — 1 of 2 features included.");
-    expect(md).toContain("- Features: 1");
+    expect(md).toContain("_Filtered by tag @smoke — 1 of 2 features included._");
+    expect(md).toContain("| Checkout | 1 | 0 | 0 | 1 |");
     expect(md).toContain("## Checkout");
     expect(md).not.toContain("Profile");
     expect(md).not.toContain("View profile");
@@ -174,8 +200,10 @@ describe("renderScenariosMarkdown", () => {
     const md = renderScenariosMarkdown([
       { features: [{ pathRel: "features/auth.feature", rawText: raw }] },
     ]);
-    expect(md).toContain("- [Auth (<user>/<role>)](#auth-userrole)");
-    expect(md).toContain("## Auth (<user>/<role>)");
+    // Link text and headings are entity-escaped so the rendered doc shows the literal
+    // placeholders; the anchor comes from slugging the RAW title (GitHub slugs rendered text).
+    expect(md).toContain("- [Auth (&lt;user&gt;/&lt;role&gt;)](#auth-userrole)");
+    expect(md).toContain("## Auth (&lt;user&gt;/&lt;role&gt;)");
   });
 
   it("keeps a blank line after <summary> and before </details> so inner Markdown renders", () => {
@@ -196,10 +224,9 @@ describe("renderScenariosMarkdown", () => {
       { features: [{ pathRel: "features/stub.feature", rawText: stub }] },
     ]);
     expect(md).toContain("### Scenario Outline: No data");
-    expect(md).toContain("- Given I do <thing>");
+    expect(md).toContain("- Given I do &lt;thing&gt;");
     expect(md).toContain("_No examples_");
-    expect(md).toContain("- Scenario outlines: 1");
-    expect(md).toContain("- Outline example rows: 0");
+    expect(md).toContain("| Stubby | 0 | 1 | 0 | 0 |");
   });
 
   it("notes an unparsable feature under its path instead of omitting it", () => {
@@ -209,7 +236,7 @@ describe("renderScenariosMarkdown", () => {
     expect(md).toContain("- [features/broken.feature](#featuresbrokenfeature)");
     expect(md).toContain("## features/broken.feature");
     expect(md).toContain("_Could not parse_");
-    expect(md).toContain("- Features: 1");
+    expect(md).toContain("| features/broken.feature | 0 | 0 | 0 | 0 |");
   });
 
   it("drops unparsable features when a tag filter is active", () => {
@@ -218,10 +245,10 @@ describe("renderScenariosMarkdown", () => {
       { tagFilter: ["@smoke"] }
     );
     expect(md).not.toContain("_Could not parse_");
-    expect(md).toContain("- Features: 0");
+    expect(md).toContain("| **Total** | **0** | **0** | **0** | **0** |");
   });
 
-  it("renders the brand line in italics directly under the title, above Summary", () => {
+  it("renders the brand line in italics directly under the title, above the body", () => {
     const md = renderScenariosMarkdown(
       [{ features: [{ pathRel: "features/profile.feature", rawText: PROFILE }] }],
       { brandLine: "Generated by Specwright v0.2.3 — 2026-07-17 22:41" }
@@ -231,7 +258,7 @@ describe("renderScenariosMarkdown", () => {
         "# Feature Catalog",
         "_Generated by Specwright v0.2.3 — 2026-07-17 22:41_",
         "",
-        "## Summary",
+        "## Contents",
       ].join("\n")
     )).toBe(true);
   });
@@ -240,7 +267,7 @@ describe("renderScenariosMarkdown", () => {
     const md = renderScenariosMarkdown([
       { features: [{ pathRel: "features/profile.feature", rawText: PROFILE }] },
     ]);
-    expect(md.startsWith("# Feature Catalog\n\n## Summary")).toBe(true);
+    expect(md.startsWith("# Feature Catalog\n\n## Contents")).toBe(true);
   });
 
   it("shifts heading levels and nests the contents under folder entries in multi-root mode", () => {

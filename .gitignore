@@ -25,3 +25,6 @@ test-results/
 
 .claude/
 scripts/claude-sandbox.sh
+
+# Internal working documents — not part of the shipped repo
+docs/requirements/

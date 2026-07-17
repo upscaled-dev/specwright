@@ -50,8 +50,8 @@ export function renderStepsMarkdown(
 
   const out: string[] = ["# Step Definitions"];
   if (options?.brandLine) {out.push(`_${options.brandLine}_`);}
-  pushBlock(out, renderSummary(sections));
   pushBlock(out, renderContents(plans, multiRoot));
+  pushBlock(out, renderSummary(sections));
 
   const keywordLevel = multiRoot ? "###" : "##";
   for (const plan of plans) {
@@ -103,21 +103,31 @@ function renderGroup(group: KeywordGroup, keywordLevel: string): string[] {
   return lines;
 }
 
+/** Collapsible per-keyword Summary table with a bolded grand-total row. */
 function renderSummary(
   sections: Array<{ folderName?: string; defs: StepDefExport[] }>,
 ): string[] {
   const all = sections.flatMap((s) => s.defs);
-  const count = (keyword: "Given" | "When" | "Then"): number =>
-    all.filter((d) => d.keyword === keyword).length;
-  const unused = all.filter((d) => d.usageCount === 0).length;
-  return [
+  const lines = [
+    "<details open>",
+    "<summary><strong>Summary</strong></summary>",
+    "",
     "## Summary",
-    `- Total definitions: ${all.length}`,
-    `- Given: ${count("Given")}`,
-    `- When: ${count("When")}`,
-    `- Then: ${count("Then")}`,
-    `- Unused: ${unused}`,
+    "| Keyword | Definitions | Unused |",
+    "|---|---:|---:|",
   ];
+  for (const keyword of KEYWORD_ORDER) {
+    const defs = all.filter((d) => d.keyword === keyword);
+    const unused = defs.filter((d) => d.usageCount === 0).length;
+    lines.push(`| ${keyword} | ${defs.length} | ${unused} |`);
+  }
+  const totalUnused = all.filter((d) => d.usageCount === 0).length;
+  lines.push(
+    `| **Total** | **${all.length}** | **${totalUnused}** |`,
+    "",
+    "</details>",
+  );
+  return lines;
 }
 
 function usageSuffix(count: number): string {
