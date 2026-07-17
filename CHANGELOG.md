@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- **Steps panel.** A new "Specwright" container in the Activity Bar with a **Steps** view. Step definitions are grouped by `Given`/`When`/`Then` with a usage count and an unused marker on each; clicking one navigates to its `file:line`. An **Unmatched steps** section groups Gherkin steps that have no matching definition by feature file, with one-click scaffolding for a single step or a whole file.
+- **Insert Step…** command — inserts a known step pattern into the active `.feature` file as a snippet, with a tab stop per parameter and `{string}` placeholders wrapped in quotes. Also available as an inline action on step-definition rows in the panel.
+- **Export Steps** and **Export All Scenarios** commands — write Markdown catalogs (brand line, Summary section, linked Table of Contents, collapsible sections). The scenario export first asks for a scope — all features, by tag, or a multi-select of feature files — and records the active filter in its Summary; features with no matching scenarios are omitted.
+- CodeLens Run/Debug links now render on the `Example:` and `Scenario Template:` Gherkin synonyms, alongside `Scenario:` and `Scenario Outline:`.
+- Per-scenario durations in the Test Explorer, shown next to each scenario after a run.
+- Actionable error hints when the `npx`, `playwright`, or `bddgen` binary is missing — a run that fails with a "command not found"/"is not recognized" shell error now names the binary and points at installing the project's dependencies, instead of surfacing only raw shell noise.
+- New setting `playwrightBddRunner.enableStepsPanel` (default `true`): show or hide the Steps panel. Disabling it releases the panel and its share of the step-usage index.
+
+### Changed
+
+- The Test Explorer stop button now cancels the run: it kills the Playwright process tree (`taskkill /T` on Windows, process-group `SIGTERM` elsewhere), marks any not-yet-run items skipped, and no longer reports the killed subtree as failed.
+- The `reporter` setting now also accepts a comma-separated list, the `github`/`blob`/`null` built-ins, and custom reporter module paths — validation checks each token rather than the whole string.
+- The Feature-Based (hierarchical) view refreshes incrementally when a single `.feature` file is saved, re-reading just that file instead of re-globbing and re-parsing the whole workspace. Content-grouped views (tags, scenario type, flat) keep the full refresh.
+- Run summaries in the Test Results panel report the run's measured wall-clock duration rather than the sum of per-scenario times (which double-counted multi-project and retried entries).
+- The release script now bumps `package-lock.json` in lockstep with `package.json`, so a release commit no longer leaves the lockfile stale (the drift that dirtied the next `npm ci`/install).
+
+### Fixed
+
+- Flaky tests that fail then pass on retry now map to **passed**, matching Playwright's exit code, instead of showing as failed.
+- A feature, Scenario Outline, or tag run that fails **before** producing any per-scenario results (e.g. a bddgen or compile error) now marks the parent item failed instead of leaving every scenario skipped and hiding the failure. The deliberate "no tests found" out-of-scope case is still explained as skipped.
+- Scenario Outline titles that contain placeholders (e.g. `Add (<a>/<b>) widgets`) now resolve their per-row statuses even when the generated-spec line mapping is unavailable, and no longer falsely warn that no results were attributed.
+- Multi-project runs use worst-wins when the same scenario runs more than once (chromium + firefox, `repeat-each`), so a failure in one project is no longer masked by a pass in another.
+- bddgen errors from runs where codegen is delegated to `defineBddProject` now reach the Problems panel.
+- Cancelled runs settle the status bar into a "cancelled" state instead of leaving the spinner running.
+- Windows: drive-letter casing no longer breaks run-summary scoping or multi-root debug folder matching (`c:\` vs `C:\` mismatches are canonicalized).
 
 ## [0.2.3] - 2026-07-15
 ### Fixed

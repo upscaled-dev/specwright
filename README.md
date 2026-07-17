@@ -32,7 +32,8 @@ Only your playwright-bdd configuration is required. If your project layout diffe
 - **Three run profiles**: Run, Debug (breakpoints in `.feature` files and step-definition `.ts` files just work), and Run in Parallel (prompts once for a worker count, then remembers it).
 - **Five organization strategies**, switchable on the fly: hierarchical by feature, by tag, by file, by scenario type, or flat.
 - **Scenario Outline rows as first-class items** — every `Examples:` row is individually runnable and individually reported.
-- **Exact result mapping** back to the right `.feature` line via playwright-bdd's embedded source data, so pass/fail status sticks to the correct tree item — even for outline example rows.
+- **Exact result mapping** back to the right `.feature` line via playwright-bdd's embedded source data, so pass/fail status sticks to the correct tree item — even for outline example rows. Flaky tests that pass on retry map to passed; multi-project runs take the worst result.
+- **Per-scenario durations** shown after a run, and a stop button that actually cancels — it kills the Playwright process tree and marks the rest skipped.
 
 ![Switching between tag, file, scenario-type, hierarchical, and flat views](images/views.gif)
 
@@ -73,6 +74,19 @@ Set breakpoints directly in the `.feature` file — the breakpoint gutter is ena
 
 → [docs/features.md](docs/features.md)
 
+### Steps panel
+
+A **Specwright** container in the Activity Bar hosts a **Steps** view:
+
+- **Step definitions** grouped by `Given`/`When`/`Then`, each with a usage count and an unused marker; click one to open its definition.
+- **Unmatched steps** grouped by feature file, with one-click scaffolding for a single step or a whole file.
+- **Insert Step…** picks a known step pattern and inserts it into the active `.feature` file as a snippet, with a tab stop per parameter.
+- **Export Steps** and **Export All Scenarios** write shareable Markdown catalogs — a summary, a linked table of contents, and collapsible sections. The scenario export can be scoped to all features, a tag, or a hand-picked set.
+
+Toggle the panel with `playwrightBddRunner.enableStepsPanel`.
+
+→ [docs/features.md#steps-panel](docs/features.md#steps-panel)
+
 ### Authoring `.feature` files
 
 - **Syntax highlighting** built in — no second extension required.
@@ -107,8 +121,8 @@ code --install-extension upscaled-dev.specwright
 
 ## Documentation
 
-- [docs/runs.md](docs/runs.md) — running tests, status bar, CodeLens, parallel, pre-run hook
-- [docs/features.md](docs/features.md) — language-server features for `.feature` and step files
+- [docs/runs.md](docs/runs.md) — running tests, cancellation, status bar, CodeLens, parallel, pre-run hook
+- [docs/features.md](docs/features.md) — language-server features for `.feature` and step files, the Steps panel, and Markdown exports
 - [docs/settings.md](docs/settings.md) — full settings reference + compatibility behavior
 - [docs/development.md](docs/development.md) — building, testing, releasing, project layout
 - [CHANGELOG.md](CHANGELOG.md) — release notes

@@ -38,7 +38,9 @@ Targeting any scenario from the Test Explorer or CodeLens runs a shell command o
 - **Scenario selection** uses `--grep` against the scenario name (Playwright doesn't support `.feature`-line addressing). A whole-Scenario-Outline run greps the outline name so every expanded example row is included.
 - **Feature-file selection** greps by the `Feature:` title (not the filename), so running one feature can't accidentally match another feature whose scenario titles happen to contain the filename.
 - **Result mapping** back to the Test Explorer reads the Playwright JSON reporter — the extension appends `--reporter=json` alongside whatever reporter you configured so the user-visible output isn't disturbed. Because playwright-bdd's report carries no `.feature` source line, the extension reads the `bddFileData` block embedded in each generated spec to map every result (including `Example #N` outline rows, which the report only labels by index) back to its exact `.feature` path and line. So status sticks to the right tree item even without source annotations.
-- **`bddgen` failures** are parsed for `feature_file:line` markers and republished as `Error`-severity diagnostics on the offending `.feature` line (source `Playwright-BDD`, code `bddgen-error`). These diagnostics clear automatically on the next successful run.
+- **`bddgen` failures** are parsed for `feature_file:line` markers and republished as `Error`-severity diagnostics on the offending `.feature` line (source `Playwright-BDD`, code `bddgen-error`). These diagnostics clear automatically on the next successful run. When codegen is delegated to `defineBddProject` (so `bddgen` runs inside `playwright test` rather than as a separate step), those generation errors reach the Problems panel too.
+- **Missing binaries** produce an actionable hint. If `npx`, `playwright`, or `bddgen` isn't found (a `command not found` / `is not recognized` shell error), the failure names the binary and points at installing the project's dependencies, instead of surfacing only raw shell noise.
+- **Runs that produce no per-scenario results** fail the targeted item rather than hide the failure. When a run fails before any scenario result exists — a bddgen or compile error — the feature/outline/tag parent is marked failed (its children stay skipped), except for the deliberate "no tests found" out-of-scope case, which stays explained as skipped (see [Test Results output](#test-results-output)).
 - **Debug runs split the command.** Instead of chaining everything with `&&`, the executor runs `bddgen` as a separate step first — so the generated specs exist before feature-file breakpoints are mirrored into them — and then launches only the `playwright test` half under the debugger. See [Debugging with breakpoints](#debugging-with-breakpoints).
 - **Parallel execution** appends `--workers=<maxParallelProcesses>` when `playwrightBddRunner.parallelExecution` is `true`. The "Run in Parallel" Test Explorer profile also forces this flag, independent of that setting. On first use in a workspace the profile prompts for a worker count (1 / 2 / 4 / 8 / 16 / Custom) and persists the choice to `playwrightBddRunner.maxParallelProcesses`; subsequent runs use the stored value silently. If `maxParallelProcesses` is ever invalid, the profile auto-adjusts to `CPU cores - 2` (clamped to 1–16).
 - If your `playwright.config.ts` already runs `bddgen` automatically (via `defineBddProject`), set `playwrightBddRunner.bddgenCommand` to an empty string to skip the explicit codegen step.
@@ -67,6 +69,14 @@ Each row of every `Examples:` block is discovered as its own runnable item named
 ![Scenario Outline examples expanded in the Test Explorer](../images/multi_scenario_outline_explorer.png)
 ![Running a single Scenario Outline example row](../images/running_example.gif)
 
+### Cancelling a run
+
+The Test Explorer stop button cancels the run. The extension kills the spawned Playwright process tree (`taskkill /T` on Windows, a process-group `SIGTERM` elsewhere, so a `webServer` or browser child can't outlive the run) and marks any item that hasn't started yet — and its descendants — skipped. The killed subtree is *not* reported as failed, and the status bar settles into its `cancelled` state.
+
+### Durations and flaky runs
+
+After a run, each scenario shows its measured duration in the Test Explorer. Result mapping follows Playwright's own exit code: a test that fails then passes on retry (Playwright's "flaky" case) maps to **passed**, and when the same scenario runs in more than one project (multi-project, `repeat-each`) the worst outcome wins.
+
 ## Debugging with breakpoints
 
 Click the gutter in a `.feature` file to set a breakpoint — the extension enables VS Code's breakpoint gutter for Gherkin — then start any Debug action (Debug Scenario / Scenario Outline / Example, or the Test Explorer Debug profile). What happens on launch:
@@ -89,8 +99,8 @@ Implemented in [src/core/breakpoint-mirror.ts](../src/core/breakpoint-mirror.ts)
 Implemented in [src/parsers/feature-parser.ts](../src/parsers/feature-parser.ts) (`provideScenarioCodeLenses`). Four kinds of CodeLens render in a `.feature` editor when `playwrightBddRunner.enableCodeLens` is `true`:
 
 - **Feature-level**, anchored to the `Feature:` line: "Run Feature File", plus one "Run with @tag" link for every unique tag found anywhere in the file.
-- **Scenario-level**, above each `Scenario:`: "Run Scenario" and "Debug Scenario".
-- **Scenario Outline-level**, above each `Scenario Outline:`: "Run Scenario Outline" and "Debug Scenario Outline".
+- **Scenario-level**, above each `Scenario:` (and its `Example:` synonym): "Run Scenario" and "Debug Scenario".
+- **Scenario Outline-level**, above each `Scenario Outline:` (and its `Scenario Template:` synonym): "Run Scenario Outline" and "Debug Scenario Outline".
 - **Example-level**, above each row inside an `Examples:` block: "Run Example" and "Debug Example", scoped to that single row.
 
 ![Run / Debug links above scenarios via CodeLens](../images/running_feature_code_lens.gif)
@@ -99,9 +109,10 @@ Implemented in [src/parsers/feature-parser.ts](../src/parsers/feature-parser.ts)
 
 A status bar item on the left shows the current run state:
 
-- `Playwright-BDD` when idle.
-- `Playwright-BDD: running…` while a Playwright invocation is in flight.
-- `Playwright-BDD: passed N` or `Playwright-BDD: N passed, M failed` after the last run, until the next one starts.
+- `Specwright` when idle.
+- `Specwright: running…` while a Playwright invocation is in flight.
+- `Specwright: passed N` or `Specwright: N passed, M failed` after the last run, until the next one starts.
+- `Specwright: cancelled` when a run is stopped — a deliberate stop is neither pass nor fail, so the spinner is cleared rather than left running.
 
 Clicking the item focuses the test output channel (`Specwright: Show Test Output`). The item is always visible — there is no setting to hide it. Use VS Code's standard status bar controls to suppress it if needed.
 
@@ -112,7 +123,8 @@ After a run, the Test Explorer's **Test Results** panel shows a per-scenario sum
 - Each scenario heading, then its Gherkin steps with durations — **green** for passed steps, **red** for the failed one. Scenario Outline examples render as `Scenario Outline: <name> — Example #N` with the example values already substituted into the step text, so you can see exactly which inputs passed or failed.
 - For a failure, the step that failed is followed by the `.feature` location, the error message, and the raw stack frames (left intact so the panel turns `file:line:col` into clickable links into the failing step-definition code). The same error + stack is attached to the failing item, so it also shows inline and in the failure peek.
 - **Missing step definitions.** When `missingSteps: "skip-scenario"` causes bddgen to skip scenarios, its `Missing step definitions:` block (with the suggested step snippets) is surfaced here too, followed by a pointer to the *Generate Missing Step Definitions* command.
-- **Out-of-scope features.** If a run produces no results for the feature you targeted — e.g. the `.feature` lives outside playwright-bdd's configured `features` glob, so bddgen never generates it — the panel flags it and suggests the glob to add to `defineBddConfig({ features: [...] })`, rather than silently leaving the items skipped.
+- **Out-of-scope features.** If a run produces no results for the feature you targeted — e.g. the `.feature` lives outside playwright-bdd's configured `features` glob, so bddgen never generates it — the panel flags it and suggests the glob to add to `defineBddConfig({ features: [...] })`, rather than silently leaving the items skipped. A genuine failure that also produces no results is failed rather than mislabelled as out-of-scope.
+- **Run footer.** A tally line closes the summary with the run's measured wall-clock duration (preferred over summing per-scenario times, which double-counts multi-project and retried entries).
 
 ## Commands
 
@@ -149,6 +161,15 @@ These take their target from the arguments the invoking surface passes in (file 
 ### Code generation
 
 - `generateStepDefinitions` — scan the active `.feature` file for unmatched steps and insert typed stubs into a chosen step file. See [features.md → step-definition generation](features.md#step-definition-generation).
+
+### Steps panel
+
+Detailed in [features.md → Steps panel](features.md#steps-panel).
+
+- `refreshStepsPanel` — force a rescan of the step-usage index behind the panel (toolbar button).
+- `exportSteps` / `exportScenarios` — write the Markdown catalogs (toolbar buttons; also in the palette).
+- `insertStep` — insert a known step pattern into the active `.feature` editor as a snippet.
+- `scaffoldStepFromPanel` / `scaffoldFeatureFromPanel` — panel-only inline actions (hidden from the palette) that scaffold a single unmatched step or every unmatched step in a file.
 
 ### Diagnostics
 

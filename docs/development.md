@@ -15,7 +15,7 @@ Unit tests use [Vitest](https://vitest.dev/) with a minimal stub of the `vscode`
 
 ## Releasing
 
-Use the release script — it bumps the version, updates `CHANGELOG.md`, runs the full pipeline, packages the `.vsix`, and creates a git commit + tag. It stops before pushing so you can review.
+Use the release script — it bumps the version in `package.json` and `package-lock.json` in lockstep (so the lockfile can't drift and dirty the next `npm ci`/install), updates `CHANGELOG.md`, runs the full pipeline, packages the `.vsix`, and creates a git commit + tag. It stops before pushing so you can review.
 
 ```bash
 npm run release            # default: patch bump
@@ -61,6 +61,8 @@ src/
   commands/
     command-manager.ts                    # registers all playwrightBddRunner.* commands
     generate-steps.ts                     # orchestrates "Generate Missing Step Definitions"
+    insert-step.ts                        # "Insert Step…" snippet builder + QuickPick
+    export-catalogs.ts                    # orchestrates Export Steps / Export All Scenarios
     prompt-worker-count.ts                # QuickPick + persistence for parallel-profile workers
   core/
     extension-config.ts                   # reads playwrightBddRunner.* settings
@@ -71,6 +73,10 @@ src/
     test-organization.ts                  # 5 tree-grouping strategies
     provider-registry.ts                  # owns lifecycle of reactive providers
   generators/step-stub-generator.ts       # pure: parameter inference, keyword normalization, stub formatting
+  exporters/
+    steps-markdown.ts                     # pure: renders the Export Steps catalog
+    scenarios-markdown.ts                 # pure: renders the Export All Scenarios catalog
+    markdown-slugger.ts                   # pure: GitHub-style anchor slugs for the exports' TOC
   parsers/
     feature-parser.ts                     # Gherkin parser
     bdd-file-data-parser.ts               # extracts the bddFileData block from generated specs
@@ -88,7 +94,8 @@ src/
     step-hover-provider.ts                # hover tooltip with matching def pattern + source link
     step-reference-provider.ts            # Find All References from a step def into .feature files
     step-usage-codelens-provider.ts       # "Used N times" CodeLens above each Given/When/Then
-    step-usage-index.ts                   # shared usage index used by references / CodeLens / unused diagnostic
+    step-usage-index.ts                   # shared usage index used by references / CodeLens / unused diagnostic / Steps panel
+    steps-tree-data-provider.ts           # the Activity Bar "Steps" tree view (definitions + unmatched steps)
     unused-step-diagnostics-provider.ts   # Information diagnostic on never-matched step defs
     step-diagnostics-provider.ts          # unmatched / ambiguous / outline diagnostics in .feature files
     step-code-action-provider.ts          # quick-fixes for unmatched and ambiguous steps
@@ -111,6 +118,8 @@ src/
     logger.ts
     shell.ts                              # shell-safe quoting
     workspace-path.ts                     # shared toWorkspaceRelative helper
+    working-dir.ts                        # per-run cwd inference + drive-letter canonicalization
+    discovery-excludes.ts                 # shared built-in discovery excludes
     cucumber-autocomplete-detector.ts     # checks for alexkrechik.cucumberautocomplete
   test/
     __mocks__/vscode.ts                   # vitest mock of `vscode`

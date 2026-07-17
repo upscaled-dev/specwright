@@ -15,12 +15,13 @@ All settings live under `playwrightBddRunner.*` in your VS Code Settings (`Cmd/C
 | `tags` | string | `` | Default tag expression, e.g. `@smoke and not @wip`. |
 | `parallelExecution` | boolean | `false` | Adds `--workers=<maxParallelProcesses>` to Playwright. |
 | `maxParallelProcesses` | number (1–16) | `4` | Worker count when parallel is enabled. |
-| `reporter` | enum | `list` | One of `list`/`line`/`dot`/`html`/`json`/`junit`. The JSON reporter is appended in addition, for result mapping. |
+| `reporter` | string | `list` | The Settings dropdown offers `list`/`line`/`dot`/`html`/`json`/`junit`, but the value also accepts a comma-separated list, the `github`/`blob`/`null` built-ins, and custom reporter module paths (edit `settings.json` directly for those). The JSON reporter is appended in addition, for result mapping. |
 | `useConfigReporters` | boolean | `false` | Run the reporters declared in your Playwright config instead of injecting `--reporter` flags, so a custom reporter can run alongside the extension's Test Results panel. Requires a bare `['json']` entry (no `outputFile`) in your config's `reporter` array — the extension steers it to its temp file via `PLAYWRIGHT_JSON_OUTPUT_NAME` and parses that. |
 | `dryRun` | boolean | `false` | Passes `--list` to Playwright. |
 | `enableCodeLens` | boolean | `true` | Run/debug CodeLens on feature files. Disable if conflicting with another extension. |
 | `enableStepDefinitionNavigation` | boolean | `true` | Go to Definition from a Gherkin step to its TypeScript step definition. |
 | `enableStepDiagnostics` | boolean | `true` | Master switch for the unmatched-step, ambiguous-step, and Scenario Outline diagnostics in `.feature` files. |
+| `enableStepsPanel` | boolean | `true` | Show the Specwright Steps panel in the Activity Bar. Disabling disposes the panel and releases its share of the step-usage index. See [features.md → Steps panel](features.md#steps-panel). |
 | `enableStepAutocomplete` | `auto` / `on` / `off` | `auto` | Suggest existing playwright-bdd step definitions when typing a step. |
 | `enableTagAutocomplete` | `auto` / `on` / `off` | `auto` | Suggest existing tags when typing `@`. |
 | `enableStepHover` | `auto` / `on` / `off` | `auto` | Show the matching step-definition pattern and source location when hovering a step. |
