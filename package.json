@@ -472,7 +472,9 @@
       "specwright": [
         {
           "id": "playwrightBddRunner.stepsExplorer",
-          "name": "Steps"
+          "name": "Steps",
+          "icon": "media/activity-bar-icon.svg",
+          "contextualTitle": "Specwright BDD"
         }
       ]
     },
