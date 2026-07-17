@@ -66,6 +66,11 @@ export interface ParsedStepDef {
   pattern: string;
   /** True when the source was a regex literal (`/.../`), false for Cucumber-expression strings. */
   isRegex: boolean;
+  /**
+   * The call keyword the definition registered under. Optional so callers that build a
+   * ParsedStepDef inline (e.g. unused-step diagnostics) don't have to supply it.
+   */
+  keyword?: "Given" | "When" | "Then" | "Step" | undefined;
 }
 
 const STEP_LINE_RE = new RegExp(`^\\s*(?:${STEP_KEYWORDS})\\s+(.+?)\\s*$`);
@@ -140,7 +145,13 @@ export function extractStepDefsFromSource(content: string): ParsedStepDef[] {
       : safeCompileRegex(`^${patternToRegexSource(parsed.text)}$`);
     if (!regex) {continue;}
 
-    defs.push({ line: i, regex, pattern: parsed.text, isRegex: parsed.isRegex });
+    defs.push({
+      line: i,
+      regex,
+      pattern: parsed.text,
+      isRegex: parsed.isRegex,
+      keyword: callMatch[2] as "Given" | "When" | "Then" | "Step",
+    });
   }
 
   return defs;

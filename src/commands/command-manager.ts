@@ -6,6 +6,10 @@ import { RunOutputResult } from "../core/test-executor";
 import { GenerateStepsCommand } from "./generate-steps";
 import { StepResolver, UnmatchedStep } from "../providers/step-resolver";
 import { StepDefinitionProvider } from "../providers/step-definition-provider";
+import { StepUsageIndex } from "../providers/step-usage-index";
+import { StepDefinitionNode, UnmatchedFileNode, UnmatchedStepNode } from "../providers/steps-tree-data-provider";
+import { runInsertStep } from "./insert-step";
+import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -30,6 +34,10 @@ interface TestProviderLike {
     result: RunOutputResult,
     target?: { lineNumber?: number }
   ) => void;
+}
+
+interface UsageIndexHost {
+  getUsageIndex(): StepUsageIndex;
 }
 
 export interface CommandOptions {
@@ -61,6 +69,10 @@ export class CommandManager {
   private readonly parsedFeatureCache = new Map<string, { mtimeMs: number; parsed: ParsedFeature }>();
   private generateStepsCommand: GenerateStepsCommand | undefined;
   private generateStepsResolver: StepResolver | undefined;
+  private stepDefinitionProvider: StepDefinitionProvider | undefined;
+  private stepDefinitionResolver: StepResolver | undefined;
+  private stepDefinitionConfigListener: vscode.Disposable | undefined;
+  private usageIndexHost: UsageIndexHost | undefined;
 
   public static create(context: PlaywrightBddExtensionContext): CommandManager {
     return new CommandManager(context);
@@ -76,6 +88,10 @@ export class CommandManager {
 
   public setTestProvider(testProvider: unknown): void {
     this.testProvider = testProvider;
+  }
+
+  public setUsageIndexHost(host: UsageIndexHost): void {
+    this.usageIndexHost = host;
   }
 
   /**
@@ -122,6 +138,12 @@ export class CommandManager {
         { command: "playwrightBddRunner.generateStepDefinitions", title: "Generate Missing Step Definitions", category: CATEGORY, handler: this.generateStepDefinitions.bind(this) },
         { command: "playwrightBddRunner.generateStepDefinitionForStep", title: "Create Step Definition For Step", category: CATEGORY, handler: this.generateStepDefinitionForStep.bind(this) },
         { command: "playwrightBddRunner.goToStepDefinition", title: "Go to Step Definition", category: CATEGORY, handler: this.goToStepDefinition.bind(this) },
+        { command: "playwrightBddRunner.refreshStepsPanel", title: "Refresh Steps Panel", category: CATEGORY, handler: this.refreshStepsPanel.bind(this) },
+        { command: "playwrightBddRunner.exportSteps", title: "Export Steps", category: CATEGORY, handler: this.exportSteps.bind(this) },
+        { command: "playwrightBddRunner.exportScenarios", title: "Export All Scenarios", category: CATEGORY, handler: this.exportScenarios.bind(this) },
+        { command: "playwrightBddRunner.insertStep", title: "Insert Step…", category: CATEGORY, handler: this.insertStep.bind(this) },
+        { command: "playwrightBddRunner.scaffoldStepFromPanel", title: "Create Step Definition", category: CATEGORY, handler: this.scaffoldStepFromPanel.bind(this) },
+        { command: "playwrightBddRunner.scaffoldFeatureFromPanel", title: "Generate Missing Step Definitions", category: CATEGORY, handler: this.scaffoldFeatureFromPanel.bind(this) },
       ];
 
       for (const cmd of commands) {
@@ -412,6 +434,11 @@ export class CommandManager {
       this.generateStepsResolver = undefined;
       this.generateStepsCommand = undefined;
     }
+    if (this.stepDefinitionConfigListener) {
+      try { this.stepDefinitionConfigListener.dispose(); } catch { /* ignore */ }
+      this.stepDefinitionConfigListener = undefined;
+    }
+    this.invalidateStepDefinitionProvider();
   }
 
   private clearCommands(): void {
@@ -493,6 +520,55 @@ export class CommandManager {
     await command.executeForSteps(featureUri, [step]);
   }
 
+  private requireUsageIndexHost(action: string): UsageIndexHost | undefined {
+    if (!this.usageIndexHost) {
+      this.showErrorMessage(`${action} is unavailable: provider registry not wired.`);
+      return undefined;
+    }
+    return this.usageIndexHost;
+  }
+
+  private refreshStepsPanel(): void {
+    // rescan() fires onDidChangeUsages, which the Steps tree provider maps to a tree refresh.
+    this.requireUsageIndexHost("Refresh Steps Panel")?.getUsageIndex().rescan();
+  }
+
+  private async exportSteps(): Promise<void> {
+    const host = this.requireUsageIndexHost("Export Steps");
+    if (!host) {return;}
+    await exportStepsCatalog(host.getUsageIndex());
+  }
+
+  private async exportScenarios(): Promise<void> {
+    await exportScenariosCatalog(this.context);
+  }
+
+  private async insertStep(...args: CommandArguments): Promise<void> {
+    const host = this.requireUsageIndexHost("Insert Step");
+    if (!host) {return;}
+    const node = args[0] as StepDefinitionNode | undefined;
+    const preselected =
+      node?.kind === "stepDefinition"
+        ? { pattern: node.pattern, isRegex: node.isRegex }
+        : undefined;
+    await runInsertStep(
+      async () => [...(await host.getUsageIndex().getAllUsages()).keys()],
+      preselected
+    );
+  }
+
+  private async scaffoldStepFromPanel(...args: CommandArguments): Promise<void> {
+    const node = args[0] as UnmatchedStepNode | undefined;
+    if (node?.kind !== "unmatchedStep") {return;}
+    await this.generateStepDefinitionForStep(vscode.Uri.file(node.featurePath), node.step);
+  }
+
+  private async scaffoldFeatureFromPanel(...args: CommandArguments): Promise<void> {
+    const node = args[0] as UnmatchedFileNode | undefined;
+    if (node?.kind !== "unmatchedFile") {return;}
+    await this.generateStepDefinitions(node.featurePath);
+  }
+
   /**
    * Jump from the Gherkin step under the cursor to its matching `Given/When/Then` step
    * definition. Reuses the same resolver as the F12 DefinitionProvider, but surfaces it as an
@@ -512,7 +588,7 @@ export class CommandManager {
     }
 
     const position = editor.selection.active;
-    const provider = new StepDefinitionProvider(this.context.config.stepDefinitionPaths, this.logger);
+    const provider = this.getStepDefinitionProvider();
     const locations = await provider.provideDefinition(doc, position);
     if (!locations || locations.length === 0) {
       vscode.window.showInformationMessage(
@@ -551,6 +627,34 @@ export class CommandManager {
       );
     }
     return this.generateStepsCommand;
+  }
+
+  // A StepDefinitionProvider bakes in `stepDefinitionPaths` and caches the scanned
+  // step-definition files, so a fresh instance per invocation would re-scan every time.
+  // We own its resolver explicitly (the provider isn't disposable, and its file watchers
+  // must be torn down) and drop the whole cache on any config change so a changed
+  // `stepDefinitionPaths` setting rebuilds the provider against the new globs.
+  private getStepDefinitionProvider(): StepDefinitionProvider {
+    if (!this.stepDefinitionProvider) {
+      this.stepDefinitionResolver = new StepResolver(this.context.logger);
+      this.stepDefinitionProvider = new StepDefinitionProvider(
+        this.context.config.stepDefinitionPaths,
+        this.logger,
+        this.stepDefinitionResolver
+      );
+      this.stepDefinitionConfigListener ??= this.context.config.addChangeListener(() => {
+        this.invalidateStepDefinitionProvider();
+      });
+    }
+    return this.stepDefinitionProvider;
+  }
+
+  private invalidateStepDefinitionProvider(): void {
+    if (this.stepDefinitionResolver) {
+      try { this.stepDefinitionResolver.dispose(); } catch { /* ignore */ }
+      this.stepDefinitionResolver = undefined;
+    }
+    this.stepDefinitionProvider = undefined;
   }
 
   private debugOrganization(): void {

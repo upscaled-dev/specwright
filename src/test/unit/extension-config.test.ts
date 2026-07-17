@@ -48,6 +48,7 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   stepDefinitionExcludePaths: (c) => c.stepDefinitionExcludePaths,
   enableStepDefinitionNavigation: (c) => c.enableStepDefinitionNavigation,
   enableStepDiagnostics: (c) => c.enableStepDiagnostics,
+  enableStepsPanel: (c) => c.enableStepsPanel,
   enableStepAutocomplete: (c) => c.stepAutocompleteMode,
   enableTagAutocomplete: (c) => c.tagAutocompleteMode,
   enableStepHover: (c) => c.stepHoverMode,
@@ -102,6 +103,23 @@ describe("ExtensionConfig.validate", () => {
     ).toThrow(/testFilePattern/);
     expect(() =>
       ExtensionConfig.create(configReturning({ reporter: "tap" }), false).validate()
+    ).toThrow(/reporter/);
+  });
+
+  it("accepts extra built-ins, module paths, and comma-separated reporter lists", () => {
+    for (const reporter of ["github", "blob", "null", "list,json", "./my-reporter.ts", "reporters/custom.js"]) {
+      expect(() =>
+        ExtensionConfig.create(configReturning({ reporter }), false).validate()
+      ).not.toThrow();
+    }
+  });
+
+  it("rejects a reporter list with an empty or unknown token", () => {
+    expect(() =>
+      ExtensionConfig.create(configReturning({ reporter: "list," }), false).validate()
+    ).toThrow(/reporter/);
+    expect(() =>
+      ExtensionConfig.create(configReturning({ reporter: "list,tap" }), false).validate()
     ).toThrow(/reporter/);
   });
 });

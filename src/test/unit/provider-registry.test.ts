@@ -40,6 +40,10 @@ interface FakeConfigOptions {
   unusedStepDiagnosticsMode: "auto" | "on" | "off";
   stepLiteralPromotionMode: "auto" | "on" | "off";
   stepUsageCodeLensMode: "auto" | "on" | "off";
+  stepReferencesMode: "auto" | "on" | "off";
+  stepHoverMode: "auto" | "on" | "off";
+  tableFormattingMode: "auto" | "on" | "off";
+  enableStepsPanel: boolean;
   testFilePattern: string;
 }
 
@@ -55,6 +59,10 @@ function makeFakeConfig(opts: Partial<FakeConfigOptions> & Pick<FakeConfigOption
     unusedStepDiagnosticsMode: "off",
     stepLiteralPromotionMode: "off",
     stepUsageCodeLensMode: "off",
+    stepReferencesMode: "off",
+    stepHoverMode: "off",
+    tableFormattingMode: "off",
+    enableStepsPanel: false,
     testFilePattern: "**/*.feature",
     ...opts,
   };
@@ -69,6 +77,10 @@ function makeFakeConfig(opts: Partial<FakeConfigOptions> & Pick<FakeConfigOption
     get unusedStepDiagnosticsMode(): "auto" | "on" | "off" { return state.unusedStepDiagnosticsMode; },
     get stepLiteralPromotionMode(): "auto" | "on" | "off" { return state.stepLiteralPromotionMode; },
     get stepUsageCodeLensMode(): "auto" | "on" | "off" { return state.stepUsageCodeLensMode; },
+    get stepReferencesMode(): "auto" | "on" | "off" { return state.stepReferencesMode; },
+    get stepHoverMode(): "auto" | "on" | "off" { return state.stepHoverMode; },
+    get tableFormattingMode(): "auto" | "on" | "off" { return state.tableFormattingMode; },
+    get enableStepsPanel(): boolean { return state.enableStepsPanel; },
     get testFilePattern(): string { return state.testFilePattern; },
     addChangeListener(cb: () => void): { dispose: () => void } {
       listener = cb;
@@ -659,6 +671,127 @@ describe("ProviderRegistry", () => {
       const secondIndex = (registry as unknown as RegistryInternals).tagIndex;
       expect(secondIndex).toBeDefined();
       expect(secondIndex).not.toBe(firstIndex);
+    });
+  });
+
+  describe("steps panel lifecycle", () => {
+    interface MockableWindow {
+      __treeViewCounters: { createCount: number; disposeCount: number };
+      __resetTreeViewCounters: () => void;
+    }
+    const win = vscode.window as unknown as MockableWindow;
+
+    beforeEach(() => {
+      win.__resetTreeViewCounters();
+    });
+
+    it("creates the tree view and the shared usage index when enableStepsPanel is true", () => {
+      const { config } = makeFakeConfig({
+        enableCodeLens: false,
+        enableStepDefinitionNavigation: false,
+        stepDefinitionPaths: [],
+        enableStepsPanel: true,
+      });
+      const registry = new ProviderRegistry(config, stubFeatureParser, stubLogger);
+      registry.applyCurrent();
+
+      expect(win.__treeViewCounters.createCount).toBe(1);
+      expect(registry.stepsPanelActive).toBe(true);
+      expect(registry.stepUsageIndexActive).toBe(true);
+      registry.dispose();
+    });
+
+    it("stays inactive when enableStepsPanel is false", () => {
+      const { config } = makeFakeConfig({
+        enableCodeLens: false,
+        enableStepDefinitionNavigation: false,
+        stepDefinitionPaths: [],
+        enableStepsPanel: false,
+      });
+      const registry = new ProviderRegistry(config, stubFeatureParser, stubLogger);
+      registry.applyCurrent();
+
+      expect(win.__treeViewCounters.createCount).toBe(0);
+      expect(registry.stepsPanelActive).toBe(false);
+      expect(registry.stepUsageIndexActive).toBe(false);
+      registry.dispose();
+    });
+
+    it("disposes the view and reclaims the usage index when toggled off with no other consumers", () => {
+      const ctx = makeFakeConfig({
+        enableCodeLens: false,
+        enableStepDefinitionNavigation: false,
+        stepDefinitionPaths: [],
+        enableStepsPanel: true,
+      });
+      const registry = new ProviderRegistry(ctx.config, stubFeatureParser, stubLogger);
+      registry.applyCurrent();
+      expect(registry.stepsPanelActive).toBe(true);
+
+      ctx.set({ enableStepsPanel: false });
+      ctx.fireChange();
+
+      expect(win.__treeViewCounters.disposeCount).toBe(1);
+      expect(registry.stepsPanelActive).toBe(false);
+      expect(registry.stepUsageIndexActive).toBe(false);
+      registry.dispose();
+    });
+
+    it("keeps the usage index alive when another consumer still needs it", () => {
+      const ctx = makeFakeConfig({
+        enableCodeLens: false,
+        enableStepDefinitionNavigation: false,
+        stepDefinitionPaths: ["a/**/*.ts"],
+        stepUsageCodeLensMode: "on",
+        enableStepsPanel: true,
+      });
+      const registry = new ProviderRegistry(ctx.config, stubFeatureParser, stubLogger);
+      registry.applyCurrent();
+      expect(registry.stepsPanelActive).toBe(true);
+      expect(registry.usageCodeLensActive).toBe(true);
+
+      ctx.set({ enableStepsPanel: false });
+      ctx.fireChange();
+
+      expect(registry.stepsPanelActive).toBe(false);
+      expect(registry.stepUsageIndexActive).toBe(true);
+      registry.dispose();
+    });
+
+    it("re-creates the view on off->on re-toggle", () => {
+      const ctx = makeFakeConfig({
+        enableCodeLens: false,
+        enableStepDefinitionNavigation: false,
+        stepDefinitionPaths: [],
+        enableStepsPanel: true,
+      });
+      const registry = new ProviderRegistry(ctx.config, stubFeatureParser, stubLogger);
+      registry.applyCurrent();
+
+      ctx.set({ enableStepsPanel: false });
+      ctx.fireChange();
+      ctx.set({ enableStepsPanel: true });
+      ctx.fireChange();
+
+      expect(win.__treeViewCounters.createCount).toBe(2);
+      expect(registry.stepsPanelActive).toBe(true);
+      registry.dispose();
+    });
+
+    it("disposes the tree view on dispose()", () => {
+      const { config } = makeFakeConfig({
+        enableCodeLens: false,
+        enableStepDefinitionNavigation: false,
+        stepDefinitionPaths: [],
+        enableStepsPanel: true,
+      });
+      const registry = new ProviderRegistry(config, stubFeatureParser, stubLogger);
+      registry.applyCurrent();
+
+      registry.dispose();
+
+      expect(win.__treeViewCounters.disposeCount).toBe(1);
+      expect(registry.stepsPanelActive).toBe(false);
     });
   });
 });

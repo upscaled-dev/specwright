@@ -294,5 +294,22 @@ describe("StepDefinitionProvider helpers", () => {
       expect(defs).toHaveLength(1);
       expect(defs[0]!.pattern).toBe("I await the result");
     });
+
+    it("captures the call keyword for all four call forms", () => {
+      const src = [
+        "Given('a given step', async () => {});",
+        "When('a when step', async () => {});",
+        "Then('a then step', async () => {});",
+        "Step('a generic step', async () => {});",
+      ].join("\n");
+      const defs = extractStepDefsFromSource(src);
+      expect(defs.map((d) => d.keyword)).toEqual(["Given", "When", "Then", "Step"]);
+    });
+
+    it("captures the keyword for regex-literal definitions", () => {
+      const src = "Then(/^count is (\\d+)$/, async () => {});";
+      const defs = extractStepDefsFromSource(src);
+      expect(defs[0]!.keyword).toBe("Then");
+    });
   });
 });

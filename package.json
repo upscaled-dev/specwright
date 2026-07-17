@@ -150,16 +150,21 @@
         },
         "playwrightBddRunner.reporter": {
           "type": "string",
-          "enum": [
+          "examples": [
             "list",
             "line",
             "dot",
             "html",
             "json",
-            "junit"
+            "junit",
+            "github",
+            "blob",
+            "null",
+            "list,json",
+            "./my-reporter.ts"
           ],
           "default": "list",
-          "description": "Reporter for Playwright test output (terminal display only; result mapping always uses the JSON reporter)"
+          "description": "Reporter(s) for Playwright test output: a built-in name (list, line, dot, html, json, junit, github, blob, null), a custom reporter module path, or a comma-separated list of these. Terminal display only; result mapping always uses the JSON reporter."
         },
         "playwrightBddRunner.useConfigReporters": {
           "type": "boolean",
@@ -208,6 +213,11 @@
           "type": "boolean",
           "default": true,
           "description": "Highlight Gherkin steps in .feature files that have no matching playwright-bdd step definition. Provides a 'Create step definition' quick fix."
+        },
+        "playwrightBddRunner.enableStepsPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the Specwright Steps panel in the Activity Bar: all step definitions grouped by keyword with usage counts, plus Gherkin steps with no matching definition. Disabling releases the panel and its share of the step-usage index."
         },
         "playwrightBddRunner.enableStepAutocomplete": {
           "type": "string",
@@ -411,8 +421,61 @@
         "command": "playwrightBddRunner.goToStepDefinition",
         "title": "Go to Step Definition",
         "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.refreshStepsPanel",
+        "title": "Refresh Steps Panel",
+        "category": "Specwright",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "playwrightBddRunner.exportSteps",
+        "title": "Export Steps",
+        "category": "Specwright",
+        "icon": "$(export)"
+      },
+      {
+        "command": "playwrightBddRunner.exportScenarios",
+        "title": "Export All Scenarios",
+        "category": "Specwright",
+        "icon": "$(book)"
+      },
+      {
+        "command": "playwrightBddRunner.insertStep",
+        "title": "Insert Step…",
+        "category": "Specwright",
+        "icon": "$(insert)"
+      },
+      {
+        "command": "playwrightBddRunner.scaffoldStepFromPanel",
+        "title": "Create Step Definition",
+        "category": "Specwright",
+        "icon": "$(add)"
+      },
+      {
+        "command": "playwrightBddRunner.scaffoldFeatureFromPanel",
+        "title": "Generate Missing Step Definitions",
+        "category": "Specwright",
+        "icon": "$(add)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "specwright",
+          "title": "Specwright",
+          "icon": "media/specwright-activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "specwright": [
+        {
+          "id": "playwrightBddRunner.stepsExplorer",
+          "name": "Steps"
+        }
+      ]
+    },
     "menus": {
       "commandPalette": [
         {
@@ -458,6 +521,48 @@
         {
           "command": "playwrightBddRunner.runFeatureFileWithContext",
           "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.scaffoldStepFromPanel",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.scaffoldFeatureFromPanel",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "playwrightBddRunner.refreshStepsPanel",
+          "when": "view == playwrightBddRunner.stepsExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "playwrightBddRunner.exportSteps",
+          "when": "view == playwrightBddRunner.stepsExplorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "playwrightBddRunner.exportScenarios",
+          "when": "view == playwrightBddRunner.stepsExplorer",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "playwrightBddRunner.insertStep",
+          "when": "view == playwrightBddRunner.stepsExplorer && viewItem == stepDefinition",
+          "group": "inline"
+        },
+        {
+          "command": "playwrightBddRunner.scaffoldStepFromPanel",
+          "when": "view == playwrightBddRunner.stepsExplorer && viewItem == unmatchedStep",
+          "group": "inline"
+        },
+        {
+          "command": "playwrightBddRunner.scaffoldFeatureFromPanel",
+          "when": "view == playwrightBddRunner.stepsExplorer && viewItem == unmatchedFile",
+          "group": "inline"
         }
       ],
       "editor/context": [

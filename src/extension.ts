@@ -54,6 +54,7 @@ export interface ExtensionApi {
         readonly tableFormattingActive: boolean;
         readonly outlineActive: boolean;
         readonly bddgenDiagnosticsActive: boolean;
+        readonly stepsPanelActive: boolean;
         readonly stepPaths: readonly string[];
       }
     | undefined;
@@ -86,6 +87,7 @@ function buildApi(
         get tableFormattingActive() { return registry.tableFormattingActive; },
         get outlineActive() { return registry.outlineActive; },
         get bddgenDiagnosticsActive() { return registry.bddgenDiagnosticsActive; },
+        get stepsPanelActive() { return registry.stepsPanelActive; },
         get stepPaths() { return registry.stepPaths; },
       }
     : undefined;
@@ -178,6 +180,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandManager.registerCommands(context);
     context.subscriptions.push(commandManager);
     commandManager.setTestProvider(testProvider as unknown);
+    commandManager.setUsageIndexHost(providerRegistry);
 
     providerRegistry.applyCurrent();
 

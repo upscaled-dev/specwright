@@ -123,6 +123,10 @@ export class ExtensionConfig {
     return this.config.get<boolean>("enableStepDiagnostics", true);
   }
 
+  public get enableStepsPanel(): boolean {
+    return this.config.get<boolean>("enableStepsPanel", true);
+  }
+
   public get stepAutocompleteMode(): "auto" | "on" | "off" {
     const raw = this.config.get<string>("enableStepAutocomplete", "auto");
     return raw === "on" || raw === "off" ? raw : "auto";
@@ -179,9 +183,20 @@ export class ExtensionConfig {
         `maxParallelProcesses must be between ${MAX_PARALLEL_PROCESSES_MIN} and ${MAX_PARALLEL_PROCESSES_MAX}`
       );
     }
-    const validReporters = ["list", "line", "dot", "html", "json", "junit"];
-    if (!validReporters.includes(this.reporter)) {
-      errors.push(`reporter must be one of: ${validReporters.join(", ")}`);
+    // `reporter` maps onto Playwright's `--reporter`, which accepts a comma-separated list of
+    // built-ins and/or custom reporter module paths (the debug command builder even appends
+    // ",json" itself). Validate each token, not the whole string, so those legitimate values
+    // don't trip a spurious activation warning.
+    const builtinReporters = [
+      "list", "line", "dot", "html", "json", "junit", "github", "blob", "null",
+    ];
+    const isReporterModulePath = (token: string): boolean =>
+      token.includes("/") || token.includes("\\") || /\.(js|ts|mjs|cjs|mts|cts)$/.test(token);
+    const reporterTokens = this.reporter.split(",").map((t) => t.trim());
+    if (reporterTokens.some((t) => !builtinReporters.includes(t) && !isReporterModulePath(t))) {
+      errors.push(
+        `reporter must be a comma-separated list of built-ins (${builtinReporters.join(", ")}) or reporter module paths; got "${this.reporter}"`
+      );
     }
     if (errors.length > 0) {
       throw new Error(`Configuration validation failed: ${errors.join(", ")}`);

@@ -494,4 +494,73 @@ describe("StepUsageIndex", () => {
     expect(await idx.countUsagesForDef(def)).toBe(1);
     idx.dispose();
   });
+
+  it("getUnmatchedSteps groups undefined steps per file and excludes matched ones", async () => {
+    const def = defOf("I have a thing", "/ws/steps/a.ts", 0);
+    featureContents.set(
+      "/ws/a.feature",
+      [
+        "Feature: A",
+        "  Scenario: S",
+        "    Given I have a thing",
+        "    Given I have no definition",
+      ].join("\n")
+    );
+    featureContents.set(
+      "/ws/b.feature",
+      ["Feature: B", "  Scenario: T", "    Given also undefined"].join("\n")
+    );
+    const resolver = makeResolverWithDefs([def]);
+    const idx = new StepUsageIndex(makeConfig({}), resolver, stubLogger);
+
+    const unmatched = await idx.getUnmatchedSteps();
+    expect([...unmatched.keys()].sort()).toEqual(["/ws/a.feature", "/ws/b.feature"]);
+    const a = unmatched.get("/ws/a.feature")!;
+    expect(a).toHaveLength(1);
+    expect(a[0]!.text).toBe("I have no definition");
+    expect(a[0]!.line).toBe(3);
+    const b = unmatched.get("/ws/b.feature")!;
+    expect(b.map((s) => s.text)).toEqual(["also undefined"]);
+    idx.dispose();
+  });
+
+  it("getUnmatchedSteps omits files whose steps all match", async () => {
+    const def = defOf("I have a thing", "/ws/steps/a.ts", 0);
+    featureContents.set(
+      "/ws/a.feature",
+      ["Feature: A", "  Scenario: S", "    Given I have a thing"].join("\n")
+    );
+    const resolver = makeResolverWithDefs([def]);
+    const idx = new StepUsageIndex(makeConfig({}), resolver, stubLogger);
+
+    const unmatched = await idx.getUnmatchedSteps();
+    expect(unmatched.has("/ws/a.feature")).toBe(false);
+    expect(unmatched.size).toBe(0);
+    idx.dispose();
+  });
+
+  it("getUnmatchedSteps resolves And/But to the effective keyword in file order", async () => {
+    const thing = defOf("I have a thing", "/ws/steps/a.ts", 0);
+    const click = defOf("I click", "/ws/steps/a.ts", 1);
+    featureContents.set(
+      "/ws/a.feature",
+      [
+        "Feature: A",
+        "  Scenario: S",
+        "    Given I have a thing",
+        "    And still undefined",
+        "    When I click",
+        "    But also undefined",
+      ].join("\n")
+    );
+    const resolver = makeResolverWithDefs([thing, click]);
+    const idx = new StepUsageIndex(makeConfig({}), resolver, stubLogger);
+
+    const steps = (await idx.getUnmatchedSteps()).get("/ws/a.feature")!;
+    expect(steps.map((s) => [s.line, s.keyword, s.effectiveKeyword, s.text])).toEqual([
+      [3, "And", "Given", "still undefined"],
+      [5, "But", "When", "also undefined"],
+    ]);
+    idx.dispose();
+  });
 });

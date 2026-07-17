@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import * as vscode from "vscode";
 import { CommandManager } from "../../commands/command-manager";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { PlaywrightBddExtensionContext } from "../../types";
@@ -234,5 +235,97 @@ describe("scenario.outlineName — Map<test.id, Scenario> lookup model", () => {
     expect(parsed).not.toBeNull();
     const s = parsed!.scenarios[0]!;
     expect(s.isScenarioOutline).toBe(false);
+  });
+});
+
+describe("CommandManager — StepDefinitionProvider caching", () => {
+  type StepDefProviderAccess = { getStepDefinitionProvider: () => unknown };
+
+  it("reuses a single provider across invocations (no per-call re-scan)", () => {
+    const mgr = CommandManager.create(makeContext());
+    const get = (): unknown => (mgr as unknown as StepDefProviderAccess).getStepDefinitionProvider();
+    expect(get()).toBe(get());
+  });
+
+  it("rebuilds the provider after a configuration change", () => {
+    const config = ExtensionConfig.create();
+    const mgr = CommandManager.create(makeContext({ config }));
+    const get = (): unknown => (mgr as unknown as StepDefProviderAccess).getStepDefinitionProvider();
+    const first = get();
+    config.reload();
+    expect(get()).not.toBe(first);
+  });
+});
+
+describe("command contributions ↔ handler registrations parity", () => {
+  interface PackageJson {
+    contributes: {
+      commands: Array<{ command: string }>;
+      menus: Record<string, Array<{ command?: string; when?: string; submenu?: string }>>;
+    };
+  }
+  const pkg = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf-8")
+  ) as PackageJson;
+
+  function registeredCommandIds(): string[] {
+    const registered: string[] = [];
+    const commandsApi = vscode.commands as unknown as { registerCommand: unknown };
+    const original = commandsApi.registerCommand;
+    commandsApi.registerCommand = (cmd: string): { dispose: () => void } => {
+      registered.push(cmd);
+      return { dispose: () => {} };
+    };
+    try {
+      const mgr = CommandManager.create(makeContext());
+      mgr.registerCommands({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+      mgr.dispose();
+    } finally {
+      commandsApi.registerCommand = original;
+    }
+    return registered;
+  }
+
+  it("every contributed playwrightBddRunner command has a handler and vice versa", () => {
+    const contributed = pkg.contributes.commands.map((c) => c.command).sort();
+    const registered = registeredCommandIds().sort();
+    expect(registered).toEqual(contributed);
+  });
+
+  it("places the Steps panel commands in the view menus, gated on the stepsExplorer view", () => {
+    const viewTitle = pkg.contributes.menus["view/title"]!;
+    expect(viewTitle.map((e) => e.command)).toEqual([
+      "playwrightBddRunner.refreshStepsPanel",
+      "playwrightBddRunner.exportSteps",
+      "playwrightBddRunner.exportScenarios",
+    ]);
+    for (const entry of viewTitle) {
+      expect(entry.when).toBe("view == playwrightBddRunner.stepsExplorer");
+    }
+
+    const itemContext = pkg.contributes.menus["view/item/context"]!;
+    expect(itemContext.map((e) => [e.command, e.when])).toEqual([
+      ["playwrightBddRunner.insertStep", "view == playwrightBddRunner.stepsExplorer && viewItem == stepDefinition"],
+      ["playwrightBddRunner.scaffoldStepFromPanel", "view == playwrightBddRunner.stepsExplorer && viewItem == unmatchedStep"],
+      ["playwrightBddRunner.scaffoldFeatureFromPanel", "view == playwrightBddRunner.stepsExplorer && viewItem == unmatchedFile"],
+    ]);
+  });
+
+  it("hides the tree-node scaffold wrappers from the command palette", () => {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    for (const command of [
+      "playwrightBddRunner.scaffoldStepFromPanel",
+      "playwrightBddRunner.scaffoldFeatureFromPanel",
+    ]) {
+      expect(palette.find((e) => e.command === command)?.when).toBe("false");
+    }
+    for (const command of [
+      "playwrightBddRunner.refreshStepsPanel",
+      "playwrightBddRunner.exportSteps",
+      "playwrightBddRunner.exportScenarios",
+      "playwrightBddRunner.insertStep",
+    ]) {
+      expect(palette.find((e) => e.command === command)).toBeUndefined();
+    }
   });
 });

@@ -18,6 +18,7 @@ import { StepLiteralPromotionProvider } from "../providers/step-literal-promotio
 import { FeatureDocumentSymbolProvider } from "../providers/feature-document-symbol-provider";
 import { FeatureTableFormatter } from "../providers/feature-table-formatter";
 import { BddgenDiagnosticsProvider } from "../providers/bddgen-diagnostics-provider";
+import { StepsTreeDataProvider } from "../providers/steps-tree-data-provider";
 import { isCucumberAutocompletePresent } from "../utils/cucumber-autocomplete-detector";
 
 const FEATURE_SELECTORS: vscode.DocumentSelector = [
@@ -52,6 +53,8 @@ export class ProviderRegistry implements vscode.Disposable {
   private outlineDisposable: vscode.Disposable | undefined;
   private tagIndex: TagIndex | undefined;
   private stepUsageIndex: StepUsageIndex | undefined;
+  private stepsTreeProvider: StepsTreeDataProvider | undefined;
+  private stepsTreeView: vscode.Disposable | undefined;
   private lastTagIndexPattern: string | undefined;
   private lastStepPaths: readonly string[] | undefined;
   private lastDiagnosticsStepPaths: readonly string[] | undefined;
@@ -150,7 +153,33 @@ export class ProviderRegistry implements vscode.Disposable {
     this.reconcileUnusedStepDiagnostics();
     this.reconcileStepLiteralPromotion();
     this.reconcileTableFormatting();
+    this.reconcileStepsPanel();
     this.reconcileUsageIndexGlobs();
+  }
+
+  private reconcileStepsPanel(): void {
+    if (!this.config.enableStepsPanel) {
+      if (this.stepsTreeView) {
+        this.stepsTreeView.dispose();
+        this.stepsTreeView = undefined;
+        this.stepsTreeProvider?.dispose();
+        this.stepsTreeProvider = undefined;
+      }
+      this.maybeDisposeUsageIndex();
+      return;
+    }
+    if (this.stepsTreeView) {return;}
+    const provider = new StepsTreeDataProvider(this.ensureUsageIndex(), this.config);
+    this.stepsTreeProvider = provider;
+    this.stepsTreeView = vscode.window.createTreeView("playwrightBddRunner.stepsExplorer", {
+      treeDataProvider: provider,
+    });
+    this.logger.info("Steps panel enabled");
+  }
+
+  /** Shared step-usage index for the panel commands (insert/export/refresh). */
+  public getUsageIndex(): StepUsageIndex {
+    return this.ensureUsageIndex();
   }
 
   private ensureUsageIndex(): StepUsageIndex {
@@ -391,7 +420,12 @@ export class ProviderRegistry implements vscode.Disposable {
   }
 
   private maybeDisposeUsageIndex(): void {
-    if (this.referencesDisposable || this.usageCodeLensDisposable || this.unusedStepDiagnostics) {return;}
+    if (
+      this.referencesDisposable ||
+      this.usageCodeLensDisposable ||
+      this.unusedStepDiagnostics ||
+      this.stepsTreeView
+    ) {return;}
     if (this.stepUsageIndex) {
       this.stepUsageIndex.dispose();
       this.stepUsageIndex = undefined;
@@ -473,6 +507,10 @@ export class ProviderRegistry implements vscode.Disposable {
     return this.outlineDisposable !== undefined;
   }
 
+  public get stepsPanelActive(): boolean {
+    return this.stepsTreeView !== undefined;
+  }
+
   public get stepPaths(): readonly string[] {
     return this.lastStepPaths ?? [];
   }
@@ -514,6 +552,10 @@ export class ProviderRegistry implements vscode.Disposable {
     this.tableFormattingDisposable = undefined;
     this.outlineDisposable?.dispose();
     this.outlineDisposable = undefined;
+    this.stepsTreeView?.dispose();
+    this.stepsTreeView = undefined;
+    this.stepsTreeProvider?.dispose();
+    this.stepsTreeProvider = undefined;
     this.stepUsageIndex?.dispose();
     this.stepUsageIndex = undefined;
     this.lastUsageIndexStepPaths = undefined;

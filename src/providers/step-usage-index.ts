@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
-import { ParsedStepDefWithFile, StepResolver } from "./step-resolver";
+import { ParsedStepDefWithFile, StepResolver, UnmatchedStep } from "./step-resolver";
 import { computeSkipRanges } from "./feature-skip-ranges";
 import {
   isUnderExcludedDir,
@@ -28,6 +28,7 @@ function defKeyOf(def: ParsedStepDefWithFile): string {
 
 export class StepUsageIndex implements vscode.Disposable {
   private readonly usagesByFeature = new Map<string, FeatureUsageEntry[]>();
+  private readonly unmatchedByFeature = new Map<string, UnmatchedStep[]>();
   private defsByKey = new Map<string, ParsedStepDefWithFile>();
   private scanPromise: Promise<void> | undefined;
   private readonly watchers: vscode.FileSystemWatcher[] = [];
@@ -86,6 +87,17 @@ export class StepUsageIndex implements vscode.Disposable {
     return result;
   }
 
+  /** Gherkin steps with no matching definition, keyed by feature path, in file order. */
+  public async getUnmatchedSteps(): Promise<Map<string, UnmatchedStep[]>> {
+    await this.ensureScanned();
+    const result = new Map<string, UnmatchedStep[]>();
+    if (this.disposed) {return result;}
+    for (const [featurePath, steps] of this.unmatchedByFeature) {
+      result.set(featurePath, steps);
+    }
+    return result;
+  }
+
   public async countUsagesForDef(def: ParsedStepDefWithFile): Promise<number> {
     await this.ensureScanned();
     if (this.disposed) {return 0;}
@@ -103,6 +115,7 @@ export class StepUsageIndex implements vscode.Disposable {
     this.disposed = true;
     this.disposeWatchers();
     this.usagesByFeature.clear();
+    this.unmatchedByFeature.clear();
     this.defsByKey.clear();
     this._onDidChangeUsages.dispose();
   }
@@ -175,19 +188,37 @@ export class StepUsageIndex implements vscode.Disposable {
     }
     if (this.disposed) {return;}
     const content = Buffer.from(bytes).toString("utf-8");
-    const entries = this.computeUsagesForFeature(uri.fsPath, content);
+    const { entries, unmatched } = this.computeUsagesForFeature(uri.fsPath, content);
     this.usagesByFeature.set(uri.fsPath, entries);
+    if (unmatched.length > 0) {
+      this.unmatchedByFeature.set(uri.fsPath, unmatched);
+    } else {
+      this.unmatchedByFeature.delete(uri.fsPath);
+    }
     this._onDidChangeUsages.fire();
   }
 
-  private computeUsagesForFeature(featurePath: string, content: string): FeatureUsageEntry[] {
+  private computeUsagesForFeature(
+    featurePath: string,
+    content: string,
+  ): { entries: FeatureUsageEntry[]; unmatched: UnmatchedStep[] } {
     const skipRanges = computeSkipRanges(content);
     const steps = this.stepResolver.parseFeatureSteps(content);
     const defs = Array.from(this.defsByKey.values());
     const entries: FeatureUsageEntry[] = [];
+    const unmatched: UnmatchedStep[] = [];
     for (const step of steps) {
       if (skipRanges.has(step.line)) {continue;}
       const matches = this.stepResolver.findStepMatches(step.text, defs);
+      if (matches.length === 0) {
+        unmatched.push({
+          line: step.line,
+          keyword: step.keyword,
+          effectiveKeyword: step.effectiveKeyword,
+          text: step.text,
+        });
+        continue;
+      }
       for (const match of matches) {
         entries.push({
           defKey: defKeyOf(match),
@@ -198,7 +229,7 @@ export class StepUsageIndex implements vscode.Disposable {
         });
       }
     }
-    return entries;
+    return { entries, unmatched };
   }
 
   private installFeatureWatcher(pattern: string): void {
@@ -216,6 +247,7 @@ export class StepUsageIndex implements vscode.Disposable {
     watcher.onDidDelete((uri) => {
       if (isIgnored(uri)) {return;}
       this.usagesByFeature.delete(uri.fsPath);
+      this.unmatchedByFeature.delete(uri.fsPath);
       this._onDidChangeUsages.fire();
     });
     this.watchers.push(watcher);
@@ -244,6 +276,7 @@ export class StepUsageIndex implements vscode.Disposable {
     // invalidation would stack another set and multiply refresh events.
     this.disposeWatchers();
     this.usagesByFeature.clear();
+    this.unmatchedByFeature.clear();
     this.defsByKey.clear();
     this.scanPromise = undefined;
     this._onDidChangeUsages.fire();
