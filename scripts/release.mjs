@@ -125,16 +125,19 @@ function ensureTagFree(newVersion) {
   if (existing === tag) die(4, `tag '${tag}' already exists`);
 }
 
-// 4. Update package.json
+// 4. Update package.json AND package-lock.json in lockstep.
+// `npm version --no-git-tag-version` bumps the version in both files (and only the
+// package's own version fields — never a dependency that happens to share the string)
+// without touching git. Hand-editing package.json alone was the root cause of repeated
+// lockfile drift: the lockfile kept the old version, so the next `npm ci`/install dirtied
+// the tree right after a release commit.
 function updatePackageVersion(newVersion) {
-  const pkg = JSON.parse(readFileSync(PKG_PATH, "utf-8"));
-  pkg.version = newVersion;
   if (isDryRun) {
-    log(`(dry-run) would set package.json version to ${newVersion}`);
+    log(`(dry-run) would run 'npm version --no-git-tag-version ${newVersion}' (package.json + package-lock.json → ${newVersion})`);
     return;
   }
-  writeFileSync(PKG_PATH, JSON.stringify(pkg, null, 2) + "\n");
-  log(`package.json version → ${newVersion}`);
+  run(`npm version --no-git-tag-version ${newVersion}`);
+  log(`package.json + package-lock.json version → ${newVersion}`);
 }
 
 // 5. Update CHANGELOG: move ## [Unreleased] content into a dated header,
@@ -180,7 +183,7 @@ function packageVsix(newVersion) {
 
 // 8. Commit + tag
 function commitAndTag(newVersion) {
-  run("git add package.json CHANGELOG.md");
+  run("git add package.json package-lock.json CHANGELOG.md");
   run(`git commit -m "chore(release): v${newVersion}"`);
   run(`git tag -a v${newVersion} -m "Release v${newVersion}"`);
 }
