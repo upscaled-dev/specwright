@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-07-17
 ### Added
 
 - **Steps panel.** A new "Specwright" container in the Activity Bar with a **Steps** view. Step definitions are grouped by `Given`/`When`/`Then` with a usage count and an unused marker on each; clicking one navigates to its `file:line`. An **Unmatched steps** section groups Gherkin steps that have no matching definition by feature file, with one-click scaffolding for a single step or a whole file.

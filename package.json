@@ -2,7 +2,7 @@
   "name": "specwright",
   "displayName": "Specwright BDD - Playwright-BDD Test Explorer",
   "description": "Run, debug & explore Playwright-BDD (playwright-bdd) Gherkin tests in the Test Explorer. Full .feature authoring: autocomplete, hover, go-to-definition, find references, diagnostics, snippets, tag filtering, parallel runs, and step-definition generation. Works alongside Cucumber.",
-  "version": "0.2.3",
+  "version": "0.3.5",
   "icon": "icon.png",
   "publisher": "upscaled-dev",
   "license": "MIT",
@@ -464,7 +464,7 @@
         {
           "id": "specwright",
           "title": "Specwright",
-          "icon": "media/specwright-activitybar.svg"
+          "icon": "media/activity-bar-icon.svg"
         }
       ]
     },
