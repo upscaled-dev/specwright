@@ -101,7 +101,14 @@ interface TreeViewCounters {
   disposeCount: number;
 }
 
+interface StubTreeView {
+  message: string | undefined;
+  dispose: () => void;
+  onDidDispose: () => { dispose: () => void };
+}
+
 const __treeViewCounters: TreeViewCounters = { createCount: 0, disposeCount: 0 };
+let __lastTreeView: StubTreeView | undefined;
 
 export const window = {
   createOutputChannel: () => new StubOutputChannel(),
@@ -118,12 +125,15 @@ export const window = {
     hide(): void { this.shown = false; },
     dispose(): void { this.disposed = true; },
   }),
-  createTreeView: (_viewId: string, _options: unknown) => {
+  createTreeView: (_viewId: string, _options: unknown): StubTreeView => {
     __treeViewCounters.createCount += 1;
-    return {
+    const view: StubTreeView = {
+      message: undefined,
       dispose: (): void => { __treeViewCounters.disposeCount += 1; },
       onDidDispose: () => ({ dispose: () => {} }),
     };
+    __lastTreeView = view;
+    return view;
   },
   // Settable by tests that exercise active-editor commands (insert step, go to definition).
   activeTextEditor: undefined as unknown,
@@ -135,9 +145,11 @@ export const window = {
   showSaveDialog: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showTextDocument: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   __treeViewCounters,
+  __getLastTreeView: (): StubTreeView | undefined => __lastTreeView,
   __resetTreeViewCounters: (): void => {
     __treeViewCounters.createCount = 0;
     __treeViewCounters.disposeCount = 0;
+    __lastTreeView = undefined;
   },
 };
 

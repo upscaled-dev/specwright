@@ -264,7 +264,7 @@ describe("command contributions ↔ handler registrations parity", () => {
   interface PackageJson {
     contributes: {
       commands: Array<{ command: string }>;
-      menus: Record<string, Array<{ command?: string; when?: string; submenu?: string }>>;
+      menus: Record<string, Array<{ command?: string; when?: string; submenu?: string; group?: string }>>;
     };
   }
   const pkg = JSON.parse(
@@ -297,12 +297,13 @@ describe("command contributions ↔ handler registrations parity", () => {
 
   it("places the Steps panel commands in the view menus, gated on the stepsExplorer view", () => {
     const viewTitle = pkg.contributes.menus["view/title"]!;
-    expect(viewTitle.map((e) => e.command)).toEqual([
+    const stepsTitle = viewTitle.filter((e) => e.when?.includes("stepsExplorer"));
+    expect(stepsTitle.map((e) => e.command)).toEqual([
       "playwrightBddRunner.refreshStepsPanel",
       "playwrightBddRunner.exportSteps",
       "playwrightBddRunner.exportScenarios",
     ]);
-    for (const entry of viewTitle) {
+    for (const entry of stepsTitle) {
       expect(entry.when).toBe("view == playwrightBddRunner.stepsExplorer");
     }
 
@@ -345,6 +346,13 @@ describe("command contributions ↔ handler registrations parity", () => {
     for (const command of ["playwrightBddRunner.traceability.openIssue", "playwrightBddRunner.traceability.copyKey"]) {
       expect(palette.find((e) => e.command === command)?.when).toBe("false");
     }
+  });
+
+  it("puts the manage-connection gear in the traceability view title bar", () => {
+    const viewTitle = pkg.contributes.menus["view/title"]!;
+    const gear = viewTitle.find((e) => e.command === "playwrightBddRunner.traceability.manageConnection");
+    expect(gear?.when).toBe("view == playwrightBddRunner.traceability");
+    expect(gear?.group).toBe("navigation@1");
   });
 });
 
@@ -417,5 +425,76 @@ describe("traceability browse/copy command handlers", () => {
     const handlers = captureHandlers(makeContext());
     await handlers.get("playwrightBddRunner.traceability.copyKey")!({ testKey: "CALC-1" });
     expect(envHooks.__clipboardText).toBe("CALC-1");
+  });
+});
+
+describe("traceability hidePanel command handler", () => {
+  interface Update {
+    key: string;
+    value: unknown;
+    target: vscode.ConfigurationTarget;
+  }
+
+  function stubWorkspaceConfig(inspected: Record<string, unknown>): Update[] {
+    const updates: Update[] = [];
+    const wsConfig = {
+      get: (): unknown => undefined,
+      inspect: (): Record<string, unknown> => inspected,
+      update: (key: string, value: unknown, target: vscode.ConfigurationTarget): Promise<void> => {
+        updates.push({ key, value, target });
+        return Promise.resolve();
+      },
+    } as unknown as vscode.WorkspaceConfiguration;
+    vi.spyOn(vscode.workspace, "getConfiguration").mockReturnValue(wsConfig);
+    return updates;
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("writes traceability.enablePanel=false to Global when it is not workspace-pinned", async () => {
+    const updates = stubWorkspaceConfig({});
+    const handlers = captureHandlers(makeContext());
+    await handlers.get("playwrightBddRunner.traceability.hidePanel")!();
+    expect(updates).toEqual([
+      { key: "traceability.enablePanel", value: false, target: vscode.ConfigurationTarget.Global },
+    ]);
+  });
+
+  it("writes it back to the Workspace when the setting is pinned there", async () => {
+    const updates = stubWorkspaceConfig({ workspaceValue: true });
+    const handlers = captureHandlers(makeContext());
+    await handlers.get("playwrightBddRunner.traceability.hidePanel")!();
+    expect(updates[0]?.target).toBe(vscode.ConfigurationTarget.Workspace);
+  });
+});
+
+describe("traceability panel connection UX contributions", () => {
+  interface PackageJson {
+    contributes: {
+      viewsWelcome: Array<{ view: string; when?: string; contents: string }>;
+      menus: Record<string, Array<{ command?: string; when?: string }>>;
+    };
+  }
+  const pkg = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf-8")
+  ) as PackageJson;
+
+  it("splits the traceability welcome into connected and not-connected states", () => {
+    const welcomes = pkg.contributes.viewsWelcome.filter(
+      (w) => w.view === "playwrightBddRunner.traceability"
+    );
+    const setup = welcomes.find((w) => w.when === "!playwrightBddRunner.traceability.connected");
+    const connected = welcomes.find((w) => w.when === "playwrightBddRunner.traceability.connected");
+    expect(setup).toBeDefined();
+    expect(connected).toBeDefined();
+    expect(setup!.contents).toContain("command:playwrightBddRunner.traceability.connect");
+    expect(setup!.contents).toContain("command:playwrightBddRunner.traceability.hidePanel");
+  });
+
+  it("keeps the welcome-only hidePanel command out of the palette", () => {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    expect(
+      palette.find((e) => e.command === "playwrightBddRunner.traceability.hidePanel")?.when
+    ).toBe("false");
   });
 });

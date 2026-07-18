@@ -6,9 +6,21 @@ import { PlaywrightJsonParser } from "../utils/playwright-json-parser";
 import { Logger } from "../utils/logger";
 import { REPORT_CANDIDATES, TraceabilityModel } from "./traceability-model";
 import { TraceabilityAdapter } from "./traceability-adapter";
-import { TraceabilityTreeDataProvider } from "./traceability-tree-data-provider";
+import { TraceabilityNode, TraceabilityTreeDataProvider } from "./traceability-tree-data-provider";
 
 const FALLBACK_PROVIDER_ID = "xray";
+const CONNECTED_CONTEXT_KEY = "playwrightBddRunner.traceability.connected";
+
+/**
+ * Provider-neutral view of the active backend's connection state. The extension adapts the
+ * provider-specific credential store + site into this so the neutral subsystem never imports Xray
+ * vocabulary. `label` is the display string for the connected indicator (e.g. the normalized site).
+ */
+export interface TraceabilityConnectionSource {
+  readonly onDidChange: vscode.Event<void>;
+  readonly label: string;
+  isConnected(): Promise<boolean>;
+}
 
 // One watcher per candidate report path (a brace-glob with a slash inside `{}` does not fire
 // reliably in a VS Code FileSystemWatcher). A create/change/delete on any of these refreshes the
@@ -22,7 +34,7 @@ const REPORT_WATCH_GLOBS = REPORT_CANDIDATES.map((candidate) => `**/${candidate}
  * provider is injected as a TraceabilityAdapter, so a second backend is a one-line map addition.
  */
 export class TraceabilitySubsystem implements vscode.Disposable {
-  private treeView: vscode.Disposable | undefined;
+  private treeView: vscode.TreeView<TraceabilityNode> | undefined;
   private treeProvider: TraceabilityTreeDataProvider | undefined;
   private model: TraceabilityModel | undefined;
   private watcherDisposables: vscode.Disposable[] = [];
@@ -30,7 +42,12 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   private rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   private rebuildInFlight = false;
   private rebuildPending = false;
+  // Bumped whenever connection state is (re)committed — teardown, rebuild, or a fresh probe. An
+  // async probe captures the epoch at entry and only commits if it is still current, so a late
+  // resolution (panel already torn down, or a newer probe already landed) discards silently.
+  private connectionEpoch = 0;
   private readonly configChangeDisposable: vscode.Disposable;
+  private readonly connectionChangeDisposable: vscode.Disposable;
   private disposed = false;
   private warnedUnknownProvider = false;
 
@@ -40,12 +57,14 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   constructor(
     private readonly config: ExtensionConfig,
     private readonly adapters: Record<string, TraceabilityAdapter>,
+    private readonly connection: TraceabilityConnectionSource,
     private readonly featureParser: FeatureParser,
     private readonly discoveryManager: TestDiscoveryManager,
     private readonly playwrightJsonParser: PlaywrightJsonParser,
     private readonly logger: Logger
   ) {
     this.configChangeDisposable = config.addChangeListener(() => this.applyCurrent());
+    this.connectionChangeDisposable = connection.onDidChange(() => this.queueConnectionRefresh());
   }
 
   public applyCurrent(): void {
@@ -82,6 +101,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     }
     const signature = this.signature(adapter);
     if (this.treeView && this.lastSignature === signature) {
+      this.queueConnectionRefresh();
       return;
     }
     // A changed signature — provider swap, prefix, or pattern — rebuilds the whole panel so the new
@@ -103,7 +123,41 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.setupWatchers();
     this.lastSignature = signature;
     this.scheduleRebuild();
+    this.queueConnectionRefresh();
     this.logger.info("Traceability panel enabled");
+  }
+
+  private queueConnectionRefresh(): void {
+    this.refreshConnectionState().catch((error) => {
+      this.logger.warn("Traceability connection refresh failed", { error: String(error) });
+    });
+  }
+
+  // Connection state is async (a credential-store read), so context key, tree gating, and the
+  // connected indicator all update here off the same probe. The epoch captured at entry is the
+  // newest, so any older in-flight probe discards when it resolves.
+  private async refreshConnectionState(): Promise<void> {
+    const epoch = ++this.connectionEpoch;
+    if (this.disposed) {
+      return;
+    }
+    const connected = await this.connection.isConnected();
+    if (this.disposed || epoch !== this.connectionEpoch) {
+      return;
+    }
+    this.commitConnectedContext(connected);
+    this.treeProvider?.setConnected(connected);
+    if (this.treeView) {
+      this.treeView.message = connected ? `${this.connection.label} · Connected` : "";
+    }
+  }
+
+  private commitConnectedContext(connected: boolean): void {
+    Promise.resolve(
+      vscode.commands.executeCommand("setContext", CONNECTED_CONTEXT_KEY, connected)
+    ).catch((error) => {
+      this.logger.warn("Traceability connection context update failed", { error: String(error) });
+    });
   }
 
   // The active provider id joins the signature so switching traceability.provider forces a rebuild.
@@ -183,11 +237,16 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.model?.dispose();
     this.model = undefined;
     this.lastSignature = undefined;
+    // Bump before committing so an in-flight probe captured under the old epoch can't overwrite
+    // this false with a stale true when it later resolves.
+    this.connectionEpoch += 1;
+    this.commitConnectedContext(false);
   }
 
   public dispose(): void {
     this.disposed = true;
     this.configChangeDisposable.dispose();
+    this.connectionChangeDisposable.dispose();
     this.teardown();
     // The discovery manager is handed to this subsystem for its exclusive use.
     this.discoveryManager.dispose();

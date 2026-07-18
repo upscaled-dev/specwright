@@ -11,9 +11,10 @@ import { TestOrganizationManager } from "./core/test-organization";
 import { PlaywrightJsonParser } from "./utils/playwright-json-parser";
 import { CommandBuilder } from "./core/command-builder";
 import { ProviderRegistry } from "./core/provider-registry";
-import { TraceabilitySubsystem } from "./traceability/traceability-subsystem";
+import { TraceabilityConnectionSource, TraceabilitySubsystem } from "./traceability/traceability-subsystem";
 import { TraceabilityAdapter } from "./traceability/traceability-adapter";
-import { XrayAdapter } from "./xray/xray-adapter";
+import { normalizeSiteUrl, XrayAdapter } from "./xray/xray-adapter";
+import { XrayCredentialStore } from "./xray/xray-credential-store";
 import { PROMPTED_STATE_KEY } from "./commands/prompt-worker-count";
 import { StatusBar } from "./ui/status-bar";
 
@@ -160,6 +161,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   providerRegistry = new ProviderRegistry(config, featureParser, logger);
   context.subscriptions.push(providerRegistry);
 
+  const credentialStore = new XrayCredentialStore(context.secrets);
+  context.subscriptions.push(credentialStore);
   const xrayAdapter = new XrayAdapter(config);
   const traceabilityAdapters: Record<string, TraceabilityAdapter> = { xray: xrayAdapter };
   const traceabilityAdapter = traceabilityAdapters[config.traceabilityProvider] ?? xrayAdapter;
@@ -169,9 +172,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       context.subscriptions.push(adapter as vscode.Disposable);
     }
   }
+  // Adapt the Xray-specific credential store + site into the neutral connection view the subsystem
+  // consumes; label and credential lookup read config live so a site edit reflects without a rebuild.
+  const traceabilityConnection: TraceabilityConnectionSource = {
+    onDidChange: credentialStore.onDidChange,
+    get label(): string {
+      return normalizeSiteUrl(config.xraySiteUrl);
+    },
+    isConnected: (): Promise<boolean> => {
+      if (normalizeSiteUrl(config.xraySiteUrl) === "") {
+        return Promise.resolve(false);
+      }
+      return credentialStore.hasCredentials(config.xraySiteUrl);
+    },
+  };
   traceabilitySubsystem = new TraceabilitySubsystem(
     config,
     traceabilityAdapters,
+    traceabilityConnection,
     featureParser,
     TestDiscoveryManager.create(logger, config),
     PlaywrightJsonParser.create(logger),
@@ -223,6 +241,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     context.subscriptions.push(commandManager);
     commandManager.setTestProvider(testProvider as unknown);
     commandManager.setUsageIndexHost(providerRegistry);
+    commandManager.setCredentialStore(credentialStore);
 
     providerRegistry.applyCurrent();
     traceabilitySubsystem.applyCurrent();

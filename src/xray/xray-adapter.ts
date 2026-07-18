@@ -13,9 +13,17 @@ export function projectFromKey(key: string): string {
   return match?.[1] ?? key;
 }
 
-/** Accept a bare host, a full URL, or a trailing-slashed value and reduce it to a bare host. */
+/**
+ * Accept a bare host, a full URL, or a trailing-slashed value and reduce it to a bare host.
+ * Lowercased: hostnames are case-insensitive, and the result keys SecretStorage entries — case
+ * variants of one site must resolve to one credential slot.
+ */
 export function normalizeSiteUrl(raw: string): string {
-  return raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+  let host = raw.trim().replace(/^https?:\/\//i, "");
+  while (host.endsWith("/")) {
+    host = host.slice(0, -1);
+  }
+  return host.toLowerCase();
 }
 
 const DEFAULT_TEST_PREFIX = "TEST_";

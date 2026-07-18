@@ -10,6 +10,8 @@ import { StepUsageIndex } from "../providers/step-usage-index";
 import { StepDefinitionNode, UnmatchedFileNode, UnmatchedStepNode } from "../providers/steps-tree-data-provider";
 import { runInsertStep } from "./insert-step";
 import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
+import { XrayConnectionCommands } from "../xray/xray-connection-commands";
+import { XrayCredentialStore } from "../xray/xray-credential-store";
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -73,6 +75,8 @@ export class CommandManager {
   private stepDefinitionResolver: StepResolver | undefined;
   private stepDefinitionConfigListener: vscode.Disposable | undefined;
   private usageIndexHost: UsageIndexHost | undefined;
+  private credentialStore: XrayCredentialStore | undefined;
+  private xrayConnectionCommands: XrayConnectionCommands | undefined;
 
   public static create(context: PlaywrightBddExtensionContext): CommandManager {
     return new CommandManager(context);
@@ -92,6 +96,10 @@ export class CommandManager {
 
   public setUsageIndexHost(host: UsageIndexHost): void {
     this.usageIndexHost = host;
+  }
+
+  public setCredentialStore(store: XrayCredentialStore): void {
+    this.credentialStore = store;
   }
 
   /**
@@ -146,6 +154,11 @@ export class CommandManager {
         { command: "playwrightBddRunner.scaffoldFeatureFromPanel", title: "Generate Missing Step Definitions", category: CATEGORY, handler: this.scaffoldFeatureFromPanel.bind(this) },
         { command: "playwrightBddRunner.traceability.openIssue", title: "Open Issue in Tracker", category: CATEGORY, handler: this.openIssueInTracker.bind(this) },
         { command: "playwrightBddRunner.traceability.copyKey", title: "Copy Issue Key", category: CATEGORY, handler: this.copyIssueKey.bind(this) },
+        { command: "playwrightBddRunner.traceability.manageConnection", title: "Manage Xray Connection", category: CATEGORY, handler: () => this.getXrayConnectionCommands().manageConnection() },
+        { command: "playwrightBddRunner.traceability.connect", title: "Connect to Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().connect() },
+        { command: "playwrightBddRunner.traceability.disconnect", title: "Disconnect from Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().disconnect() },
+        { command: "playwrightBddRunner.traceability.testConnection", title: "Test Xray Connection", category: CATEGORY, handler: () => this.getXrayConnectionCommands().testConnection() },
+        { command: "playwrightBddRunner.traceability.hidePanel", title: "Hide Traceability Panel", category: CATEGORY, handler: this.hideTraceabilityPanel.bind(this) },
       ];
 
       for (const cmd of commands) {
@@ -460,6 +473,17 @@ export class CommandManager {
     vscode.window.showInformationMessage(`Copied ${key}`);
   }
 
+  // Welcome-only "Hide this panel" affordance. Write to wherever the setting already lives so a
+  // workspace-pinned opt-out isn't silently promoted to Global (mirrors the Xray site-URL target).
+  private async hideTraceabilityPanel(): Promise<void> {
+    const wsConfig = vscode.workspace.getConfiguration("playwrightBddRunner");
+    const target =
+      wsConfig.inspect<boolean>("traceability.enablePanel")?.workspaceValue !== undefined
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await wsConfig.update("traceability.enablePanel", false, target);
+  }
+
   public dispose(): void {
     for (const [, disposable] of this.commands) {
       try { disposable.dispose(); } catch { /* ignore */ }
@@ -654,6 +678,18 @@ export class CommandManager {
       "goto",
       "No matching step definition found."
     );
+  }
+
+  private getXrayConnectionCommands(): XrayConnectionCommands {
+    if (!this.credentialStore) {
+      throw new Error("Xray connection commands are unavailable: credential store not wired.");
+    }
+    this.xrayConnectionCommands ??= new XrayConnectionCommands(
+      this.context.config,
+      this.credentialStore,
+      this.context.logger
+    );
+    return this.xrayConnectionCommands;
   }
 
   private getGenerateStepsCommand(): GenerateStepsCommand {

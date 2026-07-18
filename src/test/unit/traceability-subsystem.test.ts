@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
-import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
+import {
+  TraceabilityConnectionSource,
+  TraceabilitySubsystem,
+} from "../../traceability/traceability-subsystem";
 import { TraceabilityAdapter } from "../../traceability/traceability-adapter";
 import { XrayAdapter } from "../../xray/xray-adapter";
 import { FeatureParser } from "../../parsers/feature-parser";
@@ -15,8 +18,62 @@ interface TreeViewCounters {
 }
 const treeViews = (vscode.window as unknown as {
   __treeViewCounters: TreeViewCounters;
+  __getLastTreeView: () => { message: string | undefined } | undefined;
   __resetTreeViewCounters: () => void;
 });
+
+const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+interface ConnectionControl {
+  connection: TraceabilityConnectionSource;
+  setConnected: (value: boolean) => void;
+  setLabel: (label: string) => void;
+  fire: () => void;
+}
+
+function makeConnection(initial = false): ConnectionControl {
+  let connected = initial;
+  let label = "";
+  const emitter = new vscode.EventEmitter<void>();
+  const connection: TraceabilityConnectionSource = {
+    onDidChange: emitter.event,
+    get label(): string {
+      return label;
+    },
+    isConnected: () => Promise.resolve(connected),
+  };
+  return {
+    connection,
+    setConnected: (value) => { connected = value; },
+    setLabel: (next) => { label = next; },
+    fire: () => emitter.fire(),
+  };
+}
+
+interface DeferredConnection extends ConnectionControl {
+  // One resolver per outstanding isConnected() probe, in call order, so a test can resolve them
+  // out of order to model overlapping refreshes and late resolutions.
+  resolvers: Array<(value: boolean) => void>;
+}
+
+function deferredConnection(label = ""): DeferredConnection {
+  const resolvers: Array<(value: boolean) => void> = [];
+  const emitter = new vscode.EventEmitter<void>();
+  const connection: TraceabilityConnectionSource = {
+    onDidChange: emitter.event,
+    get label(): string {
+      return label;
+    },
+    isConnected: () => new Promise<boolean>((resolve) => { resolvers.push(resolve); }),
+  };
+  return {
+    connection,
+    setConnected: () => { /* probes resolve via resolvers */ },
+    setLabel: () => { /* label fixed at construction */ },
+    fire: () => emitter.fire(),
+    resolvers,
+  };
+}
 
 interface TraceabilityConfigState {
   enableTraceabilityPanel: boolean;
@@ -81,11 +138,13 @@ function fakeAdapter(id: string): TraceabilityAdapter {
 function build(
   config: ExtensionConfig,
   adapters?: Record<string, TraceabilityAdapter>,
-  logger = Logger.create()
-): { subsystem: TraceabilitySubsystem; created: FakeWatcher[] } {
+  logger = Logger.create(),
+  connection: ConnectionControl = makeConnection()
+): { subsystem: TraceabilitySubsystem; created: FakeWatcher[]; connection: ConnectionControl } {
   const subsystem = new TraceabilitySubsystem(
     config,
     adapters ?? { xray: new XrayAdapter(config) },
+    connection.connection,
     FeatureParser.create(logger),
     TestDiscoveryManager.create(logger, config),
     PlaywrightJsonParser.create(logger),
@@ -103,7 +162,7 @@ function build(
     created.push(watcher);
     return watcher as unknown as vscode.FileSystemWatcher;
   });
-  return { subsystem, created };
+  return { subsystem, created, connection };
 }
 
 describe("TraceabilitySubsystem lifecycle", () => {
@@ -223,6 +282,151 @@ describe("TraceabilitySubsystem provider selection", () => {
     expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
     expect(treeViews.__treeViewCounters.createCount).toBe(2);
     expect(subsystem.traceabilityPanelActive).toBe(true);
+    subsystem.dispose();
+  });
+});
+
+describe("TraceabilitySubsystem connection state", () => {
+  const CONTEXT_KEY = "playwrightBddRunner.traceability.connected";
+
+  beforeEach(() => {
+    treeViews.__resetTreeViewCounters();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function connectedStates(spy: { mock: { calls: unknown[][] } }): boolean[] {
+    return spy.mock.calls
+      .filter((call) => call[0] === "setContext" && call[1] === CONTEXT_KEY)
+      .map((call) => call[2] as boolean);
+  }
+
+  it("sets the context key true and shows the connected indicator when connected", async () => {
+    const exec = vi.spyOn(vscode.commands, "executeCommand");
+    const { config } = makeConfig();
+    const conn = makeConnection(true);
+    conn.setLabel("acme.atlassian.net");
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    expect(connectedStates(exec).at(-1)).toBe(true);
+    expect(treeViews.__getLastTreeView()?.message).toBe("acme.atlassian.net · Connected");
+    subsystem.dispose();
+  });
+
+  it("sets the context key false and clears the indicator when disconnected", async () => {
+    const exec = vi.spyOn(vscode.commands, "executeCommand");
+    const { config } = makeConfig();
+    const { subsystem } = build(config, undefined, Logger.create(), makeConnection(false));
+
+    subsystem.applyCurrent();
+    await flush();
+
+    expect(connectedStates(exec).at(-1)).toBe(false);
+    expect(treeViews.__getLastTreeView()?.message).toBe("");
+    subsystem.dispose();
+  });
+
+  it("re-evaluates when the credential store fires a change", async () => {
+    const exec = vi.spyOn(vscode.commands, "executeCommand");
+    const { config } = makeConfig();
+    const conn = makeConnection(false);
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+    expect(connectedStates(exec).at(-1)).toBe(false);
+
+    conn.setConnected(true);
+    conn.setLabel("acme.atlassian.net");
+    conn.fire();
+    await flush();
+
+    expect(connectedStates(exec).at(-1)).toBe(true);
+    expect(treeViews.__getLastTreeView()?.message).toBe("acme.atlassian.net · Connected");
+    subsystem.dispose();
+  });
+
+  it("clears the context key to false when the panel tears down", async () => {
+    const exec = vi.spyOn(vscode.commands, "executeCommand");
+    const { config, set, fireChange } = makeConfig();
+    const { subsystem } = build(config, undefined, Logger.create(), makeConnection(true));
+
+    subsystem.applyCurrent();
+    await flush();
+
+    exec.mockClear();
+    set({ enableTraceabilityPanel: false });
+    fireChange();
+
+    const states = connectedStates(exec);
+    expect(states).toContain(false);
+    expect(states.every((value) => value === false)).toBe(true);
+    subsystem.dispose();
+  });
+
+  it("clears the context key to false on dispose", async () => {
+    const exec = vi.spyOn(vscode.commands, "executeCommand");
+    const { config } = makeConfig();
+    const { subsystem } = build(config, undefined, Logger.create(), makeConnection(true));
+
+    subsystem.applyCurrent();
+    await flush();
+
+    exec.mockClear();
+    subsystem.dispose();
+
+    expect(connectedStates(exec).at(-1)).toBe(false);
+  });
+
+  it("discards a probe that resolves true after teardown so the context key stays false", async () => {
+    const exec = vi.spyOn(vscode.commands, "executeCommand");
+    const { config, set, fireChange } = makeConfig();
+    const deferred = deferredConnection("acme.atlassian.net");
+    const { subsystem } = build(config, undefined, Logger.create(), deferred);
+
+    subsystem.applyCurrent();
+    await flush();
+    expect(deferred.resolvers).toHaveLength(1);
+
+    set({ enableTraceabilityPanel: false });
+    fireChange();
+    exec.mockClear();
+
+    deferred.resolvers[0]!(true);
+    await flush();
+
+    expect(connectedStates(exec)).not.toContain(true);
+    expect(treeViews.__getLastTreeView()?.message).not.toBe("acme.atlassian.net · Connected");
+    subsystem.dispose();
+  });
+
+  it("keeps the newest result when an older overlapping probe resolves last", async () => {
+    const exec = vi.spyOn(vscode.commands, "executeCommand");
+    const { config } = makeConfig();
+    const deferred = deferredConnection("acme.atlassian.net");
+    const { subsystem } = build(config, undefined, Logger.create(), deferred);
+
+    subsystem.applyCurrent();
+    await flush();
+    deferred.fire();
+    await flush();
+    expect(deferred.resolvers).toHaveLength(2);
+
+    exec.mockClear();
+    // Newer probe (index 1) lands true first; the older probe (index 0) resolves false last and
+    // must not overwrite it.
+    deferred.resolvers[1]!(true);
+    await flush();
+    deferred.resolvers[0]!(false);
+    await flush();
+
+    expect(connectedStates(exec).at(-1)).toBe(true);
+    expect(treeViews.__getLastTreeView()?.message).toBe("acme.atlassian.net · Connected");
     subsystem.dispose();
   });
 });

@@ -9,6 +9,12 @@ interface StubContext {
     get: ReturnType<typeof vi.fn>;
     update: ReturnType<typeof vi.fn>;
   };
+  secrets: {
+    get: ReturnType<typeof vi.fn>;
+    store: ReturnType<typeof vi.fn>;
+    delete: ReturnType<typeof vi.fn>;
+    onDidChange: ReturnType<typeof vi.fn>;
+  };
 }
 
 function makeStubContext(): StubContext {
@@ -17,6 +23,12 @@ function makeStubContext(): StubContext {
     workspaceState: {
       get: vi.fn().mockReturnValue(undefined),
       update: vi.fn().mockResolvedValue(undefined),
+    },
+    secrets: {
+      get: vi.fn().mockResolvedValue(undefined),
+      store: vi.fn().mockResolvedValue(undefined),
+      delete: vi.fn().mockResolvedValue(undefined),
+      onDidChange: vi.fn().mockReturnValue({ dispose: vi.fn() }),
     },
   };
 }

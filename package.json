@@ -2,7 +2,7 @@
   "name": "specwright",
   "displayName": "Specwright BDD - Playwright-BDD Test Explorer",
   "description": "Run, debug & explore Playwright-BDD (playwright-bdd) Gherkin tests in the Test Explorer. Full .feature authoring: autocomplete, hover, go-to-definition, find references, diagnostics, snippets, tag filtering, parallel runs, and step-definition generation. Works alongside Cucumber.",
-  "version": "0.4.1",
+  "version": "0.4.3",
   "icon": "icon.png",
   "publisher": "upscaled-dev",
   "license": "MIT",
@@ -502,6 +502,32 @@
         "title": "Copy Issue Key",
         "category": "Specwright",
         "icon": "$(copy)"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.manageConnection",
+        "title": "Manage Xray Connection",
+        "category": "Specwright",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.connect",
+        "title": "Connect to Xray",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.disconnect",
+        "title": "Disconnect from Xray",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.testConnection",
+        "title": "Test Xray Connection",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.hidePanel",
+        "title": "Hide Traceability Panel",
+        "category": "Specwright"
       }
     ],
     "viewsContainers": {
@@ -533,6 +559,12 @@
     "viewsWelcome": [
       {
         "view": "playwrightBddRunner.traceability",
+        "when": "!playwrightBddRunner.traceability.connected",
+        "contents": "Set up Xray integration to map your scenarios to Xray tests, see coverage at a glance, and publish run results back to Jira.\n\n[Set up Xray](command:playwrightBddRunner.traceability.connect)\n\nPrefer to keep this out of the way? [Hide this panel](command:playwrightBddRunner.traceability.hidePanel)."
+      },
+      {
+        "view": "playwrightBddRunner.traceability",
+        "when": "playwrightBddRunner.traceability.connected",
         "contents": "No Xray-tagged scenarios found yet.\n\nTag a scenario with `@TEST_KEY` (and optionally `@REQ_KEY`) in a .feature file to map it to an Xray test. The tree then groups scenarios by their Xray keys, lists untagged scenarios as coverage gaps, and shows pass/fail badges after a run.\n\nLive Xray Cloud sync — test status, coverage board, and publishing — arrives in a later release."
       }
     ],
@@ -597,6 +629,10 @@
         {
           "command": "playwrightBddRunner.traceability.copyKey",
           "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.hidePanel",
+          "when": "false"
         }
       ],
       "view/title": [
@@ -614,6 +650,11 @@
           "command": "playwrightBddRunner.exportScenarios",
           "when": "view == playwrightBddRunner.stepsExplorer",
           "group": "navigation@3"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.manageConnection",
+          "when": "view == playwrightBddRunner.traceability",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [

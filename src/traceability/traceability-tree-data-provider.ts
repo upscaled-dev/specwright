@@ -73,6 +73,7 @@ export class TraceabilityTreeDataProvider
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<TraceabilityNode | undefined>();
   public readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
   private readonly subscription: vscode.Disposable;
+  private connected = false;
 
   constructor(
     private readonly model: TraceabilityModel,
@@ -81,6 +82,16 @@ export class TraceabilityTreeDataProvider
     this.subscription = this.model.onDidChange(() =>
       this._onDidChangeTreeData.fire(undefined)
     );
+  }
+
+  // Until a provider connection exists the offline tag tree stays empty so the setup welcome shows
+  // instead (§4.1); the subsystem drives this off the credential store's connection state.
+  public setConnected(connected: boolean): void {
+    if (this.connected === connected) {
+      return;
+    }
+    this.connected = connected;
+    this._onDidChangeTreeData.fire(undefined);
   }
 
   public dispose(): void {
@@ -140,7 +151,7 @@ export class TraceabilityTreeDataProvider
   public getChildren(node?: TraceabilityNode): TraceabilityNode[] {
     const snap = this.model.snapshot;
     if (!node) {
-      if (snap.links.length === 0 && snap.untraced.length === 0) {
+      if (!this.connected || (snap.links.length === 0 && snap.untraced.length === 0)) {
         return [];
       }
       return [

@@ -19,8 +19,14 @@ function makeModel(snapshot: TraceabilitySnapshot): {
   return { model, fire: () => emitter.fire() };
 }
 
-function provider(snapshot: TraceabilitySnapshot, label = "Xray"): TraceabilityTreeDataProvider {
-  return new TraceabilityTreeDataProvider(makeModel(snapshot).model, label);
+function provider(
+  snapshot: TraceabilitySnapshot,
+  label = "Xray",
+  connected = true
+): TraceabilityTreeDataProvider {
+  const p = new TraceabilityTreeDataProvider(makeModel(snapshot).model, label);
+  p.setConnected(connected);
+  return p;
 }
 
 const SNAPSHOT: TraceabilitySnapshot = {
@@ -50,6 +56,32 @@ const SNAPSHOT: TraceabilitySnapshot = {
 describe("TraceabilityTreeDataProvider", () => {
   it("returns no roots when the snapshot is empty so viewsWelcome renders", () => {
     expect(provider(EMPTY).getChildren()).toEqual([]);
+  });
+
+  it("returns no roots while disconnected even with a populated snapshot so the setup welcome shows", () => {
+    expect(provider(SNAPSHOT, "Xray", false).getChildren()).toEqual([]);
+  });
+
+  it("renders sections once connected", () => {
+    const p = provider(SNAPSHOT, "Xray", false);
+    expect(p.getChildren()).toEqual([]);
+    p.setConnected(true);
+    expect(p.getChildren().map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
+      "covered",
+      "untraced",
+    ]);
+  });
+
+  it("fires a tree refresh when the connection state flips", () => {
+    const p = provider(EMPTY, "Xray", false);
+    let refreshes = 0;
+    p.onDidChangeTreeData(() => { refreshes += 1; });
+    p.setConnected(true);
+    expect(refreshes).toBe(1);
+    p.setConnected(true);
+    expect(refreshes).toBe(1);
+    p.setConnected(false);
+    expect(refreshes).toBe(2);
   });
 
   it("shows the covered and untraced sections with counts", () => {
