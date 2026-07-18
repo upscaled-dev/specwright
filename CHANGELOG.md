@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.3.7] - 2026-07-18
 ### Added
 
 - **Richer Markdown catalog exports.** Feature and step catalogs now open with a branded masthead — the Specwright logo inlined in the heading plus headline counts (features/scenarios/tags, definitions/unused) — and close with a matching footer.
