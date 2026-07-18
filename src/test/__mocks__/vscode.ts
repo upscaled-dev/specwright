@@ -57,6 +57,30 @@ const Uri = {
     scheme: "file",
     toString: () => `file://${fsPath}`,
   }),
+  parse: (value: string) => ({
+    fsPath: value,
+    scheme: value.split(":")[0] ?? "",
+    toString: () => value,
+  }),
+};
+
+export const env = {
+  __openExternalCalls: [] as string[],
+  __clipboardText: "",
+  openExternal: (uri: { toString: () => string }): Promise<boolean> => {
+    env.__openExternalCalls.push(uri.toString());
+    return Promise.resolve(true);
+  },
+  clipboard: {
+    writeText: (text: string): Promise<void> => {
+      env.__clipboardText = text;
+      return Promise.resolve();
+    },
+  },
+  __resetEnv: (): void => {
+    env.__openExternalCalls.length = 0;
+    env.__clipboardText = "";
+  },
 };
 
 interface StubStatusBarItem {

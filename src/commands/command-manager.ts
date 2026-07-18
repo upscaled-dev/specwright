@@ -62,6 +62,11 @@ function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
+/** Accept a bare host, a full URL, or a trailing-slashed value and reduce it to a bare host. */
+export function normalizeSiteUrl(raw: string): string {
+  return raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+}
+
 export class CommandManager {
   private readonly commands = new Map<string, vscode.Disposable>();
   private readonly context: PlaywrightBddExtensionContext;
@@ -144,6 +149,8 @@ export class CommandManager {
         { command: "playwrightBddRunner.insertStep", title: "Insert Step…", category: CATEGORY, handler: this.insertStep.bind(this) },
         { command: "playwrightBddRunner.scaffoldStepFromPanel", title: "Create Step Definition", category: CATEGORY, handler: this.scaffoldStepFromPanel.bind(this) },
         { command: "playwrightBddRunner.scaffoldFeatureFromPanel", title: "Generate Missing Step Definitions", category: CATEGORY, handler: this.scaffoldFeatureFromPanel.bind(this) },
+        { command: "playwrightBddRunner.xray.openIssue", title: "Open Xray Issue in Browser", category: CATEGORY, handler: this.openXrayIssue.bind(this) },
+        { command: "playwrightBddRunner.xray.copyKey", title: "Copy Xray Key", category: CATEGORY, handler: this.copyXrayKey.bind(this) },
       ];
 
       for (const cmd of commands) {
@@ -422,6 +429,40 @@ export class CommandManager {
 
   private showErrorMessage(message: string): void {
     vscode.window.showErrorMessage(message);
+  }
+
+  // The Xray tree passes its node (which carries `testKey`) as the first menu arg; a palette/string
+  // caller can pass the key directly.
+  private xrayKeyFromArg(arg: unknown): string | undefined {
+    if (typeof arg === "string") {return arg;}
+    const key = (arg as { testKey?: unknown } | undefined)?.testKey;
+    return typeof key === "string" ? key : undefined;
+  }
+
+  private async openXrayIssue(...args: CommandArguments): Promise<void> {
+    const key = this.xrayKeyFromArg(args[0]);
+    if (!key) {
+      this.showErrorMessage("Open Xray issue: no Xray key on this item.");
+      return;
+    }
+    const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
+    if (!site) {
+      vscode.window.showWarningMessage(
+        "Set playwrightBddRunner.xray.siteUrl to open Xray issues in the browser."
+      );
+      return;
+    }
+    await vscode.env.openExternal(vscode.Uri.parse(`https://${site}/browse/${key}`));
+  }
+
+  private async copyXrayKey(...args: CommandArguments): Promise<void> {
+    const key = this.xrayKeyFromArg(args[0]);
+    if (!key) {
+      this.showErrorMessage("Copy Xray key: no Xray key on this item.");
+      return;
+    }
+    await vscode.env.clipboard.writeText(key);
+    vscode.window.showInformationMessage(`Copied ${key}`);
   }
 
   public dispose(): void {

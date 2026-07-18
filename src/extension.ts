@@ -11,6 +11,7 @@ import { TestOrganizationManager } from "./core/test-organization";
 import { PlaywrightJsonParser } from "./utils/playwright-json-parser";
 import { CommandBuilder } from "./core/command-builder";
 import { ProviderRegistry } from "./core/provider-registry";
+import { XraySubsystem } from "./xray/xray-subsystem";
 import { PROMPTED_STATE_KEY } from "./commands/prompt-worker-count";
 import { StatusBar } from "./ui/status-bar";
 
@@ -19,6 +20,7 @@ let commandManager: CommandManager | undefined;
 let isActivated = false;
 let testController: vscode.TestController | undefined;
 let providerRegistry: ProviderRegistry | undefined;
+let xraySubsystem: XraySubsystem | undefined;
 let activationLogger: Logger | undefined;
 
 /**
@@ -59,12 +61,19 @@ export interface ExtensionApi {
       }
     | undefined;
   /** @internal */
+  readonly xraySubsystem:
+    | {
+        readonly xrayPanelActive: boolean;
+      }
+    | undefined;
+  /** @internal */
   seedParallelProfilePrompted(value: boolean): Promise<void>;
 }
 
 function buildApi(
   provider: PlaywrightBddTestProvider | undefined,
   registry: ProviderRegistry | undefined,
+  xray: XraySubsystem | undefined,
   workspaceState: vscode.Memento | undefined
 ): ExtensionApi {
   const seedParallelProfilePrompted = async (value: boolean): Promise<void> => {
@@ -91,8 +100,18 @@ function buildApi(
         get stepPaths() { return registry.stepPaths; },
       }
     : undefined;
+  const xrayApi = xray
+    ? {
+        get xrayPanelActive() { return xray.xrayPanelActive; },
+      }
+    : undefined;
   if (!provider) {
-    return { testProvider: undefined, providerRegistry: registryApi, seedParallelProfilePrompted };
+    return {
+      testProvider: undefined,
+      providerRegistry: registryApi,
+      xraySubsystem: xrayApi,
+      seedParallelProfilePrompted,
+    };
   }
   return {
     testProvider: {
@@ -104,6 +123,7 @@ function buildApi(
       restoreShellRunner: () => provider.restoreShellRunner(),
     },
     providerRegistry: registryApi,
+    xraySubsystem: xrayApi,
     seedParallelProfilePrompted,
   };
 }
@@ -115,7 +135,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   if (isActivated) {
     activationLogger?.warn("Extension already activated, skipping duplicate activation");
-    return buildApi(testProvider, providerRegistry, context.workspaceState);
+    return buildApi(testProvider, providerRegistry, xraySubsystem, context.workspaceState);
   }
 
   const logger = Logger.create();
@@ -137,6 +157,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   providerRegistry = new ProviderRegistry(config, featureParser, logger);
   context.subscriptions.push(providerRegistry);
+
+  xraySubsystem = new XraySubsystem(
+    config,
+    featureParser,
+    TestDiscoveryManager.create(logger, config),
+    PlaywrightJsonParser.create(logger),
+    logger
+  );
+  context.subscriptions.push(xraySubsystem);
 
   const sharedContext: PlaywrightBddExtensionContext = {
     logger,
@@ -183,6 +212,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandManager.setUsageIndexHost(providerRegistry);
 
     providerRegistry.applyCurrent();
+    xraySubsystem.applyCurrent();
 
     const statusBar = StatusBar.create(testExecutor);
     context.subscriptions.push(statusBar);
@@ -197,7 +227,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     );
   }
 
-  return buildApi(testProvider, providerRegistry, context.workspaceState);
+  return buildApi(testProvider, providerRegistry, xraySubsystem, context.workspaceState);
 }
 
 export function deactivate(): void {
@@ -218,6 +248,7 @@ export function deactivate(): void {
     commandManager = undefined;
     testController = undefined;
     providerRegistry = undefined;
+    xraySubsystem = undefined;
     activationLogger = undefined;
     // The logger must outlive every log call above, so it is disposed last.
     try { logger?.dispose(); } catch { /* already disposed */ }

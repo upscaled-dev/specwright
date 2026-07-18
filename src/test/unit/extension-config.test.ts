@@ -58,6 +58,10 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   enableStepLiteralPromotion: (c) => c.stepLiteralPromotionMode,
   enableTableFormatting: (c) => c.tableFormattingMode,
   collapseMarkdownExportSections: (c) => c.collapseMarkdownExportSections,
+  "xray.enableXrayPanel": (c) => c.enableXrayPanel,
+  "xray.siteUrl": (c) => c.xraySiteUrl,
+  "xray.testTagPrefix": (c) => c.xrayTestTagPrefix,
+  "xray.reqTagPrefix": (c) => c.xrayReqTagPrefix,
 };
 
 describe("ExtensionConfig defaults vs package.json", () => {

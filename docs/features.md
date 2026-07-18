@@ -193,3 +193,45 @@ Two commands (command palette, or the Steps-panel toolbar) write shareable Markd
 - **Export All Scenarios** — first asks for a scope: **All features**, **By tag…** (pick from the known tags or enter custom ones; a feature is included when any of its scenarios carries any of the chosen tags), or **Selected features…** (multi-select of discovered feature files). Each feature renders its title and path, then each scenario or outline with its tags and steps, and outline example tables copied verbatim. The Summary states the active filter and how much was included, plus feature/scenario/outline/example-row counts and a descending tag-frequency list. Features with no matching scenarios are omitted.
 
 Markdown is the only export format; JSON/CSV and standalone HTML are out of scope.
+
+## Xray Traceability panel
+
+An **Xray Traceability** view (id `playwrightBddRunner.xrayTraceability`) stacks below the Steps view in the Specwright container. It maps scenarios to Jira Xray test and requirement keys using tags in the `.feature` files — entirely offline, from tags alone. This is the first phase of the Xray integration; syncing with Xray Cloud, the coverage board, and publishing run results arrive in later releases.
+
+### Tag convention
+
+- `@TEST_<KEY>` maps a scenario to an Xray test: `@TEST_CALC-1043` links to test `CALC-1043`.
+- `@REQ_<KEY>` marks requirement coverage: `@REQ_CALC-900` shows as `REQ CALC-900` on the scenario row.
+- The prefix is matched **case-insensitively** and the key is normalized to uppercase, so `@test_calc-1043` and `@TEST_CALC-1043` collapse to the same test.
+- Keys follow the Jira shape `PROJ-123`; multi-segment projects like `AB-CD-123` work (the project is everything before the trailing `-<number>`, so `AB-CD-123` belongs to `AB-CD`).
+- Prefixes are configurable via `xray.testTagPrefix` / `xray.reqTagPrefix`; an empty prefix falls back to the default. Extraction lives in [src/xray/tag-extraction.ts](../src/xray/tag-extraction.ts).
+
+Because the mapping comes from tags, not scenario names, renaming a scenario never breaks its link.
+
+### Tree structure
+
+Two sections, each with a count:
+
+- **Mapped tests** — one node per Xray test key (description: project and scenario count), expanding to the scenarios it covers. Clicking a scenario reveals its `.feature` line.
+- **Untraced scenarios** — scenarios with no `@TEST_` tag, listed as coverage gaps with a warning icon.
+
+**Scenario Outlines** map as **one Xray test per outline** — a `@TEST_` tag on the outline covers every example row, which Xray treats as iterations. A `@TEST_` tag on a specific `Examples:` block splits that block out into its own test (the rest of the outline stays with the outline-level key). There is never one test per example row.
+
+When no scenarios carry Xray tags yet, the view shows a welcome note explaining the tag convention instead of an empty tree.
+
+### Context actions
+
+Right-click (or use the inline icons on) a test-key node:
+
+- **Open Xray Issue in Browser** — opens `https://{siteUrl}/browse/{KEY}` using the `xray.siteUrl` setting. Warns if the setting is empty.
+- **Copy Xray Key** — copies the key to the clipboard.
+
+### Result badges
+
+Test-key and scenario nodes show pass/fail/skipped badges from the most recent **persistent Playwright JSON report** found in the workspace — the first-found newest of `results.json`, `test-results.json`, `test-results/results.json`, or `playwright-report/results.json` in any workspace root. A test key covering several scenarios shows the worst outcome among them.
+
+Important caveat: runs launched from the Test Explorer do **not** produce badges — the extension's own runs write their JSON report to a temp file and delete it after parsing. Badges appear only for runs whose Playwright config writes a JSON report to one of the paths above (for example a plain `npx playwright test` with a `['json', { outputFile: 'results.json' }]` reporter). Deeper integration with the extension's own runs lands in a later phase. The panel watches the report paths, so badges refresh when a report is written and clear when it is deleted.
+
+### Settings
+
+Controlled by `playwrightBddRunner.xray.enableXrayPanel` (boolean, default `true`) — disabling hides the view and tears down its watchers. All four `xray.*` settings are in [settings.md](settings.md).

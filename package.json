@@ -2,7 +2,7 @@
   "name": "specwright",
   "displayName": "Specwright BDD - Playwright-BDD Test Explorer",
   "description": "Run, debug & explore Playwright-BDD (playwright-bdd) Gherkin tests in the Test Explorer. Full .feature authoring: autocomplete, hover, go-to-definition, find references, diagnostics, snippets, tag filtering, parallel runs, and step-definition generation. Works alongside Cucumber.",
-  "version": "0.3.9",
+  "version": "0.4.1",
   "icon": "icon.png",
   "publisher": "upscaled-dev",
   "license": "MIT",
@@ -303,6 +303,26 @@
           "type": "boolean",
           "default": false,
           "description": "Render the collapsible sections in exported feature/step Markdown catalogs collapsed by default. Recommended for large catalogs so the document opens as a scannable outline."
+        },
+        "playwrightBddRunner.xray.enableXrayPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the Xray Traceability panel beneath the Steps panel: scenarios grouped by their @TEST_ Xray keys, coverage gaps for untagged scenarios, and pass/fail badges from the last run. Disabling releases the panel and its watchers."
+        },
+        "playwrightBddRunner.xray.siteUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Your Jira/Xray Cloud site host, e.g. 'acme.atlassian.net'. Used to build browse links (https://{siteUrl}/browse/{KEY}) for the 'Open Xray Issue in Browser' action."
+        },
+        "playwrightBddRunner.xray.testTagPrefix": {
+          "type": "string",
+          "default": "TEST_",
+          "description": "Tag prefix that maps a scenario to an Xray test. '@TEST_CALC-1043' links to Xray test CALC-1043. Matched case-insensitively."
+        },
+        "playwrightBddRunner.xray.reqTagPrefix": {
+          "type": "string",
+          "default": "REQ_",
+          "description": "Tag prefix that marks a scenario as covering an Xray requirement. '@REQ_CALC-900' covers requirement CALC-900. Matched case-insensitively."
         }
       }
     },
@@ -462,6 +482,18 @@
         "title": "Generate Missing Step Definitions",
         "category": "Specwright",
         "icon": "$(add)"
+      },
+      {
+        "command": "playwrightBddRunner.xray.openIssue",
+        "title": "Open Xray Issue in Browser",
+        "category": "Specwright",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "playwrightBddRunner.xray.copyKey",
+        "title": "Copy Xray Key",
+        "category": "Specwright",
+        "icon": "$(copy)"
       }
     ],
     "viewsContainers": {
@@ -480,9 +512,22 @@
           "name": "Steps",
           "icon": "media/activity-bar-icon.svg",
           "contextualTitle": "Specwright BDD"
+        },
+        {
+          "id": "playwrightBddRunner.xrayTraceability",
+          "name": "Xray Traceability",
+          "icon": "media/activity-bar-icon.svg",
+          "contextualTitle": "Specwright BDD",
+          "when": "config.playwrightBddRunner.xray.enableXrayPanel"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "playwrightBddRunner.xrayTraceability",
+        "contents": "No Xray-tagged scenarios found yet.\n\nTag a scenario with `@TEST_KEY` (and optionally `@REQ_KEY`) in a .feature file to map it to an Xray test. The tree then groups scenarios by their Xray keys, lists untagged scenarios as coverage gaps, and shows pass/fail badges after a run.\n\nLive Xray Cloud sync — test status, coverage board, and publishing — arrives in a later release."
+      }
+    ],
     "menus": {
       "commandPalette": [
         {
@@ -536,6 +581,14 @@
         {
           "command": "playwrightBddRunner.scaffoldFeatureFromPanel",
           "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.xray.openIssue",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.xray.copyKey",
+          "when": "false"
         }
       ],
       "view/title": [
@@ -570,6 +623,16 @@
           "command": "playwrightBddRunner.scaffoldFeatureFromPanel",
           "when": "view == playwrightBddRunner.stepsExplorer && viewItem == unmatchedFile",
           "group": "inline"
+        },
+        {
+          "command": "playwrightBddRunner.xray.openIssue",
+          "when": "view == playwrightBddRunner.xrayTraceability && viewItem == xrayTestKey",
+          "group": "inline@1"
+        },
+        {
+          "command": "playwrightBddRunner.xray.copyKey",
+          "when": "view == playwrightBddRunner.xrayTraceability && viewItem == xrayTestKey",
+          "group": "inline@2"
         }
       ],
       "editor/context": [

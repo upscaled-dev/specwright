@@ -304,7 +304,8 @@ describe("command contributions ↔ handler registrations parity", () => {
     }
 
     const itemContext = pkg.contributes.menus["view/item/context"]!;
-    expect(itemContext.map((e) => [e.command, e.when])).toEqual([
+    const stepsItems = itemContext.filter((e) => e.when?.includes("stepsExplorer"));
+    expect(stepsItems.map((e) => [e.command, e.when])).toEqual([
       ["playwrightBddRunner.insertStep", "view == playwrightBddRunner.stepsExplorer && viewItem == stepDefinition"],
       ["playwrightBddRunner.scaffoldStepFromPanel", "view == playwrightBddRunner.stepsExplorer && viewItem == unmatchedStep"],
       ["playwrightBddRunner.scaffoldFeatureFromPanel", "view == playwrightBddRunner.stepsExplorer && viewItem == unmatchedFile"],
@@ -327,5 +328,97 @@ describe("command contributions ↔ handler registrations parity", () => {
     ]) {
       expect(palette.find((e) => e.command === command)).toBeUndefined();
     }
+  });
+
+  it("places the xray node commands inline on the test-key item and hides them from the palette", () => {
+    const itemContext = pkg.contributes.menus["view/item/context"]!;
+    const xrayItems = itemContext.filter((e) => e.when?.includes("xrayTraceability"));
+    expect(xrayItems.map((e) => [e.command, e.when])).toEqual([
+      ["playwrightBddRunner.xray.openIssue", "view == playwrightBddRunner.xrayTraceability && viewItem == xrayTestKey"],
+      ["playwrightBddRunner.xray.copyKey", "view == playwrightBddRunner.xrayTraceability && viewItem == xrayTestKey"],
+    ]);
+
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    for (const command of ["playwrightBddRunner.xray.openIssue", "playwrightBddRunner.xray.copyKey"]) {
+      expect(palette.find((e) => e.command === command)?.when).toBe("false");
+    }
+  });
+});
+
+interface EnvHooks {
+  __openExternalCalls: string[];
+  __clipboardText: string;
+  __resetEnv: () => void;
+}
+
+const envHooks = (vscode as unknown as { env: EnvHooks }).env;
+
+function configWithSite(siteUrl: string): ExtensionConfig {
+  const workspaceConfig = {
+    get: <T>(key: string, defaultValue?: T): T | undefined =>
+      key === "xray.siteUrl" ? (siteUrl as unknown as T) : defaultValue,
+    update: (): Promise<void> => Promise.resolve(),
+    inspect: (key: string): { key: string } => ({ key }),
+  } as unknown as vscode.WorkspaceConfiguration;
+  return ExtensionConfig.create(workspaceConfig, false);
+}
+
+function captureHandlers(context: PlaywrightBddExtensionContext): Map<string, (...a: unknown[]) => Promise<void>> {
+  const handlers = new Map<string, (...a: unknown[]) => Promise<void>>();
+  const commandsApi = vscode.commands as unknown as { registerCommand: unknown };
+  const original = commandsApi.registerCommand;
+  commandsApi.registerCommand = (cmd: string, cb: (...a: unknown[]) => Promise<void>): { dispose: () => void } => {
+    handlers.set(cmd, cb);
+    return { dispose: () => {} };
+  };
+  try {
+    const mgr = CommandManager.create(context);
+    mgr.registerCommands({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+  } finally {
+    commandsApi.registerCommand = original;
+  }
+  return handlers;
+}
+
+describe("xray browse/copy command handlers", () => {
+  beforeEach(() => envHooks.__resetEnv());
+
+  async function openIssue(siteUrl: string, arg: unknown): Promise<void> {
+    const handlers = captureHandlers(makeContext({ config: configWithSite(siteUrl) }));
+    await handlers.get("playwrightBddRunner.xray.openIssue")!(arg);
+  }
+
+  it("builds the browse URL from a bare host", async () => {
+    await openIssue("acme.atlassian.net", { testKey: "CALC-1" });
+    expect(envHooks.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-1"]);
+  });
+
+  it("strips an https:// scheme from the configured site", async () => {
+    await openIssue("https://acme.atlassian.net", { testKey: "CALC-1" });
+    expect(envHooks.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-1"]);
+  });
+
+  it("strips trailing slashes from the configured site", async () => {
+    await openIssue("acme.atlassian.net/", { testKey: "CALC-1" });
+    expect(envHooks.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-1"]);
+  });
+
+  it("warns and opens nothing when siteUrl is unset", async () => {
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    await openIssue("", { testKey: "CALC-1" });
+    expect(envHooks.__openExternalCalls).toEqual([]);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it("no-ops when the item carries no xray key", async () => {
+    await openIssue("acme.atlassian.net", { notAKey: true });
+    expect(envHooks.__openExternalCalls).toEqual([]);
+  });
+
+  it("copies the xray key to the clipboard", async () => {
+    const handlers = captureHandlers(makeContext());
+    await handlers.get("playwrightBddRunner.xray.copyKey")!({ testKey: "CALC-1" });
+    expect(envHooks.__clipboardText).toBe("CALC-1");
   });
 });
