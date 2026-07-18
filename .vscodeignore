@@ -31,13 +31,14 @@ test-results/**
 .vscodeignore
 .github/**
 .devcontainer/**
-.DS_Store
+.DS_Storeß
 node_modules/**
 package-lock.json
 
 # Dev-only assets that don't need to ship
 images/**
 icon.psd
+icon.png
 
 # Repo documentation — ships via the repository, not the package
 docs/**

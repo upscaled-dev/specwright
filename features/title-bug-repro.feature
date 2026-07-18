@@ -16,11 +16,10 @@ Feature: Title repro
       | 3      | 3      |
 
   
-  Scenario Outline: Add (<count1>/<count2>) widgets
+  Scenario Outline: Add new (<count1>/<count2>) widgets
     Given I have 0 widgets
     When I add <count1> widgets
     |number|value|
-    |<count1>|new|
     Then I have <count2> widgets total
 
     Examples:
