@@ -1008,3 +1008,114 @@ describe("TestExecutor working-directory inference (monorepo)", () => {
     expect(calls[0]!.workingDir).toBe(tmpDir);
   });
 });
+
+describe("TestExecutor spec-line target no-tests retry", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "executor-retry-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeWorkspace(): typeof vscode.workspace {
+    return {
+      ...vscode.workspace,
+      workspaceFolders: [{ name: "ws", index: 0, uri: vscode.Uri.file(tmpDir) }],
+    } as unknown as typeof vscode.workspace;
+  }
+
+  function write(relPath: string, content = ""): string {
+    const abs = nodePath.join(tmpDir, ...relPath.split("/"));
+    fs.mkdirSync(nodePath.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content);
+    return abs;
+  }
+
+  function writeSpec(): void {
+    write(
+      ".features-gen/features/a.feature.spec.js",
+      `const bddFileData = [ // bdd-data-start
+  {"pwTestLine":7,"pickleLine":3,"steps":[]},
+]; // bdd-data-end`
+    );
+  }
+
+  it("reruns with name-grep when Playwright finds no tests for the spec-line target", async () => {
+    writeSpec();
+    const feature = write("features/a.feature", "Feature: F");
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      if (command.includes("a.feature.spec.js")) {
+        return { success: false, output: "Error: no tests found", error: "", returnCode: 1 };
+      }
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      workspace: makeWorkspace(),
+    });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+    });
+
+    expect(calls).toHaveLength(2);
+    // The target must use forward slashes — Playwright treats CLI file filters as regexes, so
+    // Windows separators (`\b`, `\f`, ...) silently match nothing. Meaningful on win32 CI, where
+    // path.relative would otherwise produce backslashes.
+    expect(calls[0]).toContain(".features-gen/features/a.feature.spec.js:7");
+    expect(calls[1]).toContain("--grep");
+    expect(calls[1]).not.toContain("a.feature.spec.js");
+    expect(result.success).toBe(true);
+  });
+
+  it("does not retry when the targeted run failed for a different reason", async () => {
+    writeSpec();
+    const feature = write("features/a.feature", "Feature: F");
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      return { success: false, output: "1 failed", error: "", returnCode: 1 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      workspace: makeWorkspace(),
+    });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.success).toBe(false);
+  });
+
+  it("does not retry a run that never had a spec-line target", async () => {
+    // No generated spec on disk → the first run already used name-grep; a "no tests found"
+    // outcome must surface as-is instead of rerunning the identical command.
+    const feature = write("features/a.feature", "Feature: F");
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      return { success: false, output: "Error: no tests found", error: "", returnCode: 1 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      workspace: makeWorkspace(),
+    });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.success).toBe(false);
+  });
+});

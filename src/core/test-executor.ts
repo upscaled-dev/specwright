@@ -68,6 +68,18 @@ function countScenarioStatuses(
   return { passed, failed };
 }
 
+/**
+ * True when the run executed nothing at all and Playwright said so. Distinguishes a filter
+ * matching zero tests from real failures (compile errors, failing tests), which produce either
+ * scenario results or a different error text.
+ */
+function foundNoTests(result: RunOutputResult): boolean {
+  return (
+    (result.scenarioDetails ?? []).length === 0 &&
+    /no tests found/i.test(`${result.output}\n${result.error ?? ""}`)
+  );
+}
+
 let reportSequence = 0;
 
 type CommandResult = { success: boolean; output: string; error: string; returnCode: number };
@@ -361,7 +373,33 @@ export class TestExecutor {
     }
 
     const enriched = this.withSpecLineTarget(options);
-    const { playwrightCommand } = this.commandBuilder().buildScenarioCommandParts(enriched);
+    const result = await this.runScenarioPlaywright(enriched, workingDir, start, signal);
+
+    // Safety net: a spec-line target Playwright doesn't recognize (stale spec, path-filter
+    // quirk) makes it report "no tests found" — the run ends with nothing executed and every
+    // Explorer item skipped. That's strictly worse than the imprecise name-grep, so rerun once
+    // without the target. Only the exact no-tests outcome retries; real failures (compile
+    // errors, failing tests) would fail identically again and must surface as-is.
+    const specLineTargetWasAdded =
+      enriched.specLineTarget !== undefined && options.specLineTarget === undefined;
+    if (specLineTargetWasAdded && !signal?.aborted && foundNoTests(result)) {
+      this.logger.warn(
+        `Playwright found no tests for the spec-line target ${enriched.specLineTarget}; ` +
+          "retrying with a name-based --grep."
+      );
+      return this.runScenarioPlaywright(options, workingDir, start, signal);
+    }
+    return result;
+  }
+
+  /** The playwright half of a scenario run: execute with a JSON report and map the outcome. */
+  private async runScenarioPlaywright(
+    options: TestExecutionOptions,
+    workingDir: string,
+    start: number,
+    signal: AbortSignal | undefined
+  ): Promise<RunOutputResult> {
+    const { playwrightCommand } = this.commandBuilder().buildScenarioCommandParts(options);
 
     reportSequence += 1;
     const reportPath = path.join(
@@ -523,7 +561,11 @@ export class TestExecutor {
     // outside the working dir (a `..` chain would be brittle).
     const rel = path.relative(workingDir, specPath);
     const specArg = rel === "" || rel.startsWith("..") || path.isAbsolute(rel) ? specPath : rel;
-    return { target: `${specArg}:${pwTestLine}` };
+    // Playwright treats CLI file filters as regular expressions. A Windows-separator path is
+    // regex poison there — `.features-gen\browser` reads as "gen" + word-boundary + "rowser",
+    // which matches nothing, and Playwright reports "no tests found". Forward slashes are
+    // literal in a regex and Playwright accepts them on every platform.
+    return { target: `${specArg.split(path.sep).join("/")}:${pwTestLine}` };
   }
 
   private async runWithJsonReport(

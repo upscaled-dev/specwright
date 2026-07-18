@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+
+- **Windows: single-row targeting matched nothing, so nothing ran.** Playwright treats CLI file filters as regular expressions, and the `<spec>:<line>` target emitted in 0.3.8 used Windows path separators — `\b`, `\f` and friends are regex metacharacters there, so every targeted run ended in "no tests found" with all scenarios shown as possibly out of scope. Targets are now emitted with forward slashes on every platform.
+- Safety net: when Playwright reports "no tests found" for a spec-line-targeted run, the run is retried once with the name-based `--grep` fallback — an unrecognized target (stale spec, path quirk) can no longer end a run with nothing executed.
 
 ## [0.3.8] - 2026-07-18
 ### Fixed
