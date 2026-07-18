@@ -14,3 +14,17 @@ Feature: Title repro
       | count1 | count2 |
       | 2      | 2      |
       | 3      | 3      |
+
+  
+  Scenario Outline: Add (<count1>/<count2>) widgets
+    Given I have 0 widgets
+    When I add <count1> widgets
+    |number|value|
+    |<count1>|new|
+    Then I have <count2> widgets total
+
+    Examples:
+      | count1 | count2 |
+      | 2      | 2      |
+      | 3      | 3      |
+

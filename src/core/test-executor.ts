@@ -208,11 +208,7 @@ export class TestExecutor {
         }
       }
 
-      const specPath = resolveGeneratedSpecPath(
-        workingDir,
-        this.config.featuresGenDir,
-        options.filePath
-      );
+      const specPath = this.resolveSpecPath(workingDir, options.filePath);
       mirrorId = this.mirror.mirrorBreakpoints(options.filePath, specPath);
 
       // Resolve the precise spec target from the freshly generated spec (bddgen just ran), so a
@@ -473,6 +469,26 @@ export class TestExecutor {
    * back to name-grep — when there's no line, the spec can't be located/read, or the line isn't
    * mapped.
    */
+  /**
+   * Locate the generated spec for a feature, logging when several BDD projects generated it
+   * (the run/debug then covers only the targeted project, which the user should know about).
+   */
+  private resolveSpecPath(workingDir: string, filePath: string): string | undefined {
+    return resolveGeneratedSpecPath(
+      workingDir,
+      this.config.featuresGenDir,
+      filePath,
+      (chosen, candidates) => {
+        this.logger.warn(
+          `Multiple generated specs match ${filePath}: ${candidates.join(", ")}. ` +
+            `Targeting the newest, ${chosen} — the scenario runs only in that BDD project. ` +
+            `To always target one project, point 'playwrightBddRunner.featuresGenDir' at its ` +
+            `output dir (e.g. ".features-gen/browser").`
+        );
+      }
+    );
+  }
+
   private resolveSpecLineTarget(
     filePath: string,
     lineNumber?: number,
@@ -482,8 +498,7 @@ export class TestExecutor {
       return { reason: "the test item has no line number" };
     }
     const workingDir = this.getWorkingDirectory(filePath);
-    const specPath =
-      specPathArg ?? resolveGeneratedSpecPath(workingDir, this.config.featuresGenDir, filePath);
+    const specPath = specPathArg ?? this.resolveSpecPath(workingDir, filePath);
     if (!specPath) {
       return { reason: `the feature is outside the working directory ${workingDir}` };
     }

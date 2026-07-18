@@ -1,4 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { parseBddFileData, resolveGeneratedSpecPath } from "../../parsers/bdd-file-data-parser";
 
@@ -99,4 +101,123 @@ describe("resolveGeneratedSpecPath", () => {
       ).toBeUndefined();
     }
   );
+
+  // playwright-bdd v9 generates `<feature>.spec.ts`; v8 and earlier generated `.spec.js`.
+  describe("suffix selection against generated files on disk", () => {
+    let workDir: string;
+    let genDir: string;
+
+    beforeEach(() => {
+      workDir = fs.mkdtempSync(path.join(os.tmpdir(), "bdd-spec-path-"));
+      genDir = path.join(workDir, ".features-gen", "features");
+      fs.mkdirSync(genDir, { recursive: true });
+    });
+
+    afterEach(() => {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    });
+
+    const feature = (): string => path.join(workDir, "features", "a.feature");
+
+    it("picks the .spec.ts file when only it exists (playwright-bdd v9)", () => {
+      const tsSpec = path.join(genDir, "a.feature.spec.ts");
+      fs.writeFileSync(tsSpec, "// spec");
+      expect(resolveGeneratedSpecPath(workDir, ".features-gen", feature())).toBe(tsSpec);
+    });
+
+    it("picks the newer file when both suffixes exist (stale .js from before a v9 upgrade)", () => {
+      const jsSpec = path.join(genDir, "a.feature.spec.js");
+      const tsSpec = path.join(genDir, "a.feature.spec.ts");
+      fs.writeFileSync(jsSpec, "// old");
+      fs.writeFileSync(tsSpec, "// new");
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(jsSpec, past, past);
+      expect(resolveGeneratedSpecPath(workDir, ".features-gen", feature())).toBe(tsSpec);
+
+      // And the other way around: a project that downgraded (or regenerated .js) wins back.
+      const older = new Date(Date.now() - 120_000);
+      fs.utimesSync(tsSpec, older, older);
+      const now = new Date();
+      fs.utimesSync(jsSpec, now, now);
+      expect(resolveGeneratedSpecPath(workDir, ".features-gen", feature())).toBe(jsSpec);
+    });
+
+    it("falls back to the .spec.js candidate when neither exists, so callers can name a path in diagnostics", () => {
+      expect(resolveGeneratedSpecPath(workDir, ".features-gen", feature())).toBe(
+        path.join(genDir, "a.feature.spec.js")
+      );
+    });
+
+    it("finds the spec when featuresRoot stripped the leading segment from the generated layout", () => {
+      // featuresRoot: './features' → bddgen writes .features-gen/a.feature.spec.js
+      const spec = path.join(workDir, ".features-gen", "a.feature.spec.js");
+      fs.writeFileSync(spec, "// spec");
+      expect(resolveGeneratedSpecPath(workDir, ".features-gen", feature())).toBe(spec);
+    });
+
+    it("prefers the exact mirrored path over a stripped-segment match", () => {
+      const exact = path.join(genDir, "a.feature.spec.js"); // .features-gen/features/...
+      const stripped = path.join(workDir, ".features-gen", "a.feature.spec.js");
+      fs.writeFileSync(exact, "// exact");
+      fs.writeFileSync(stripped, "// stripped");
+      // Even with the stripped file newer, the more specific path wins.
+      const now = new Date();
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(exact, past, past);
+      fs.utimesSync(stripped, now, now);
+      expect(resolveGeneratedSpecPath(workDir, ".features-gen", feature())).toBe(exact);
+    });
+
+    it("finds the spec nested under a named BDD project directory", () => {
+      // defineBddProject(..., 'browser') → .features-gen/browser/features/a.feature.spec.js
+      const projectDir = path.join(workDir, ".features-gen", "browser", "features");
+      fs.mkdirSync(projectDir, { recursive: true });
+      const spec = path.join(projectDir, "a.feature.spec.js");
+      fs.writeFileSync(spec, "// spec");
+      expect(resolveGeneratedSpecPath(workDir, ".features-gen", feature())).toBe(spec);
+    });
+
+    it("finds the spec under a named project combined with featuresRoot stripping", () => {
+      // project 'browser' + featuresRoot './features' → .features-gen/browser/a.feature.spec.ts
+      const projectDir = path.join(workDir, ".features-gen", "browser");
+      fs.mkdirSync(projectDir, { recursive: true });
+      const spec = path.join(projectDir, "a.feature.spec.ts");
+      fs.writeFileSync(spec, "// spec");
+      expect(resolveGeneratedSpecPath(workDir, ".features-gen", feature())).toBe(spec);
+    });
+
+    it("tie-breaks same-specificity matches from multiple named projects by newest mtime and flags the duplicate", () => {
+      const browserDir = path.join(workDir, ".features-gen", "browser", "features");
+      const apiDir = path.join(workDir, ".features-gen", "api", "features");
+      fs.mkdirSync(browserDir, { recursive: true });
+      fs.mkdirSync(apiDir, { recursive: true });
+      const browserSpec = path.join(browserDir, "a.feature.spec.js");
+      const apiSpec = path.join(apiDir, "a.feature.spec.js");
+      fs.writeFileSync(browserSpec, "// browser");
+      fs.writeFileSync(apiSpec, "// api");
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(apiSpec, past, past);
+
+      const duplicates: { chosen: string; candidates: string[] }[] = [];
+      const result = resolveGeneratedSpecPath(workDir, ".features-gen", feature(), (chosen, candidates) =>
+        duplicates.push({ chosen, candidates })
+      );
+
+      expect(result).toBe(browserSpec);
+      expect(duplicates).toHaveLength(1);
+      expect(duplicates[0]?.chosen).toBe(browserSpec);
+      expect(duplicates[0]?.candidates).toEqual(expect.arrayContaining([browserSpec, apiSpec]));
+      expect(duplicates[0]?.candidates).toHaveLength(2);
+    });
+
+    it("does not flag a duplicate when only one project generated the feature", () => {
+      const browserDir = path.join(workDir, ".features-gen", "browser", "features");
+      fs.mkdirSync(browserDir, { recursive: true });
+      fs.writeFileSync(path.join(browserDir, "a.feature.spec.js"), "// browser");
+
+      const duplicates: string[] = [];
+      resolveGeneratedSpecPath(workDir, ".features-gen", feature(), (chosen) => duplicates.push(chosen));
+      expect(duplicates).toHaveLength(0);
+    });
+  });
 });
