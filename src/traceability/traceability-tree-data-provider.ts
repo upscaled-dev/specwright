@@ -6,7 +6,7 @@ import {
   TraceLink,
   UntracedScenario,
   worstStatus,
-} from "../xray/traceability-model";
+} from "./traceability-model";
 
 interface SectionNode {
   kind: "section";
@@ -16,7 +16,7 @@ interface SectionNode {
 interface TestKeyNode {
   kind: "testKey";
   testKey: string;
-  project: string;
+  project?: string | undefined;
   links: TraceLink[];
 }
 
@@ -41,9 +41,6 @@ export type TraceabilityNode =
   | LinkNode
   | UntracedNode
   | InfoNode;
-
-const NO_MAPPED_MESSAGE = "No scenarios are mapped to an Xray test yet.";
-const NO_UNTRACED_MESSAGE = "Every scenario is mapped to an Xray test.";
 
 const OUTCOME_ICON: Record<RunOutcome, string> = {
   passed: "testing-passed-icon",
@@ -77,7 +74,10 @@ export class TraceabilityTreeDataProvider
   public readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
   private readonly subscription: vscode.Disposable;
 
-  constructor(private readonly model: TraceabilityModel) {
+  constructor(
+    private readonly model: TraceabilityModel,
+    private readonly providerLabel: string
+  ) {
     this.subscription = this.model.onDidChange(() =>
       this._onDidChangeTreeData.fire(undefined)
     );
@@ -109,8 +109,8 @@ export class TraceabilityTreeDataProvider
       case "testKey": {
         const item = new vscode.TreeItem(node.testKey, vscode.TreeItemCollapsibleState.Collapsed);
         const scenarios = node.links.length === 1 ? "1 scenario" : `${node.links.length} scenarios`;
-        item.description = `${node.project} · ${scenarios}`;
-        item.contextValue = "xrayTestKey";
+        item.description = node.project ? `${node.project} · ${scenarios}` : scenarios;
+        item.contextValue = "traceabilityTestKey";
         const aggregate = worstStatus(node.links.map((l) => l.lastResult));
         item.iconPath = aggregate ? outcomeIcon(aggregate) : new vscode.ThemeIcon("key");
         item.tooltip = node.testKey;
@@ -120,7 +120,7 @@ export class TraceabilityTreeDataProvider
         const { scenario, reqKeys } = node.link;
         const item = new vscode.TreeItem(scenario.name, vscode.TreeItemCollapsibleState.None);
         item.description = reqDescription(reqKeys);
-        item.contextValue = "xrayScenario";
+        item.contextValue = "traceabilityScenario";
         item.iconPath = outcomeIcon(node.link.lastResult);
         item.command = revealCommand(scenario);
         return item;
@@ -129,7 +129,7 @@ export class TraceabilityTreeDataProvider
         const { scenario, reqKeys } = node.item;
         const item = new vscode.TreeItem(scenario.name, vscode.TreeItemCollapsibleState.None);
         item.description = reqDescription(reqKeys);
-        item.contextValue = "xrayUntraced";
+        item.contextValue = "traceabilityUntraced";
         item.iconPath = new vscode.ThemeIcon("warning");
         item.command = revealCommand(scenario);
         return item;
@@ -165,14 +165,14 @@ export class TraceabilityTreeDataProvider
       byKey.set(link.testKey, list);
     }
     if (byKey.size === 0) {
-      return [{ kind: "info", label: NO_MAPPED_MESSAGE }];
+      return [{ kind: "info", label: `No scenarios are mapped to a ${this.providerLabel} test yet.` }];
     }
     return [...byKey.entries()]
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([testKey, links]) => ({
         kind: "testKey",
         testKey,
-        project: links[0]?.project ?? "",
+        project: links[0]?.project,
         links,
       }));
   }
@@ -180,7 +180,7 @@ export class TraceabilityTreeDataProvider
   private untracedNodes(): TraceabilityNode[] {
     const items = this.model.snapshot.untraced;
     if (items.length === 0) {
-      return [{ kind: "info", label: NO_UNTRACED_MESSAGE }];
+      return [{ kind: "info", label: `Every scenario is mapped to a ${this.providerLabel} test.` }];
     }
     return [...items]
       .sort((a, b) => a.scenario.name.localeCompare(b.scenario.name))

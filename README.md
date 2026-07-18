@@ -89,7 +89,7 @@ Toggle the panel with `playwrightBddRunner.enableStepsPanel`.
 
 ### Xray traceability (new, preview)
 
-An **Xray Traceability** view sits below Steps in the same container. Tag scenarios with `@TEST_CALC-1043` (and optionally `@REQ_CALC-900`) and the tree groups them by Jira Xray test key, lists untagged scenarios as coverage gaps, and shows pass/fail badges from the newest Playwright JSON report in the workspace. Right-click a key to open it in Jira or copy it. Offline and tag-only for now — nothing talks to Xray Cloud yet. Configure with the `playwrightBddRunner.xray.*` settings.
+A **Traceability** view sits below Steps in the same container. Tag scenarios with `@TEST_CALC-1043` (and optionally `@REQ_CALC-900`) and the tree groups them by Jira Xray test key, lists untagged scenarios as coverage gaps, and shows pass/fail badges from the newest Playwright JSON report in the workspace. Right-click a key to open it in Jira or copy it. Offline and tag-only for now — nothing talks to Xray Cloud yet. Configure with the `playwrightBddRunner.traceability.*` settings (Xray provider chosen via `traceability.provider`; `xray.siteUrl` sets the browse host).
 
 → [docs/features.md#xray-traceability-panel](docs/features.md#xray-traceability-panel)
 

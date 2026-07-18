@@ -189,6 +189,7 @@ function makeExecutor(
     featureParser: {} as PlaywrightBddExtensionContext["featureParser"],
     playwrightJsonParser: PlaywrightJsonParser.create(logger),
     commandBuilder,
+    traceabilityAdapter: {} as PlaywrightBddExtensionContext["traceabilityAdapter"],
     ...(deps.bddgenDiagnostics ? { bddgenDiagnostics: deps.bddgenDiagnostics } : {}),
   };
   executor.setContext(context);

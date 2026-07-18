@@ -13,6 +13,8 @@ import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { TestOrganizationManager } from "../../core/test-organization";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { CommandBuilder } from "../../core/command-builder";
+import { TraceabilityAdapter } from "../../traceability/traceability-adapter";
+import { XrayAdapter } from "../../xray/xray-adapter";
 
 function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): PlaywrightBddExtensionContext {
   const logger = Logger.create();
@@ -26,6 +28,7 @@ function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): Playwr
     featureParser: FeatureParser.create(logger),
     playwrightJsonParser: PlaywrightJsonParser.create(logger),
     commandBuilder: CommandBuilder.create(config, logger),
+    traceabilityAdapter: new XrayAdapter(config),
   };
   return { ...base, ...(overrides ?? {}) };
 }
@@ -330,16 +333,16 @@ describe("command contributions ↔ handler registrations parity", () => {
     }
   });
 
-  it("places the xray node commands inline on the test-key item and hides them from the palette", () => {
+  it("places the traceability node commands inline on the test-key item and hides them from the palette", () => {
     const itemContext = pkg.contributes.menus["view/item/context"]!;
-    const xrayItems = itemContext.filter((e) => e.when?.includes("xrayTraceability"));
-    expect(xrayItems.map((e) => [e.command, e.when])).toEqual([
-      ["playwrightBddRunner.xray.openIssue", "view == playwrightBddRunner.xrayTraceability && viewItem == xrayTestKey"],
-      ["playwrightBddRunner.xray.copyKey", "view == playwrightBddRunner.xrayTraceability && viewItem == xrayTestKey"],
+    const traceabilityItems = itemContext.filter((e) => e.when?.includes("playwrightBddRunner.traceability"));
+    expect(traceabilityItems.map((e) => [e.command, e.when])).toEqual([
+      ["playwrightBddRunner.traceability.openIssue", "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey"],
+      ["playwrightBddRunner.traceability.copyKey", "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey"],
     ]);
 
     const palette = pkg.contributes.menus["commandPalette"]!;
-    for (const command of ["playwrightBddRunner.xray.openIssue", "playwrightBddRunner.xray.copyKey"]) {
+    for (const command of ["playwrightBddRunner.traceability.openIssue", "playwrightBddRunner.traceability.copyKey"]) {
       expect(palette.find((e) => e.command === command)?.when).toBe("false");
     }
   });
@@ -353,14 +356,18 @@ interface EnvHooks {
 
 const envHooks = (vscode as unknown as { env: EnvHooks }).env;
 
-function configWithSite(siteUrl: string): ExtensionConfig {
-  const workspaceConfig = {
-    get: <T>(key: string, defaultValue?: T): T | undefined =>
-      key === "xray.siteUrl" ? (siteUrl as unknown as T) : defaultValue,
-    update: (): Promise<void> => Promise.resolve(),
-    inspect: (key: string): { key: string } => ({ key }),
-  } as unknown as vscode.WorkspaceConfiguration;
-  return ExtensionConfig.create(workspaceConfig, false);
+function stubAdapter(browseUrl: (key: string) => string | undefined): TraceabilityAdapter {
+  return {
+    id: "xray",
+    label: "Xray",
+    keyGrammar: {
+      testPrefix: "TEST_",
+      reqPrefix: "REQ_",
+      keyShape: /^[A-Z]+-\d+$/,
+      canonicalizeKey: (key) => key.toUpperCase(),
+    },
+    browseUrl,
+  };
 }
 
 function captureHandlers(context: PlaywrightBddExtensionContext): Map<string, (...a: unknown[]) => Promise<void>> {
@@ -380,45 +387,35 @@ function captureHandlers(context: PlaywrightBddExtensionContext): Map<string, (.
   return handlers;
 }
 
-describe("xray browse/copy command handlers", () => {
+describe("traceability browse/copy command handlers", () => {
   beforeEach(() => envHooks.__resetEnv());
 
-  async function openIssue(siteUrl: string, arg: unknown): Promise<void> {
-    const handlers = captureHandlers(makeContext({ config: configWithSite(siteUrl) }));
-    await handlers.get("playwrightBddRunner.xray.openIssue")!(arg);
+  async function openIssue(adapter: TraceabilityAdapter, arg: unknown): Promise<void> {
+    const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
+    await handlers.get("playwrightBddRunner.traceability.openIssue")!(arg);
   }
 
-  it("builds the browse URL from a bare host", async () => {
-    await openIssue("acme.atlassian.net", { testKey: "CALC-1" });
+  it("opens the browse URL the adapter resolves for the key", async () => {
+    await openIssue(stubAdapter((key) => `https://acme.atlassian.net/browse/${key}`), { testKey: "CALC-1" });
     expect(envHooks.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-1"]);
   });
 
-  it("strips an https:// scheme from the configured site", async () => {
-    await openIssue("https://acme.atlassian.net", { testKey: "CALC-1" });
-    expect(envHooks.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-1"]);
-  });
-
-  it("strips trailing slashes from the configured site", async () => {
-    await openIssue("acme.atlassian.net/", { testKey: "CALC-1" });
-    expect(envHooks.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-1"]);
-  });
-
-  it("warns and opens nothing when siteUrl is unset", async () => {
+  it("warns and opens nothing when the adapter yields no browse URL", async () => {
     const warn = vi.spyOn(vscode.window, "showWarningMessage");
-    await openIssue("", { testKey: "CALC-1" });
+    await openIssue(stubAdapter(() => undefined), { testKey: "CALC-1" });
     expect(envHooks.__openExternalCalls).toEqual([]);
     expect(warn).toHaveBeenCalledOnce();
     warn.mockRestore();
   });
 
-  it("no-ops when the item carries no xray key", async () => {
-    await openIssue("acme.atlassian.net", { notAKey: true });
+  it("no-ops when the item carries no issue key", async () => {
+    await openIssue(stubAdapter((key) => `https://acme.atlassian.net/browse/${key}`), { notAKey: true });
     expect(envHooks.__openExternalCalls).toEqual([]);
   });
 
-  it("copies the xray key to the clipboard", async () => {
+  it("copies the issue key to the clipboard", async () => {
     const handlers = captureHandlers(makeContext());
-    await handlers.get("playwrightBddRunner.xray.copyKey")!({ testKey: "CALC-1" });
+    await handlers.get("playwrightBddRunner.traceability.copyKey")!({ testKey: "CALC-1" });
     expect(envHooks.__clipboardText).toBe("CALC-1");
   });
 });

@@ -5,7 +5,10 @@ import { TestDiscoveryManager } from "../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../utils/playwright-json-parser";
 import { Logger } from "../utils/logger";
 import { REPORT_CANDIDATES, TraceabilityModel } from "./traceability-model";
-import { TraceabilityTreeDataProvider } from "../providers/traceability-tree-data-provider";
+import { TraceabilityAdapter } from "./traceability-adapter";
+import { TraceabilityTreeDataProvider } from "./traceability-tree-data-provider";
+
+const FALLBACK_PROVIDER_ID = "xray";
 
 // One watcher per candidate report path (a brace-glob with a slash inside `{}` does not fire
 // reliably in a VS Code FileSystemWatcher). A create/change/delete on any of these refreshes the
@@ -13,11 +16,12 @@ import { TraceabilityTreeDataProvider } from "../providers/traceability-tree-dat
 const REPORT_WATCH_GLOBS = REPORT_CANDIDATES.map((candidate) => `**/${candidate}`);
 
 /**
- * Sibling to ProviderRegistry: owns the Xray traceability panel with the same idempotent
- * reconcile-on-config-change lifecycle. When `enableXrayPanel` is off the whole subsystem tears
- * down — tree, model, watchers — with zero residue. Shares nothing with the Steps code.
+ * Sibling to ProviderRegistry: owns the traceability panel with the same idempotent
+ * reconcile-on-config-change lifecycle. When `traceability.enablePanel` is off the whole subsystem
+ * tears down — tree, model, watchers — with zero residue. Shares nothing with the Steps code. The
+ * provider is injected as a TraceabilityAdapter, so a second backend is a one-line map addition.
  */
-export class XraySubsystem implements vscode.Disposable {
+export class TraceabilitySubsystem implements vscode.Disposable {
   private treeView: vscode.Disposable | undefined;
   private treeProvider: TraceabilityTreeDataProvider | undefined;
   private model: TraceabilityModel | undefined;
@@ -28,12 +32,14 @@ export class XraySubsystem implements vscode.Disposable {
   private rebuildPending = false;
   private readonly configChangeDisposable: vscode.Disposable;
   private disposed = false;
+  private warnedUnknownProvider = false;
 
   /** Debounce window for coalescing bursts of watcher events (overridable in tests). */
   public rebuildDebounceMs = 300;
 
   constructor(
     private readonly config: ExtensionConfig,
+    private readonly adapters: Record<string, TraceabilityAdapter>,
     private readonly featureParser: FeatureParser,
     private readonly discoveryManager: TestDiscoveryManager,
     private readonly playwrightJsonParser: PlaywrightJsonParser,
@@ -44,53 +50,71 @@ export class XraySubsystem implements vscode.Disposable {
 
   public applyCurrent(): void {
     if (this.disposed) {return;}
-    this.reconcileXrayPanel();
+    this.reconcileTraceabilityPanel();
   }
 
-  public get xrayPanelActive(): boolean {
+  public get traceabilityPanelActive(): boolean {
     return this.treeView !== undefined;
   }
 
-  private reconcileXrayPanel(): void {
-    if (!this.config.enableXrayPanel) {
+  // Reads config.traceabilityProvider live so switching the provider re-selects here; an unknown id
+  // falls back to Xray and warns once (not once per config-change burst).
+  private selectAdapter(): TraceabilityAdapter | undefined {
+    const id = this.config.traceabilityProvider;
+    const adapter = this.adapters[id];
+    if (adapter) {return adapter;}
+    if (!this.warnedUnknownProvider) {
+      this.logger.warn(`Unknown traceability provider "${id}", falling back to "${FALLBACK_PROVIDER_ID}"`);
+      this.warnedUnknownProvider = true;
+    }
+    return this.adapters[FALLBACK_PROVIDER_ID];
+  }
+
+  private reconcileTraceabilityPanel(): void {
+    if (!this.config.enableTraceabilityPanel) {
       this.teardown();
       return;
     }
-    const signature = this.signature();
-    if (this.treeView) {
-      if (this.lastSignature !== signature) {
-        this.rebuildWatchers();
-        this.lastSignature = signature;
-        this.scheduleRebuild();
-      }
+    const adapter = this.selectAdapter();
+    if (!adapter) {
+      this.teardown();
       return;
     }
+    const signature = this.signature(adapter);
+    if (this.treeView && this.lastSignature === signature) {
+      return;
+    }
+    // A changed signature — provider swap, prefix, or pattern — rebuilds the whole panel so the new
+    // adapter's model, label, and watchers all take effect without a window reload.
+    this.teardown();
     const model = new TraceabilityModel(
       this.featureParser,
       this.discoveryManager,
       this.playwrightJsonParser,
-      this.config,
+      adapter,
       this.logger
     );
     this.model = model;
-    const provider = new TraceabilityTreeDataProvider(model);
+    const provider = new TraceabilityTreeDataProvider(model, adapter.label);
     this.treeProvider = provider;
-    this.treeView = vscode.window.createTreeView("playwrightBddRunner.xrayTraceability", {
+    this.treeView = vscode.window.createTreeView("playwrightBddRunner.traceability", {
       treeDataProvider: provider,
     });
     this.setupWatchers();
     this.lastSignature = signature;
     this.scheduleRebuild();
-    this.logger.info("Xray traceability panel enabled");
+    this.logger.info("Traceability panel enabled");
   }
 
-  // siteUrl is deliberately excluded: the browse URL is read live, so editing it must not tear
-  // down watchers or trigger a rescan. Only inputs the model actually consumes belong here.
-  private signature(): string {
+  // The active provider id joins the signature so switching traceability.provider forces a rebuild.
+  // The browse URL (siteUrl) is deliberately excluded: it is read live, so editing it must not
+  // tear down watchers or trigger a rescan. Only inputs the model actually consumes belong here.
+  private signature(adapter: TraceabilityAdapter): string {
     return [
+      adapter.id,
       this.config.testFilePattern,
-      this.config.xrayTestTagPrefix,
-      this.config.xrayReqTagPrefix,
+      adapter.keyGrammar.testPrefix,
+      adapter.keyGrammar.reqPrefix,
     ].join("|");
   }
 
@@ -99,7 +123,7 @@ export class XraySubsystem implements vscode.Disposable {
     this.rebuildTimer = setTimeout(() => {
       this.rebuildTimer = undefined;
       this.runRebuild().catch((error) => {
-        this.logger.warn("Xray traceability rebuild failed", { error: String(error) });
+        this.logger.warn("Traceability rebuild failed", { error: String(error) });
       });
     }, this.rebuildDebounceMs);
   }
@@ -142,12 +166,6 @@ export class XraySubsystem implements vscode.Disposable {
         reportWatcher.onDidDelete(rebuild)
       );
     }
-  }
-
-  private rebuildWatchers(): void {
-    for (const d of this.watcherDisposables) {d.dispose();}
-    this.watcherDisposables = [];
-    this.setupWatchers();
   }
 
   private teardown(): void {

@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
-import { XraySubsystem } from "../../xray/xray-subsystem";
+import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
+import { TraceabilityAdapter } from "../../traceability/traceability-adapter";
+import { XrayAdapter } from "../../xray/xray-adapter";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
@@ -16,33 +18,36 @@ const treeViews = (vscode.window as unknown as {
   __resetTreeViewCounters: () => void;
 });
 
-interface XrayConfigState {
-  enableXrayPanel: boolean;
+interface TraceabilityConfigState {
+  enableTraceabilityPanel: boolean;
+  traceabilityProvider: string;
   testFilePattern: string;
-  xrayTestTagPrefix: string;
-  xrayReqTagPrefix: string;
+  traceabilityTestTagPrefix: string;
+  traceabilityReqTagPrefix: string;
   xraySiteUrl: string;
 }
 
-function makeConfig(initial?: Partial<XrayConfigState>): {
+function makeConfig(initial?: Partial<TraceabilityConfigState>): {
   config: ExtensionConfig;
-  set: (next: Partial<XrayConfigState>) => void;
+  set: (next: Partial<TraceabilityConfigState>) => void;
   fireChange: () => void;
 } {
-  const state: XrayConfigState = {
-    enableXrayPanel: true,
+  const state: TraceabilityConfigState = {
+    enableTraceabilityPanel: true,
+    traceabilityProvider: "xray",
     testFilePattern: "**/*.feature",
-    xrayTestTagPrefix: "TEST_",
-    xrayReqTagPrefix: "REQ_",
+    traceabilityTestTagPrefix: "TEST_",
+    traceabilityReqTagPrefix: "REQ_",
     xraySiteUrl: "",
     ...initial,
   };
   let listener: (() => void) | undefined;
   const config = {
-    get enableXrayPanel(): boolean { return state.enableXrayPanel; },
+    get enableTraceabilityPanel(): boolean { return state.enableTraceabilityPanel; },
+    get traceabilityProvider(): string { return state.traceabilityProvider; },
     get testFilePattern(): string { return state.testFilePattern; },
-    get xrayTestTagPrefix(): string { return state.xrayTestTagPrefix; },
-    get xrayReqTagPrefix(): string { return state.xrayReqTagPrefix; },
+    get traceabilityTestTagPrefix(): string { return state.traceabilityTestTagPrefix; },
+    get traceabilityReqTagPrefix(): string { return state.traceabilityReqTagPrefix; },
     get xraySiteUrl(): string { return state.xraySiteUrl; },
     addChangeListener(l: () => void): { dispose: () => void } {
       listener = l;
@@ -59,10 +64,28 @@ interface FakeWatcher {
   dispose: ReturnType<typeof vi.fn>;
 }
 
-function build(config: ExtensionConfig): { subsystem: XraySubsystem; created: FakeWatcher[] } {
-  const logger = Logger.create();
-  const subsystem = new XraySubsystem(
+function fakeAdapter(id: string): TraceabilityAdapter {
+  return {
+    id,
+    label: id,
+    keyGrammar: {
+      testPrefix: "TEST_",
+      reqPrefix: "REQ_",
+      keyShape: /^[A-Z]+-\d+$/,
+      canonicalizeKey: (key) => key.toUpperCase(),
+    },
+    browseUrl: () => undefined,
+  };
+}
+
+function build(
+  config: ExtensionConfig,
+  adapters?: Record<string, TraceabilityAdapter>,
+  logger = Logger.create()
+): { subsystem: TraceabilitySubsystem; created: FakeWatcher[] } {
+  const subsystem = new TraceabilitySubsystem(
     config,
+    adapters ?? { xray: new XrayAdapter(config) },
     FeatureParser.create(logger),
     TestDiscoveryManager.create(logger, config),
     PlaywrightJsonParser.create(logger),
@@ -83,7 +106,7 @@ function build(config: ExtensionConfig): { subsystem: XraySubsystem; created: Fa
   return { subsystem, created };
 }
 
-describe("XraySubsystem lifecycle", () => {
+describe("TraceabilitySubsystem lifecycle", () => {
   beforeEach(() => {
     treeViews.__resetTreeViewCounters();
   });
@@ -99,7 +122,7 @@ describe("XraySubsystem lifecycle", () => {
     subsystem.applyCurrent();
     subsystem.applyCurrent();
 
-    expect(subsystem.xrayPanelActive).toBe(true);
+    expect(subsystem.traceabilityPanelActive).toBe(true);
     expect(treeViews.__treeViewCounters.createCount).toBe(1);
     subsystem.dispose();
   });
@@ -112,17 +135,17 @@ describe("XraySubsystem lifecycle", () => {
     const firstWatchers = [...created];
     expect(firstWatchers.length).toBeGreaterThan(0);
 
-    set({ enableXrayPanel: false });
+    set({ enableTraceabilityPanel: false });
     fireChange();
-    expect(subsystem.xrayPanelActive).toBe(false);
+    expect(subsystem.traceabilityPanelActive).toBe(false);
     expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
     for (const w of firstWatchers) {
       expect(w.dispose).toHaveBeenCalled();
     }
 
-    set({ enableXrayPanel: true });
+    set({ enableTraceabilityPanel: true });
     fireChange();
-    expect(subsystem.xrayPanelActive).toBe(true);
+    expect(subsystem.traceabilityPanelActive).toBe(true);
     expect(treeViews.__treeViewCounters.createCount).toBe(2);
     subsystem.dispose();
   });
@@ -158,7 +181,48 @@ describe("XraySubsystem lifecycle", () => {
     for (const w of created) {
       expect(w.dispose).not.toHaveBeenCalled();
     }
-    expect(subsystem.xrayPanelActive).toBe(true);
+    expect(subsystem.traceabilityPanelActive).toBe(true);
+    subsystem.dispose();
+  });
+});
+
+describe("TraceabilitySubsystem provider selection", () => {
+  beforeEach(() => {
+    treeViews.__resetTreeViewCounters();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("falls back to xray and warns once when the configured provider is unknown", () => {
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn");
+    const { config, fireChange } = makeConfig({ traceabilityProvider: "bogus" });
+    const { subsystem } = build(config, { xray: fakeAdapter("xray") }, logger);
+
+    subsystem.applyCurrent();
+    fireChange();
+
+    expect(subsystem.traceabilityPanelActive).toBe(true);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]![0]).toContain("bogus");
+    subsystem.dispose();
+  });
+
+  it("rebuilds the panel when the active provider id changes", () => {
+    const { config, set, fireChange } = makeConfig({ traceabilityProvider: "xray" });
+    const { subsystem } = build(config, { xray: fakeAdapter("xray"), azure: fakeAdapter("azure") });
+
+    subsystem.applyCurrent();
+    expect(treeViews.__treeViewCounters.createCount).toBe(1);
+
+    set({ traceabilityProvider: "azure" });
+    fireChange();
+
+    expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
+    expect(treeViews.__treeViewCounters.createCount).toBe(2);
+    expect(subsystem.traceabilityPanelActive).toBe(true);
     subsystem.dispose();
   });
 });

@@ -171,20 +171,24 @@ export class ExtensionConfig {
     return this.config.get<boolean>("collapseMarkdownExportSections", false);
   }
 
-  public get enableXrayPanel(): boolean {
-    return this.config.get<boolean>("xray.enableXrayPanel", true);
+  public get enableTraceabilityPanel(): boolean {
+    return this.config.get<boolean>("traceability.enablePanel", true);
+  }
+
+  public get traceabilityProvider(): string {
+    return this.config.get<string>("traceability.provider", "xray");
+  }
+
+  public get traceabilityTestTagPrefix(): string {
+    return this.config.get<string>("traceability.testTagPrefix", "TEST_");
+  }
+
+  public get traceabilityReqTagPrefix(): string {
+    return this.config.get<string>("traceability.reqTagPrefix", "REQ_");
   }
 
   public get xraySiteUrl(): string {
     return this.config.get<string>("xray.siteUrl", "");
-  }
-
-  public get xrayTestTagPrefix(): string {
-    return this.config.get<string>("xray.testTagPrefix", "TEST_");
-  }
-
-  public get xrayReqTagPrefix(): string {
-    return this.config.get<string>("xray.reqTagPrefix", "REQ_");
   }
 
   public validate(): void {
@@ -218,11 +222,11 @@ export class ExtensionConfig {
         `reporter must be a comma-separated list of built-ins (${builtinReporters.join(", ")}) or reporter module paths; got "${this.reporter}"`
       );
     }
-    if (!this.xrayTestTagPrefix.trim()) {
-      errors.push("xray.testTagPrefix cannot be empty");
+    if (!this.traceabilityTestTagPrefix.trim()) {
+      errors.push("traceability.testTagPrefix cannot be empty");
     }
-    if (!this.xrayReqTagPrefix.trim()) {
-      errors.push("xray.reqTagPrefix cannot be empty");
+    if (!this.traceabilityReqTagPrefix.trim()) {
+      errors.push("traceability.reqTagPrefix cannot be empty");
     }
     if (errors.length > 0) {
       throw new Error(`Configuration validation failed: ${errors.join(", ")}`);

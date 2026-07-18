@@ -24,6 +24,7 @@ import {
   normalizePathKey,
 } from "../utils/playwright-json-parser";
 import { CommandBuilder } from "../core/command-builder";
+import { XrayAdapter } from "../xray/xray-adapter";
 import { isUnderExcludedDir, workspaceExcludeFragments } from "../utils/discovery-excludes";
 import {
   ensureWorkerCount,
@@ -143,6 +144,7 @@ export class PlaywrightBddTestProvider {
       featureParser: FeatureParser.create(logger),
       playwrightJsonParser: PlaywrightJsonParser.create(logger),
       commandBuilder: CommandBuilder.create(config, logger),
+      traceabilityAdapter: new XrayAdapter(config),
     };
   }
 

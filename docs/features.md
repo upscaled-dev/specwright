@@ -196,7 +196,7 @@ Markdown is the only export format; JSON/CSV and standalone HTML are out of scop
 
 ## Xray Traceability panel
 
-An **Xray Traceability** view (id `playwrightBddRunner.xrayTraceability`) stacks below the Steps view in the Specwright container. It maps scenarios to Jira Xray test and requirement keys using tags in the `.feature` files — entirely offline, from tags alone. This is the first phase of the Xray integration; syncing with Xray Cloud, the coverage board, and publishing run results arrive in later releases.
+A **Traceability** view (id `playwrightBddRunner.traceability`) stacks below the Steps view in the Specwright container. It maps scenarios to Jira Xray test and requirement keys using tags in the `.feature` files — entirely offline, from tags alone. This is the first phase of the Xray integration; syncing with Xray Cloud, the coverage board, and publishing run results arrive in later releases.
 
 ### Tag convention
 
@@ -204,7 +204,7 @@ An **Xray Traceability** view (id `playwrightBddRunner.xrayTraceability`) stacks
 - `@REQ_<KEY>` marks requirement coverage: `@REQ_CALC-900` shows as `REQ CALC-900` on the scenario row.
 - The prefix is matched **case-insensitively** and the key is normalized to uppercase, so `@test_calc-1043` and `@TEST_CALC-1043` collapse to the same test.
 - Keys follow the Jira shape `PROJ-123`; multi-segment projects like `AB-CD-123` work (the project is everything before the trailing `-<number>`, so `AB-CD-123` belongs to `AB-CD`).
-- Prefixes are configurable via `xray.testTagPrefix` / `xray.reqTagPrefix`; an empty prefix falls back to the default. Extraction lives in [src/xray/tag-extraction.ts](../src/xray/tag-extraction.ts).
+- Prefixes are configurable via `traceability.testTagPrefix` / `traceability.reqTagPrefix`; an empty prefix falls back to the default. Extraction lives in [src/traceability/tag-extraction.ts](../src/traceability/tag-extraction.ts).
 
 Because the mapping comes from tags, not scenario names, renaming a scenario never breaks its link.
 
@@ -223,8 +223,8 @@ When no scenarios carry Xray tags yet, the view shows a welcome note explaining 
 
 Right-click (or use the inline icons on) a test-key node:
 
-- **Open Xray Issue in Browser** — opens `https://{siteUrl}/browse/{KEY}` using the `xray.siteUrl` setting. Warns if the setting is empty.
-- **Copy Xray Key** — copies the key to the clipboard.
+- **Open Issue in Tracker** — opens `https://{siteUrl}/browse/{KEY}` using the `xray.siteUrl` setting. Warns if the setting is empty.
+- **Copy Issue Key** — copies the key to the clipboard.
 
 ### Result badges
 
@@ -234,4 +234,4 @@ Important caveat: runs launched from the Test Explorer do **not** produce badges
 
 ### Settings
 
-Controlled by `playwrightBddRunner.xray.enableXrayPanel` (boolean, default `true`) — disabling hides the view and tears down its watchers. All four `xray.*` settings are in [settings.md](settings.md).
+Controlled by `playwrightBddRunner.traceability.enablePanel` (boolean, default `true`) — disabling hides the view and tears down its watchers. The `traceability.*` settings (plus `xray.siteUrl`) are in [settings.md](settings.md).

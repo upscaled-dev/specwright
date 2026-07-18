@@ -141,6 +141,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
       featureParser: FeatureParser.create(logger),
       playwrightJsonParser: parser,
       commandBuilder,
+      traceabilityAdapter: {} as PlaywrightBddExtensionContext["traceabilityAdapter"],
     };
     executor.setContext(context);
 

@@ -8,25 +8,25 @@ import {
   ScenarioStatus,
   normalizePathKey,
 } from "../utils/playwright-json-parser";
-import { ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
 import { OutlineExampleRow, Scenario } from "../types";
-import { extractXrayKeys, projectFromKey, TagPrefixes } from "./tag-extraction";
+import { extractKeys } from "./tag-extraction";
+import { KeyGrammar, TraceabilityAdapter } from "./traceability-adapter";
 
 export type RunOutcome = ScenarioStatus;
 
-export interface XrayTestMeta {
+export interface TestMeta {
   summary?: string | undefined;
   status?: string | undefined;
 }
 
 /**
  * The metadata-merge seam for P1: an offline snapshot leaves this undefined so links carry no
- * `xray` field and the orphan bucket is empty. P1 slots a cache-backed provider in here without
- * touching the join.
+ * `meta` field and the orphan bucket is empty. P1 slots a cache-backed provider in here (behind
+ * the adapter) without touching the join.
  */
 export interface MetadataProvider {
-  get(testKey: string): XrayTestMeta | undefined;
+  get(testKey: string): TestMeta | undefined;
   keys(): Iterable<string>;
 }
 
@@ -41,10 +41,10 @@ export interface ScenarioRef {
 
 export interface TraceLink {
   testKey: string;
-  project: string;
+  project?: string | undefined;
   scenario: ScenarioRef;
   reqKeys: string[];
-  xray?: XrayTestMeta | undefined;
+  meta?: TestMeta | undefined;
   lastResult?: RunOutcome | undefined;
 }
 
@@ -55,7 +55,7 @@ export interface UntracedScenario {
 
 export interface OrphanTest {
   testKey: string;
-  xray: XrayTestMeta;
+  meta: TestMeta;
 }
 
 export interface TraceabilitySnapshot {
@@ -149,7 +149,7 @@ function outlineTagsFor(rows: readonly OutlineExampleRow[]): string[] {
 export function buildTraceabilitySnapshot(
   features: readonly ParsedFeatureInput[],
   statusMap: Record<string, ScenarioStatus>,
-  prefixes: TagPrefixes,
+  keyGrammar: KeyGrammar,
   metadataProvider?: MetadataProvider
 ): TraceabilitySnapshot {
   const links: TraceLink[] = [];
@@ -163,10 +163,12 @@ export function buildTraceabilitySnapshot(
   ): void => {
     const link: TraceLink = {
       testKey,
-      project: projectFromKey(testKey),
       scenario,
       reqKeys,
     };
+    if (keyGrammar.projectOf) {
+      link.project = keyGrammar.projectOf(testKey);
+    }
     if (lastResult !== undefined) {
       link.lastResult = lastResult;
     }
@@ -176,7 +178,7 @@ export function buildTraceabilitySnapshot(
   const unionReq = (rows: readonly OutlineExampleRow[]): string[] => {
     const out: string[] = [];
     for (const row of rows) {
-      for (const key of extractXrayKeys(row.tags ?? [], prefixes).reqKeys) {
+      for (const key of extractKeys(row.tags ?? [], keyGrammar).reqKeys) {
         if (!out.includes(key)) {out.push(key);}
       }
     }
@@ -200,14 +202,14 @@ export function buildTraceabilitySnapshot(
     // intersecting one representative row's merged tags per block cancels the block-specific tags
     // (and keeps a tag that sits on both the outline and a block). With a single block there's
     // nothing to intersect against, so fall back to subtracting that block's tags.
-    const outlineKeys = extractXrayKeys(outlineTagsFor(rows), prefixes).testKeys;
+    const outlineKeys = extractKeys(outlineTagsFor(rows), keyGrammar).testKeys;
 
     const outlineLevelRows: OutlineExampleRow[] = [];
     const blockGroups = new Map<number, OutlineExampleRow[]>();
     const untracedRows: OutlineExampleRow[] = [];
 
     for (const row of rows) {
-      const blockKeys = extractXrayKeys(row.examplesBlockTags ?? [], prefixes).testKeys;
+      const blockKeys = extractKeys(row.examplesBlockTags ?? [], keyGrammar).testKeys;
       if (blockKeys.length > 0) {
         const list = blockGroups.get(row.examplesBlockLineNumber) ?? [];
         list.push(row);
@@ -232,7 +234,7 @@ export function buildTraceabilitySnapshot(
     for (const blockRows of blockGroups.values()) {
       const sample = blockRows[0];
       if (!sample) {continue;}
-      const blockKeys = extractXrayKeys(sample.examplesBlockTags ?? [], prefixes).testKeys;
+      const blockKeys = extractKeys(sample.examplesBlockTags ?? [], keyGrammar).testKeys;
       const blockName = sample.examplesBlockName;
       const ref: ScenarioRef = {
         filePath,
@@ -268,7 +270,7 @@ export function buildTraceabilitySnapshot(
         continue;
       }
 
-      const { testKeys, reqKeys } = extractXrayKeys(scenario.tags ?? [], prefixes);
+      const { testKeys, reqKeys } = extractKeys(scenario.tags ?? [], keyGrammar);
       const isOutline = scenario.isScenarioOutline;
       const line = isOutline ? scenario.outlineLineNumber : scenario.lineNumber;
       const name = isOutline ? scenario.outlineName : scenario.name;
@@ -294,7 +296,7 @@ export function buildTraceabilitySnapshot(
   if (metadataProvider) {
     for (const link of links) {
       const meta = metadataProvider.get(link.testKey);
-      if (meta) {link.xray = meta;}
+      if (meta) {link.meta = meta;}
     }
   }
 
@@ -312,7 +314,7 @@ function computeOrphans(links: TraceLink[], provider: MetadataProvider): OrphanT
   for (const key of provider.keys()) {
     if (!covered.has(key)) {
       const meta = provider.get(key);
-      if (meta) {orphans.push({ testKey: key, xray: meta });}
+      if (meta) {orphans.push({ testKey: key, meta });}
     }
   }
   return orphans;
@@ -363,9 +365,8 @@ export class TraceabilityModel implements vscode.Disposable {
     private readonly featureParser: FeatureParser,
     private readonly discoveryManager: TestDiscoveryManager,
     private readonly playwrightJsonParser: PlaywrightJsonParser,
-    private readonly config: ExtensionConfig,
-    private readonly logger: Logger,
-    private readonly metadataProvider?: MetadataProvider
+    private readonly adapter: TraceabilityAdapter,
+    private readonly logger: Logger
   ) {}
 
   public get snapshot(): TraceabilitySnapshot {
@@ -378,7 +379,7 @@ export class TraceabilityModel implements vscode.Disposable {
       // The subsystem's watchers drive invalidation; let the discovery cache absorb event bursts.
       files = await this.discoveryManager.discoverTestFiles();
     } catch (error) {
-      this.logger.warn("Xray traceability discovery failed", { error: String(error) });
+      this.logger.warn("Traceability discovery failed", { error: String(error) });
       files = [];
     }
 
@@ -390,15 +391,11 @@ export class TraceabilityModel implements vscode.Disposable {
       }
     }
 
-    const prefixes: TagPrefixes = {
-      testPrefix: this.config.xrayTestTagPrefix,
-      reqPrefix: this.config.xrayReqTagPrefix,
-    };
     this.current = buildTraceabilitySnapshot(
       features,
       await this.readStatusMap(),
-      prefixes,
-      this.metadataProvider
+      this.adapter.keyGrammar,
+      this.adapter.metadataProvider
     );
     this._onDidChange.fire();
   }

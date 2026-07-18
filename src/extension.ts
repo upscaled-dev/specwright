@@ -11,7 +11,9 @@ import { TestOrganizationManager } from "./core/test-organization";
 import { PlaywrightJsonParser } from "./utils/playwright-json-parser";
 import { CommandBuilder } from "./core/command-builder";
 import { ProviderRegistry } from "./core/provider-registry";
-import { XraySubsystem } from "./xray/xray-subsystem";
+import { TraceabilitySubsystem } from "./traceability/traceability-subsystem";
+import { TraceabilityAdapter } from "./traceability/traceability-adapter";
+import { XrayAdapter } from "./xray/xray-adapter";
 import { PROMPTED_STATE_KEY } from "./commands/prompt-worker-count";
 import { StatusBar } from "./ui/status-bar";
 
@@ -20,7 +22,7 @@ let commandManager: CommandManager | undefined;
 let isActivated = false;
 let testController: vscode.TestController | undefined;
 let providerRegistry: ProviderRegistry | undefined;
-let xraySubsystem: XraySubsystem | undefined;
+let traceabilitySubsystem: TraceabilitySubsystem | undefined;
 let activationLogger: Logger | undefined;
 
 /**
@@ -61,9 +63,9 @@ export interface ExtensionApi {
       }
     | undefined;
   /** @internal */
-  readonly xraySubsystem:
+  readonly traceabilitySubsystem:
     | {
-        readonly xrayPanelActive: boolean;
+        readonly traceabilityPanelActive: boolean;
       }
     | undefined;
   /** @internal */
@@ -73,7 +75,7 @@ export interface ExtensionApi {
 function buildApi(
   provider: PlaywrightBddTestProvider | undefined,
   registry: ProviderRegistry | undefined,
-  xray: XraySubsystem | undefined,
+  traceability: TraceabilitySubsystem | undefined,
   workspaceState: vscode.Memento | undefined
 ): ExtensionApi {
   const seedParallelProfilePrompted = async (value: boolean): Promise<void> => {
@@ -100,16 +102,16 @@ function buildApi(
         get stepPaths() { return registry.stepPaths; },
       }
     : undefined;
-  const xrayApi = xray
+  const traceabilityApi = traceability
     ? {
-        get xrayPanelActive() { return xray.xrayPanelActive; },
+        get traceabilityPanelActive() { return traceability.traceabilityPanelActive; },
       }
     : undefined;
   if (!provider) {
     return {
       testProvider: undefined,
       providerRegistry: registryApi,
-      xraySubsystem: xrayApi,
+      traceabilitySubsystem: traceabilityApi,
       seedParallelProfilePrompted,
     };
   }
@@ -123,7 +125,7 @@ function buildApi(
       restoreShellRunner: () => provider.restoreShellRunner(),
     },
     providerRegistry: registryApi,
-    xraySubsystem: xrayApi,
+    traceabilitySubsystem: traceabilityApi,
     seedParallelProfilePrompted,
   };
 }
@@ -135,7 +137,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   if (isActivated) {
     activationLogger?.warn("Extension already activated, skipping duplicate activation");
-    return buildApi(testProvider, providerRegistry, xraySubsystem, context.workspaceState);
+    return buildApi(testProvider, providerRegistry, traceabilitySubsystem, context.workspaceState);
   }
 
   const logger = Logger.create();
@@ -158,14 +160,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   providerRegistry = new ProviderRegistry(config, featureParser, logger);
   context.subscriptions.push(providerRegistry);
 
-  xraySubsystem = new XraySubsystem(
+  const xrayAdapter = new XrayAdapter(config);
+  const traceabilityAdapters: Record<string, TraceabilityAdapter> = { xray: xrayAdapter };
+  const traceabilityAdapter = traceabilityAdapters[config.traceabilityProvider] ?? xrayAdapter;
+  // The extension owns adapter lifetimes; those that hold resources (P1 auth/cache) declare dispose.
+  for (const adapter of Object.values(traceabilityAdapters)) {
+    if (typeof adapter.dispose === "function") {
+      context.subscriptions.push(adapter as vscode.Disposable);
+    }
+  }
+  traceabilitySubsystem = new TraceabilitySubsystem(
     config,
+    traceabilityAdapters,
     featureParser,
     TestDiscoveryManager.create(logger, config),
     PlaywrightJsonParser.create(logger),
     logger
   );
-  context.subscriptions.push(xraySubsystem);
+  context.subscriptions.push(traceabilitySubsystem);
 
   const sharedContext: PlaywrightBddExtensionContext = {
     logger,
@@ -177,6 +189,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     playwrightJsonParser: PlaywrightJsonParser.create(logger),
     commandBuilder,
     bddgenDiagnostics: providerRegistry.bddgenDiagnostics,
+    traceabilityAdapter,
   };
 
   testExecutor.setContext(sharedContext);
@@ -212,7 +225,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandManager.setUsageIndexHost(providerRegistry);
 
     providerRegistry.applyCurrent();
-    xraySubsystem.applyCurrent();
+    traceabilitySubsystem.applyCurrent();
 
     const statusBar = StatusBar.create(testExecutor);
     context.subscriptions.push(statusBar);
@@ -227,7 +240,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     );
   }
 
-  return buildApi(testProvider, providerRegistry, xraySubsystem, context.workspaceState);
+  return buildApi(testProvider, providerRegistry, traceabilitySubsystem, context.workspaceState);
 }
 
 export function deactivate(): void {
@@ -248,7 +261,7 @@ export function deactivate(): void {
     commandManager = undefined;
     testController = undefined;
     providerRegistry = undefined;
-    xraySubsystem = undefined;
+    traceabilitySubsystem = undefined;
     activationLogger = undefined;
     // The logger must outlive every log call above, so it is disposed last.
     try { logger?.dispose(); } catch { /* already disposed */ }

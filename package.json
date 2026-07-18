@@ -304,25 +304,33 @@
           "default": false,
           "description": "Render the collapsible sections in exported feature/step Markdown catalogs collapsed by default. Recommended for large catalogs so the document opens as a scannable outline."
         },
-        "playwrightBddRunner.xray.enableXrayPanel": {
+        "playwrightBddRunner.traceability.enablePanel": {
           "type": "boolean",
           "default": true,
-          "description": "Show the Xray Traceability panel beneath the Steps panel: scenarios grouped by their @TEST_ Xray keys, coverage gaps for untagged scenarios, and pass/fail badges from the last run. Disabling releases the panel and its watchers."
+          "description": "Show the Traceability panel beneath the Steps panel: scenarios grouped by their @TEST_ keys, coverage gaps for untagged scenarios, and pass/fail badges from the last run. Disabling releases the panel and its watchers."
+        },
+        "playwrightBddRunner.traceability.provider": {
+          "type": "string",
+          "enum": [
+            "xray"
+          ],
+          "default": "xray",
+          "description": "Which ALM backend the Traceability panel maps to. Only 'xray' (Jira Xray Cloud) is available today; more providers land in later releases."
+        },
+        "playwrightBddRunner.traceability.testTagPrefix": {
+          "type": "string",
+          "default": "TEST_",
+          "description": "Tag prefix that maps a scenario to a test in the tracker. '@TEST_CALC-1043' links to test CALC-1043. Matched case-insensitively."
+        },
+        "playwrightBddRunner.traceability.reqTagPrefix": {
+          "type": "string",
+          "default": "REQ_",
+          "description": "Tag prefix that marks a scenario as covering a requirement. '@REQ_CALC-900' covers requirement CALC-900. Matched case-insensitively."
         },
         "playwrightBddRunner.xray.siteUrl": {
           "type": "string",
           "default": "",
-          "description": "Your Jira/Xray Cloud site host, e.g. 'acme.atlassian.net'. Used to build browse links (https://{siteUrl}/browse/{KEY}) for the 'Open Xray Issue in Browser' action."
-        },
-        "playwrightBddRunner.xray.testTagPrefix": {
-          "type": "string",
-          "default": "TEST_",
-          "description": "Tag prefix that maps a scenario to an Xray test. '@TEST_CALC-1043' links to Xray test CALC-1043. Matched case-insensitively."
-        },
-        "playwrightBddRunner.xray.reqTagPrefix": {
-          "type": "string",
-          "default": "REQ_",
-          "description": "Tag prefix that marks a scenario as covering an Xray requirement. '@REQ_CALC-900' covers requirement CALC-900. Matched case-insensitively."
+          "description": "Your Jira/Xray Cloud site host, e.g. 'acme.atlassian.net'. Used to build browse links (https://{siteUrl}/browse/{KEY}) for the 'Open in tracker' action."
         }
       }
     },
@@ -484,14 +492,14 @@
         "icon": "$(add)"
       },
       {
-        "command": "playwrightBddRunner.xray.openIssue",
-        "title": "Open Xray Issue in Browser",
+        "command": "playwrightBddRunner.traceability.openIssue",
+        "title": "Open Issue in Tracker",
         "category": "Specwright",
         "icon": "$(link-external)"
       },
       {
-        "command": "playwrightBddRunner.xray.copyKey",
-        "title": "Copy Xray Key",
+        "command": "playwrightBddRunner.traceability.copyKey",
+        "title": "Copy Issue Key",
         "category": "Specwright",
         "icon": "$(copy)"
       }
@@ -514,17 +522,17 @@
           "contextualTitle": "Specwright BDD"
         },
         {
-          "id": "playwrightBddRunner.xrayTraceability",
-          "name": "Xray Traceability",
+          "id": "playwrightBddRunner.traceability",
+          "name": "Traceability",
           "icon": "media/activity-bar-icon.svg",
           "contextualTitle": "Specwright BDD",
-          "when": "config.playwrightBddRunner.xray.enableXrayPanel"
+          "when": "config.playwrightBddRunner.traceability.enablePanel"
         }
       ]
     },
     "viewsWelcome": [
       {
-        "view": "playwrightBddRunner.xrayTraceability",
+        "view": "playwrightBddRunner.traceability",
         "contents": "No Xray-tagged scenarios found yet.\n\nTag a scenario with `@TEST_KEY` (and optionally `@REQ_KEY`) in a .feature file to map it to an Xray test. The tree then groups scenarios by their Xray keys, lists untagged scenarios as coverage gaps, and shows pass/fail badges after a run.\n\nLive Xray Cloud sync — test status, coverage board, and publishing — arrives in a later release."
       }
     ],
@@ -583,11 +591,11 @@
           "when": "false"
         },
         {
-          "command": "playwrightBddRunner.xray.openIssue",
+          "command": "playwrightBddRunner.traceability.openIssue",
           "when": "false"
         },
         {
-          "command": "playwrightBddRunner.xray.copyKey",
+          "command": "playwrightBddRunner.traceability.copyKey",
           "when": "false"
         }
       ],
@@ -625,13 +633,13 @@
           "group": "inline"
         },
         {
-          "command": "playwrightBddRunner.xray.openIssue",
-          "when": "view == playwrightBddRunner.xrayTraceability && viewItem == xrayTestKey",
+          "command": "playwrightBddRunner.traceability.openIssue",
+          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey",
           "group": "inline@1"
         },
         {
-          "command": "playwrightBddRunner.xray.copyKey",
-          "when": "view == playwrightBddRunner.xrayTraceability && viewItem == xrayTestKey",
+          "command": "playwrightBddRunner.traceability.copyKey",
+          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey",
           "group": "inline@2"
         }
       ],

@@ -11,9 +11,11 @@ import {
   MetadataProvider,
   ParsedFeatureInput,
   TraceLink,
-} from "../../xray/traceability-model";
+} from "../../traceability/traceability-model";
+import { JIRA_KEY_SHAPE, projectFromKey } from "../../xray/xray-adapter";
 
-const PREFIXES = { testPrefix: "TEST_", reqPrefix: "REQ_" };
+const upper = (key: string): string => key.toUpperCase();
+const GRAMMAR = { testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: JIRA_KEY_SHAPE, canonicalizeKey: upper, projectOf: projectFromKey };
 const FILE = "/ws/calc.feature";
 
 const FEATURE = `Feature: Calc
@@ -52,7 +54,7 @@ function link(links: TraceLink[], testKey: string): TraceLink {
 
 describe("buildTraceabilitySnapshot", () => {
   it("maps scenarios to test keys, derives projects, and carries requirement keys", () => {
-    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, PREFIXES);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR);
 
     expect(snap.links.map((l) => l.testKey).sort()).toEqual(["CALC-1043", "CALC-1051", "CALC-1052"]);
     const divide = link(snap.links, "CALC-1043");
@@ -63,14 +65,20 @@ describe("buildTraceabilitySnapshot", () => {
     expect(divide.scenario.line).toBe(4);
   });
 
+  it("leaves project undefined when the grammar has no projectOf", () => {
+    const { projectOf: _drop, ...noProject } = GRAMMAR;
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, noProject);
+    expect(link(snap.links, "CALC-1043").project).toBeUndefined();
+  });
+
   it("buckets scenarios with no @TEST_ tag as untraced", () => {
-    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, PREFIXES);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR);
     expect(snap.untraced.map((u) => u.scenario.name)).toEqual(["Untagged thing"]);
     expect(snap.untraced[0]!.scenario.line).toBe(7);
   });
 
   it("groups an outline under one test key and splits a tagged Examples block into its own", () => {
-    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, PREFIXES);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR);
 
     const outline = link(snap.links, "CALC-1051");
     expect(outline.scenario.kind).toBe("outline");
@@ -84,7 +92,7 @@ describe("buildTraceabilitySnapshot", () => {
   });
 
   it("orphans are always empty offline (no metadata provider)", () => {
-    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, PREFIXES);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR);
     expect(snap.orphans).toEqual([]);
     expect(snap.stale).toBe(false);
   });
@@ -95,7 +103,7 @@ describe("buildTraceabilitySnapshot", () => {
       [`${key}:4`]: "passed", // Divide by zero
       [`${key}:16`]: "failed", // first Examples row of the outline
     };
-    const snap = buildTraceabilitySnapshot([parse(FEATURE)], statusMap, PREFIXES);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], statusMap, GRAMMAR);
 
     expect(link(snap.links, "CALC-1043").lastResult).toBe("passed");
     expect(link(snap.links, "CALC-1051").lastResult).toBe("failed");
@@ -104,7 +112,7 @@ describe("buildTraceabilitySnapshot", () => {
 
   it("keeps the mapping stable when a scenario is renamed (keys come from tags)", () => {
     const renamed = FEATURE.replace("Scenario: Divide by zero", "Scenario: Division guard");
-    const snap = buildTraceabilitySnapshot([parse(renamed)], {}, PREFIXES);
+    const snap = buildTraceabilitySnapshot([parse(renamed)], {}, GRAMMAR);
     const divide = link(snap.links, "CALC-1043");
     expect(divide.scenario.name).toBe("Division guard");
     expect(divide.testKey).toBe("CALC-1043");
@@ -120,7 +128,7 @@ Scenario: A
     const snap = buildTraceabilitySnapshot(
       [parse(content)],
       {},
-      { testPrefix: "xt-", reqPrefix: "cov-" }
+      { testPrefix: "xt-", reqPrefix: "cov-", keyShape: JIRA_KEY_SHAPE, canonicalizeKey: upper, projectOf: projectFromKey }
     );
     expect(snap.links.map((l) => l.testKey)).toEqual(["AB-1"]);
   });
@@ -141,7 +149,7 @@ Scenario Outline: O
     | a |
     | 2 |
 `;
-    const snap = buildTraceabilitySnapshot([parse(content)], {}, PREFIXES);
+    const snap = buildTraceabilitySnapshot([parse(content)], {}, GRAMMAR);
     // The second block's row must map to the outline-level test, not fall into the gap bucket.
     expect(snap.untraced).toEqual([]);
     const outlineLevel = snap.links.filter((l) => l.scenario.kind === "outline");
@@ -162,7 +170,7 @@ Scenario Outline: multiply <a> by <b>
 `;
     const key = normalizePathKey(FILE);
     const statusMap: Record<string, ScenarioStatus> = { [`${key}::multiply 2 by 3`]: "passed" };
-    const snap = buildTraceabilitySnapshot([parse(content)], statusMap, PREFIXES);
+    const snap = buildTraceabilitySnapshot([parse(content)], statusMap, GRAMMAR);
     expect(link(snap.links, "MUL-1").lastResult).toBe("passed");
   });
 
@@ -176,11 +184,11 @@ Scenario Outline: multiply <a> by <b>
             : undefined,
       keys: () => ["CALC-1043", "CALC-9999"],
     };
-    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, PREFIXES, provider);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, provider);
 
-    expect(link(snap.links, "CALC-1043").xray?.summary).toBe("Divide by zero");
-    expect(link(snap.links, "CALC-1051").xray).toBeUndefined();
-    expect(snap.orphans).toEqual([{ testKey: "CALC-9999", xray: { summary: "Ghost test" } }]);
+    expect(link(snap.links, "CALC-1043").meta?.summary).toBe("Divide by zero");
+    expect(link(snap.links, "CALC-1051").meta).toBeUndefined();
+    expect(snap.orphans).toEqual([{ testKey: "CALC-9999", meta: { summary: "Ghost test" } }]);
   });
 });
 
