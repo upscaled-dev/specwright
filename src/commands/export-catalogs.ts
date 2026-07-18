@@ -136,7 +136,10 @@ export function countFeaturesMatchingTags(
   return count;
 }
 
-export async function exportStepsCatalog(index: StepUsageIndex): Promise<void> {
+export async function exportStepsCatalog(
+  index: StepUsageIndex,
+  collapsed = false,
+): Promise<void> {
   const usages = await index.getAllUsages();
   const folderNames = (vscode.workspace.workspaceFolders ?? []).map((f) => f.name);
   const sections = buildStepsSections(
@@ -145,7 +148,10 @@ export async function exportStepsCatalog(index: StepUsageIndex): Promise<void> {
     (filePath) => vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.name,
     toWorkspaceRelative,
   );
-  const markdown = renderStepsMarkdown(sections, { brandLine: currentBrandLine() });
+  const markdown = renderStepsMarkdown(sections, {
+    brandLine: currentBrandLine(),
+    collapsed,
+  });
   await saveAndOpen(markdown, "steps.md");
 }
 
@@ -207,6 +213,7 @@ export async function exportScenariosCatalog(
     brandLine: currentBrandLine(),
     tagFilter: selection.tagFilter,
     filterNote: selection.filterNote,
+    collapsed: context.config.collapseMarkdownExportSections,
   });
   await saveAndOpen(markdown, "scenarios.md");
 }

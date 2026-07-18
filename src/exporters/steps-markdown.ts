@@ -1,3 +1,4 @@
+import { countLabel, detailsTag, renderFooter, renderMasthead } from "./brand";
 import { MarkdownSlugger } from "./markdown-slugger";
 
 export interface StepDefExport {
@@ -25,14 +26,16 @@ interface SectionPlan {
 
 export function renderStepsMarkdown(
   sections: Array<{ folderName?: string; defs: StepDefExport[] }>,
-  options?: { brandLine?: string | undefined },
+  options?: { brandLine?: string | undefined; collapsed?: boolean | undefined },
 ): string {
   const multiRoot = sections.length > 1;
+  const collapsed = options?.collapsed;
   const slugger = new MarkdownSlugger();
   // Fixed headings claim their slugs first so a folder or group sharing their text still
   // gets the -N anchor GitHub would assign it.
   slugger.slug("Step Definitions");
   slugger.slug("Summary");
+  slugger.slug("Unused");
   slugger.slug("Contents");
 
   const plans: SectionPlan[] = sections.map((section) => {
@@ -48,10 +51,18 @@ export function renderStepsMarkdown(
     return { folderName: section.folderName, folderSlug, groups };
   });
 
-  const out: string[] = ["# Step Definitions"];
-  if (options?.brandLine) {out.push(`_${options.brandLine}_`);}
+  const allDefs = sections.flatMap((s) => s.defs);
+  const unusedDefs = allDefs.filter((d) => d.usageCount === 0);
+  const stats = [countLabel(allDefs.length, "definition")];
+  if (unusedDefs.length > 0) {stats.push(`${unusedDefs.length} unused`);}
+
+  const out: string[] = renderMasthead("Step Definitions", {
+    brandLine: options?.brandLine,
+    stats,
+  });
   pushBlock(out, renderContents(plans, multiRoot));
-  pushBlock(out, renderSummary(sections));
+  pushBlock(out, renderSummary(sections, collapsed));
+  pushBlock(out, renderUnused(unusedDefs, collapsed));
 
   const keywordLevel = multiRoot ? "###" : "##";
   for (const plan of plans) {
@@ -59,9 +70,10 @@ export function renderStepsMarkdown(
       pushBlock(out, [`## ${plan.folderName}`]);
     }
     for (const group of plan.groups) {
-      pushBlock(out, renderGroup(group, keywordLevel));
+      pushBlock(out, renderGroup(group, keywordLevel, collapsed));
     }
   }
+  pushBlock(out, renderFooter(stats));
 
   return `${out.join("\n")}\n`;
 }
@@ -84,12 +96,16 @@ function renderContents(plans: SectionPlan[], multiRoot: boolean): string[] {
   return ["## Contents", ...lines];
 }
 
-function renderGroup(group: KeywordGroup, keywordLevel: string): string[] {
-  const count = group.defs.length === 1 ? "1 definition" : `${group.defs.length} definitions`;
+function renderGroup(
+  group: KeywordGroup,
+  keywordLevel: string,
+  collapsed?: boolean,
+): string[] {
+  const count = countLabel(group.defs.length, "definition");
   // The heading lives inside the details block so its anchor exists; the blank lines after
   // <summary> and before </details> are required for the inner Markdown to render.
   const lines = [
-    "<details open>",
+    detailsTag(collapsed),
     `<summary><strong>${group.keyword}</strong> — ${count}</summary>`,
     "",
     `${keywordLevel} ${group.keyword}`,
@@ -106,10 +122,11 @@ function renderGroup(group: KeywordGroup, keywordLevel: string): string[] {
 /** Collapsible per-keyword Summary table with a bolded grand-total row. */
 function renderSummary(
   sections: Array<{ folderName?: string; defs: StepDefExport[] }>,
+  collapsed?: boolean,
 ): string[] {
   const all = sections.flatMap((s) => s.defs);
   const lines = [
-    "<details open>",
+    detailsTag(collapsed),
     "<summary><strong>Summary</strong></summary>",
     "",
     "## Summary",
@@ -127,6 +144,31 @@ function renderSummary(
     "",
     "</details>",
   );
+  return lines;
+}
+
+/**
+ * Collapsible callout listing every never-referenced step definition so dead steps are
+ * actionable in one place instead of scattered behind inline _(unused)_ markers. Omitted
+ * entirely when nothing is unused.
+ */
+function renderUnused(unused: StepDefExport[], collapsed?: boolean): string[] {
+  if (unused.length === 0) {return [];}
+  const ordered = [...unused].sort(
+    (a, b) =>
+      KEYWORD_ORDER.indexOf(a.keyword) - KEYWORD_ORDER.indexOf(b.keyword) ||
+      a.humanized.localeCompare(b.humanized),
+  );
+  const lines = [
+    detailsTag(collapsed),
+    `<summary><strong>Unused</strong> — ${countLabel(unused.length, "definition")}</summary>`,
+    "",
+    "## Unused",
+  ];
+  for (const def of ordered) {
+    lines.push(`- **\`${def.humanized}\`** (${def.keyword}) — \`${def.sourceRel}:${def.line}\``);
+  }
+  lines.push("", "</details>");
   return lines;
 }
 

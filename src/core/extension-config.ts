@@ -167,6 +167,10 @@ export class ExtensionConfig {
     return raw === "on" || raw === "off" ? raw : "auto";
   }
 
+  public get collapseMarkdownExportSections(): boolean {
+    return this.config.get<boolean>("collapseMarkdownExportSections", false);
+  }
+
   public validate(): void {
     const errors: string[] = [];
     if (!this.testFilePattern || this.testFilePattern.trim() === "") {

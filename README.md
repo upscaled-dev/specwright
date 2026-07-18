@@ -81,7 +81,7 @@ A **Specwright** container in the Activity Bar hosts a **Steps** view:
 - **Step definitions** grouped by `Given`/`When`/`Then`, each with a usage count and an unused marker; click one to open its definition.
 - **Unmatched steps** grouped by feature file, with one-click scaffolding for a single step or a whole file.
 - **Insert Step…** picks a known step pattern and inserts it into the active `.feature` file as a snippet, with a tab stop per parameter.
-- **Export Steps** and **Export All Scenarios** write shareable Markdown catalogs — a summary, a linked table of contents, and collapsible sections. The scenario export can be scoped to all features, a tag, or a hand-picked set.
+- **Export Steps** and **Export All Scenarios** write shareable Markdown catalogs — a branded masthead with headline counts, a summary, a linked table of contents, and collapsible sections. Scenario catalogs add a "Browse by tag" index; step catalogs surface an "Unused" callout. The scenario export can be scoped to all features, a tag, or a hand-picked set, and `collapseMarkdownExportSections` starts the sections collapsed for large catalogs.
 
 Toggle the panel with `playwrightBddRunner.enableStepsPanel`.
 

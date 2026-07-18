@@ -57,6 +57,7 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   enableUnusedStepDiagnostics: (c) => c.unusedStepDiagnosticsMode,
   enableStepLiteralPromotion: (c) => c.stepLiteralPromotionMode,
   enableTableFormatting: (c) => c.tableFormattingMode,
+  collapseMarkdownExportSections: (c) => c.collapseMarkdownExportSections,
 };
 
 describe("ExtensionConfig defaults vs package.json", () => {

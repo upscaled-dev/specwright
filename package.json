@@ -298,6 +298,11 @@
           ],
           "default": "auto",
           "description": "Auto-align Gherkin data tables (| col | col |) when VS Code's 'Format Document' runs on a .feature file. 'auto' disables when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate formatting. 'on' always enables. 'off' always disables."
+        },
+        "playwrightBddRunner.collapseMarkdownExportSections": {
+          "type": "boolean",
+          "default": false,
+          "description": "Render the collapsible sections in exported feature/step Markdown catalogs collapsed by default. Recommended for large catalogs so the document opens as a scannable outline."
         }
       }
     },

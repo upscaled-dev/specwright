@@ -1,5 +1,6 @@
 import { FeatureParser, isOutlineExampleRow } from "../parsers/feature-parser";
 import { OutlineExampleRow, OutlineStub, RegularScenario, Scenario } from "../types/index";
+import { countLabel, detailsTag, renderFooter, renderMasthead } from "./brand";
 import { escapeHtml } from "./html-escape";
 import { MarkdownSlugger } from "./markdown-slugger";
 
@@ -17,6 +18,7 @@ interface ScenarioOptions {
   tagFilter?: string[] | undefined;
   filterNote?: string | undefined;
   brandLine?: string | undefined;
+  collapsed?: boolean | undefined;
 }
 
 type Unit =
@@ -65,27 +67,41 @@ export function renderScenariosMarkdown(
   slugger.slug("Contents");
   slugger.slug("Summary");
   slugger.slug("Tags");
+  slugger.slug("Browse by tag");
   const prepared = sections.map((section): PreparedSection =>
     prepareSection(parser, section, filter, slugger, multiRoot),
   );
 
+  const collapsed = options?.collapsed;
   const featureLevel = multiRoot ? "###" : "##";
   const scenarioLevel = multiRoot ? "####" : "###";
 
-  const out: string[] = ["# Feature Catalog"];
-  if (options?.brandLine) {out.push(`_${options.brandLine}_`);}
+  const grand = grandCounts(prepared);
+  const tagCount = collectTagCounts(prepared).size;
+  const stats = [
+    countLabel(grand.featureCount, "feature"),
+    countLabel(grand.total, "scenario"),
+  ];
+  if (tagCount > 0) {stats.push(countLabel(tagCount, "tag"));}
+
+  const out: string[] = renderMasthead("Feature Catalog", {
+    brandLine: options?.brandLine,
+    stats,
+  });
   pushBlock(out, renderContents(prepared, multiRoot));
-  pushBlock(out, renderSummary(prepared, multiRoot, filterNote));
-  pushBlock(out, renderTags(prepared));
+  pushBlock(out, renderSummary(prepared, multiRoot, filterNote, collapsed));
+  pushBlock(out, renderTags(prepared, collapsed));
+  pushBlock(out, renderTagIndex(prepared, collapsed));
 
   for (const section of prepared) {
     if (multiRoot) {
       pushBlock(out, [`## ${escapeHtml(section.folderName ?? "")}`]);
     }
     for (const feature of section.features) {
-      pushBlock(out, renderFeature(feature, featureLevel, scenarioLevel));
+      pushBlock(out, renderFeature(feature, featureLevel, scenarioLevel, collapsed));
     }
   }
+  pushBlock(out, renderFooter(stats));
 
   return `${out.join("\n")}\n`;
 }
@@ -157,6 +173,22 @@ function featureCounts(feature: PreparedFeature): FeatureCounts {
   return { regular, outlines, exampleRows, total: regular + exampleRows };
 }
 
+/** Catalog-wide totals, including a feature headcount, for the masthead/footer captions. */
+function grandCounts(sections: PreparedSection[]): FeatureCounts & { featureCount: number } {
+  const grand = { featureCount: 0, regular: 0, outlines: 0, exampleRows: 0, total: 0 };
+  for (const section of sections) {
+    for (const feature of section.features) {
+      grand.featureCount += 1;
+      const c = featureCounts(feature);
+      grand.regular += c.regular;
+      grand.outlines += c.outlines;
+      grand.exampleRows += c.exampleRows;
+      grand.total += c.total;
+    }
+  }
+  return grand;
+}
+
 /**
  * Collapsible per-feature Summary table with a grand-total row. The Total column counts
  * runnable scenarios (regular + expanded example rows); outline declarations are broken out
@@ -166,9 +198,10 @@ function renderSummary(
   sections: PreparedSection[],
   multiRoot: boolean,
   filterNote?: string,
+  collapsed?: boolean,
 ): string[] {
   const lines = [
-    "<details open>",
+    detailsTag(collapsed),
     "<summary><strong>Summary</strong></summary>",
     "",
     "## Summary",
@@ -222,24 +255,73 @@ function collectTagCounts(sections: PreparedSection[]): Map<string, number> {
   return tagCounts;
 }
 
-/** Collapsible tag-frequency table; omitted entirely when the catalog carries no tags. */
-function renderTags(sections: PreparedSection[]): string[] {
-  const tagCounts = collectTagCounts(sections);
-  if (tagCounts.size === 0) {return [];}
-
-  const sorted = [...tagCounts.entries()].sort(
+/** Tags sorted for display: most-used first, ties broken alphabetically. */
+function sortedTagCounts(sections: PreparedSection[]): Array<[string, number]> {
+  return [...collectTagCounts(sections).entries()].sort(
     (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
   );
+}
+
+/** Collapsible tag-frequency table; omitted entirely when the catalog carries no tags. */
+function renderTags(sections: PreparedSection[], collapsed?: boolean): string[] {
+  const sorted = sortedTagCounts(sections);
+  if (sorted.length === 0) {return [];}
+
+  // Two Tag/Count pairs per row so a long tag list stays compact instead of one tall column.
   const lines = [
-    "<details open>",
+    detailsTag(collapsed),
     "<summary><strong>Tags</strong></summary>",
     "",
     "## Tags",
-    "| Tag | Count |",
-    "|---|---:|",
+    "| Tag | Count | Tag | Count |",
+    "|---|---:|---|---:|",
   ];
-  for (const [tag, count] of sorted) {
-    lines.push(`| ${tag} | ${count} |`);
+  for (let i = 0; i < sorted.length; i += 2) {
+    const left = sorted[i];
+    if (!left) {continue;}
+    const right = sorted[i + 1];
+    const rightCells = right ? `${right[0]} | ${right[1]}` : " | ";
+    lines.push(`| ${left[0]} | ${left[1]} | ${rightCells} |`);
+  }
+  lines.push("", "</details>");
+  return lines;
+}
+
+/**
+ * Collapsible "Browse by tag" index: under each tag, links to the features that carry it, so a
+ * reader can navigate the catalog by tag. Features are deduped per tag and link to the anchors
+ * the feature headings already own. Omitted when the catalog carries no tags.
+ */
+function renderTagIndex(sections: PreparedSection[], collapsed?: boolean): string[] {
+  const sorted = sortedTagCounts(sections);
+  if (sorted.length === 0) {return [];}
+
+  const featuresByTag = new Map<string, PreparedFeature[]>();
+  for (const section of sections) {
+    for (const feature of section.features) {
+      const featureTags = new Set(
+        feature.units.flatMap((u) => unitScenarios(u)).flatMap((s) => s.tags ?? []),
+      );
+      for (const tag of featureTags) {
+        const list = featuresByTag.get(tag) ?? [];
+        list.push(feature);
+        featuresByTag.set(tag, list);
+      }
+    }
+  }
+
+  const lines = [
+    detailsTag(collapsed),
+    "<summary><strong>Browse by tag</strong></summary>",
+    "",
+    "## Browse by tag",
+  ];
+  for (const [tag] of sorted) {
+    lines.push(`- **${escapeHtml(tag)}**`);
+    for (const feature of featuresByTag.get(tag) ?? []) {
+      const name = escapeHtml(feature.title ?? feature.pathRel);
+      lines.push(`  - [${name}](#${feature.slug})`);
+    }
   }
   lines.push("", "</details>");
   return lines;
@@ -249,17 +331,18 @@ function renderFeature(
   feature: PreparedFeature,
   featureLevel: string,
   scenarioLevel: string,
+  collapsed?: boolean,
 ): string[] {
   if (feature.title === null) {
     return [`${featureLevel} ${feature.pathRel}`, "", "_Could not parse_"];
   }
   const title = escapeHtml(feature.title);
   const units = [...feature.units].sort((a, b) => a.sortLine - b.sortLine);
-  const count = units.length === 1 ? "1 scenario" : `${units.length} scenarios`;
+  const count = countLabel(units.length, "scenario");
   // The heading lives inside the details block so its anchor exists; the blank lines after
   // <summary> and before </details> are required for the inner Markdown to render.
   const lines = [
-    "<details open>",
+    detailsTag(collapsed),
     `<summary><strong>${title}</strong> — ${count}</summary>`,
     "",
     `${featureLevel} ${title}`,

@@ -536,7 +536,10 @@ export class CommandManager {
   private async exportSteps(): Promise<void> {
     const host = this.requireUsageIndexHost("Export Steps");
     if (!host) {return;}
-    await exportStepsCatalog(host.getUsageIndex());
+    await exportStepsCatalog(
+      host.getUsageIndex(),
+      this.context.config.collapseMarkdownExportSections,
+    );
   }
 
   private async exportScenarios(): Promise<void> {

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Richer Markdown catalog exports.** Feature and step catalogs now open with a branded masthead — the Specwright logo inlined in the heading plus headline counts (features/scenarios/tags, definitions/unused) — and close with a matching footer.
+- **Browse by tag** section in scenario catalogs: each tag links to the features that carry it.
+- **Unused** callout in step catalogs listing every never-referenced step definition in one place.
+- Setting `playwrightBddRunner.collapseMarkdownExportSections` (default off) renders the collapsible sections collapsed by default, so large catalogs open as a scannable outline.
+
+### Changed
+
+- The Tags table in scenario catalogs is now two tag/count pairs per row, keeping long tag lists compact.
 
 ## [0.3.6] - 2026-07-17
 ## [0.3.0] - 2026-07-17
