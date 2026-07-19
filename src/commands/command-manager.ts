@@ -12,6 +12,9 @@ import { runInsertStep } from "./insert-step";
 import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
 import { XrayConnectionCommands } from "../xray/xray-connection-commands";
 import { XrayCredentialStore } from "../xray/xray-credential-store";
+import { computeLinkEdit, linkScenarioPicks } from "../traceability/link-scenario";
+import { ScenarioRef } from "../traceability/traceability-model";
+import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -77,6 +80,7 @@ export class CommandManager {
   private usageIndexHost: UsageIndexHost | undefined;
   private credentialStore: XrayCredentialStore | undefined;
   private xrayConnectionCommands: XrayConnectionCommands | undefined;
+  private traceabilitySubsystem: TraceabilitySubsystem | undefined;
 
   public static create(context: PlaywrightBddExtensionContext): CommandManager {
     return new CommandManager(context);
@@ -100,6 +104,10 @@ export class CommandManager {
 
   public setCredentialStore(store: XrayCredentialStore): void {
     this.credentialStore = store;
+  }
+
+  public setTraceabilitySubsystem(subsystem: TraceabilitySubsystem): void {
+    this.traceabilitySubsystem = subsystem;
   }
 
   /**
@@ -154,6 +162,7 @@ export class CommandManager {
         { command: "playwrightBddRunner.scaffoldFeatureFromPanel", title: "Generate Missing Step Definitions", category: CATEGORY, handler: this.scaffoldFeatureFromPanel.bind(this) },
         { command: "playwrightBddRunner.traceability.openIssue", title: "Open Issue in Tracker", category: CATEGORY, handler: this.openIssueInTracker.bind(this) },
         { command: "playwrightBddRunner.traceability.copyKey", title: "Copy Issue Key", category: CATEGORY, handler: this.copyIssueKey.bind(this) },
+        { command: "playwrightBddRunner.traceability.linkScenario", title: "Link Scenario to Test", category: CATEGORY, handler: this.linkScenario.bind(this) },
         { command: "playwrightBddRunner.traceability.manageConnection", title: "Manage Xray Connection", category: CATEGORY, handler: () => this.getXrayConnectionCommands().manageConnection() },
         { command: "playwrightBddRunner.traceability.connect", title: "Connect to Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().connect() },
         { command: "playwrightBddRunner.traceability.disconnect", title: "Disconnect from Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().disconnect() },
@@ -471,6 +480,64 @@ export class CommandManager {
     }
     await vscode.env.clipboard.writeText(key);
     vscode.window.showInformationMessage(`Copied ${key}`);
+  }
+
+  // The traceability tree passes its untraced/mapped node; a palette invocation has none.
+  private scenarioRefFromArg(arg: unknown): ScenarioRef | undefined {
+    const node = arg as
+      | { kind?: string; item?: { scenario?: ScenarioRef }; link?: { scenario?: ScenarioRef } }
+      | undefined;
+    if (node?.kind === "untraced") {return node.item?.scenario;}
+    if (node?.kind === "link") {return node.link?.scenario;}
+    return undefined;
+  }
+
+  private async linkScenario(...args: CommandArguments): Promise<void> {
+    const scenario = this.scenarioRefFromArg(args[0]);
+    if (!scenario) {
+      vscode.window.showInformationMessage("Link Scenario: run this from a scenario row in the Traceability view.");
+      return;
+    }
+    const adapter = this.traceabilitySubsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
+    const metadata = adapter.metadata;
+    if (!metadata) {
+      vscode.window.showInformationMessage("Connect to your test tracker and run Sync before linking scenarios.");
+      return;
+    }
+    const picks = linkScenarioPicks(metadata.snapshot());
+    if (picks.length === 0) {
+      vscode.window.showInformationMessage("No synced tests to link yet — run Sync first.");
+      return;
+    }
+
+    const items = picks.map((pick) => ({ label: pick.key, description: pick.summary ?? "", key: pick.key }));
+    const chosen = await vscode.window.showQuickPick(items, {
+      placeHolder: "Select a test to link to this scenario",
+      matchOnDescription: true,
+    });
+    if (!chosen) {return;}
+
+    const uri = vscode.Uri.file(scenario.filePath);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const lines = doc.getText().split("\n");
+    const edit = computeLinkEdit(lines, scenario.line, chosen.key, adapter.keyGrammar);
+    if (edit.kind === "unchanged") {
+      vscode.window.showInformationMessage(`Scenario already linked to ${chosen.key}.`);
+      return;
+    }
+
+    const wsEdit = new vscode.WorkspaceEdit();
+    if (edit.kind === "insertLine") {
+      const eol = doc.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
+      wsEdit.insert(uri, new vscode.Position(edit.line, 0), `${edit.text}${eol}`);
+    } else {
+      // Range from the document's own line length (EOL-excluded), never the "\n"-split string, so a
+      // CRLF line's trailing "\r" is never dragged into the replacement.
+      const lineLength = doc.lineAt(edit.line).text.length;
+      wsEdit.replace(uri, new vscode.Range(edit.line, 0, edit.line, lineLength), edit.text);
+    }
+    await vscode.workspace.applyEdit(wsEdit);
+    await doc.save();
   }
 
   // Welcome-only "Hide this panel" affordance. Write to wherever the setting already lives so a

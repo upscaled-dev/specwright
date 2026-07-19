@@ -15,6 +15,7 @@ import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { CommandBuilder } from "../../core/command-builder";
 import { ExternalRef, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayAdapter } from "../../xray/xray-adapter";
+import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 
 function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): PlaywrightBddExtensionContext {
   const logger = Logger.create();
@@ -336,7 +337,7 @@ describe("command contributions ↔ handler registrations parity", () => {
 
   it("places the traceability node commands inline on the test-key item and hides them from the palette", () => {
     const itemContext = pkg.contributes.menus["view/item/context"]!;
-    const traceabilityItems = itemContext.filter((e) => e.when?.includes("playwrightBddRunner.traceability"));
+    const traceabilityItems = itemContext.filter((e) => e.when?.includes("traceabilityTestKey"));
     expect(traceabilityItems.map((e) => [e.command, e.when])).toEqual([
       ["playwrightBddRunner.traceability.openIssue", "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey"],
       ["playwrightBddRunner.traceability.copyKey", "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey"],
@@ -496,5 +497,166 @@ describe("traceability panel connection UX contributions", () => {
     expect(
       palette.find((e) => e.command === "playwrightBddRunner.traceability.hidePanel")?.when
     ).toBe("false");
+  });
+});
+
+describe("traceability linkScenario command", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const untracedNode = {
+    kind: "untraced",
+    item: { scenario: { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" } },
+  };
+
+  async function syncedAdapter(): Promise<InMemoryTraceabilityAdapter> {
+    const adapter = new InMemoryTraceabilityAdapter();
+    adapter.seedCatalogue([{ key: "5", summary: "Five" }], "complete");
+    await adapter.metadata.sync({ testKeys: ["5"] });
+    return adapter;
+  }
+
+  it("prompts to connect/sync when the active adapter exposes no metadata capability", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const handlers = captureHandlers(makeContext());
+    await handlers.get("playwrightBddRunner.traceability.linkScenario")!(untracedNode);
+    expect(String(info.mock.calls[0]?.[0])).toContain("Sync");
+  });
+
+  it("no-ops with guidance when invoked from the palette without a scenario row", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const handlers = captureHandlers(makeContext());
+    await handlers.get("playwrightBddRunner.traceability.linkScenario")!();
+    expect(String(info.mock.calls[0]?.[0])).toContain("Traceability view");
+  });
+
+  it("informs the user when the snapshot has no synced tests instead of showing a blank picker", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const handlers = captureHandlers(makeContext({ traceabilityAdapter: new InMemoryTraceabilityAdapter() }));
+    await handlers.get("playwrightBddRunner.traceability.linkScenario")!(untracedNode);
+    expect(String(info.mock.calls[0]?.[0])).toContain("No synced tests");
+  });
+
+  it("inserts the grammar-built test tag above the untraced scenario via a WorkspaceEdit", async () => {
+    const adapter = await syncedAdapter();
+    const feature = "Feature: F\n\nScenario: A\n  Given x\n";
+    const doc = {
+      uri: vscode.Uri.file("/ws/a.feature"),
+      getText: () => feature,
+      save: () => Promise.resolve(true),
+    };
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(doc as unknown as vscode.TextDocument);
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(
+      { label: "5", description: "Five", key: "5" } as unknown as vscode.QuickPickItem
+    );
+    const applied: Array<{ __entries: Array<{ op: string; text: string }> }> = [];
+    vi.spyOn(vscode.workspace, "applyEdit").mockImplementation((edit) => {
+      applied.push(edit as unknown as { __entries: Array<{ op: string; text: string }> });
+      return Promise.resolve(true);
+    });
+
+    const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
+    await handlers.get("playwrightBddRunner.traceability.linkScenario")!(untracedNode);
+
+    expect(applied).toHaveLength(1);
+    expect(applied[0]!.__entries).toHaveLength(1);
+    expect(applied[0]!.__entries[0]).toMatchObject({ op: "insert", text: "@TC-5\n" });
+  });
+
+  interface EditEntry {
+    op: string;
+    range?: { start: { line: number } };
+    position?: { line: number };
+    text: string;
+  }
+
+  function fakeDoc(text: string): vscode.TextDocument {
+    const sep = text.includes("\r\n") ? "\r\n" : "\n";
+    return {
+      uri: vscode.Uri.file("/ws/a.feature"),
+      eol: sep === "\r\n" ? vscode.EndOfLine.CRLF : vscode.EndOfLine.LF,
+      getText: () => text,
+      lineAt: (n: number) => ({ text: text.split(sep)[n] ?? "" }),
+      save: () => Promise.resolve(true),
+    } as unknown as vscode.TextDocument;
+  }
+
+  function applyWsEdit(text: string, entries: EditEntry[]): string {
+    const eol = text.includes("\r\n") ? "\r\n" : "\n";
+    const parts = text.split(eol);
+    for (const e of entries) {
+      if (e.op === "insert" && e.position) {
+        const content = e.text.endsWith(eol) ? e.text.slice(0, -eol.length) : e.text;
+        parts.splice(e.position.line, 0, content);
+      } else if (e.op === "replace" && e.range) {
+        parts[e.range.start.line] = e.text;
+      }
+    }
+    return parts.join(eol);
+  }
+
+  async function reMap(feature: string): Promise<string> {
+    const adapter = new InMemoryTraceabilityAdapter();
+    adapter.seedCatalogue([{ key: "9", summary: "Nine" }], "complete");
+    await adapter.metadata.sync({ testKeys: ["9"] });
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(fakeDoc(feature));
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(
+      { label: "9", key: "9" } as unknown as vscode.QuickPickItem
+    );
+    const applied: EditEntry[][] = [];
+    vi.spyOn(vscode.workspace, "applyEdit").mockImplementation((edit) => {
+      applied.push((edit as unknown as { __entries: EditEntry[] }).__entries);
+      return Promise.resolve(true);
+    });
+    const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
+    await handlers.get("playwrightBddRunner.traceability.linkScenario")!({
+      kind: "link",
+      link: { scenario: { filePath: "/ws/a.feature", line: 4, name: "A", kind: "scenario" } },
+    });
+    expect(applied).toHaveLength(1);
+    return applyWsEdit(feature, applied[0]!);
+  }
+
+  it("re-maps an already-linked LF document to the picked key, byte-exact", async () => {
+    expect(await reMap("Feature: F\n\n@TC-5\nScenario: A\n  Given x\n")).toBe(
+      "Feature: F\n\n@TC-9\nScenario: A\n  Given x\n"
+    );
+  });
+
+  it("re-maps an already-linked CRLF document without a doubled carriage return", async () => {
+    const out = await reMap("Feature: F\r\n\r\n@TC-5\r\nScenario: A\r\n  Given x\r\n");
+    expect(out).toBe("Feature: F\r\n\r\n@TC-9\r\nScenario: A\r\n  Given x\r\n");
+    expect(out).not.toContain("\r\r");
+  });
+});
+
+describe("traceability linkScenario contributions", () => {
+  interface Pkg {
+    contributes: {
+      commands: Array<{ command: string; category?: string }>;
+      menus: Record<string, Array<{ command?: string; when?: string; group?: string }>>;
+    };
+  }
+  const pkg = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf-8")
+  ) as Pkg;
+  const CMD = "playwrightBddRunner.traceability.linkScenario";
+
+  it("declares the command under the Specwright category", () => {
+    expect(pkg.contributes.commands.find((c) => c.command === CMD)?.category).toBe("Specwright");
+  });
+
+  it("offers the inline link action on both untraced and mapped rows", () => {
+    const items = pkg.contributes.menus["view/item/context"]!.filter((e) => e.command === CMD);
+    expect(items.every((e) => e.group === "inline@1")).toBe(true);
+    const whens = items.map((e) => e.when);
+    expect(whens).toContain("view == playwrightBddRunner.traceability && viewItem == traceabilityUntraced");
+    expect(whens).toContain("view == playwrightBddRunner.traceability && viewItem == traceabilityScenario");
+  });
+
+  it("gates the palette entry on the traceability panel being enabled", () => {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    expect(palette.find((e) => e.command === CMD)?.when).toBe(
+      "config.playwrightBddRunner.traceability.enablePanel"
+    );
   });
 });

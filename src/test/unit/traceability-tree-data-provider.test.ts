@@ -64,13 +64,13 @@ describe("TraceabilityTreeDataProvider", () => {
     expect(provider(SNAPSHOT, "Xray", false).getChildren()).toEqual([]);
   });
 
-  it("renders sections once connected", () => {
+  it("renders sections once connected, untraced first", () => {
     const p = provider(SNAPSHOT, "Xray", false);
     expect(p.getChildren()).toEqual([]);
     p.setConnected(true);
     expect(p.getChildren().map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
-      "covered",
       "untraced",
+      "covered",
     ]);
   });
 
@@ -86,23 +86,23 @@ describe("TraceabilityTreeDataProvider", () => {
     expect(refreshes).toBe(2);
   });
 
-  it("shows the covered and untraced sections with counts", () => {
+  it("shows the untraced and covered sections with counts", () => {
     const p = provider(SNAPSHOT);
     const roots = p.getChildren();
     expect(roots.map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
-      "covered",
       "untraced",
+      "covered",
     ]);
-    expect(p.getTreeItem(roots[0]!).label).toBe("Mapped tests");
-    expect(p.getTreeItem(roots[0]!).description).toBe("2");
-    expect(p.getTreeItem(roots[1]!).label).toBe("Untraced scenarios");
-    expect(p.getTreeItem(roots[1]!).description).toBe("1");
+    expect(p.getTreeItem(roots[0]!).label).toBe("Untraced scenarios");
+    expect(p.getTreeItem(roots[0]!).description).toBe("1");
+    expect(p.getTreeItem(roots[1]!).label).toBe("Mapped tests");
+    expect(p.getTreeItem(roots[1]!).description).toBe("2");
   });
 
   it("groups links under their test key and renders reveal + badge on the scenario leaf", () => {
     const p = provider(SNAPSHOT);
     const roots = p.getChildren();
-    const testKeys = p.getChildren(roots[0]);
+    const testKeys = p.getChildren(roots[1]);
     expect(testKeys.map((n) => (n.kind === "testKey" ? n.testKey : n.kind))).toEqual([
       "CALC-1043",
       "CALC-1051",
@@ -138,14 +138,14 @@ describe("TraceabilityTreeDataProvider", () => {
       completeness: "unknown",
       errors: [],
     });
-    const testKeys = p.getChildren(p.getChildren()[0]);
+    const testKeys = p.getChildren(p.getChildren()[1]);
     expect(p.getTreeItem(testKeys[0]!).description).toBe("1 scenario");
   });
 
   it("lists untraced scenarios in the gap bucket", () => {
     const p = provider(SNAPSHOT);
     const roots = p.getChildren();
-    const untraced = p.getChildren(roots[1]);
+    const untraced = p.getChildren(roots[0]);
     const item = p.getTreeItem(untraced[0]!);
     expect(item.label).toBe("Untagged");
     expect(item.contextValue).toBe("traceabilityUntraced");
@@ -153,8 +153,71 @@ describe("TraceabilityTreeDataProvider", () => {
 
   it("templates the empty-section message with the provider label", () => {
     const p = provider({ links: [], untraced: SNAPSHOT.untraced, orphans: [], stale: false, completeness: "unknown", errors: [] }, "Azure DevOps");
-    const covered = p.getChildren(p.getChildren()[0]);
+    const covered = p.getChildren(p.getChildren()[1]);
     expect(p.getTreeItem(covered[0]!).label).toBe("No scenarios are mapped to a Azure DevOps test yet.");
+  });
+
+  it("renders the snapshot's normalized status on the mapped-test row with providerValue in the tooltip", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "CALC-1",
+          scenario: { filePath: "/ws/a.feature", line: 2, name: "A", kind: "scenario" },
+          reqKeys: [],
+          lastResult: "passed",
+          meta: { key: "CALC-1", summary: "A test", status: { category: "failed", providerValue: "In Review" } },
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "complete",
+      errors: [],
+    });
+    const testKeys = p.getChildren(p.getChildren()[1]);
+    const item = p.getTreeItem(testKeys[0]!);
+    expect((item.iconPath as vscode.ThemeIcon).id).toBe("testing-failed-icon");
+    expect(item.tooltip).toBe("CALC-1 · In Review");
+  });
+
+  it("falls back to the aggregate local run badge when the snapshot has no status", () => {
+    const p = provider(SNAPSHOT);
+    const testKeys = p.getChildren(p.getChildren()[1]);
+    const passed = p.getTreeItem(testKeys[0]!);
+    expect((passed.iconPath as vscode.ThemeIcon).id).toBe("testing-passed-icon");
+    const failed = p.getTreeItem(testKeys[1]!);
+    expect((failed.iconPath as vscode.ThemeIcon).id).toBe("testing-failed-icon");
+  });
+
+  it("marks a drifting link with a description suffix and an explanatory tooltip", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "CALC-1",
+          scenario: { filePath: "/ws/a.feature", line: 2, name: "Divide", kind: "scenario" },
+          reqKeys: ["CALC-9"],
+          lastResult: "passed",
+          meta: { key: "CALC-1", gherkin: "Scenario: Divide\n  Given other" },
+          drift: true,
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "complete",
+      errors: [],
+    });
+    const testKeys = p.getChildren(p.getChildren()[1]);
+    const leaf = p.getTreeItem(p.getChildren(testKeys[0])[0]!);
+    expect(leaf.description).toBe("REQ CALC-9 · drift");
+    expect(String(leaf.tooltip)).toContain("differs");
+  });
+
+  it("leaves a non-drifting link with no drift marker", () => {
+    const p = provider(SNAPSHOT);
+    const testKeys = p.getChildren(p.getChildren()[1]);
+    const leaf = p.getTreeItem(p.getChildren(testKeys[0])[0]!);
+    expect(leaf.description).toBe("REQ CALC-900");
   });
 
   it("fires onDidChangeTreeData when the model changes, until disposed", () => {

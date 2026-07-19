@@ -8,6 +8,7 @@ import { REPORT_CANDIDATES, TraceabilityModel } from "./traceability-model";
 import { TraceabilityAdapter } from "./contracts";
 import { TraceabilityAdapterRegistry } from "./adapter-registry";
 import { TraceabilityNode, TraceabilityTreeDataProvider } from "./traceability-tree-data-provider";
+import { TagDiagnosticsProvider } from "./tag-diagnostics";
 
 const FALLBACK_PROVIDER_ID = "xray";
 const CONNECTED_CONTEXT_KEY = "playwrightBddRunner.traceability.connected";
@@ -28,6 +29,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   private treeView: vscode.TreeView<TraceabilityNode> | undefined;
   private treeProvider: TraceabilityTreeDataProvider | undefined;
   private model: TraceabilityModel | undefined;
+  private tagDiagnostics: TagDiagnosticsProvider | undefined;
   private activeAdapter: TraceabilityAdapter | undefined;
   private activeAdapterId: string | undefined;
   private watcherDisposables: vscode.Disposable[] = [];
@@ -65,6 +67,12 @@ export class TraceabilitySubsystem implements vscode.Disposable {
 
   public get traceabilityPanelActive(): boolean {
     return this.treeView !== undefined;
+  }
+
+  // The linkScenario command reads the live adapter's metadata snapshot from here — the browse-URL
+  // adapter the command context holds is a separate instance and is never synced.
+  public getActiveAdapter(): TraceabilityAdapter | undefined {
+    return this.activeAdapter;
   }
 
   // Reads config.traceabilityProvider live so switching the provider re-selects here; an unknown id
@@ -122,6 +130,10 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.treeView = vscode.window.createTreeView("playwrightBddRunner.traceability", {
       treeDataProvider: provider,
     });
+    // Grammar-driven tag diagnostics are offline (no connection needed) and rebuild with the panel
+    // on any prefix/provider change, so they always lint against the active adapter's grammar.
+    this.tagDiagnostics = new TagDiagnosticsProvider(adapter.keyGrammar);
+    this.tagDiagnostics.start();
     if (adapter.connection) {
       this.adapterSubscriptions.push(
         adapter.connection.onDidChange(() => this.queueConnectionRefresh())
@@ -249,6 +261,8 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.treeView = undefined;
     this.treeProvider?.dispose();
     this.treeProvider = undefined;
+    this.tagDiagnostics?.dispose();
+    this.tagDiagnostics = undefined;
     this.model?.dispose();
     this.model = undefined;
     this.activeAdapter?.dispose?.();

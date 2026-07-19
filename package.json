@@ -504,6 +504,12 @@
         "icon": "$(copy)"
       },
       {
+        "command": "playwrightBddRunner.traceability.linkScenario",
+        "title": "Link Scenario to Test",
+        "category": "Specwright",
+        "icon": "$(link)"
+      },
+      {
         "command": "playwrightBddRunner.traceability.manageConnection",
         "title": "Manage Xray Connection",
         "category": "Specwright",
@@ -631,6 +637,10 @@
           "when": "false"
         },
         {
+          "command": "playwrightBddRunner.traceability.linkScenario",
+          "when": "config.playwrightBddRunner.traceability.enablePanel"
+        },
+        {
           "command": "playwrightBddRunner.traceability.hidePanel",
           "when": "false"
         }
@@ -682,6 +692,16 @@
           "command": "playwrightBddRunner.traceability.copyKey",
           "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey",
           "group": "inline@2"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.linkScenario",
+          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityUntraced",
+          "group": "inline@1"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.linkScenario",
+          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityScenario",
+          "group": "inline@1"
         }
       ],
       "editor/context": [

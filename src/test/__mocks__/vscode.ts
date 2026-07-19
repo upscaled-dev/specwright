@@ -510,6 +510,7 @@ export const extensions = {
 export { Position, Range, Location, Uri };
 
 export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
+export const EndOfLine = { LF: 1, CRLF: 2 };
 export const TestRunProfileKind = { Run: 1, Debug: 2, Coverage: 3 };
 
 export class TestRunRequest {

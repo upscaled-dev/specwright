@@ -234,6 +234,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandManager.setTestProvider(testProvider as unknown);
     commandManager.setUsageIndexHost(providerRegistry);
     commandManager.setCredentialStore(credentialStore);
+    commandManager.setTraceabilitySubsystem(traceabilitySubsystem);
 
     providerRegistry.applyCurrent();
     traceabilitySubsystem.applyCurrent();

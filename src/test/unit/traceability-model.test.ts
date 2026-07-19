@@ -8,6 +8,7 @@ import { normalizePathKey, PlaywrightJsonParser, ScenarioStatus } from "../../ut
 import {
   buildTraceabilitySnapshot,
   findPlaywrightReport,
+  hasGherkinDrift,
   ParsedFeatureInput,
   TraceLink,
 } from "../../traceability/traceability-model";
@@ -228,6 +229,50 @@ Scenario Outline: multiply <a> by <b>
 
     expect(snap.orphans).toEqual([]);
     expect(snap.errors).toEqual(["fetch failed"]);
+  });
+
+  it("flags drift when the snapshot's stored gherkin differs from the local scenario", () => {
+    const remote = remoteSnapshot([
+      { key: "CALC-1043", gherkin: "Scenario: Divide by zero\n  Given a DIFFERENT calculator" },
+    ]);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").drift).toBe(true);
+  });
+
+  it("does not flag drift when stored gherkin matches after normalizing whitespace/line endings", () => {
+    const remote = remoteSnapshot([
+      { key: "CALC-1043", gherkin: "Scenario: Divide by zero\r\n  Given a calculator   " },
+    ]);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").drift).toBeUndefined();
+  });
+
+  it("leaves drift unset when the snapshot carries no stored gherkin", () => {
+    const remote = remoteSnapshot([{ key: "CALC-1043", summary: "Divide by zero" }]);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").drift).toBeUndefined();
+  });
+
+  it("does not flag drift for an indentation-only difference", () => {
+    const remote = remoteSnapshot([
+      { key: "CALC-1043", gherkin: "    Scenario: Divide by zero\n        Given a calculator" },
+    ]);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").drift).toBeUndefined();
+  });
+});
+
+describe("hasGherkinDrift", () => {
+  it("ignores line endings and trailing whitespace", () => {
+    expect(hasGherkinDrift("Scenario: A\r\n  Given x  \n", "Scenario: A\n  Given x")).toBe(false);
+  });
+
+  it("detects a meaningful text difference", () => {
+    expect(hasGherkinDrift("Scenario: A\n  Given x", "Scenario: A\n  Given y")).toBe(true);
+  });
+
+  it("ignores per-line indentation differences", () => {
+    expect(hasGherkinDrift("Scenario: A\n  Given x", "Scenario: A\n        Given x")).toBe(false);
   });
 });
 

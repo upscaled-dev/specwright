@@ -36,6 +36,9 @@ export interface TraceLink {
   reqKeys: string[];
   meta?: TestCaseMetadata | undefined;
   lastResult?: RunOutcome | undefined;
+  // Set when the snapshot's stored Gherkin differs from the local scenario source (display-only; a
+  // reconcile action arrives in P3). Absent until a snapshot populates `meta.gherkin`.
+  drift?: boolean | undefined;
 }
 
 export interface UntracedScenario {
@@ -88,6 +91,25 @@ export function worstStatus(
     }
   }
   return worst;
+}
+
+// Drift compares text only, ignoring line endings and per-line indentation/trailing whitespace, so a
+// scenario that differs from the remote test purely by CRLF, indentation, or trailing spaces is not
+// flagged.
+export function normalizeGherkin(text: string): string {
+  const lines = text.replaceAll("\r\n", "\n").split("\n").map((line) => line.trim());
+  while (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines.join("\n");
+}
+
+export function hasGherkinDrift(local: string, remote: string): boolean {
+  return normalizeGherkin(local) !== normalizeGherkin(remote);
+}
+
+function reconstructScenarioGherkin(keyword: string, name: string, steps: readonly string[]): string {
+  return [`${keyword}: ${name}`, ...steps.map((step) => `  ${step}`)].join("\n");
 }
 
 // Mirrors PlaywrightBddTestProvider.resolveStatusForItem: outline example rows are titled
@@ -153,7 +175,8 @@ export function buildTraceabilitySnapshot(
     testKey: string,
     scenario: ScenarioRef,
     reqKeys: string[],
-    lastResult: ScenarioStatus | undefined
+    lastResult: ScenarioStatus | undefined,
+    localGherkin?: string
   ): void => {
     const link: TraceLink = {
       testKey,
@@ -165,6 +188,13 @@ export function buildTraceabilitySnapshot(
     }
     if (lastResult !== undefined) {
       link.lastResult = lastResult;
+    }
+    const meta = remote?.tests.get(testKey);
+    if (meta) {
+      link.meta = meta;
+      if (meta.gherkin !== undefined && localGherkin !== undefined && hasGherkinDrift(localGherkin, meta.gherkin)) {
+        link.drift = true;
+      }
     }
     links.push(link);
   };
@@ -220,8 +250,9 @@ export function buildTraceabilitySnapshot(
       const lastResult = worstStatus(
         outlineLevelRows.map((r) => lookupStatus(statusMap, filePath, r.lineNumber, r.name, r.substitutedName))
       );
+      const localGherkin = reconstructScenarioGherkin("Scenario Outline", outlineName, first.steps);
       for (const testKey of outlineKeys) {
-        addLink(testKey, outlineRef, reqKeys, lastResult);
+        addLink(testKey, outlineRef, reqKeys, lastResult, localGherkin);
       }
     }
 
@@ -242,8 +273,9 @@ export function buildTraceabilitySnapshot(
       const lastResult = worstStatus(
         blockRows.map((r) => lookupStatus(statusMap, filePath, r.lineNumber, r.name, r.substitutedName))
       );
+      const localGherkin = reconstructScenarioGherkin("Scenario Outline", ref.name, sample.steps);
       for (const testKey of blockKeys) {
-        addLink(testKey, ref, reqKeys, lastResult);
+        addLink(testKey, ref, reqKeys, lastResult, localGherkin);
       }
     }
 
@@ -277,20 +309,14 @@ export function buildTraceabilitySnapshot(
         untraced.push({ scenario: ref, reqKeys });
         continue;
       }
+      const localGherkin = reconstructScenarioGherkin(isOutline ? "Scenario Outline" : "Scenario", name, scenario.steps);
       for (const testKey of testKeys) {
-        addLink(testKey, ref, reqKeys, lastResult);
+        addLink(testKey, ref, reqKeys, lastResult, localGherkin);
       }
     }
 
     for (const rows of outlineRows.values()) {
       buildOutlineLinks(rows, filePath);
-    }
-  }
-
-  if (remote) {
-    for (const link of links) {
-      const meta = remote.tests.get(link.testKey);
-      if (meta) {link.meta = meta;}
     }
   }
 

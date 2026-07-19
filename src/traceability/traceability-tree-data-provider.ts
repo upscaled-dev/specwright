@@ -7,6 +7,7 @@ import {
   UntracedScenario,
   worstStatus,
 } from "./traceability-model";
+import { NormalizedStatus } from "./contracts";
 
 interface SectionNode {
   kind: "section";
@@ -48,8 +49,19 @@ const OUTCOME_ICON: Record<RunOutcome, string> = {
   skipped: "testing-skipped-icon",
 };
 
+const STATUS_ICON: Record<NormalizedStatus["category"], string> = {
+  passed: "testing-passed-icon",
+  failed: "testing-failed-icon",
+  pending: "testing-queued-icon",
+  unknown: "testing-unset-icon",
+};
+
 function outcomeIcon(outcome: RunOutcome | undefined): vscode.ThemeIcon {
   return new vscode.ThemeIcon(outcome ? OUTCOME_ICON[outcome] : "circle-outline");
+}
+
+function statusIcon(status: NormalizedStatus): vscode.ThemeIcon {
+  return new vscode.ThemeIcon(STATUS_ICON[status.category]);
 }
 
 function reqDescription(reqKeys: readonly string[]): string {
@@ -122,18 +134,31 @@ export class TraceabilityTreeDataProvider
         const scenarios = node.links.length === 1 ? "1 scenario" : `${node.links.length} scenarios`;
         item.description = node.project ? `${node.project} · ${scenarios}` : scenarios;
         item.contextValue = "traceabilityTestKey";
-        const aggregate = worstStatus(node.links.map((l) => l.lastResult));
-        item.iconPath = aggregate ? outcomeIcon(aggregate) : new vscode.ThemeIcon("key");
-        item.tooltip = node.testKey;
+        // All links under a key share the same snapshot entry, so the remote status is the test's,
+        // not per-scenario. It wins over the aggregate local run result when present (§3.3).
+        const status = node.links[0]?.meta?.status;
+        if (status) {
+          item.iconPath = statusIcon(status);
+          item.tooltip = `${node.testKey} · ${status.providerValue}`;
+        } else {
+          const aggregate = worstStatus(node.links.map((l) => l.lastResult));
+          item.iconPath = aggregate ? outcomeIcon(aggregate) : new vscode.ThemeIcon("key");
+          item.tooltip = node.testKey;
+        }
         return item;
       }
       case "link": {
         const { scenario, reqKeys } = node.link;
         const item = new vscode.TreeItem(scenario.name, vscode.TreeItemCollapsibleState.None);
-        item.description = reqDescription(reqKeys);
+        const parts = [reqDescription(reqKeys)];
+        if (node.link.drift) {parts.push("drift");}
+        item.description = parts.filter((p) => p !== "").join(" · ");
         item.contextValue = "traceabilityScenario";
         item.iconPath = outcomeIcon(node.link.lastResult);
         item.command = revealCommand(scenario);
+        if (node.link.drift) {
+          item.tooltip = `${scenario.name}\nThe remote test text differs from this scenario (display only; reconcile arrives in a later release).`;
+        }
         return item;
       }
       case "untraced": {
@@ -154,9 +179,10 @@ export class TraceabilityTreeDataProvider
       if (!this.connected || (snap.links.length === 0 && snap.untraced.length === 0)) {
         return [];
       }
+      // Untraced first: the gap bucket is the panel's work queue, so it sits above mapped tests.
       return [
-        { kind: "section", section: "covered" },
         { kind: "section", section: "untraced" },
+        { kind: "section", section: "covered" },
       ];
     }
     if (node.kind === "section") {
