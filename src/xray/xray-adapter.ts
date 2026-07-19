@@ -1,12 +1,23 @@
 import { ExtensionConfig } from "../core/extension-config";
 import {
   ConnectionCapability,
+  ConnectionVerifyResult,
   ExternalRef,
   KeyGrammar,
   TraceabilityAdapter,
 } from "../traceability/contracts";
 import { TraceabilityAdapterFactory } from "../traceability/adapter-registry";
 import { XrayCredentialStore } from "./xray-credential-store";
+import type {
+  XrayConnectionOutcome,
+  XrayConnectionTestDeps,
+  XrayProbeOptions,
+} from "./xray-connection-test";
+
+type XrayProbe = (
+  deps: XrayConnectionTestDeps,
+  options?: XrayProbeOptions
+) => Promise<XrayConnectionOutcome>;
 
 // A Jira/Xray issue key: a project part (which may itself contain hyphens/underscores), then a
 // trailing `-<number>`. The project is everything before that last `-<number>` — so JIRA_KEY_SHAPE
@@ -45,7 +56,8 @@ function effectivePrefix(prefix: string, fallback: string): string {
 // commands — this capability only reports state to the neutral subsystem.
 function xrayConnection(
   config: ExtensionConfig,
-  credentialStore: XrayCredentialStore
+  credentialStore: XrayCredentialStore,
+  verify?: () => Promise<ConnectionVerifyResult>
 ): ConnectionCapability {
   return {
     onDidChange: credentialStore.onDidChange,
@@ -58,7 +70,20 @@ function xrayConnection(
       }
       return credentialStore.hasCredentials(config.xraySiteUrl);
     },
+    ...(verify ? { verify } : {}),
   };
+}
+
+// An auth-only probe can only land in the ok/auth/network stages: ok is a verified handshake,
+// network means the site was unreachable, and every other stage is an authentication failure.
+function toVerifyResult(outcome: XrayConnectionOutcome): ConnectionVerifyResult {
+  if (outcome.ok) {
+    return { status: "ok", message: outcome.message };
+  }
+  if (outcome.stage === "network") {
+    return { status: "unreachable", message: outcome.message };
+  }
+  return { status: "auth-failed", message: outcome.message };
 }
 
 export class XrayAdapter implements TraceabilityAdapter {
@@ -70,9 +95,10 @@ export class XrayAdapter implements TraceabilityAdapter {
   // tag-only join when a capability is absent.
   constructor(
     private readonly config: ExtensionConfig,
-    credentialStore?: XrayCredentialStore
+    credentialStore?: XrayCredentialStore,
+    verify?: () => Promise<ConnectionVerifyResult>
   ) {
-    this.connection = credentialStore ? xrayConnection(config, credentialStore) : undefined;
+    this.connection = credentialStore ? xrayConnection(config, credentialStore, verify) : undefined;
   }
 
   public get keyGrammar(): KeyGrammar {
@@ -92,10 +118,23 @@ export class XrayAdapter implements TraceabilityAdapter {
 }
 
 export function createXrayAdapterFactory(
-  credentialStore: XrayCredentialStore
+  credentialStore: XrayCredentialStore,
+  probe: XrayProbe
 ): TraceabilityAdapterFactory {
   return {
     id: "xray",
-    create: (ctx) => new XrayAdapter(ctx.config, credentialStore),
+    create: (ctx) => {
+      const verify = (): Promise<ConnectionVerifyResult> =>
+        probe(
+          {
+            site: ctx.config.xraySiteUrl,
+            credentialStore,
+            logger: ctx.logger,
+            knownTestKeys: () => [],
+          },
+          { authOnly: true }
+        ).then(toVerifyResult);
+      return new XrayAdapter(ctx.config, credentialStore, verify);
+    },
   };
 }

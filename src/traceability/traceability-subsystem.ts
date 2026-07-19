@@ -5,7 +5,7 @@ import { TestDiscoveryManager } from "../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../utils/playwright-json-parser";
 import { Logger } from "../utils/logger";
 import { REPORT_CANDIDATES, TraceabilityModel } from "./traceability-model";
-import { TraceabilityAdapter } from "./contracts";
+import { ConnectionVerifyResult, TraceabilityAdapter } from "./contracts";
 import { TraceabilityAdapterRegistry } from "./adapter-registry";
 import { TraceabilityNode, TraceabilityTreeDataProvider } from "./traceability-tree-data-provider";
 import { TagDiagnosticsProvider } from "./tag-diagnostics";
@@ -73,6 +73,16 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // adapter the command context holds is a separate instance and is never synced.
   public getActiveAdapter(): TraceabilityAdapter | undefined {
     return this.activeAdapter;
+  }
+
+  // Deduped test keys from the offline `@TEST_` tag scan; empty when no model exists (panel off or
+  // still building). Feeds the connection test's workspace-derived probes so it never prompts.
+  public knownTestKeys(): string[] {
+    const seen = new Set<string>();
+    for (const link of this.model?.snapshot.links ?? []) {
+      seen.add(link.testKey);
+    }
+    return [...seen];
   }
 
   // Reads config.traceabilityProvider live so switching the provider re-selects here; an unknown id
@@ -171,10 +181,30 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     }
     this.commitConnectedContext(connected);
     this.treeProvider?.setConnected(connected);
-    if (this.treeView) {
-      const label = connection?.label ?? "";
-      this.treeView.message = connected && label !== "" ? `${label} · Connected` : "";
+
+    if (!connected || !connection?.verify) {
+      this.treeProvider?.setConnectionIndicator(undefined);
+      return;
     }
+    this.treeProvider?.setConnectionIndicator({
+      state: "checking",
+      label: connection.label,
+      message: "Checking connection…",
+    });
+    let result: ConnectionVerifyResult;
+    try {
+      result = await connection.verify();
+    } catch (error) {
+      result = { status: "unreachable", message: String(error) };
+    }
+    if (this.disposed || epoch !== this.connectionEpoch) {
+      return;
+    }
+    this.treeProvider?.setConnectionIndicator({
+      state: result.status,
+      label: connection.label,
+      message: result.message,
+    });
   }
 
   private commitConnectedContext(connected: boolean): void {

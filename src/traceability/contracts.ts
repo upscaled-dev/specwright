@@ -93,12 +93,23 @@ export interface PublishResult {
   readonly ref?: ExecutionRef | undefined;
 }
 
+export type ConnectionVerifyStatus = "ok" | "auth-failed" | "unreachable";
+
+export interface ConnectionVerifyResult {
+  status: ConnectionVerifyStatus;
+  message: string;
+}
+
 // Read-side view of the provider connection. The connect/disconnect actions live in provider
 // commands + the credential store, not here — this capability only reports state.
 export interface ConnectionCapability {
   readonly onDidChange: Event<void>;
   readonly label: string;
   isConnected(): Promise<boolean>;
+  // `verify` runs a live, cheap handshake against the provider; `isConnected()` stays "credentials
+  // stored" and continues to gate tree visibility — the two deliberately differ so the offline tree
+  // still shows when the network doesn't.
+  verify?(): Promise<ConnectionVerifyResult>;
 }
 
 export interface MetadataCapability {

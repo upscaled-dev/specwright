@@ -1,7 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
-import { ConnectionCapability, TraceabilityAdapter } from "../../traceability/contracts";
+import {
+  ConnectionCapability,
+  ConnectionVerifyResult,
+  TraceabilityAdapter,
+} from "../../traceability/contracts";
+import {
+  ConnectionIndicator,
+  TraceabilityTreeDataProvider,
+} from "../../traceability/traceability-tree-data-provider";
 import { TraceabilityAdapterRegistry } from "../../traceability/adapter-registry";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
@@ -28,7 +36,10 @@ interface ConnectionControl {
   fire: () => void;
 }
 
-function makeConnection(initial = false): ConnectionControl {
+function makeConnection(
+  initial = false,
+  verify?: () => Promise<ConnectionVerifyResult>
+): ConnectionControl {
   let connected = initial;
   let label = "";
   const emitter = new vscode.EventEmitter<void>();
@@ -38,6 +49,7 @@ function makeConnection(initial = false): ConnectionControl {
       return label;
     },
     isConnected: () => Promise.resolve(connected),
+    ...(verify ? { verify } : {}),
   };
   return {
     connection,
@@ -45,6 +57,31 @@ function makeConnection(initial = false): ConnectionControl {
     setLabel: (next) => { label = next; },
     fire: () => emitter.fire(),
   };
+}
+
+interface DeferredVerify {
+  connection: ConnectionCapability;
+  // One resolver per outstanding verify() call, in call order.
+  resolvers: Array<(result: ConnectionVerifyResult) => void>;
+  fire: () => void;
+}
+
+function deferredVerifyConnection(label = "acme.atlassian.net"): DeferredVerify {
+  const resolvers: Array<(result: ConnectionVerifyResult) => void> = [];
+  const emitter = new vscode.EventEmitter<void>();
+  const connection: ConnectionCapability = {
+    onDidChange: emitter.event,
+    label,
+    isConnected: () => Promise.resolve(true),
+    verify: () => new Promise<ConnectionVerifyResult>((resolve) => { resolvers.push(resolve); }),
+  };
+  return { connection, resolvers, fire: () => emitter.fire() };
+}
+
+function indicatorCalls(
+  spy: { mock: { calls: unknown[][] } }
+): Array<ConnectionIndicator | undefined> {
+  return spy.mock.calls.map((call) => call[0] as ConnectionIndicator | undefined);
 }
 
 interface DeferredConnection extends ConnectionControl {
@@ -309,7 +346,7 @@ describe("TraceabilitySubsystem connection state", () => {
       .map((call) => call[2] as boolean);
   }
 
-  it("sets the context key true and shows the connected indicator when connected", async () => {
+  it("sets the context key true when connected", async () => {
     const exec = vi.spyOn(vscode.commands, "executeCommand");
     const { config } = makeConfig();
     const conn = makeConnection(true);
@@ -320,11 +357,10 @@ describe("TraceabilitySubsystem connection state", () => {
     await flush();
 
     expect(connectedStates(exec).at(-1)).toBe(true);
-    expect(treeViews.__getLastTreeView()?.message).toBe("acme.atlassian.net · Connected");
     subsystem.dispose();
   });
 
-  it("sets the context key false and clears the indicator when disconnected", async () => {
+  it("sets the context key false when disconnected", async () => {
     const exec = vi.spyOn(vscode.commands, "executeCommand");
     const { config } = makeConfig();
     const { subsystem } = build(config, undefined, Logger.create(), makeConnection(false));
@@ -333,7 +369,6 @@ describe("TraceabilitySubsystem connection state", () => {
     await flush();
 
     expect(connectedStates(exec).at(-1)).toBe(false);
-    expect(treeViews.__getLastTreeView()?.message).toBe("");
     subsystem.dispose();
   });
 
@@ -353,7 +388,6 @@ describe("TraceabilitySubsystem connection state", () => {
     await flush();
 
     expect(connectedStates(exec).at(-1)).toBe(true);
-    expect(treeViews.__getLastTreeView()?.message).toBe("acme.atlassian.net · Connected");
     subsystem.dispose();
   });
 
@@ -407,7 +441,6 @@ describe("TraceabilitySubsystem connection state", () => {
     await flush();
 
     expect(connectedStates(exec)).not.toContain(true);
-    expect(treeViews.__getLastTreeView()?.message).not.toBe("acme.atlassian.net · Connected");
     subsystem.dispose();
   });
 
@@ -432,7 +465,185 @@ describe("TraceabilitySubsystem connection state", () => {
     await flush();
 
     expect(connectedStates(exec).at(-1)).toBe(true);
-    expect(treeViews.__getLastTreeView()?.message).toBe("acme.atlassian.net · Connected");
+    subsystem.dispose();
+  });
+});
+
+describe("TraceabilitySubsystem connection indicator", () => {
+  beforeEach(() => {
+    treeViews.__resetTreeViewCounters();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function spyIndicator(): ReturnType<typeof vi.spyOn> {
+    return vi.spyOn(TraceabilityTreeDataProvider.prototype, "setConnectionIndicator");
+  }
+
+  it("commits a checking row and then the ok indicator on a successful verify", async () => {
+    const setIndicator = spyIndicator();
+    const { config } = makeConfig();
+    const conn = makeConnection(true, () =>
+      Promise.resolve({ status: "ok", message: "Connected to acme — project CALC" })
+    );
+    conn.setLabel("acme.atlassian.net");
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    const calls = indicatorCalls(setIndicator);
+    expect(calls).toContainEqual({ state: "checking", label: "acme.atlassian.net", message: "Checking connection…" });
+    expect(calls.at(-1)).toEqual({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme — project CALC" });
+    subsystem.dispose();
+  });
+
+  it("commits an auth-failed indicator when verify reports auth-failed", async () => {
+    const setIndicator = spyIndicator();
+    const { config } = makeConfig();
+    const conn = makeConnection(true, () =>
+      Promise.resolve({ status: "auth-failed", message: "Authentication failed — check your client ID and secret." })
+    );
+    conn.setLabel("acme.atlassian.net");
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    expect(indicatorCalls(setIndicator).at(-1)).toEqual({
+      state: "auth-failed",
+      label: "acme.atlassian.net",
+      message: "Authentication failed — check your client ID and secret.",
+    });
+    subsystem.dispose();
+  });
+
+  it("commits an unreachable indicator when verify reports unreachable", async () => {
+    const setIndicator = spyIndicator();
+    const { config } = makeConfig();
+    const conn = makeConnection(true, () =>
+      Promise.resolve({ status: "unreachable", message: "Could not reach Xray — check your network connection." })
+    );
+    conn.setLabel("acme.atlassian.net");
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    expect(indicatorCalls(setIndicator).at(-1)).toEqual({
+      state: "unreachable",
+      label: "acme.atlassian.net",
+      message: "Could not reach Xray — check your network connection.",
+    });
+    subsystem.dispose();
+  });
+
+  it("maps a thrown verify to an unreachable indicator carrying the error text", async () => {
+    const setIndicator = spyIndicator();
+    const { config } = makeConfig();
+    const conn = makeConnection(true, () => Promise.reject(new Error("boom")));
+    conn.setLabel("acme.atlassian.net");
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    expect(indicatorCalls(setIndicator).at(-1)).toEqual({
+      state: "unreachable",
+      label: "acme.atlassian.net",
+      message: "Error: boom",
+    });
+    subsystem.dispose();
+  });
+
+  it("discards a stale verify: an older refresh resolving last must not overwrite the newer result", async () => {
+    const setIndicator = spyIndicator();
+    const { config } = makeConfig();
+    const deferred = deferredVerifyConnection("acme.atlassian.net");
+    const conn: ConnectionControl = {
+      connection: deferred.connection,
+      setConnected: () => { /* fixed */ },
+      setLabel: () => { /* fixed */ },
+      fire: deferred.fire,
+    };
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+    expect(deferred.resolvers).toHaveLength(1);
+
+    deferred.fire();
+    await flush();
+    expect(deferred.resolvers).toHaveLength(2);
+
+    // Newer refresh (index 1) resolves ok first; the older refresh (index 0) resolves auth-failed
+    // last and must be discarded on the epoch check.
+    deferred.resolvers[1]!({ status: "ok", message: "newest" });
+    await flush();
+    deferred.resolvers[0]!({ status: "auth-failed", message: "stale" });
+    await flush();
+
+    expect(indicatorCalls(setIndicator).at(-1)).toEqual({
+      state: "ok",
+      label: "acme.atlassian.net",
+      message: "newest",
+    });
+    subsystem.dispose();
+  });
+
+  it("discards a verify that resolves after dispose", async () => {
+    const setIndicator = spyIndicator();
+    const { config } = makeConfig();
+    const deferred = deferredVerifyConnection("acme.atlassian.net");
+    const conn: ConnectionControl = {
+      connection: deferred.connection,
+      setConnected: () => { /* fixed */ },
+      setLabel: () => { /* fixed */ },
+      fire: deferred.fire,
+    };
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+    expect(deferred.resolvers).toHaveLength(1);
+
+    subsystem.dispose();
+    deferred.resolvers[0]!({ status: "ok", message: "too late" });
+    await flush();
+
+    const calls = indicatorCalls(setIndicator);
+    expect(calls.at(-1)).toEqual({ state: "checking", label: "acme.atlassian.net", message: "Checking connection…" });
+    expect(calls).not.toContainEqual({ state: "ok", label: "acme.atlassian.net", message: "too late" });
+  });
+
+  it("clears the indicator when the connected adapter's connection has no verify", async () => {
+    const setIndicator = spyIndicator();
+    const { config } = makeConfig();
+    const conn = makeConnection(true);
+    conn.setLabel("acme.atlassian.net");
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    expect(setIndicator).toHaveBeenCalledWith(undefined);
+    expect(indicatorCalls(setIndicator).some((c) => c?.state === "checking")).toBe(false);
+    subsystem.dispose();
+  });
+
+  it("clears the indicator and does not crash for an adapter with no connection at all", async () => {
+    const setIndicator = spyIndicator();
+    const { config } = makeConfig();
+    const { subsystem } = build(config, { xray: fakeAdapter("xray") });
+
+    subsystem.applyCurrent();
+    await flush();
+
+    expect(subsystem.traceabilityPanelActive).toBe(true);
+    expect(setIndicator).toHaveBeenCalledWith(undefined);
+    expect(indicatorCalls(setIndicator).some((c) => c?.state === "checking")).toBe(false);
     subsystem.dispose();
   });
 });

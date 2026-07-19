@@ -1,9 +1,21 @@
 import { describe, it, expect } from "vitest";
 import type * as vscode from "vscode";
 import { ExtensionConfig } from "../../core/extension-config";
-import { JIRA_KEY_SHAPE, normalizeSiteUrl, projectFromKey, XrayAdapter } from "../../xray/xray-adapter";
+import {
+  createXrayAdapterFactory,
+  JIRA_KEY_SHAPE,
+  normalizeSiteUrl,
+  projectFromKey,
+  XrayAdapter,
+} from "../../xray/xray-adapter";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
+import type {
+  XrayConnectionOutcome,
+  XrayConnectionTestDeps,
+  XrayProbeOptions,
+} from "../../xray/xray-connection-test";
 import { TraceabilityAdapter } from "../../traceability/contracts";
+import { Logger } from "../../utils/logger";
 
 function mapSecretStorage(): vscode.SecretStorage {
   const map = new Map<string, string>();
@@ -120,5 +132,93 @@ describe("XrayAdapter connection capability", () => {
     await store.setCredentials("acme.atlassian.net", "id-1", "secret-1");
     const adapter = new XrayAdapter(configWith({}), store);
     expect(await adapter.connection?.isConnected()).toBe(false);
+  });
+});
+
+function mutableConfig(values: Record<string, unknown>): ExtensionConfig {
+  const workspaceConfig = {
+    get: <T>(key: string, defaultValue?: T): T | undefined =>
+      key in values ? (values[key] as T) : defaultValue,
+    update: (): Promise<void> => Promise.resolve(),
+    inspect: (key: string): { key: string } => ({ key }),
+  } as unknown as vscode.WorkspaceConfiguration;
+  return ExtensionConfig.create(workspaceConfig, false);
+}
+
+interface ProbeCall {
+  deps: XrayConnectionTestDeps;
+  options: XrayProbeOptions | undefined;
+}
+
+function recordingProbe(outcome: XrayConnectionOutcome): {
+  probe: (deps: XrayConnectionTestDeps, options?: XrayProbeOptions) => Promise<XrayConnectionOutcome>;
+  calls: ProbeCall[];
+} {
+  const calls: ProbeCall[] = [];
+  return {
+    calls,
+    probe: (deps, options) => {
+      calls.push({ deps, options });
+      return Promise.resolve(outcome);
+    },
+  };
+}
+
+describe("createXrayAdapterFactory verify", () => {
+  it("runs an auth-only probe with a live site read and maps ok → ok", async () => {
+    const store = new XrayCredentialStore(mapSecretStorage());
+    const values: Record<string, unknown> = { "xray.siteUrl": "old.atlassian.net" };
+    const config = mutableConfig(values);
+    const { probe, calls } = recordingProbe({
+      ok: true,
+      stage: "ok",
+      site: "new.atlassian.net",
+      message: "Connected to new.atlassian.net",
+    });
+    const adapter = createXrayAdapterFactory(store, probe).create({ config, logger: Logger.create() });
+
+    // The site is read at verify time, not captured at create time.
+    values["xray.siteUrl"] = "new.atlassian.net";
+    const result = await adapter.connection!.verify!();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.options).toEqual({ authOnly: true });
+    expect(calls[0]!.deps.site).toBe("new.atlassian.net");
+    expect(calls[0]!.deps.knownTestKeys()).toEqual([]);
+    expect(result).toEqual({ status: "ok", message: "Connected to new.atlassian.net" });
+  });
+
+  it("maps a network-stage outcome to unreachable", async () => {
+    const store = new XrayCredentialStore(mapSecretStorage());
+    const config = mutableConfig({ "xray.siteUrl": "acme.atlassian.net" });
+    const { probe } = recordingProbe({
+      ok: false,
+      stage: "network",
+      site: "acme.atlassian.net",
+      message: "Could not reach Xray — check your network connection.",
+    });
+    const adapter = createXrayAdapterFactory(store, probe).create({ config, logger: Logger.create() });
+
+    expect(await adapter.connection!.verify!()).toEqual({
+      status: "unreachable",
+      message: "Could not reach Xray — check your network connection.",
+    });
+  });
+
+  it("maps an auth-stage outcome to auth-failed", async () => {
+    const store = new XrayCredentialStore(mapSecretStorage());
+    const config = mutableConfig({ "xray.siteUrl": "acme.atlassian.net" });
+    const { probe } = recordingProbe({
+      ok: false,
+      stage: "auth",
+      site: "acme.atlassian.net",
+      message: "Authentication failed — check your client ID and secret.",
+    });
+    const adapter = createXrayAdapterFactory(store, probe).create({ config, logger: Logger.create() });
+
+    expect(await adapter.connection!.verify!()).toEqual({
+      status: "auth-failed",
+      message: "Authentication failed — check your client ID and secret.",
+    });
   });
 });

@@ -15,6 +15,7 @@ import { TraceabilitySubsystem } from "./traceability/traceability-subsystem";
 import { TraceabilityAdapterRegistry } from "./traceability/adapter-registry";
 import { createInMemoryAdapterFactory } from "./traceability/in-memory-adapter";
 import { createXrayAdapterFactory } from "./xray/xray-adapter";
+import { probeXrayConnection } from "./xray/xray-connection-test";
 import { XrayCredentialStore } from "./xray/xray-credential-store";
 import { PROMPTED_STATE_KEY } from "./commands/prompt-worker-count";
 import { StatusBar } from "./ui/status-bar";
@@ -165,7 +166,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const credentialStore = new XrayCredentialStore(context.secrets);
   context.subscriptions.push(credentialStore);
   const traceabilityRegistry = new TraceabilityAdapterRegistry();
-  const xrayFactory = createXrayAdapterFactory(credentialStore);
+  const xrayFactory = createXrayAdapterFactory(credentialStore, probeXrayConnection);
   traceabilityRegistry.register(xrayFactory);
   // Not in the public settings enum — resolved only from a hand-typed `traceability.provider`
   // value so the contract-test adapter can be driven in a dev window.

@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
-import { ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
-import { JIRA_KEY_SHAPE, normalizeSiteUrl } from "./xray-adapter";
+import { normalizeSiteUrl, projectFromKey } from "./xray-adapter";
 import { XrayCredentialStore } from "./xray-credential-store";
 
 const XRAY_BASE = "https://xray.cloud.getxray.app/api/v2";
@@ -10,6 +9,8 @@ const CONNECT_COMMAND = "playwrightBddRunner.traceability.connect";
 
 const DEPTH_CAP = 6;
 const ERROR_MESSAGE_CLIP = 160;
+const MAX_PROBE_KEYS = 20;
+const MAX_PROJECT_PROBES = 3;
 
 // Connection diagnostics log allowlisted information only: status, field names, value types,
 // lengths/counts, and rate-limit headers (docs/requirements/traceability-integration-recommendations.md
@@ -92,28 +93,6 @@ export function graphqlErrorSummaries(body: unknown): string[] {
   });
 }
 
-export interface KeyListResult {
-  keys: string[];
-  invalid: string[];
-}
-
-export function parseKeyList(input: string): KeyListResult {
-  const keys: string[] = [];
-  const invalid: string[] = [];
-  for (const raw of input.split(",")) {
-    const token = raw.trim();
-    if (token === "") {
-      continue;
-    }
-    if (JIRA_KEY_SHAPE.test(token)) {
-      keys.push(token);
-    } else {
-      invalid.push(token);
-    }
-  }
-  return { keys, invalid };
-}
-
 // Describes a JWT for the log without ever emitting it — length and segment count are enough to
 // verify the wire shape.
 export function describeJwt(jwt: string): string {
@@ -132,9 +111,31 @@ export function rateLimitHeaders(headers: Headers): Record<string, string> {
 }
 
 export interface XrayConnectionTestDeps {
-  config: ExtensionConfig;
+  // Passed explicitly (never read from an ExtensionConfig snapshot) so a probe fired right after a
+  // save reads the just-written host rather than a stale cached one.
+  site: string;
   credentialStore: XrayCredentialStore;
   logger: Logger;
+  knownTestKeys: () => string[];
+}
+
+export interface XrayProbeOptions {
+  // Auth-only: run the handshake and stop, skipping the key/GraphQL/project probes. Drives the
+  // panel's connection dot, which means "authenticated", not "credentials stored".
+  authOnly?: boolean | undefined;
+}
+
+export interface XrayProjectSummary {
+  project: string;
+  totalTests: number;
+}
+
+export interface XrayConnectionOutcome {
+  ok: boolean;
+  stage: "auth" | "graphql" | "network" | "ok";
+  site: string;
+  message: string;
+  projects?: XrayProjectSummary[] | undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -189,7 +190,19 @@ function coverageQuery(jql: string): string {
   return `{ getTests(jql: ${JSON.stringify(jql)}, limit: 100) { results { issueId jira(fields: ["key"]) coverableIssues(limit: 20) { total results { issueId jira(fields: ["key", "summary", "status"]) } } } } }`;
 }
 
-async function runGraphqlProbe(logger: Logger, jwt: string, label: string, query: string): Promise<boolean> {
+// `limit: Int!` is required on getTests (schema max 100); a per-project count only needs `total`, so
+// a single-item page is the cheapest legal request.
+function projectCountQuery(project: string): string {
+  const jql = `project = ${project}`;
+  return `{ getTests(jql: ${JSON.stringify(jql)}, limit: 1) { total } }`;
+}
+
+interface GraphqlResult {
+  ok: boolean;
+  body: unknown;
+}
+
+async function graphqlRequest(logger: Logger, jwt: string, label: string, query: string): Promise<GraphqlResult> {
   const response = await timedFetch(`${XRAY_BASE}/graphql`, {
     method: "POST",
     headers: {
@@ -211,10 +224,55 @@ async function runGraphqlProbe(logger: Logger, jwt: string, label: string, query
   const data =
     body !== null && typeof body === "object" ? (body as { data?: unknown }).data : undefined;
   const hasData = data !== null && data !== undefined;
-  return response.ok && errorSummaries.length === 0 && hasData;
+  return { ok: response.ok && errorSummaries.length === 0 && hasData, body };
 }
 
-async function authenticate(logger: Logger, credentials: { clientId: string; clientSecret: string }): Promise<string | undefined> {
+export function extractTotal(body: unknown): number | undefined {
+  if (body !== null && typeof body === "object") {
+    const data = (body as { data?: { getTests?: { total?: unknown } } }).data;
+    if (typeof data?.getTests?.total === "number") {
+      return data.getTests.total;
+    }
+  }
+  return undefined;
+}
+
+interface ProjectProbeResult {
+  summaries: XrayProjectSummary[];
+  failed: number;
+}
+
+// A project probe that is not ok (non-OK status or GraphQL errors) or whose total isn't a number is
+// excluded from the reported totals — a false "0 tests" for a project that actually errored is worse
+// than saying nothing. The failure count surfaces in the summary; graphqlRequest already logs why.
+async function probeProjects(logger: Logger, jwt: string, keys: readonly string[]): Promise<ProjectProbeResult> {
+  const projects: string[] = [];
+  for (const key of keys) {
+    const project = projectFromKey(key);
+    if (!projects.includes(project)) {
+      projects.push(project);
+    }
+  }
+  const summaries: XrayProjectSummary[] = [];
+  let failed = 0;
+  for (const project of projects.slice(0, MAX_PROJECT_PROBES)) {
+    const { ok, body } = await graphqlRequest(logger, jwt, `project ${project}`, projectCountQuery(project));
+    const total = extractTotal(body);
+    if (!ok || total === undefined) {
+      failed += 1;
+      continue;
+    }
+    summaries.push({ project, totalTests: total });
+  }
+  return { summaries, failed };
+}
+
+type AuthResult = { ok: true; jwt: string } | { ok: false; status: number };
+
+async function authenticate(
+  logger: Logger,
+  credentials: { clientId: string; clientSecret: string }
+): Promise<AuthResult> {
   const response = await timedFetch(`${XRAY_BASE}/authenticate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -227,8 +285,7 @@ async function authenticate(logger: Logger, credentials: { clientId: string; cli
     logger.error(
       `Authentication failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
     );
-    await showErrorWithOutput(logger, "Xray authentication failed — see output for details.");
-    return undefined;
+    return { ok: false, status: response.status };
   }
   const raw = response.bodyText;
   let token: string;
@@ -242,14 +299,123 @@ async function authenticate(logger: Logger, credentials: { clientId: string; cli
   logger.info(
     `/authenticate body arrived ${raw.trim().startsWith('"') ? "quote-wrapped (JSON string)" : "NOT quote-wrapped"}`
   );
-  return token;
+  return { ok: true, jwt: token };
 }
 
+function uniqueKeys(keys: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const key of keys) {
+    if (!out.includes(key)) {
+      out.push(key);
+    }
+  }
+  return out;
+}
+
+function successMessage(site: string, projects: readonly XrayProjectSummary[], failed: number): string {
+  const parts = projects.map((p) => `project ${p.project}: ${p.totalTests} Xray tests`).join(", ");
+  const base = projects.length === 0
+    ? `Connected to ${site} — authentication OK`
+    : `Connected to ${site} — ${parts}`;
+  return failed > 0 ? `${base} — ${failed} project probe(s) failed, see output` : base;
+}
+
+// Indicative, value-free auth messages shared by the toast and the panel status area (§5: no
+// credential/JWT value ever appears here).
+function authFailureMessage(status: number): string {
+  return status === 401
+    ? "Authentication failed — check your client ID and secret."
+    : `Authentication failed (HTTP ${status}).`;
+}
+
+/**
+ * Runs the handshake and shape probes and returns a structured outcome without any UI. Test keys
+ * come from the workspace (the `@TEST_` tag scan), never a prompt; nothing runs after a failed
+ * handshake. With `authOnly`, stops after the handshake. Callers own presentation (toasts for the
+ * command, an inline status for the panel).
+ */
+export async function probeXrayConnection(
+  deps: XrayConnectionTestDeps,
+  options: XrayProbeOptions = {}
+): Promise<XrayConnectionOutcome> {
+  const { credentialStore, logger, knownTestKeys } = deps;
+  const site = normalizeSiteUrl(deps.site);
+  const credentials = await credentialStore.getCredentials(deps.site);
+  if (!credentials) {
+    return { ok: false, stage: "auth", site, message: "No stored Xray credentials for this site." };
+  }
+
+  logger.info(`Xray connection test starting for ${site}`);
+
+  let auth: AuthResult;
+  try {
+    auth = await authenticate(logger, credentials);
+  } catch (error) {
+    logger.error(`Authentication request error: ${scrubJwtLike(errorMessage(error))}`);
+    return {
+      ok: false,
+      stage: "network",
+      site,
+      message: "Could not reach Xray — check your network connection.",
+    };
+  }
+  if (!auth.ok) {
+    return { ok: false, stage: "auth", site, message: authFailureMessage(auth.status) };
+  }
+  const jwt = auth.jwt;
+
+  if (options.authOnly) {
+    return { ok: true, stage: "ok", site, message: `Connected to ${site}` };
+  }
+
+  const keys = uniqueKeys(knownTestKeys()).slice(0, MAX_PROBE_KEYS);
+  if (keys.length === 0) {
+    logger.info("no @TEST_ tags found in workspace — skipped GraphQL probes");
+    return { ok: true, stage: "ok", site, message: `Connected to ${site} — authentication OK` };
+  }
+
+  const jql = `key in (${keys.join(", ")})`;
+  let projects: XrayProjectSummary[];
+  let projectFailures: number;
+  try {
+    const probeA = await graphqlRequest(logger, jwt, "getTests", testsQuery(jql));
+    const probeB = await graphqlRequest(logger, jwt, "getTests + coverableIssues", coverageQuery(jql));
+    if (!probeA.ok || !probeB.ok) {
+      return {
+        ok: false,
+        stage: "graphql",
+        site,
+        message: "Xray GraphQL probe failed (non-OK status or GraphQL errors) — see output for details.",
+      };
+    }
+    const probed = await probeProjects(logger, jwt, keys);
+    projects = probed.summaries;
+    projectFailures = probed.failed;
+  } catch (error) {
+    logger.error(`GraphQL request error: ${scrubJwtLike(errorMessage(error))}`);
+    return {
+      ok: false,
+      stage: "network",
+      site,
+      message: "Could not reach Xray — check your network connection.",
+    };
+  }
+
+  return {
+    ok: true,
+    stage: "ok",
+    site,
+    message: successMessage(site, projects, projectFailures),
+    projects,
+  };
+}
+
+// Command wrapper: keeps the connect-before-testing gate and the toast presentation. The panel
+// delegate calls probeXrayConnection directly so its result renders inline without a double toast.
 export async function runXrayConnectionTest(deps: XrayConnectionTestDeps): Promise<void> {
-  const { config, credentialStore, logger } = deps;
-  const site = config.xraySiteUrl;
-  const normalizedSite = normalizeSiteUrl(site);
-  const credentials = normalizedSite ? await credentialStore.getCredentials(site) : undefined;
+  const { credentialStore, logger } = deps;
+  const normalizedSite = normalizeSiteUrl(deps.site);
+  const credentials = normalizedSite ? await credentialStore.getCredentials(deps.site) : undefined;
 
   if (!normalizedSite || !credentials) {
     const pick = await vscode.window.showWarningMessage(
@@ -262,60 +428,12 @@ export async function runXrayConnectionTest(deps: XrayConnectionTestDeps): Promi
     return;
   }
 
-  logger.info(`Xray connection test starting for ${normalizedSite}`);
-
-  let jwt: string | undefined;
-  try {
-    jwt = await authenticate(logger, credentials);
-  } catch (error) {
-    logger.error(`Authentication request error: ${scrubJwtLike(errorMessage(error))}`);
-    await showErrorWithOutput(logger, "Xray authentication request failed — see output for details.");
+  const outcome = await probeXrayConnection(deps);
+  if (!outcome.ok) {
+    await showErrorWithOutput(logger, outcome.message);
     return;
   }
-  if (jwt === undefined) {
-    return;
-  }
-
-  const keyInput = await vscode.window.showInputBox({
-    title: "Xray Connection Test",
-    prompt: "Enter comma-separated Xray test issue keys to query",
-    placeHolder: "CALC-1043, CALC-1051",
-    ignoreFocusOut: true,
-    validateInput: (value) => {
-      const { keys, invalid } = parseKeyList(value);
-      if (invalid.length > 0) {
-        return `Not a valid Jira key: ${invalid.join(", ")}`;
-      }
-      return keys.length === 0 ? "Enter at least one Jira key" : undefined;
-    },
-  });
-  if (keyInput === undefined) {
-    return;
-  }
-  const jql = `key in (${parseKeyList(keyInput).keys.join(", ")})`;
-
-  let okA: boolean;
-  let okB: boolean;
-  try {
-    okA = await runGraphqlProbe(logger, jwt, "getTests", testsQuery(jql));
-    okB = await runGraphqlProbe(logger, jwt, "getTests + coverableIssues", coverageQuery(jql));
-  } catch (error) {
-    logger.error(`GraphQL request error: ${scrubJwtLike(errorMessage(error))}`);
-    await showErrorWithOutput(logger, "Xray GraphQL request failed — see output for details.");
-    return;
-  }
-  if (!okA || !okB) {
-    await showErrorWithOutput(
-      logger,
-      "Xray GraphQL probe failed (non-OK status or GraphQL errors) — see output for details."
-    );
-    return;
-  }
-
-  const pick = await vscode.window.showInformationMessage(
-    "Xray connection OK — shapes written to output",
-    "Show Output"
-  );
+  const pick = await vscode.window.showInformationMessage(outcome.message, "Show Output");
   if (pick === "Show Output") {
     logger.showOutput();
   }

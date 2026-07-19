@@ -220,6 +220,81 @@ describe("TraceabilityTreeDataProvider", () => {
     expect(leaf.description).toBe("REQ CALC-900");
   });
 
+  it("leads the tree with the connection row when an indicator is set and the snapshot is non-empty", () => {
+    const p = provider(SNAPSHOT);
+    p.setConnectionIndicator({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme" });
+    const roots = p.getChildren();
+    expect(roots.map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
+      "connection",
+      "untraced",
+      "covered",
+    ]);
+  });
+
+  it("omits the connection row when no indicator is set", () => {
+    const p = provider(SNAPSHOT);
+    expect(p.getChildren().map((n) => n.kind)).toEqual(["section", "section"]);
+  });
+
+  it("omits the connection row on an empty snapshot so the welcome still shows, even with an indicator", () => {
+    const p = provider(EMPTY);
+    p.setConnectionIndicator({ state: "ok", label: "acme.atlassian.net", message: "Connected" });
+    expect(p.getChildren()).toEqual([]);
+  });
+
+  it("renders each connection state with its icon, color, and description", () => {
+    const p = provider(SNAPSHOT);
+    const rowFor = (state: "checking" | "ok" | "auth-failed" | "unreachable"): vscode.TreeItem => {
+      p.setConnectionIndicator({ state, label: "acme.atlassian.net", message: `msg-${state}` });
+      return p.getTreeItem(p.getChildren()[0]!);
+    };
+
+    const checking = rowFor("checking");
+    expect((checking.iconPath as vscode.ThemeIcon).id).toBe("loading~spin");
+    expect(checking.description).toBe("Checking…");
+
+    const ok = rowFor("ok");
+    expect((ok.iconPath as vscode.ThemeIcon).id).toBe("circle-filled");
+    expect(((ok.iconPath as vscode.ThemeIcon).color as vscode.ThemeColor).id).toBe("charts.green");
+    expect(ok.description).toBe("Connected");
+
+    const authFailed = rowFor("auth-failed");
+    expect((authFailed.iconPath as vscode.ThemeIcon).id).toBe("circle-filled");
+    expect(((authFailed.iconPath as vscode.ThemeIcon).color as vscode.ThemeColor).id).toBe("charts.red");
+    expect(authFailed.description).toBe("Authentication failed");
+
+    const unreachable = rowFor("unreachable");
+    expect((unreachable.iconPath as vscode.ThemeIcon).id).toBe("circle-outline");
+    expect((unreachable.iconPath as vscode.ThemeIcon).color).toBeUndefined();
+    expect(unreachable.description).toBe("Unreachable");
+  });
+
+  it("carries the site host as label, the provider detail in the tooltip, and the setup command on the row", () => {
+    const p = provider(SNAPSHOT);
+    p.setConnectionIndicator({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme — project CALC" });
+    const item = p.getTreeItem(p.getChildren()[0]!);
+    expect(item.label).toBe("acme.atlassian.net");
+    expect(item.tooltip).toBe("Connected to acme — project CALC");
+    expect(item.contextValue).toBe("traceabilityConnection");
+    expect((item.command as { command: string }).command).toBe("playwrightBddRunner.traceability.connect");
+  });
+
+  it("does not fire a tree refresh when the indicator is set to a shallow-equal value", () => {
+    const p = provider(SNAPSHOT);
+    let refreshes = 0;
+    p.onDidChangeTreeData(() => { refreshes += 1; });
+    p.setConnectionIndicator({ state: "ok", label: "acme", message: "up" });
+    expect(refreshes).toBe(1);
+    p.setConnectionIndicator({ state: "ok", label: "acme", message: "up" });
+    expect(refreshes).toBe(1);
+    p.setConnectionIndicator({ state: "auth-failed", label: "acme", message: "up" });
+    expect(refreshes).toBe(2);
+    p.setConnectionIndicator(undefined);
+    expect(refreshes).toBe(3);
+    p.setConnectionIndicator(undefined);
+    expect(refreshes).toBe(3);
+  });
+
   it("fires onDidChangeTreeData when the model changes, until disposed", () => {
     const { model, fire } = makeModel(SNAPSHOT);
     const p = new TraceabilityTreeDataProvider(model, "Xray");

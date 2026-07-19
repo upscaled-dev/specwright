@@ -81,6 +81,7 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
       onDidChange: this._onConnectionChange.event,
       label: fixture.label ?? "in-memory-fixture",
       isConnected: () => Promise.resolve(this.connected),
+      verify: () => Promise.resolve({ status: "ok", message: "Connected (in-memory)" }),
     };
     this.metadata = {
       onDidChange: this._onMetadataChange.event,

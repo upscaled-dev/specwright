@@ -3,7 +3,14 @@ import { ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
 import { normalizeSiteUrl } from "./xray-adapter";
 import { XrayCredentialStore } from "./xray-credential-store";
-import { runXrayConnectionTest } from "./xray-connection-test";
+import {
+  probeXrayConnection,
+  runXrayConnectionTest,
+  XrayConnectionOutcome,
+  XrayConnectionTestDeps,
+  XrayProbeOptions,
+} from "./xray-connection-test";
+import { XraySetupPanel } from "./xray-setup-panel";
 
 const CONFIG_NAMESPACE = "playwrightBddRunner";
 const SITE_URL_SETTING = "xray.siteUrl";
@@ -35,11 +42,14 @@ export class XrayConnectionCommands {
   constructor(
     private readonly config: ExtensionConfig,
     private readonly credentialStore: XrayCredentialStore,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    // Call-time supplier: the traceability subsystem is set on the CommandManager after this is
+    // constructed, so the test keys must be read when a probe runs, not captured here.
+    private readonly knownTestKeys: () => string[]
   ) {}
 
   public async manageConnection(): Promise<void> {
-    const site = this.config.xraySiteUrl;
+    const site = this.freshSite();
     const normalized = normalizeSiteUrl(site);
     const connected = normalized !== "" && (await this.credentialStore.hasCredentials(site));
 
@@ -79,61 +89,38 @@ export class XrayConnectionCommands {
   }
 
   public async connect(): Promise<void> {
-    const wsConfig = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
-    const currentSite = this.config.xraySiteUrl;
-
-    const site = await vscode.window.showInputBox({
-      title: "Connect to Xray (1/3)",
-      prompt: "Jira/Xray Cloud site host",
-      placeHolder: "acme.atlassian.net",
-      value: currentSite,
-      ignoreFocusOut: true,
-      // Validate the normalized host, not the raw string: "https://" trims non-empty but
-      // normalizes to "", which would store secrets under a degenerate key no command can
-      // ever address again. URL parsing rejects paths, ports, and embedded whitespace.
-      validateInput: (value) => {
-        const normalized = normalizeSiteUrl(value);
-        if (normalized === "") {
-          return "Enter a host like acme.atlassian.net";
-        }
-        try {
-          if (new URL(`https://${normalized}`).hostname !== normalized) {
-            return "Enter a bare host (no path or port), like acme.atlassian.net";
-          }
-        } catch {
-          return "Not a valid host";
-        }
-        return undefined;
-      },
+    await XraySetupPanel.show({
+      currentSite: () => this.config.xraySiteUrl,
+      hasCredentials: (site) => this.credentialStore.hasCredentials(site),
+      getCredentials: (site) => this.credentialStore.getCredentials(site),
+      saveConnection: (site, clientId, clientSecret) => this.saveConnection(site, clientId, clientSecret),
+      // The panel renders the outcome inline, so it calls the probe directly — going through the
+      // testConnection command would fire the standalone command's toasts on top.
+      probeConnection: (site) => this.probeConnection(site),
+      verifyConnection: (site) => this.probeConnection(site, { authOnly: true }),
     });
-    if (site === undefined) {
-      return;
-    }
+  }
+
+  // Site is the just-saved host when the panel supplies it; otherwise read fresh from the config
+  // store (never the ExtensionConfig snapshot, which only refreshes on config-change).
+  public probeConnection(site?: string, options?: XrayProbeOptions): Promise<XrayConnectionOutcome> {
+    return probeXrayConnection(this.testDeps(site ?? this.freshSite()), options);
+  }
+
+  private freshSite(): string {
+    return vscode.workspace.getConfiguration(CONFIG_NAMESPACE).get<string>(SITE_URL_SETTING, "");
+  }
+
+  public async saveConnection(site: string, clientId: string, clientSecret: string): Promise<string> {
     const trimmedSite = site.trim();
-    const hadCredentials = await this.credentialStore.hasCredentials(trimmedSite);
-
-    const clientId = await vscode.window.showInputBox({
-      title: "Connect to Xray (2/3)",
-      prompt: "Xray API client id",
-      placeHolder: hadCredentials ? "stored — enter to replace" : "client id",
-      ignoreFocusOut: true,
-      validateInput: (value) => (value.trim() === "" ? "Client id is required" : undefined),
-    });
-    if (clientId === undefined) {
-      return;
+    if (normalizeSiteUrl(trimmedSite) === "") {
+      throw new Error(`Cannot save Xray credentials: ${trimmedSite} is not a valid site host`);
     }
-
-    const clientSecret = await vscode.window.showInputBox({
-      title: "Connect to Xray (3/3)",
-      prompt: "Xray API client secret",
-      placeHolder: hadCredentials ? "stored — enter to replace" : "client secret",
-      password: true,
-      ignoreFocusOut: true,
-      validateInput: (value) => (value.trim() === "" ? "Client secret is required" : undefined),
-    });
-    if (clientSecret === undefined) {
-      return;
-    }
+    const wsConfig = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
+    // ExtensionConfig wraps a captured snapshot that only refreshes on config-change; read the
+    // current site from this fresh getConfiguration() snapshot so back-to-back saves from the
+    // retained panel can't strand the intermediate host's credentials on a stale previous site.
+    const currentSite = wsConfig.get<string>(SITE_URL_SETTING, "");
 
     if (trimmedSite !== currentSite) {
       await wsConfig.update(SITE_URL_SETTING, trimmedSite, siteUrlTarget(wsConfig));
@@ -150,17 +137,11 @@ export class XrayConnectionCommands {
       await this.credentialStore.clearCredentials(currentSite);
       this.logger.info(`Removed stored Xray credentials for previous site ${previousSite}`);
     }
-    const pick = await vscode.window.showInformationMessage(
-      `Xray credentials saved for ${normalizeSiteUrl(trimmedSite)}`,
-      "Test Connection"
-    );
-    if (pick === "Test Connection") {
-      await vscode.commands.executeCommand(COMMAND.testConnection);
-    }
+    return normalizeSiteUrl(trimmedSite);
   }
 
   public async disconnect(): Promise<void> {
-    const site = this.config.xraySiteUrl;
+    const site = this.freshSite();
     const normalized = normalizeSiteUrl(site);
     if (normalized === "" || !(await this.credentialStore.hasCredentials(site))) {
       vscode.window.showInformationMessage("No Xray credentials are stored for this site.");
@@ -179,10 +160,15 @@ export class XrayConnectionCommands {
   }
 
   public async testConnection(): Promise<void> {
-    await runXrayConnectionTest({
-      config: this.config,
+    await runXrayConnectionTest(this.testDeps(this.freshSite()));
+  }
+
+  private testDeps(site: string): XrayConnectionTestDeps {
+    return {
+      site,
       credentialStore: this.credentialStore,
       logger: this.logger,
-    });
+      knownTestKeys: this.knownTestKeys,
+    };
   }
 }

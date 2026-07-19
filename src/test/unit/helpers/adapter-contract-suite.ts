@@ -72,6 +72,12 @@ export function runAdapterContractTests(makeHarness: () => AdapterContractHarnes
 
       expect(await connection!.isConnected()).toBe(true);
       expect(fired).toBeGreaterThan(0);
+
+      if (connection!.verify) {
+        const result = await connection!.verify();
+        expect(["ok", "auth-failed", "unreachable"]).toContain(result.status);
+        expect(typeof result.message).toBe("string");
+      }
       sub.dispose();
     });
 

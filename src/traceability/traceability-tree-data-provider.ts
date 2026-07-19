@@ -36,12 +36,68 @@ interface InfoNode {
   label: string;
 }
 
+export interface ConnectionIndicator {
+  state: "checking" | "ok" | "auth-failed" | "unreachable";
+  label: string;
+  message: string;
+}
+
+interface ConnectionNode extends ConnectionIndicator {
+  kind: "connection";
+}
+
 export type TraceabilityNode =
+  | ConnectionNode
   | SectionNode
   | TestKeyNode
   | LinkNode
   | UntracedNode
   | InfoNode;
+
+const CONNECTION_DESCRIPTION: Record<ConnectionIndicator["state"], string> = {
+  checking: "Checking…",
+  ok: "Connected",
+  "auth-failed": "Authentication failed",
+  unreachable: "Unreachable",
+};
+
+function connectionIcon(state: ConnectionIndicator["state"]): vscode.ThemeIcon {
+  switch (state) {
+    case "checking":
+      return new vscode.ThemeIcon("loading~spin");
+    case "ok":
+      return new vscode.ThemeIcon("circle-filled", new vscode.ThemeColor("charts.green"));
+    case "auth-failed":
+      return new vscode.ThemeIcon("circle-filled", new vscode.ThemeColor("charts.red"));
+    case "unreachable":
+      return new vscode.ThemeIcon("circle-outline");
+  }
+}
+
+function sameIndicator(
+  a: ConnectionIndicator | undefined,
+  b: ConnectionIndicator | undefined
+): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return false;
+  }
+  return a.state === b.state && a.label === b.label && a.message === b.message;
+}
+
+// The description stays provider-neutral; the provider-specific detail lives in the tooltip. The
+// row's command opens the setup panel so a click resolves the connection in place.
+function connectionTreeItem(node: ConnectionNode): vscode.TreeItem {
+  const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
+  item.description = CONNECTION_DESCRIPTION[node.state];
+  item.tooltip = node.message;
+  item.contextValue = "traceabilityConnection";
+  item.iconPath = connectionIcon(node.state);
+  item.command = { command: "playwrightBddRunner.traceability.connect", title: "Set Up Connection" };
+  return item;
+}
 
 const OUTCOME_ICON: Record<RunOutcome, string> = {
   passed: "testing-passed-icon",
@@ -86,6 +142,7 @@ export class TraceabilityTreeDataProvider
   public readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
   private readonly subscription: vscode.Disposable;
   private connected = false;
+  private connectionIndicator: ConnectionIndicator | undefined;
 
   constructor(
     private readonly model: TraceabilityModel,
@@ -106,6 +163,16 @@ export class TraceabilityTreeDataProvider
     this._onDidChangeTreeData.fire(undefined);
   }
 
+  // `undefined` means "no status row". A no-op on a shallow-equal value keeps a repeated probe from
+  // collapsing the tree's expansion state.
+  public setConnectionIndicator(indicator: ConnectionIndicator | undefined): void {
+    if (sameIndicator(this.connectionIndicator, indicator)) {
+      return;
+    }
+    this.connectionIndicator = indicator;
+    this._onDidChangeTreeData.fire(undefined);
+  }
+
   public dispose(): void {
     this.subscription.dispose();
     this._onDidChangeTreeData.dispose();
@@ -113,6 +180,8 @@ export class TraceabilityTreeDataProvider
 
   public getTreeItem(node: TraceabilityNode): vscode.TreeItem {
     switch (node.kind) {
+      case "connection":
+        return connectionTreeItem(node);
       case "info": {
         const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
         item.iconPath = new vscode.ThemeIcon("info");
@@ -180,10 +249,14 @@ export class TraceabilityTreeDataProvider
         return [];
       }
       // Untraced first: the gap bucket is the panel's work queue, so it sits above mapped tests.
-      return [
+      const sections: TraceabilityNode[] = [
         { kind: "section", section: "untraced" },
         { kind: "section", section: "covered" },
       ];
+      // The verified-connection row leads the tree when a status is set.
+      return this.connectionIndicator
+        ? [{ kind: "connection", ...this.connectionIndicator }, ...sections]
+        : sections;
     }
     if (node.kind === "section") {
       return node.section === "covered" ? this.coveredNodes() : this.untracedNodes();

@@ -1,13 +1,13 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as vscode from "vscode";
-import { ExtensionConfig } from "../../core/extension-config";
 import { Logger, LogLevel } from "../../utils/logger";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import {
   describeJwt,
   describeShape,
+  extractTotal,
   graphqlErrorSummaries,
-  parseKeyList,
+  probeXrayConnection,
   rateLimitHeaders,
   runXrayConnectionTest,
   scrubJwtLike,
@@ -93,21 +93,19 @@ describe("graphqlErrorSummaries", () => {
   });
 });
 
-describe("parseKeyList", () => {
-  it("splits, trims, and accepts valid Jira keys", () => {
-    const { keys, invalid } = parseKeyList(" CALC-1043 , calc-1051 ");
-    expect(keys).toEqual(["CALC-1043", "calc-1051"]);
-    expect(invalid).toEqual([]);
+describe("extractTotal", () => {
+  it("returns the numeric total when present", () => {
+    expect(extractTotal({ data: { getTests: { total: 42 } } })).toBe(42);
+    expect(extractTotal({ data: { getTests: { total: 0 } } })).toBe(0);
   });
 
-  it("skips empty tokens from trailing/duplicate commas", () => {
-    expect(parseKeyList("CALC-1, , ,CALC-2,").keys).toEqual(["CALC-1", "CALC-2"]);
-  });
-
-  it("collects malformed keys as invalid", () => {
-    const { keys, invalid } = parseKeyList("CALC-1, BADKEY, 12-3");
-    expect(keys).toEqual(["CALC-1"]);
-    expect(invalid).toEqual(["BADKEY", "12-3"]);
+  it("returns undefined for malformed bodies rather than a false zero", () => {
+    expect(extractTotal({ data: { getTests: { total: "42" } } })).toBeUndefined();
+    expect(extractTotal({ data: { getTests: {} } })).toBeUndefined();
+    expect(extractTotal({ data: {} })).toBeUndefined();
+    expect(extractTotal({ errors: [{ message: "boom" }] })).toBeUndefined();
+    expect(extractTotal("plain text")).toBeUndefined();
+    expect(extractTotal(null)).toBeUndefined();
   });
 });
 
@@ -140,16 +138,6 @@ describe("rateLimitHeaders", () => {
     expect(picked["authorization"]).toBeUndefined();
   });
 });
-
-function configWith(values: Record<string, unknown>): ExtensionConfig {
-  const workspaceConfig = {
-    get: <T>(key: string, defaultValue?: T): T | undefined =>
-      key in values ? (values[key] as T) : defaultValue,
-    update: (): Promise<void> => Promise.resolve(),
-    inspect: (key: string): { key: string } => ({ key }),
-  } as unknown as vscode.WorkspaceConfiguration;
-  return ExtensionConfig.create(workspaceConfig, false);
-}
 
 function mapCredentialStore(): XrayCredentialStore {
   const map = new Map<string, string>();
@@ -195,17 +183,32 @@ const FAKE_JWT = `${"a".repeat(40)}.${"b".repeat(40)}.${"c".repeat(40)}`;
 const FAKE_SECRET = "client-secret-value-must-never-be-logged";
 const SITE = "acme.atlassian.net";
 
-async function seededDeps(): Promise<{
-  config: ExtensionConfig;
+async function seededDeps(knownTestKeys: () => string[] = () => []): Promise<{
+  site: string;
   credentialStore: XrayCredentialStore;
   logger: Logger;
+  knownTestKeys: () => string[];
   lines: string[];
 }> {
   const { logger, lines } = capturingLogger();
-  const config = configWith({ "xray.siteUrl": SITE });
   const credentialStore = mapCredentialStore();
   await credentialStore.setCredentials(SITE, "fake-client-id", FAKE_SECRET);
-  return { config, credentialStore, logger, lines };
+  return { site: SITE, credentialStore, logger, knownTestKeys, lines };
+}
+
+// Auth returns the JWT; every /graphql POST is answered by `handler`, which sees the query so a test
+// can key project-count probes off the `project = X` jql.
+function jwtThenGraphql(
+  handler: (query: string) => unknown,
+  headers: Record<string, string> = {}
+): ReturnType<typeof vi.fn> {
+  return vi.fn((url: string, init?: RequestInit) => {
+    if (url.endsWith("/authenticate")) {
+      return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));
+    }
+    const parsed = JSON.parse(String(init?.body ?? "{}")) as { query?: string };
+    return Promise.resolve(makeResponse(200, JSON.stringify(handler(parsed.query ?? "")), headers));
+  });
 }
 
 describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
@@ -215,81 +218,70 @@ describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
     vi.useRealTimers();
   });
 
-  it("never emits the raw JWT, its prefix, or the client secret on the happy path", async () => {
-    const { config, credentialStore, logger, lines } = await seededDeps();
+  it("never prompts, and never emits the raw JWT, its prefix, or the client secret on the happy path", async () => {
+    const deps = await seededDeps(() => ["CALC-1"]);
+    const { lines } = deps;
 
-    const fetchMock = vi.fn((url: string) => {
-      if (url.endsWith("/authenticate")) {
-        return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));
-      }
-      return Promise.resolve(
-        makeResponse(
-          200,
-          JSON.stringify({ data: { getTests: { total: 1, results: [{ issueId: "10", jira: { key: "CALC-1" } }] } } }),
-          { "X-RateLimit-Remaining": "99" }
-        )
-      );
-    });
+    const fetchMock = jwtThenGraphql(
+      () => ({ data: { getTests: { total: 1, results: [{ issueId: "10", jira: { key: "CALC-1" } }] } } }),
+      { "X-RateLimit-Remaining": "99" }
+    );
     vi.stubGlobal("fetch", fetchMock);
-    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("CALC-1");
+    const inputBox = vi.spyOn(vscode.window, "showInputBox");
 
-    await runXrayConnectionTest({ config, credentialStore, logger });
+    await runXrayConnectionTest(deps);
 
     const emitted = lines.join("\n");
+    expect(inputBox).not.toHaveBeenCalled();
     expect(emitted).not.toContain(FAKE_JWT);
     expect(emitted).not.toContain(FAKE_JWT.slice(0, 20));
     expect(emitted).not.toContain(FAKE_SECRET);
     expect(emitted).not.toContain(FAKE_SECRET.slice(0, 12));
     expect(emitted).toContain("JWT received");
     expect(emitted).toContain("quote-wrapped (JSON string)");
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // authenticate + two shape probes + one project-count probe (single CALC project).
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
-  it("keeps an echoed client secret out of the logs when authentication fails", async () => {
-    const { config, credentialStore, logger, lines } = await seededDeps();
+  it("keeps an echoed client secret out of the logs and reports the handshake status when auth fails", async () => {
+    const deps = await seededDeps(() => ["CALC-1"]);
+    const { lines } = deps;
 
     const echoBody = JSON.stringify({
       error: "bad request",
       request: { client_id: "fake-client-id", client_secret: FAKE_SECRET },
     });
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(makeResponse(400, echoBody))));
+    const fetchMock = vi.fn(() => Promise.resolve(makeResponse(400, echoBody)));
+    vi.stubGlobal("fetch", fetchMock);
     const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
 
-    await runXrayConnectionTest({ config, credentialStore, logger });
+    await runXrayConnectionTest(deps);
 
     const emitted = lines.join("\n");
     expect(emitted).not.toContain(FAKE_SECRET);
     expect(emitted).not.toContain(FAKE_SECRET.slice(0, 12));
     expect(emitted).toContain("response body shape");
     expect(emitted).toContain(`string(${FAKE_SECRET.length})`);
+    // Nothing runs after a failed handshake: only the /authenticate call was made.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(errorToast).toHaveBeenCalledWith(
-      expect.stringContaining("authentication failed"),
+      expect.stringContaining("Authentication failed (HTTP 400)"),
       "Show Output"
     );
   });
 
   it("fails the probe and scrubs jwt-like strings when GraphQL returns 200 with errors", async () => {
-    const { config, credentialStore, logger, lines } = await seededDeps();
+    const deps = await seededDeps(() => ["CALC-1"]);
+    const { lines } = deps;
 
-    const fetchMock = vi.fn((url: string) => {
-      if (url.endsWith("/authenticate")) {
-        return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));
-      }
-      return Promise.resolve(
-        makeResponse(
-          200,
-          JSON.stringify({
-            errors: [{ message: `denied for token ${FAKE_JWT}`, extensions: { code: "FORBIDDEN" } }],
-            data: null,
-          })
-        )
-      );
-    });
+    const fetchMock = jwtThenGraphql(() => ({
+      errors: [{ message: `denied for token ${FAKE_JWT}`, extensions: { code: "FORBIDDEN" } }],
+      data: null,
+    }));
     vi.stubGlobal("fetch", fetchMock);
-    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("CALC-1");
     const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
 
-    await runXrayConnectionTest({ config, credentialStore, logger });
+    await runXrayConnectionTest(deps);
 
     const emitted = lines.join("\n");
     expect(emitted).not.toContain(FAKE_JWT);
@@ -304,7 +296,8 @@ describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
 
   it("aborts a stalled body read via the 30s timeout instead of hanging", async () => {
     vi.useFakeTimers();
-    const { config, credentialStore, logger, lines } = await seededDeps();
+    const deps = await seededDeps(() => ["CALC-1"]);
+    const { lines } = deps;
 
     // 200 headers arrive, then the body stream stalls: text() settles only when the request
     // signal aborts — exactly the case the timer must still cover.
@@ -325,14 +318,177 @@ describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
     );
     const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
 
-    const run = runXrayConnectionTest({ config, credentialStore, logger });
+    const run = runXrayConnectionTest(deps);
     await vi.advanceTimersByTimeAsync(31_000);
     await run;
 
     expect(lines.join("\n")).toContain("Authentication request error");
     expect(errorToast).toHaveBeenCalledWith(
-      expect.stringContaining("authentication request failed"),
+      expect.stringContaining("Could not reach Xray"),
       "Show Output"
     );
+  });
+
+  it("warns and never authenticates when no credentials are stored", async () => {
+    const { logger } = capturingLogger();
+    const credentialStore = mapCredentialStore();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const warn = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+
+    await runXrayConnectionTest({ site: SITE, credentialStore, logger, knownTestKeys: () => [] });
+
+    expect(warn).toHaveBeenCalledWith(
+      "Connect to Xray before running a connection test.",
+      "Connect"
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("probeXrayConnection — structured outcome", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("skips the GraphQL probes and returns an auth-only outcome when the workspace has no test keys", async () => {
+    const deps = await seededDeps(() => []);
+    const fetchMock = jwtThenGraphql(() => ({ data: { getTests: { total: 0 } } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome).toEqual({
+      ok: true,
+      stage: "ok",
+      site: SITE,
+      message: `Connected to ${SITE} — authentication OK`,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(deps.lines.join("\n")).toContain("no @TEST_ tags found in workspace — skipped GraphQL probes");
+  });
+
+  it("groups keys by project and reports each project's total from a `project = X` probe", async () => {
+    const deps = await seededDeps(() => ["CALC-1043", "CALC-1051", "MATH-2"]);
+    const fetchMock = jwtThenGraphql((query) => {
+      if (query.includes("project = CALC")) {
+        return { data: { getTests: { total: 42 } } };
+      }
+      if (query.includes("project = MATH")) {
+        return { data: { getTests: { total: 7 } } };
+      }
+      return { data: { getTests: { total: 3, results: [] } } };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.stage).toBe("ok");
+    expect(outcome.projects).toEqual([
+      { project: "CALC", totalTests: 42 },
+      { project: "MATH", totalTests: 7 },
+    ]);
+    expect(outcome.message).toBe(
+      `Connected to ${SITE} — project CALC: 42 Xray tests, project MATH: 7 Xray tests`
+    );
+    // authenticate + two shape probes + one probe per project.
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("probes at most three projects", async () => {
+    const deps = await seededDeps(() => ["A-1", "B-1", "C-1", "D-1"]);
+    const fetchMock = jwtThenGraphql(() => ({ data: { getTests: { total: 1 } } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.projects).toHaveLength(3);
+    // authenticate + two shape probes + three project probes (D is dropped by the cap).
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("returns an auth-stage failure and runs no further requests when authentication fails", async () => {
+    const deps = await seededDeps(() => ["CALC-1"]);
+    const fetchMock = vi.fn(() => Promise.resolve(makeResponse(401, "nope")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.stage).toBe("auth");
+    expect(outcome.message).toBe("Authentication failed — check your client ID and secret.");
+    expect(outcome.projects).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a graphql-stage failure when a shape probe reports GraphQL errors", async () => {
+    const deps = await seededDeps(() => ["CALC-1"]);
+    const fetchMock = jwtThenGraphql(() => ({ errors: [{ message: "bad" }], data: null }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.stage).toBe("graphql");
+    // authenticate + both shape probes; the project probes never run.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops after the handshake and skips every GraphQL probe in authOnly mode", async () => {
+    const deps = await seededDeps(() => ["CALC-1", "MATH-2"]);
+    const fetchMock = jwtThenGraphql(() => ({ data: { getTests: { total: 9 } } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps, { authOnly: true });
+
+    expect(outcome).toEqual({ ok: true, stage: "ok", site: SITE, message: `Connected to ${SITE}` });
+    // Only /authenticate — no shape or project probes.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("excludes a project whose probe returns 200-with-errors and notes the failure in the message", async () => {
+    const deps = await seededDeps(() => ["CALC-1", "MATH-1"]);
+    const fetchMock = jwtThenGraphql((query) => {
+      if (query.includes("project = CALC")) {
+        return { errors: [{ message: "boom" }], data: null };
+      }
+      if (query.includes("project = MATH")) {
+        return { data: { getTests: { total: 5 } } };
+      }
+      return { data: { getTests: { total: 2, results: [] } } };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.projects).toEqual([{ project: "MATH", totalTests: 5 }]);
+    expect(outcome.message).toBe(
+      `Connected to ${SITE} — project MATH: 5 Xray tests — 1 project probe(s) failed, see output`
+    );
+    expect(outcome.message).not.toContain("project CALC");
+  });
+
+  it("caps the key list at 20, keeping the first 20 unique keys in first-seen order", async () => {
+    const supplied = ["CALC-1", ...Array.from({ length: 25 }, (_v, i) => `CALC-${i + 1}`)];
+    const deps = await seededDeps(() => supplied);
+    let capturedJql = "";
+    const fetchMock = jwtThenGraphql((query) => {
+      if (query.includes("key in (")) {
+        capturedJql = query;
+      }
+      return { data: { getTests: { total: 1, results: [] } } };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await probeXrayConnection(deps);
+
+    const listed = (/key in \(([^)]*)\)/.exec(capturedJql)?.[1] ?? "").split(", ");
+    expect(listed).toHaveLength(20);
+    expect(listed[0]).toBe("CALC-1");
+    expect(listed[19]).toBe("CALC-20");
+    expect(capturedJql).not.toContain("CALC-21");
   });
 });

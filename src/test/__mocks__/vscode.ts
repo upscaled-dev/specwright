@@ -110,6 +110,85 @@ interface StubTreeView {
 const __treeViewCounters: TreeViewCounters = { createCount: 0, disposeCount: 0 };
 let __lastTreeView: StubTreeView | undefined;
 
+interface StubWebview {
+  html: string;
+  options: unknown;
+  cspSource: string;
+  __posted: unknown[];
+  postMessage: (message: unknown) => Promise<boolean>;
+  onDidReceiveMessage: (listener: (message: unknown) => unknown) => { dispose: () => void };
+}
+
+interface StubWebviewPanel {
+  viewType: string;
+  title: string;
+  webview: StubWebview;
+  __revealCount: number;
+  __disposed: boolean;
+  reveal: (column?: unknown) => void;
+  onDidDispose: (listener: () => void) => { dispose: () => void };
+  dispose: () => void;
+  __receive: (message: unknown) => Promise<void>;
+}
+
+const __webviewPanels: StubWebviewPanel[] = [];
+
+function createStubWebviewPanel(
+  viewType: string,
+  title: string,
+  _showOptions: unknown,
+  options: unknown
+): StubWebviewPanel {
+  const messageListeners: Array<(message: unknown) => unknown> = [];
+  const webview: StubWebview = {
+    html: "",
+    options,
+    cspSource: "vscode-webview://stub",
+    __posted: [],
+    postMessage: (message: unknown): Promise<boolean> => {
+      webview.__posted.push(message);
+      return Promise.resolve(true);
+    },
+    onDidReceiveMessage: (listener) => {
+      messageListeners.push(listener);
+      return {
+        dispose: () => {
+          const i = messageListeners.indexOf(listener);
+          if (i > -1) { messageListeners.splice(i, 1); }
+        },
+      };
+    },
+  };
+  const disposeListeners: Array<() => void> = [];
+  const panel: StubWebviewPanel = {
+    viewType,
+    title,
+    webview,
+    __revealCount: 0,
+    __disposed: false,
+    reveal: (): void => { panel.__revealCount += 1; },
+    onDidDispose: (listener) => {
+      disposeListeners.push(listener);
+      return {
+        dispose: () => {
+          const i = disposeListeners.indexOf(listener);
+          if (i > -1) { disposeListeners.splice(i, 1); }
+        },
+      };
+    },
+    dispose: (): void => {
+      if (panel.__disposed) { return; }
+      panel.__disposed = true;
+      for (const l of [...disposeListeners]) { l(); }
+    },
+    __receive: async (message): Promise<void> => {
+      await Promise.all(messageListeners.map((l) => l(message)));
+    },
+  };
+  __webviewPanels.push(panel);
+  return panel;
+}
+
 export const window = {
   createOutputChannel: () => new StubOutputChannel(),
   createTerminal: () => ({ show: () => {}, sendText: () => {}, dispose: () => {} }),
@@ -144,12 +223,23 @@ export const window = {
   showInputBox: (..._args: unknown[]): Promise<string | undefined> => Promise.resolve(undefined),
   showSaveDialog: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showTextDocument: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
+  createWebviewPanel: (
+    viewType: string,
+    title: string,
+    showOptions?: unknown,
+    options?: unknown
+  ): StubWebviewPanel => createStubWebviewPanel(viewType, title, showOptions, options),
   __treeViewCounters,
   __getLastTreeView: (): StubTreeView | undefined => __lastTreeView,
   __resetTreeViewCounters: (): void => {
     __treeViewCounters.createCount = 0;
     __treeViewCounters.disposeCount = 0;
     __lastTreeView = undefined;
+  },
+  __webviewPanels,
+  __resetWebviewPanels: (): void => {
+    for (const panel of [...__webviewPanels]) { panel.dispose(); }
+    __webviewPanels.length = 0;
   },
 };
 
@@ -510,6 +600,7 @@ export const extensions = {
 export { Position, Range, Location, Uri };
 
 export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
+export const ViewColumn = { Active: -1, Beside: -2, One: 1, Two: 2, Three: 3 };
 export const EndOfLine = { LF: 1, CRLF: 2 };
 export const TestRunProfileKind = { Run: 1, Debug: 2, Coverage: 3 };
 
@@ -626,6 +717,10 @@ export class TreeItem {
     public label: string,
     public collapsibleState: number = TreeItemCollapsibleState.None
   ) {}
+}
+
+export class ThemeColor {
+  constructor(public readonly id: string) {}
 }
 
 export class ThemeIcon {

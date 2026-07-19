@@ -754,7 +754,8 @@ export class CommandManager {
     this.xrayConnectionCommands ??= new XrayConnectionCommands(
       this.context.config,
       this.credentialStore,
-      this.context.logger
+      this.context.logger,
+      () => this.traceabilitySubsystem?.knownTestKeys() ?? []
     );
     return this.xrayConnectionCommands;
   }
