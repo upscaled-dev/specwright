@@ -5,22 +5,12 @@ import { TestDiscoveryManager } from "../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../utils/playwright-json-parser";
 import { Logger } from "../utils/logger";
 import { REPORT_CANDIDATES, TraceabilityModel } from "./traceability-model";
-import { TraceabilityAdapter } from "./traceability-adapter";
+import { TraceabilityAdapter } from "./contracts";
+import { TraceabilityAdapterRegistry } from "./adapter-registry";
 import { TraceabilityNode, TraceabilityTreeDataProvider } from "./traceability-tree-data-provider";
 
 const FALLBACK_PROVIDER_ID = "xray";
 const CONNECTED_CONTEXT_KEY = "playwrightBddRunner.traceability.connected";
-
-/**
- * Provider-neutral view of the active backend's connection state. The extension adapts the
- * provider-specific credential store + site into this so the neutral subsystem never imports Xray
- * vocabulary. `label` is the display string for the connected indicator (e.g. the normalized site).
- */
-export interface TraceabilityConnectionSource {
-  readonly onDidChange: vscode.Event<void>;
-  readonly label: string;
-  isConnected(): Promise<boolean>;
-}
 
 // One watcher per candidate report path (a brace-glob with a slash inside `{}` does not fire
 // reliably in a VS Code FileSystemWatcher). A create/change/delete on any of these refreshes the
@@ -30,14 +20,18 @@ const REPORT_WATCH_GLOBS = REPORT_CANDIDATES.map((candidate) => `**/${candidate}
 /**
  * Sibling to ProviderRegistry: owns the traceability panel with the same idempotent
  * reconcile-on-config-change lifecycle. When `traceability.enablePanel` is off the whole subsystem
- * tears down — tree, model, watchers — with zero residue. Shares nothing with the Steps code. The
- * provider is injected as a TraceabilityAdapter, so a second backend is a one-line map addition.
+ * tears down — tree, model, watchers, adapter — with zero residue. Shares nothing with the Steps
+ * code. Adapters are built through the injected registry, so a `traceability.provider` change swaps
+ * the whole capability stack at runtime without a window reload.
  */
 export class TraceabilitySubsystem implements vscode.Disposable {
   private treeView: vscode.TreeView<TraceabilityNode> | undefined;
   private treeProvider: TraceabilityTreeDataProvider | undefined;
   private model: TraceabilityModel | undefined;
+  private activeAdapter: TraceabilityAdapter | undefined;
+  private activeAdapterId: string | undefined;
   private watcherDisposables: vscode.Disposable[] = [];
+  private adapterSubscriptions: vscode.Disposable[] = [];
   private lastSignature: string | undefined;
   private rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   private rebuildInFlight = false;
@@ -47,7 +41,6 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // resolution (panel already torn down, or a newer probe already landed) discards silently.
   private connectionEpoch = 0;
   private readonly configChangeDisposable: vscode.Disposable;
-  private readonly connectionChangeDisposable: vscode.Disposable;
   private disposed = false;
   private warnedUnknownProvider = false;
 
@@ -56,15 +49,13 @@ export class TraceabilitySubsystem implements vscode.Disposable {
 
   constructor(
     private readonly config: ExtensionConfig,
-    private readonly adapters: Record<string, TraceabilityAdapter>,
-    private readonly connection: TraceabilityConnectionSource,
+    private readonly registry: TraceabilityAdapterRegistry,
     private readonly featureParser: FeatureParser,
     private readonly discoveryManager: TestDiscoveryManager,
     private readonly playwrightJsonParser: PlaywrightJsonParser,
     private readonly logger: Logger
   ) {
     this.configChangeDisposable = config.addChangeListener(() => this.applyCurrent());
-    this.connectionChangeDisposable = connection.onDidChange(() => this.queueConnectionRefresh());
   }
 
   public applyCurrent(): void {
@@ -78,15 +69,14 @@ export class TraceabilitySubsystem implements vscode.Disposable {
 
   // Reads config.traceabilityProvider live so switching the provider re-selects here; an unknown id
   // falls back to Xray and warns once (not once per config-change burst).
-  private selectAdapter(): TraceabilityAdapter | undefined {
+  private resolveProviderId(): string | undefined {
     const id = this.config.traceabilityProvider;
-    const adapter = this.adapters[id];
-    if (adapter) {return adapter;}
+    if (this.registry.has(id)) {return id;}
     if (!this.warnedUnknownProvider) {
       this.logger.warn(`Unknown traceability provider "${id}", falling back to "${FALLBACK_PROVIDER_ID}"`);
       this.warnedUnknownProvider = true;
     }
-    return this.adapters[FALLBACK_PROVIDER_ID];
+    return this.registry.has(FALLBACK_PROVIDER_ID) ? FALLBACK_PROVIDER_ID : undefined;
   }
 
   private reconcileTraceabilityPanel(): void {
@@ -94,19 +84,31 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       this.teardown();
       return;
     }
-    const adapter = this.selectAdapter();
-    if (!adapter) {
+    const id = this.resolveProviderId();
+    if (!id) {
       this.teardown();
       return;
     }
-    const signature = this.signature(adapter);
-    if (this.treeView && this.lastSignature === signature) {
+    // Compute the signature against the still-active adapter when the id is unchanged, so an
+    // unrelated config edit doesn't force a throwaway adapter construction. A changed id always
+    // rebuilds.
+    const signature =
+      this.activeAdapter && this.activeAdapterId === id
+        ? this.signature(id, this.activeAdapter)
+        : undefined;
+    if (this.treeView && signature !== undefined && this.lastSignature === signature) {
       this.queueConnectionRefresh();
       return;
     }
     // A changed signature — provider swap, prefix, or pattern — rebuilds the whole panel so the new
-    // adapter's model, label, and watchers all take effect without a window reload.
+    // adapter's model, capabilities, label, and watchers all take effect without a window reload.
     this.teardown();
+    const adapter = this.registry.create(id, { config: this.config, logger: this.logger });
+    if (!adapter) {
+      return;
+    }
+    this.activeAdapter = adapter;
+    this.activeAdapterId = id;
     const model = new TraceabilityModel(
       this.featureParser,
       this.discoveryManager,
@@ -120,8 +122,16 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.treeView = vscode.window.createTreeView("playwrightBddRunner.traceability", {
       treeDataProvider: provider,
     });
+    if (adapter.connection) {
+      this.adapterSubscriptions.push(
+        adapter.connection.onDidChange(() => this.queueConnectionRefresh())
+      );
+    }
+    if (adapter.metadata) {
+      this.adapterSubscriptions.push(adapter.metadata.onDidChange(() => this.scheduleRebuild()));
+    }
     this.setupWatchers();
-    this.lastSignature = signature;
+    this.lastSignature = this.signature(id, adapter);
     this.scheduleRebuild();
     this.queueConnectionRefresh();
     this.logger.info("Traceability panel enabled");
@@ -134,21 +144,24 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   }
 
   // Connection state is async (a credential-store read), so context key, tree gating, and the
-  // connected indicator all update here off the same probe. The epoch captured at entry is the
+  // connected indicator all update here off the same probe. An adapter with no connection capability
+  // is treated as always available (offline tag-only view). The epoch captured at entry is the
   // newest, so any older in-flight probe discards when it resolves.
   private async refreshConnectionState(): Promise<void> {
     const epoch = ++this.connectionEpoch;
     if (this.disposed) {
       return;
     }
-    const connected = await this.connection.isConnected();
+    const connection = this.activeAdapter?.connection;
+    const connected = connection ? await connection.isConnected() : true;
     if (this.disposed || epoch !== this.connectionEpoch) {
       return;
     }
     this.commitConnectedContext(connected);
     this.treeProvider?.setConnected(connected);
     if (this.treeView) {
-      this.treeView.message = connected ? `${this.connection.label} · Connected` : "";
+      const label = connection?.label ?? "";
+      this.treeView.message = connected && label !== "" ? `${label} · Connected` : "";
     }
   }
 
@@ -163,9 +176,9 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // The active provider id joins the signature so switching traceability.provider forces a rebuild.
   // The browse URL (siteUrl) is deliberately excluded: it is read live, so editing it must not
   // tear down watchers or trigger a rescan. Only inputs the model actually consumes belong here.
-  private signature(adapter: TraceabilityAdapter): string {
+  private signature(id: string, adapter: TraceabilityAdapter): string {
     return [
-      adapter.id,
+      id,
       this.config.testFilePattern,
       adapter.keyGrammar.testPrefix,
       adapter.keyGrammar.reqPrefix,
@@ -228,6 +241,8 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       this.rebuildTimer = undefined;
     }
     this.rebuildPending = false;
+    for (const d of this.adapterSubscriptions) {d.dispose();}
+    this.adapterSubscriptions = [];
     for (const d of this.watcherDisposables) {d.dispose();}
     this.watcherDisposables = [];
     this.treeView?.dispose();
@@ -236,6 +251,9 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.treeProvider = undefined;
     this.model?.dispose();
     this.model = undefined;
+    this.activeAdapter?.dispose?.();
+    this.activeAdapter = undefined;
+    this.activeAdapterId = undefined;
     this.lastSignature = undefined;
     // Bump before committing so an in-flight probe captured under the old epoch can't overwrite
     // this false with a stale true when it later resolves.
@@ -246,7 +264,6 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   public dispose(): void {
     this.disposed = true;
     this.configChangeDisposable.dispose();
-    this.connectionChangeDisposable.dispose();
     this.teardown();
     // The discovery manager is handed to this subsystem for its exclusive use.
     this.discoveryManager.dispose();

@@ -2,6 +2,23 @@ import { describe, it, expect } from "vitest";
 import type * as vscode from "vscode";
 import { ExtensionConfig } from "../../core/extension-config";
 import { JIRA_KEY_SHAPE, normalizeSiteUrl, projectFromKey, XrayAdapter } from "../../xray/xray-adapter";
+import { XrayCredentialStore } from "../../xray/xray-credential-store";
+import { TraceabilityAdapter } from "../../traceability/contracts";
+
+function mapSecretStorage(): vscode.SecretStorage {
+  const map = new Map<string, string>();
+  return {
+    get: (key: string): Promise<string | undefined> => Promise.resolve(map.get(key)),
+    store: (key: string, value: string): Promise<void> => {
+      map.set(key, value);
+      return Promise.resolve();
+    },
+    delete: (key: string): Promise<void> => {
+      map.delete(key);
+      return Promise.resolve();
+    },
+  } as unknown as vscode.SecretStorage;
+}
 
 function configWith(values: Record<string, unknown>): ExtensionConfig {
   const workspaceConfig = {
@@ -41,7 +58,7 @@ describe("projectFromKey", () => {
 
 describe("XrayAdapter", () => {
   it("exposes the xray id/label and the Jira key grammar fed from config", () => {
-    const adapter = new XrayAdapter(
+    const adapter: TraceabilityAdapter = new XrayAdapter(
       configWith({ "traceability.testTagPrefix": "XT_", "traceability.reqTagPrefix": "COV_" })
     );
     expect(adapter.id).toBe("xray");
@@ -49,7 +66,8 @@ describe("XrayAdapter", () => {
     expect(adapter.keyGrammar.keyShape).toBe(JIRA_KEY_SHAPE);
     expect(adapter.keyGrammar.testPrefix).toBe("XT_");
     expect(adapter.keyGrammar.projectOf?.("CALC-1043")).toBe("CALC");
-    expect(adapter.metadataProvider).toBeUndefined();
+    expect(adapter.metadata).toBeUndefined();
+    expect(adapter.connection).toBeUndefined();
   });
 
   it("canonicalizes keys to uppercase through the grammar", () => {
@@ -71,16 +89,36 @@ describe("XrayAdapter", () => {
 
   it("builds a browse URL from a bare host", () => {
     const adapter = new XrayAdapter(configWith({ "xray.siteUrl": "acme.atlassian.net" }));
-    expect(adapter.browseUrl("CALC-1")).toBe("https://acme.atlassian.net/browse/CALC-1");
+    expect(adapter.browseUrl({ key: "CALC-1" })).toBe("https://acme.atlassian.net/browse/CALC-1");
   });
 
   it("normalizes a pasted scheme and trailing slash in the browse URL", () => {
     const adapter = new XrayAdapter(configWith({ "xray.siteUrl": "https://acme.atlassian.net/" }));
-    expect(adapter.browseUrl("CALC-1")).toBe("https://acme.atlassian.net/browse/CALC-1");
+    expect(adapter.browseUrl({ key: "CALC-1" })).toBe("https://acme.atlassian.net/browse/CALC-1");
   });
 
   it("returns undefined when siteUrl is unset", () => {
     const adapter = new XrayAdapter(configWith({}));
-    expect(adapter.browseUrl("CALC-1")).toBeUndefined();
+    expect(adapter.browseUrl({ key: "CALC-1" })).toBeUndefined();
+  });
+});
+
+describe("XrayAdapter connection capability", () => {
+  it("exposes a thin connection view over the credential store when one is supplied", async () => {
+    const store = new XrayCredentialStore(mapSecretStorage());
+    const adapter = new XrayAdapter(configWith({ "xray.siteUrl": "acme.atlassian.net" }), store);
+
+    expect(adapter.connection?.label).toBe("acme.atlassian.net");
+    expect(await adapter.connection?.isConnected()).toBe(false);
+
+    await store.setCredentials("acme.atlassian.net", "id-1", "secret-1");
+    expect(await adapter.connection?.isConnected()).toBe(true);
+  });
+
+  it("reports disconnected when the site is unset even with stored credentials", async () => {
+    const store = new XrayCredentialStore(mapSecretStorage());
+    await store.setCredentials("acme.atlassian.net", "id-1", "secret-1");
+    const adapter = new XrayAdapter(configWith({}), store);
+    expect(await adapter.connection?.isConnected()).toBe(false);
   });
 });

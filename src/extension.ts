@@ -11,9 +11,10 @@ import { TestOrganizationManager } from "./core/test-organization";
 import { PlaywrightJsonParser } from "./utils/playwright-json-parser";
 import { CommandBuilder } from "./core/command-builder";
 import { ProviderRegistry } from "./core/provider-registry";
-import { TraceabilityConnectionSource, TraceabilitySubsystem } from "./traceability/traceability-subsystem";
-import { TraceabilityAdapter } from "./traceability/traceability-adapter";
-import { normalizeSiteUrl, XrayAdapter } from "./xray/xray-adapter";
+import { TraceabilitySubsystem } from "./traceability/traceability-subsystem";
+import { TraceabilityAdapterRegistry } from "./traceability/adapter-registry";
+import { createInMemoryAdapterFactory } from "./traceability/in-memory-adapter";
+import { createXrayAdapterFactory } from "./xray/xray-adapter";
 import { XrayCredentialStore } from "./xray/xray-credential-store";
 import { PROMPTED_STATE_KEY } from "./commands/prompt-worker-count";
 import { StatusBar } from "./ui/status-bar";
@@ -163,39 +164,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   const credentialStore = new XrayCredentialStore(context.secrets);
   context.subscriptions.push(credentialStore);
-  const xrayAdapter = new XrayAdapter(config);
-  const traceabilityAdapters: Record<string, TraceabilityAdapter> = { xray: xrayAdapter };
-  const traceabilityAdapter = traceabilityAdapters[config.traceabilityProvider] ?? xrayAdapter;
-  // The extension owns adapter lifetimes; those that hold resources (P1 auth/cache) declare dispose.
-  for (const adapter of Object.values(traceabilityAdapters)) {
-    if (typeof adapter.dispose === "function") {
-      context.subscriptions.push(adapter as vscode.Disposable);
-    }
-  }
-  // Adapt the Xray-specific credential store + site into the neutral connection view the subsystem
-  // consumes; label and credential lookup read config live so a site edit reflects without a rebuild.
-  const traceabilityConnection: TraceabilityConnectionSource = {
-    onDidChange: credentialStore.onDidChange,
-    get label(): string {
-      return normalizeSiteUrl(config.xraySiteUrl);
-    },
-    isConnected: (): Promise<boolean> => {
-      if (normalizeSiteUrl(config.xraySiteUrl) === "") {
-        return Promise.resolve(false);
-      }
-      return credentialStore.hasCredentials(config.xraySiteUrl);
-    },
-  };
+  const traceabilityRegistry = new TraceabilityAdapterRegistry();
+  const xrayFactory = createXrayAdapterFactory(credentialStore);
+  traceabilityRegistry.register(xrayFactory);
+  // Not in the public settings enum — resolved only from a hand-typed `traceability.provider`
+  // value so the contract-test adapter can be driven in a dev window.
+  traceabilityRegistry.register(createInMemoryAdapterFactory());
   traceabilitySubsystem = new TraceabilitySubsystem(
     config,
-    traceabilityAdapters,
-    traceabilityConnection,
+    traceabilityRegistry,
     featureParser,
     TestDiscoveryManager.create(logger, config),
     PlaywrightJsonParser.create(logger),
     logger
   );
   context.subscriptions.push(traceabilitySubsystem);
+
+  // The command context needs a browse-URL adapter for the active provider; construct one from the
+  // registry (Xray fallback) and own its lifetime if it holds resources.
+  const traceabilityAdapter =
+    traceabilityRegistry.create(config.traceabilityProvider, { config, logger }) ??
+    xrayFactory.create({ config, logger });
+  if (typeof traceabilityAdapter.dispose === "function") {
+    context.subscriptions.push(traceabilityAdapter as vscode.Disposable);
+  }
 
   const sharedContext: PlaywrightBddExtensionContext = {
     logger,

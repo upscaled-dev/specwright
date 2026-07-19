@@ -453,7 +453,7 @@ export class CommandManager {
       this.showErrorMessage("Open in tracker: no issue key on this item.");
       return;
     }
-    const url = this.context.traceabilityAdapter.browseUrl(key);
+    const url = this.context.traceabilityAdapter.browseUrl({ key });
     if (!url) {
       vscode.window.showWarningMessage(
         "Set playwrightBddRunner.xray.siteUrl to open issues in the browser."

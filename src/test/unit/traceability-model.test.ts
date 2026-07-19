@@ -8,11 +8,26 @@ import { normalizePathKey, PlaywrightJsonParser, ScenarioStatus } from "../../ut
 import {
   buildTraceabilitySnapshot,
   findPlaywrightReport,
-  MetadataProvider,
   ParsedFeatureInput,
   TraceLink,
 } from "../../traceability/traceability-model";
+import { RemoteMetadataSnapshot, TestCaseMetadata } from "../../traceability/contracts";
 import { JIRA_KEY_SHAPE, projectFromKey } from "../../xray/xray-adapter";
+
+function remoteSnapshot(
+  tests: readonly TestCaseMetadata[],
+  overrides: Partial<RemoteMetadataSnapshot> = {}
+): RemoteMetadataSnapshot {
+  return {
+    tests: new Map(tests.map((test) => [test.key, test])),
+    fetchedScopes: ["CALC"],
+    syncedAt: 1_700_000_000_000,
+    stale: false,
+    completeness: "complete",
+    errors: [],
+    ...overrides,
+  };
+}
 
 const upper = (key: string): string => key.toUpperCase();
 const GRAMMAR = { testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: JIRA_KEY_SHAPE, canonicalizeKey: upper, projectOf: projectFromKey };
@@ -174,21 +189,45 @@ Scenario Outline: multiply <a> by <b>
     expect(link(snap.links, "MUL-1").lastResult).toBe("passed");
   });
 
-  it("slots cached metadata and orphans through the metadata-provider seam", () => {
-    const provider: MetadataProvider = {
-      get: (k) =>
-        k === "CALC-1043"
-          ? { summary: "Divide by zero", status: "PASS" }
-          : k === "CALC-9999"
-            ? { summary: "Ghost test" }
-            : undefined,
-      keys: () => ["CALC-1043", "CALC-9999"],
-    };
-    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, provider);
+  it("slots cached metadata and orphans through the remote-snapshot seam on a complete fetch", () => {
+    const remote = remoteSnapshot([
+      { key: "CALC-1043", summary: "Divide by zero", status: { category: "passed", providerValue: "PASS" } },
+      { key: "CALC-9999", summary: "Ghost test" },
+    ]);
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
 
     expect(link(snap.links, "CALC-1043").meta?.summary).toBe("Divide by zero");
+    expect(link(snap.links, "CALC-1043").meta?.status?.category).toBe("passed");
     expect(link(snap.links, "CALC-1051").meta).toBeUndefined();
-    expect(snap.orphans).toEqual([{ testKey: "CALC-9999", meta: { summary: "Ghost test" } }]);
+    expect(snap.orphans).toEqual([{ testKey: "CALC-9999", meta: { key: "CALC-9999", summary: "Ghost test" } }]);
+    expect(snap.completeness).toBe("complete");
+    expect(snap.syncedAt).toBe(1_700_000_000_000);
+  });
+
+  it("suppresses orphans and carries completeness when the remote fetch is partial", () => {
+    const remote = remoteSnapshot(
+      [
+        { key: "CALC-1043", summary: "Divide by zero" },
+        { key: "CALC-9999", summary: "Ghost test" },
+      ],
+      { completeness: "partial" }
+    );
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+
+    expect(link(snap.links, "CALC-1043").meta?.summary).toBe("Divide by zero");
+    expect(snap.orphans).toEqual([]);
+    expect(snap.completeness).toBe("partial");
+  });
+
+  it("surfaces sync errors on the snapshot without deriving orphans", () => {
+    const remote = remoteSnapshot([{ key: "CALC-9999", summary: "Ghost test" }], {
+      completeness: "unknown",
+      errors: ["fetch failed"],
+    });
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+
+    expect(snap.orphans).toEqual([]);
+    expect(snap.errors).toEqual(["fetch failed"]);
   });
 });
 

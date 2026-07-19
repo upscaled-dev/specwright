@@ -11,24 +11,14 @@ import {
 import { Logger } from "../utils/logger";
 import { OutlineExampleRow, Scenario } from "../types";
 import { extractKeys } from "./tag-extraction";
-import { KeyGrammar, TraceabilityAdapter } from "./traceability-adapter";
+import {
+  KeyGrammar,
+  RemoteMetadataSnapshot,
+  TestCaseMetadata,
+  TraceabilityAdapter,
+} from "./contracts";
 
 export type RunOutcome = ScenarioStatus;
-
-export interface TestMeta {
-  summary?: string | undefined;
-  status?: string | undefined;
-}
-
-/**
- * The metadata-merge seam for P1: an offline snapshot leaves this undefined so links carry no
- * `meta` field and the orphan bucket is empty. P1 slots a cache-backed provider in here (behind
- * the adapter) without touching the join.
- */
-export interface MetadataProvider {
-  get(testKey: string): TestMeta | undefined;
-  keys(): Iterable<string>;
-}
 
 export interface ScenarioRef {
   filePath: string;
@@ -44,7 +34,7 @@ export interface TraceLink {
   project?: string | undefined;
   scenario: ScenarioRef;
   reqKeys: string[];
-  meta?: TestMeta | undefined;
+  meta?: TestCaseMetadata | undefined;
   lastResult?: RunOutcome | undefined;
 }
 
@@ -55,7 +45,7 @@ export interface UntracedScenario {
 
 export interface OrphanTest {
   testKey: string;
-  meta: TestMeta;
+  meta: TestCaseMetadata;
 }
 
 export interface TraceabilitySnapshot {
@@ -64,6 +54,8 @@ export interface TraceabilitySnapshot {
   orphans: OrphanTest[];
   syncedAt?: number | undefined;
   stale: boolean;
+  completeness: "complete" | "partial" | "unknown";
+  errors: string[];
 }
 
 export interface ParsedFeatureInput {
@@ -76,6 +68,8 @@ const EMPTY_SNAPSHOT: TraceabilitySnapshot = {
   untraced: [],
   orphans: [],
   stale: false,
+  completeness: "unknown",
+  errors: [],
 };
 
 export const OUTCOME_SEVERITY: Record<ScenarioStatus, number> = {
@@ -150,7 +144,7 @@ export function buildTraceabilitySnapshot(
   features: readonly ParsedFeatureInput[],
   statusMap: Record<string, ScenarioStatus>,
   keyGrammar: KeyGrammar,
-  metadataProvider?: MetadataProvider
+  remote?: RemoteMetadataSnapshot
 ): TraceabilitySnapshot {
   const links: TraceLink[] = [];
   const untraced: UntracedScenario[] = [];
@@ -293,9 +287,9 @@ export function buildTraceabilitySnapshot(
     }
   }
 
-  if (metadataProvider) {
+  if (remote) {
     for (const link of links) {
-      const meta = metadataProvider.get(link.testKey);
+      const meta = remote.tests.get(link.testKey);
       if (meta) {link.meta = meta;}
     }
   }
@@ -303,18 +297,25 @@ export function buildTraceabilitySnapshot(
   return {
     links,
     untraced,
-    orphans: metadataProvider ? computeOrphans(links, metadataProvider) : [],
-    stale: false,
+    orphans: remote ? computeOrphans(links, remote) : [],
+    syncedAt: remote?.syncedAt,
+    stale: remote?.stale ?? false,
+    completeness: remote?.completeness ?? "unknown",
+    errors: remote ? [...remote.errors] : [],
   };
 }
 
-function computeOrphans(links: TraceLink[], provider: MetadataProvider): OrphanTest[] {
+// Orphans are only authoritative on a complete catalogue fetch — a partial or unknown snapshot may
+// be missing the very scenarios that would cover a key, so it can never yield orphan counts.
+function computeOrphans(links: TraceLink[], remote: RemoteMetadataSnapshot): OrphanTest[] {
+  if (remote.completeness !== "complete") {
+    return [];
+  }
   const covered = new Set(links.map((l) => l.testKey));
   const orphans: OrphanTest[] = [];
-  for (const key of provider.keys()) {
+  for (const [key, meta] of remote.tests) {
     if (!covered.has(key)) {
-      const meta = provider.get(key);
-      if (meta) {orphans.push({ testKey: key, meta });}
+      orphans.push({ testKey: key, meta });
     }
   }
   return orphans;
@@ -395,7 +396,7 @@ export class TraceabilityModel implements vscode.Disposable {
       features,
       await this.readStatusMap(),
       this.adapter.keyGrammar,
-      this.adapter.metadataProvider
+      this.adapter.metadata?.snapshot()
     );
     this._onDidChange.fire();
   }

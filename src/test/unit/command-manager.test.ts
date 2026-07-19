@@ -13,7 +13,7 @@ import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { TestOrganizationManager } from "../../core/test-organization";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { CommandBuilder } from "../../core/command-builder";
-import { TraceabilityAdapter } from "../../traceability/traceability-adapter";
+import { ExternalRef, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayAdapter } from "../../xray/xray-adapter";
 
 function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): PlaywrightBddExtensionContext {
@@ -364,7 +364,7 @@ interface EnvHooks {
 
 const envHooks = (vscode as unknown as { env: EnvHooks }).env;
 
-function stubAdapter(browseUrl: (key: string) => string | undefined): TraceabilityAdapter {
+function stubAdapter(resolve: (key: string) => string | undefined): TraceabilityAdapter {
   return {
     id: "xray",
     label: "Xray",
@@ -374,7 +374,7 @@ function stubAdapter(browseUrl: (key: string) => string | undefined): Traceabili
       keyShape: /^[A-Z]+-\d+$/,
       canonicalizeKey: (key) => key.toUpperCase(),
     },
-    browseUrl,
+    browseUrl: (ref: ExternalRef) => resolve(ref.key),
   };
 }
 

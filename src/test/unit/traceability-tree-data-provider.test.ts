@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import { TraceabilityTreeDataProvider } from "../../traceability/traceability-tree-data-provider";
 import type { TraceabilityModel, TraceabilitySnapshot } from "../../traceability/traceability-model";
 
-const EMPTY: TraceabilitySnapshot = { links: [], untraced: [], orphans: [], stale: false };
+const EMPTY: TraceabilitySnapshot = { links: [], untraced: [], orphans: [], stale: false, completeness: "unknown", errors: [] };
 
 function makeModel(snapshot: TraceabilitySnapshot): {
   model: TraceabilityModel;
@@ -51,6 +51,8 @@ const SNAPSHOT: TraceabilitySnapshot = {
   ],
   orphans: [],
   stale: false,
+  completeness: "unknown",
+  errors: [],
 };
 
 describe("TraceabilityTreeDataProvider", () => {
@@ -133,6 +135,8 @@ describe("TraceabilityTreeDataProvider", () => {
       untraced: [],
       orphans: [],
       stale: false,
+      completeness: "unknown",
+      errors: [],
     });
     const testKeys = p.getChildren(p.getChildren()[0]);
     expect(p.getTreeItem(testKeys[0]!).description).toBe("1 scenario");
@@ -148,7 +152,7 @@ describe("TraceabilityTreeDataProvider", () => {
   });
 
   it("templates the empty-section message with the provider label", () => {
-    const p = provider({ links: [], untraced: SNAPSHOT.untraced, orphans: [], stale: false }, "Azure DevOps");
+    const p = provider({ links: [], untraced: SNAPSHOT.untraced, orphans: [], stale: false, completeness: "unknown", errors: [] }, "Azure DevOps");
     const covered = p.getChildren(p.getChildren()[0]);
     expect(p.getTreeItem(covered[0]!).label).toBe("No scenarios are mapped to a Azure DevOps test yet.");
   });

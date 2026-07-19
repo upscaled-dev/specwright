@@ -183,5 +183,5 @@ export interface PlaywrightBddExtensionContext {
   playwrightJsonParser: PlaywrightJsonParser;
   commandBuilder: import("../core/command-builder").CommandBuilder;
   bddgenDiagnostics?: import("../providers/bddgen-diagnostics-provider").BddgenDiagnosticsProvider | undefined;
-  traceabilityAdapter: import("../traceability/traceability-adapter").TraceabilityAdapter;
+  traceabilityAdapter: import("../traceability/contracts").TraceabilityAdapter;
 }

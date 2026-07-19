@@ -1,6 +1,12 @@
 import { ExtensionConfig } from "../core/extension-config";
-import { KeyGrammar, TraceabilityAdapter } from "../traceability/traceability-adapter";
-import { MetadataProvider } from "../traceability/traceability-model";
+import {
+  ConnectionCapability,
+  ExternalRef,
+  KeyGrammar,
+  TraceabilityAdapter,
+} from "../traceability/contracts";
+import { TraceabilityAdapterFactory } from "../traceability/adapter-registry";
+import { XrayCredentialStore } from "./xray-credential-store";
 
 // A Jira/Xray issue key: a project part (which may itself contain hyphens/underscores), then a
 // trailing `-<number>`. The project is everything before that last `-<number>` — so JIRA_KEY_SHAPE
@@ -34,11 +40,40 @@ function effectivePrefix(prefix: string, fallback: string): string {
   return prefix.trim() === "" ? fallback : prefix;
 }
 
+// Thin read-side view of the landed connection slice: the credential store's change event, the
+// normalized site as the label, and a credential probe. Connect/disconnect stay in the Xray
+// commands — this capability only reports state to the neutral subsystem.
+function xrayConnection(
+  config: ExtensionConfig,
+  credentialStore: XrayCredentialStore
+): ConnectionCapability {
+  return {
+    onDidChange: credentialStore.onDidChange,
+    get label(): string {
+      return normalizeSiteUrl(config.xraySiteUrl);
+    },
+    isConnected: (): Promise<boolean> => {
+      if (normalizeSiteUrl(config.xraySiteUrl) === "") {
+        return Promise.resolve(false);
+      }
+      return credentialStore.hasCredentials(config.xraySiteUrl);
+    },
+  };
+}
+
 export class XrayAdapter implements TraceabilityAdapter {
   public readonly id = "xray";
   public readonly label = "Xray";
+  public readonly connection: ConnectionCapability | undefined;
 
-  constructor(private readonly config: ExtensionConfig) {}
+  // `metadata` is left undefined until the client slice; the model degrades to the offline
+  // tag-only join when a capability is absent.
+  constructor(
+    private readonly config: ExtensionConfig,
+    credentialStore?: XrayCredentialStore
+  ) {
+    this.connection = credentialStore ? xrayConnection(config, credentialStore) : undefined;
+  }
 
   public get keyGrammar(): KeyGrammar {
     return {
@@ -50,13 +85,17 @@ export class XrayAdapter implements TraceabilityAdapter {
     };
   }
 
-  // Late-bound so P1 can hand back a cache-backed provider without changing the field's shape.
-  public get metadataProvider(): MetadataProvider | undefined {
-    return undefined;
-  }
-
-  public browseUrl(key: string): string | undefined {
+  public browseUrl(ref: ExternalRef): string | undefined {
     const site = normalizeSiteUrl(this.config.xraySiteUrl);
-    return site ? `https://${site}/browse/${key}` : undefined;
+    return site ? `https://${site}/browse/${ref.key}` : undefined;
   }
+}
+
+export function createXrayAdapterFactory(
+  credentialStore: XrayCredentialStore
+): TraceabilityAdapterFactory {
+  return {
+    id: "xray",
+    create: (ctx) => new XrayAdapter(ctx.config, credentialStore),
+  };
 }

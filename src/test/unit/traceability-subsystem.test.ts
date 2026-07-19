@@ -1,11 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
-import {
-  TraceabilityConnectionSource,
-  TraceabilitySubsystem,
-} from "../../traceability/traceability-subsystem";
-import { TraceabilityAdapter } from "../../traceability/traceability-adapter";
-import { XrayAdapter } from "../../xray/xray-adapter";
+import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
+import { ConnectionCapability, TraceabilityAdapter } from "../../traceability/contracts";
+import { TraceabilityAdapterRegistry } from "../../traceability/adapter-registry";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
@@ -25,7 +22,7 @@ const treeViews = (vscode.window as unknown as {
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 interface ConnectionControl {
-  connection: TraceabilityConnectionSource;
+  connection: ConnectionCapability;
   setConnected: (value: boolean) => void;
   setLabel: (label: string) => void;
   fire: () => void;
@@ -35,7 +32,7 @@ function makeConnection(initial = false): ConnectionControl {
   let connected = initial;
   let label = "";
   const emitter = new vscode.EventEmitter<void>();
-  const connection: TraceabilityConnectionSource = {
+  const connection: ConnectionCapability = {
     onDidChange: emitter.event,
     get label(): string {
       return label;
@@ -59,7 +56,7 @@ interface DeferredConnection extends ConnectionControl {
 function deferredConnection(label = ""): DeferredConnection {
   const resolvers: Array<(value: boolean) => void> = [];
   const emitter = new vscode.EventEmitter<void>();
-  const connection: TraceabilityConnectionSource = {
+  const connection: ConnectionCapability = {
     onDidChange: emitter.event,
     get label(): string {
       return label;
@@ -121,7 +118,7 @@ interface FakeWatcher {
   dispose: ReturnType<typeof vi.fn>;
 }
 
-function fakeAdapter(id: string): TraceabilityAdapter {
+function fakeAdapter(id: string, connection?: ConnectionCapability): TraceabilityAdapter {
   return {
     id,
     label: id,
@@ -132,7 +129,16 @@ function fakeAdapter(id: string): TraceabilityAdapter {
       canonicalizeKey: (key) => key.toUpperCase(),
     },
     browseUrl: () => undefined,
+    ...(connection ? { connection } : {}),
   };
+}
+
+function registryOf(adapters: Record<string, TraceabilityAdapter>): TraceabilityAdapterRegistry {
+  const registry = new TraceabilityAdapterRegistry();
+  for (const [id, adapter] of Object.entries(adapters)) {
+    registry.register({ id, create: () => adapter });
+  }
+  return registry;
 }
 
 function build(
@@ -141,10 +147,10 @@ function build(
   logger = Logger.create(),
   connection: ConnectionControl = makeConnection()
 ): { subsystem: TraceabilitySubsystem; created: FakeWatcher[]; connection: ConnectionControl } {
+  const registry = registryOf(adapters ?? { xray: fakeAdapter("xray", connection.connection) });
   const subsystem = new TraceabilitySubsystem(
     config,
-    adapters ?? { xray: new XrayAdapter(config) },
-    connection.connection,
+    registry,
     FeatureParser.create(logger),
     TestDiscoveryManager.create(logger, config),
     PlaywrightJsonParser.create(logger),
