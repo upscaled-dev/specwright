@@ -191,6 +191,18 @@ export class ExtensionConfig {
     return this.config.get<string>("xray.siteUrl", "");
   }
 
+  public get xrayApiRegion(): string {
+    return this.config.get<string>("xray.apiRegion", "global");
+  }
+
+  public get xraySyncProjectKeys(): string[] {
+    return this.config.get<string[]>("xray.syncProjectKeys", []);
+  }
+
+  public get xrayCacheTtlMinutes(): number {
+    return this.config.get<number>("xray.cacheTtlMinutes", 15);
+  }
+
   public validate(): void {
     const errors: string[] = [];
     if (!this.testFilePattern || this.testFilePattern.trim() === "") {
@@ -227,6 +239,9 @@ export class ExtensionConfig {
     }
     if (!this.traceabilityReqTagPrefix.trim()) {
       errors.push("traceability.reqTagPrefix cannot be empty");
+    }
+    if (!Number.isFinite(this.xrayCacheTtlMinutes) || this.xrayCacheTtlMinutes <= 0) {
+      errors.push("xray.cacheTtlMinutes must be a positive number");
     }
     if (errors.length > 0) {
       throw new Error(`Configuration validation failed: ${errors.join(", ")}`);

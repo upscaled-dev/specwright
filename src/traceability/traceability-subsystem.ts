@@ -7,7 +7,11 @@ import { Logger } from "../utils/logger";
 import { REPORT_CANDIDATES, TraceabilityModel } from "./traceability-model";
 import { ConnectionVerifyResult, TraceabilityAdapter } from "./contracts";
 import { TraceabilityAdapterRegistry } from "./adapter-registry";
-import { TraceabilityNode, TraceabilityTreeDataProvider } from "./traceability-tree-data-provider";
+import {
+  ConnectionIndicator,
+  TraceabilityNode,
+  TraceabilityTreeDataProvider,
+} from "./traceability-tree-data-provider";
 import { TagDiagnosticsProvider } from "./tag-diagnostics";
 
 const FALLBACK_PROVIDER_ID = "xray";
@@ -42,6 +46,9 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // async probe captures the epoch at entry and only commits if it is still current, so a late
   // resolution (panel already torn down, or a newer probe already landed) discards silently.
   private connectionEpoch = 0;
+  // The last committed verify state, recomposed with fresh sync staleness on every metadata change
+  // so "synced Nm ago" updates without re-running the (network) verify.
+  private lastConnection: { state: ConnectionIndicator["state"]; label: string; message: string } | undefined;
   private readonly configChangeDisposable: vscode.Disposable;
   private disposed = false;
   private warnedUnknownProvider = false;
@@ -150,7 +157,13 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       );
     }
     if (adapter.metadata) {
-      this.adapterSubscriptions.push(adapter.metadata.onDidChange(() => this.scheduleRebuild()));
+      this.adapterSubscriptions.push(
+        adapter.metadata.onDidChange(() => {
+          this.scheduleRebuild();
+          // Recompose the status row's "synced Nm ago" off the new snapshot — no re-verify.
+          this.commitConnectionIndicator();
+        })
+      );
     }
     this.setupWatchers();
     this.lastSignature = this.signature(id, adapter);
@@ -183,6 +196,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.treeProvider?.setConnected(connected);
 
     if (!connected || !connection?.verify) {
+      this.lastConnection = undefined;
       this.treeProvider?.setConnectionIndicator(undefined);
       return;
     }
@@ -200,11 +214,23 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     if (this.disposed || epoch !== this.connectionEpoch) {
       return;
     }
-    this.treeProvider?.setConnectionIndicator({
-      state: result.status,
-      label: connection.label,
-      message: result.message,
-    });
+    this.lastConnection = { state: result.status, label: connection.label, message: result.message };
+    this.commitConnectionIndicator();
+  }
+
+  // Composes the status row from the last verify plus the current metadata staleness (§7). Sync
+  // info is omitted until the first sync produces a `syncedAt`, so a connection with no metadata
+  // capability commits the bare `{state, label, message}` row.
+  private commitConnectionIndicator(): void {
+    if (!this.treeProvider || !this.lastConnection) {
+      return;
+    }
+    const snapshot = this.activeAdapter?.metadata?.snapshot();
+    const indicator: ConnectionIndicator = { ...this.lastConnection };
+    if (snapshot?.syncedAt !== undefined) {
+      indicator.sync = { syncedAt: snapshot.syncedAt, stale: snapshot.stale };
+    }
+    this.treeProvider.setConnectionIndicator(indicator);
   }
 
   private commitConnectedContext(connected: boolean): void {
@@ -298,6 +324,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.activeAdapter?.dispose?.();
     this.activeAdapter = undefined;
     this.activeAdapterId = undefined;
+    this.lastConnection = undefined;
     this.lastSignature = undefined;
     // Bump before committing so an in-flight probe captured under the old epoch can't overwrite
     // this false with a stale true when it later resolves.

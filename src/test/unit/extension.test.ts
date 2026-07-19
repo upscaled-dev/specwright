@@ -3,12 +3,16 @@ import type * as vscode from "vscode";
 import { activate, deactivate } from "../../extension";
 import { PROMPTED_STATE_KEY } from "../../commands/prompt-worker-count";
 
+interface StubMemento {
+  get: ReturnType<typeof vi.fn>;
+  update: ReturnType<typeof vi.fn>;
+  keys: ReturnType<typeof vi.fn>;
+}
+
 interface StubContext {
   subscriptions: { dispose(): void }[];
-  workspaceState: {
-    get: ReturnType<typeof vi.fn>;
-    update: ReturnType<typeof vi.fn>;
-  };
+  workspaceState: StubMemento;
+  globalState: StubMemento;
   secrets: {
     get: ReturnType<typeof vi.fn>;
     store: ReturnType<typeof vi.fn>;
@@ -17,13 +21,20 @@ interface StubContext {
   };
 }
 
+function stubMemento(): StubMemento {
+  return {
+    get: vi.fn().mockReturnValue(undefined),
+    update: vi.fn().mockResolvedValue(undefined),
+    keys: vi.fn().mockReturnValue([]),
+  };
+}
+
 function makeStubContext(): StubContext {
   return {
     subscriptions: [],
-    workspaceState: {
-      get: vi.fn().mockReturnValue(undefined),
-      update: vi.fn().mockResolvedValue(undefined),
-    },
+    workspaceState: stubMemento(),
+    // The Xray metadata cache keys off globalState; a realistic stub keeps activation honest.
+    globalState: stubMemento(),
     secrets: {
       get: vi.fn().mockResolvedValue(undefined),
       store: vi.fn().mockResolvedValue(undefined),

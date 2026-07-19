@@ -4,20 +4,10 @@ import {
   ConnectionVerifyResult,
   ExternalRef,
   KeyGrammar,
+  MetadataCapability,
   TraceabilityAdapter,
 } from "../traceability/contracts";
-import { TraceabilityAdapterFactory } from "../traceability/adapter-registry";
 import { XrayCredentialStore } from "./xray-credential-store";
-import type {
-  XrayConnectionOutcome,
-  XrayConnectionTestDeps,
-  XrayProbeOptions,
-} from "./xray-connection-test";
-
-type XrayProbe = (
-  deps: XrayConnectionTestDeps,
-  options?: XrayProbeOptions
-) => Promise<XrayConnectionOutcome>;
 
 // A Jira/Xray issue key: a project part (which may itself contain hyphens/underscores), then a
 // trailing `-<number>`. The project is everything before that last `-<number>` — so JIRA_KEY_SHAPE
@@ -74,31 +64,22 @@ function xrayConnection(
   };
 }
 
-// An auth-only probe can only land in the ok/auth/network stages: ok is a verified handshake,
-// network means the site was unreachable, and every other stage is an authentication failure.
-function toVerifyResult(outcome: XrayConnectionOutcome): ConnectionVerifyResult {
-  if (outcome.ok) {
-    return { status: "ok", message: outcome.message };
-  }
-  if (outcome.stage === "network") {
-    return { status: "unreachable", message: outcome.message };
-  }
-  return { status: "auth-failed", message: outcome.message };
-}
-
 export class XrayAdapter implements TraceabilityAdapter {
   public readonly id = "xray";
   public readonly label = "Xray";
   public readonly connection: ConnectionCapability | undefined;
+  public readonly metadata: MetadataCapability | undefined;
 
-  // `metadata` is left undefined until the client slice; the model degrades to the offline
-  // tag-only join when a capability is absent.
+  // The model degrades to the offline tag-only join when a capability is absent, so the browse-URL
+  // command instance (built without a credential store or client) leaves both undefined.
   constructor(
     private readonly config: ExtensionConfig,
     credentialStore?: XrayCredentialStore,
-    verify?: () => Promise<ConnectionVerifyResult>
+    verify?: () => Promise<ConnectionVerifyResult>,
+    metadata?: MetadataCapability
   ) {
     this.connection = credentialStore ? xrayConnection(config, credentialStore, verify) : undefined;
+    this.metadata = metadata;
   }
 
   public get keyGrammar(): KeyGrammar {
@@ -115,26 +96,8 @@ export class XrayAdapter implements TraceabilityAdapter {
     const site = normalizeSiteUrl(this.config.xraySiteUrl);
     return site ? `https://${site}/browse/${ref.key}` : undefined;
   }
-}
 
-export function createXrayAdapterFactory(
-  credentialStore: XrayCredentialStore,
-  probe: XrayProbe
-): TraceabilityAdapterFactory {
-  return {
-    id: "xray",
-    create: (ctx) => {
-      const verify = (): Promise<ConnectionVerifyResult> =>
-        probe(
-          {
-            site: ctx.config.xraySiteUrl,
-            credentialStore,
-            logger: ctx.logger,
-            knownTestKeys: () => [],
-          },
-          { authOnly: true }
-        ).then(toVerifyResult);
-      return new XrayAdapter(ctx.config, credentialStore, verify);
-    },
-  };
+  public dispose(): void {
+    (this.metadata as { dispose?: () => void } | undefined)?.dispose?.();
+  }
 }

@@ -2,8 +2,8 @@ import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
 import { normalizeSiteUrl, projectFromKey } from "./xray-adapter";
 import { XrayCredentialStore } from "./xray-credential-store";
+import { XrayRegion, xrayBaseUrl } from "./xray-region";
 
-const XRAY_BASE = "https://xray.cloud.getxray.app/api/v2";
 const FETCH_TIMEOUT_MS = 30_000;
 const CONNECT_COMMAND = "playwrightBddRunner.traceability.connect";
 
@@ -112,8 +112,9 @@ export function rateLimitHeaders(headers: Headers): Record<string, string> {
 
 export interface XrayConnectionTestDeps {
   // Passed explicitly (never read from an ExtensionConfig snapshot) so a probe fired right after a
-  // save reads the just-written host rather than a stale cached one.
+  // save reads the just-written host/region rather than a stale cached one.
   site: string;
+  region: XrayRegion;
   credentialStore: XrayCredentialStore;
   logger: Logger;
   knownTestKeys: () => string[];
@@ -202,8 +203,8 @@ interface GraphqlResult {
   body: unknown;
 }
 
-async function graphqlRequest(logger: Logger, jwt: string, label: string, query: string): Promise<GraphqlResult> {
-  const response = await timedFetch(`${XRAY_BASE}/graphql`, {
+async function graphqlRequest(base: string, logger: Logger, jwt: string, label: string, query: string): Promise<GraphqlResult> {
+  const response = await timedFetch(`${base}/graphql`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -245,7 +246,7 @@ interface ProjectProbeResult {
 // A project probe that is not ok (non-OK status or GraphQL errors) or whose total isn't a number is
 // excluded from the reported totals — a false "0 tests" for a project that actually errored is worse
 // than saying nothing. The failure count surfaces in the summary; graphqlRequest already logs why.
-async function probeProjects(logger: Logger, jwt: string, keys: readonly string[]): Promise<ProjectProbeResult> {
+async function probeProjects(base: string, logger: Logger, jwt: string, keys: readonly string[]): Promise<ProjectProbeResult> {
   const projects: string[] = [];
   for (const key of keys) {
     const project = projectFromKey(key);
@@ -256,7 +257,7 @@ async function probeProjects(logger: Logger, jwt: string, keys: readonly string[
   const summaries: XrayProjectSummary[] = [];
   let failed = 0;
   for (const project of projects.slice(0, MAX_PROJECT_PROBES)) {
-    const { ok, body } = await graphqlRequest(logger, jwt, `project ${project}`, projectCountQuery(project));
+    const { ok, body } = await graphqlRequest(base, logger, jwt, `project ${project}`, projectCountQuery(project));
     const total = extractTotal(body);
     if (!ok || total === undefined) {
       failed += 1;
@@ -270,10 +271,11 @@ async function probeProjects(logger: Logger, jwt: string, keys: readonly string[
 type AuthResult = { ok: true; jwt: string } | { ok: false; status: number };
 
 async function authenticate(
+  base: string,
   logger: Logger,
   credentials: { clientId: string; clientSecret: string }
 ): Promise<AuthResult> {
-  const response = await timedFetch(`${XRAY_BASE}/authenticate`, {
+  const response = await timedFetch(`${base}/authenticate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_id: credentials.clientId, client_secret: credentials.clientSecret }),
@@ -340,16 +342,17 @@ export async function probeXrayConnection(
 ): Promise<XrayConnectionOutcome> {
   const { credentialStore, logger, knownTestKeys } = deps;
   const site = normalizeSiteUrl(deps.site);
+  const base = xrayBaseUrl(deps.region);
   const credentials = await credentialStore.getCredentials(deps.site);
   if (!credentials) {
     return { ok: false, stage: "auth", site, message: "No stored Xray credentials for this site." };
   }
 
-  logger.info(`Xray connection test starting for ${site}`);
+  logger.info(`Xray connection test starting for ${site} (region ${deps.region})`);
 
   let auth: AuthResult;
   try {
-    auth = await authenticate(logger, credentials);
+    auth = await authenticate(base, logger, credentials);
   } catch (error) {
     logger.error(`Authentication request error: ${scrubJwtLike(errorMessage(error))}`);
     return {
@@ -378,8 +381,8 @@ export async function probeXrayConnection(
   let projects: XrayProjectSummary[];
   let projectFailures: number;
   try {
-    const probeA = await graphqlRequest(logger, jwt, "getTests", testsQuery(jql));
-    const probeB = await graphqlRequest(logger, jwt, "getTests + coverableIssues", coverageQuery(jql));
+    const probeA = await graphqlRequest(base, logger, jwt, "getTests", testsQuery(jql));
+    const probeB = await graphqlRequest(base, logger, jwt, "getTests + coverableIssues", coverageQuery(jql));
     if (!probeA.ok || !probeB.ok) {
       return {
         ok: false,
@@ -388,7 +391,7 @@ export async function probeXrayConnection(
         message: "Xray GraphQL probe failed (non-OK status or GraphQL errors) — see output for details.",
       };
     }
-    const probed = await probeProjects(logger, jwt, keys);
+    const probed = await probeProjects(base, logger, jwt, keys);
     projects = probed.summaries;
     projectFailures = probed.failed;
   } catch (error) {

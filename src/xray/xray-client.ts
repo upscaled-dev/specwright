@@ -1,0 +1,491 @@
+import { Logger } from "../utils/logger";
+import { NormalizedStatus } from "../traceability/contracts";
+import { XrayCredentials } from "./xray-credential-store";
+import { XrayRegion, xrayBaseUrl } from "./xray-region";
+import { describeJwt, describeShape, graphqlErrorSummaries, scrubJwtLike } from "./xray-connection-test";
+
+const REQUEST_TIMEOUT_MS = 30_000;
+// Proactively reuse the JWT well inside its ~24h life so an in-flight batch never trips the true
+// expiry mid-pagination; a 401 still forces a refresh regardless.
+const JWT_REUSE_MS = 23 * 60 * 60 * 1000;
+// getTests page size (schema max 100). coverableIssues stays FLAT and small so the multiplicative
+// item budget holds: 100 tests × 20 coverable = 2100 items, well under the 10 000 cap; resolver
+// count is getTests + testType + status + coverableIssues = 4, well under 25 (§5).
+const PAGE_LIMIT = 100;
+const COVERABLE_LIMIT = 20;
+// Hard ceiling on items paginated per scope (§5's documented 10 000-item budget). A server that
+// reports monotonically growing totals would otherwise page forever; stop here, marked incomplete.
+const MAX_SCOPE_ITEMS = 10_000;
+const MAX_ATTEMPTS = 4;
+const BACKOFF_BASE_MS = 300;
+const BACKOFF_CAP_MS = 8_000;
+
+export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+
+// A page the cache records so it can reason about pagination completion and staleness per §7.
+export interface XrayCachePage {
+  readonly fetchedAt: number;
+  readonly query: string;
+  readonly start: number;
+  readonly total?: number | undefined;
+}
+
+export interface XrayTestRecord {
+  readonly key: string;
+  readonly summary?: string | undefined;
+  readonly status?: NormalizedStatus | undefined;
+  readonly gherkin?: string | undefined;
+  readonly coverageKeys?: readonly string[] | undefined;
+}
+
+// The result of fetching one or more scopes. `complete` is false when any page failed or pagination
+// was cut short — the capability demotes completeness so orphans are never derived from it.
+export interface XrayFetchOutcome {
+  readonly tests: XrayTestRecord[];
+  readonly pages: XrayCachePage[];
+  complete: boolean;
+  readonly errors: string[];
+}
+
+export interface XrayClientDeps {
+  region: XrayRegion;
+  logger: Logger;
+  credentials: () => Promise<XrayCredentials | undefined>;
+  fetchImpl?: FetchLike | undefined;
+  now?: (() => number) | undefined;
+  sleep?: ((ms: number, signal?: AbortSignal) => Promise<void>) | undefined;
+  random?: (() => number) | undefined;
+}
+
+// Cancellation propagated from the caller's AbortSignal. Distinct from a timeout (which is a
+// retryable transport fault) so backoff never keeps retrying a user-cancelled sync.
+export class XrayAbortError extends Error {
+  constructor() {
+    super("Aborted");
+    this.name = "XrayAbortError";
+  }
+}
+
+// Bad credentials / non-retryable auth failures. Carries a value-free, user-facing message.
+export class XrayAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "XrayAuthError";
+  }
+}
+
+// A transient transport fault (429, 5xx, timeout, network) that backoff should retry.
+class RetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableError";
+  }
+}
+
+interface TimedResponse {
+  status: number;
+  ok: boolean;
+  bodyText: string;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function parseBody(bodyText: string): unknown {
+  try {
+    return JSON.parse(bodyText) as unknown;
+  } catch {
+    return bodyText;
+  }
+}
+
+function stringifyShape(value: unknown): string {
+  return JSON.stringify(describeShape(value), null, 2);
+}
+
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new XrayAbortError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new XrayAbortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function dedupe(keys: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const key of keys) {
+    if (!out.includes(key)) {
+      out.push(key);
+    }
+  }
+  return out;
+}
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+function normalizeXrayStatus(name: string, color: string | undefined): NormalizedStatus {
+  const upper = name.toUpperCase();
+  let category: NormalizedStatus["category"];
+  if (upper.includes("PASS")) {
+    category = "passed";
+  } else if (upper.includes("FAIL") || upper.includes("ABORT") || upper.includes("ERROR")) {
+    category = "failed";
+  } else if (upper.includes("TODO") || upper.includes("TO DO") || upper.includes("EXEC")) {
+    category = "pending";
+  } else {
+    category = "unknown";
+  }
+  return color !== undefined
+    ? { category, providerValue: name, color }
+    : { category, providerValue: name };
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+interface RawTest {
+  gherkin?: unknown;
+  status?: { name?: unknown; color?: unknown } | null;
+  jira?: { key?: unknown; summary?: unknown } | null;
+  coverableIssues?: { results?: Array<{ jira?: { key?: unknown } | null } | null> | null } | null;
+}
+
+function toTestRecord(raw: RawTest | null): XrayTestRecord | undefined {
+  const key = readString(raw?.jira?.key)?.toUpperCase();
+  if (!key) {
+    return undefined;
+  }
+  const record: {
+    key: string;
+    summary?: string;
+    status?: NormalizedStatus;
+    gherkin?: string;
+    coverageKeys?: string[];
+  } = { key };
+  const summary = readString(raw?.jira?.summary);
+  if (summary !== undefined) {
+    record.summary = summary;
+  }
+  const statusName = readString(raw?.status?.name);
+  if (statusName !== undefined) {
+    record.status = normalizeXrayStatus(statusName, readString(raw?.status?.color));
+  }
+  const gherkin = readString(raw?.gherkin);
+  if (gherkin !== undefined) {
+    record.gherkin = gherkin;
+  }
+  const coverageKeys: string[] = [];
+  for (const entry of raw?.coverableIssues?.results ?? []) {
+    const coverageKey = readString(entry?.jira?.key)?.toUpperCase();
+    if (coverageKey && !coverageKeys.includes(coverageKey)) {
+      coverageKeys.push(coverageKey);
+    }
+  }
+  if (coverageKeys.length > 0) {
+    record.coverageKeys = coverageKeys;
+  }
+  return record;
+}
+
+interface TestPage {
+  total: number | undefined;
+  results: (RawTest | null)[];
+}
+
+function parseTestPage(body: unknown): TestPage {
+  const getTests =
+    body !== null && typeof body === "object"
+      ? (body as { data?: { getTests?: { total?: unknown; results?: unknown } } }).data?.getTests
+      : undefined;
+  const total = typeof getTests?.total === "number" ? getTests.total : undefined;
+  const results = Array.isArray(getTests?.results) ? (getTests.results as (RawTest | null)[]) : [];
+  return { total, results };
+}
+
+type PageTermination = { done: true; error?: string } | { done: false; nextStart: number };
+
+// Decides whether pagination continues after a page. `start + count` is the index past this page's
+// last item; reaching `total` means every item was seen. An empty page before `total`, or crossing
+// the item cap, terminates the scope as incomplete (value-free diagnostic).
+function pageTermination(jql: string, start: number, page: TestPage): PageTermination {
+  const seen = start + page.results.length;
+  if (page.total === undefined || seen >= page.total) {
+    return { done: true };
+  }
+  if (page.results.length === 0) {
+    return { done: true, error: `${jql}: empty page at start ${start} with total ${page.total} — pagination incomplete` };
+  }
+  const nextStart = start + PAGE_LIMIT;
+  if (nextStart >= MAX_SCOPE_ITEMS) {
+    return { done: true, error: `${jql}: reached the ${MAX_SCOPE_ITEMS}-item pagination cap — scope truncated, marked incomplete` };
+  }
+  return { done: false, nextStart };
+}
+
+function testsQuery(jql: string, start: number): string {
+  return `{ getTests(jql: ${JSON.stringify(jql)}, limit: ${PAGE_LIMIT}, start: ${start}) { total results { issueId gherkin testType { name kind } status { name color final } jira(fields: ["key", "summary"]) coverableIssues(limit: ${COVERABLE_LIMIT}) { results { jira(fields: ["key"]) } } } } }`;
+}
+
+/**
+ * Region-aware Xray Cloud transport. Owns the in-memory JWT (never persisted, never logged — only
+ * `describeJwt` facts), batched/paginated `getTests`, flat `coverableIssues`, generic exponential
+ * backoff with jitter, a 30s per-request timeout, and abort propagation on every call. All
+ * diagnostics go through the allowlist helpers — no response value ever reaches the logger.
+ */
+export class XrayClient {
+  private readonly base: string;
+  private readonly fetchImpl: FetchLike;
+  private readonly now: () => number;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  private readonly random: () => number;
+
+  private jwt: string | undefined;
+  private jwtObtainedAt = 0;
+
+  constructor(private readonly deps: XrayClientDeps) {
+    this.base = xrayBaseUrl(deps.region);
+    this.fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
+    this.now = deps.now ?? ((): number => Date.now());
+    this.sleep = deps.sleep ?? defaultSleep;
+    this.random = deps.random ?? Math.random;
+  }
+
+  // Drop the cached JWT so the next request re-authenticates. Called on any credential change —
+  // cheap, and it covers both an account switch and a same-account secret rotation.
+  public invalidateAuth(): void {
+    this.jwt = undefined;
+    this.jwtObtainedAt = 0;
+  }
+
+  public async fetchTestsByKeys(keys: readonly string[], signal?: AbortSignal): Promise<XrayFetchOutcome> {
+    const outcome: XrayFetchOutcome = { tests: [], pages: [], complete: true, errors: [] };
+    for (const batch of chunk(dedupe([...keys]), PAGE_LIMIT)) {
+      const jql = `key in (${batch.join(", ")})`;
+      const page = await this.fetchScope(jql, signal);
+      outcome.tests.push(...page.tests);
+      outcome.pages.push(...page.pages);
+      outcome.errors.push(...page.errors);
+      if (!page.complete) {
+        outcome.complete = false;
+      }
+    }
+    return outcome;
+  }
+
+  public fetchProjectCatalogue(projectKey: string, signal?: AbortSignal): Promise<XrayFetchOutcome> {
+    return this.fetchScope(`project = ${projectKey}`, signal);
+  }
+
+  private async fetchScope(jql: string, signal?: AbortSignal): Promise<XrayFetchOutcome> {
+    const outcome: XrayFetchOutcome = { tests: [], pages: [], complete: true, errors: [] };
+    let start = 0;
+    for (;;) {
+      if (signal?.aborted) {
+        throw new XrayAbortError();
+      }
+      const page = await this.requestPage(jql, start, signal);
+      if ("errors" in page) {
+        outcome.errors.push(...page.errors);
+        outcome.complete = false;
+        return outcome;
+      }
+      for (const raw of page.results) {
+        const record = toTestRecord(raw);
+        if (record) {
+          outcome.tests.push(record);
+        }
+      }
+      outcome.pages.push({ fetchedAt: this.now(), query: jql, start, total: page.total });
+      const next = pageTermination(jql, start, page);
+      if (next.done) {
+        if (next.error !== undefined) {
+          this.deps.logger.warn(next.error);
+          outcome.errors.push(next.error);
+          outcome.complete = false;
+        }
+        return outcome;
+      }
+      start = next.nextStart;
+    }
+  }
+
+  private async requestPage(
+    jql: string,
+    start: number,
+    signal: AbortSignal | undefined
+  ): Promise<TestPage | { errors: string[] }> {
+    let body: unknown;
+    try {
+      body = await this.graphql(testsQuery(jql, start), signal);
+    } catch (error) {
+      if (error instanceof XrayAbortError) {
+        throw error;
+      }
+      return { errors: [`${jql}: ${scrubJwtLike(errorMessage(error))}`] };
+    }
+    const errorSummaries = graphqlErrorSummaries(body);
+    if (errorSummaries.length > 0) {
+      for (const summary of errorSummaries) {
+        this.deps.logger.error(`GraphQL (getTests) ${summary}`);
+      }
+      return { errors: errorSummaries };
+    }
+    return parseTestPage(body);
+  }
+
+  private async graphql(query: string, signal?: AbortSignal): Promise<unknown> {
+    let refreshed = false;
+    for (;;) {
+      const jwt = await this.getJwt(signal, refreshed);
+      const response = await this.sendWithRetry(
+        `${this.base}/graphql`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+          body: JSON.stringify({ query }),
+        },
+        signal
+      );
+      // Refresh exactly once on a 401 (expired token). A 401 that survives a fresh token is a real
+      // auth failure, not an empty page — surface it so the scope is recorded incomplete.
+      if (response.status === 401) {
+        if (!refreshed) {
+          this.jwt = undefined;
+          refreshed = true;
+          continue;
+        }
+        throw new XrayAuthError("Authentication failed — check your client ID and secret.");
+      }
+      return parseBody(response.bodyText);
+    }
+  }
+
+  private async getJwt(signal: AbortSignal | undefined, force: boolean): Promise<string> {
+    if (!force && this.jwt !== undefined && this.now() - this.jwtObtainedAt < JWT_REUSE_MS) {
+      return this.jwt;
+    }
+    const jwt = await this.authenticate(signal);
+    this.jwt = jwt;
+    this.jwtObtainedAt = this.now();
+    return jwt;
+  }
+
+  private async authenticate(signal?: AbortSignal): Promise<string> {
+    const credentials = await this.deps.credentials();
+    if (!credentials) {
+      throw new XrayAuthError("No stored Xray credentials for this site.");
+    }
+    const response = await this.sendWithRetry(
+      `${this.base}/authenticate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: credentials.clientId, client_secret: credentials.clientSecret }),
+      },
+      signal
+    );
+    if (!response.ok) {
+      // The bad-credential body may echo the request, so only its shape is logged — never values.
+      this.deps.logger.error(
+        `Authentication failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
+      );
+      throw new XrayAuthError(
+        response.status === 401
+          ? "Authentication failed — check your client ID and secret."
+          : `Authentication failed (HTTP ${response.status}).`
+      );
+    }
+    const raw = response.bodyText;
+    let jwt: string;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      jwt = typeof parsed === "string" ? parsed : raw.trim();
+    } catch {
+      jwt = raw.trim();
+    }
+    this.deps.logger.info(describeJwt(jwt));
+    return jwt;
+  }
+
+  private sendWithRetry(url: string, init: RequestInit, signal?: AbortSignal): Promise<TimedResponse> {
+    return this.withBackoff(async () => {
+      const response = await this.timedFetch(url, init, signal);
+      // A rate-limit or server fault is retryable; every other status (incl. 401/400) is handled by
+      // the caller. Backoff never depends on rate-limit headers — none appear on the wire (§5).
+      if (response.status === 429 || response.status >= 500) {
+        throw new RetryableError(`HTTP ${response.status}`);
+      }
+      return response;
+    }, signal);
+  }
+
+  private async withBackoff<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    let attempt = 0;
+    for (;;) {
+      if (signal?.aborted) {
+        throw new XrayAbortError();
+      }
+      try {
+        return await run();
+      } catch (error) {
+        if (error instanceof XrayAbortError || error instanceof XrayAuthError) {
+          throw error;
+        }
+        attempt += 1;
+        if (!(error instanceof RetryableError) || attempt >= MAX_ATTEMPTS || signal?.aborted) {
+          throw error;
+        }
+        await this.sleep(this.backoffDelay(attempt), signal);
+      }
+    }
+  }
+
+  private backoffDelay(attempt: number): number {
+    const base = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (attempt - 1));
+    return base + Math.floor(this.random() * BACKOFF_BASE_MS);
+  }
+
+  // The body read stays inside the timed window (matches the probe): a server that returns headers
+  // then stalls the stream trips the 30s abort instead of hanging. The caller's signal aborting is a
+  // hard cancel (XrayAbortError); a timeout or network error is retryable transport noise.
+  private async timedFetch(url: string, init: RequestInit, signal?: AbortSignal): Promise<TimedResponse> {
+    if (signal?.aborted) {
+      throw new XrayAbortError();
+    }
+    const controller = new AbortController();
+    const onAbort = (): void => controller.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await this.fetchImpl(url, { ...init, signal: controller.signal });
+      const bodyText = await response.text();
+      return { status: response.status, ok: response.ok, bodyText };
+    } catch (error) {
+      if (signal?.aborted) {
+        throw new XrayAbortError();
+      }
+      throw new RetryableError(scrubJwtLike(errorMessage(error)));
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+}

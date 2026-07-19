@@ -647,3 +647,45 @@ describe("TraceabilitySubsystem connection indicator", () => {
     subsystem.dispose();
   });
 });
+
+describe("TraceabilitySubsystem sync staleness row", () => {
+  beforeEach(() => {
+    treeViews.__resetTreeViewCounters();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("carries the metadata snapshot's staleness on the connection row after verify", async () => {
+    const setIndicator = vi.spyOn(TraceabilityTreeDataProvider.prototype, "setConnectionIndicator");
+    const { config } = makeConfig();
+    const syncedAt = Date.now() - 60_000;
+    const adapter: TraceabilityAdapter = {
+      id: "xray",
+      label: "Xray",
+      keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: /^[A-Z]+-\d+$/, canonicalizeKey: (k) => k.toUpperCase() },
+      browseUrl: () => undefined,
+      connection: {
+        onDidChange: new vscode.EventEmitter<void>().event,
+        label: "acme.atlassian.net",
+        isConnected: () => Promise.resolve(true),
+        verify: () => Promise.resolve({ status: "ok", message: "Connected to acme" }),
+      },
+      metadata: {
+        onDidChange: new vscode.EventEmitter<void>().event,
+        snapshot: () => ({ tests: new Map(), fetchedScopes: [], syncedAt, stale: false, completeness: "partial", errors: [] }),
+        sync: () => Promise.resolve(),
+      },
+    };
+    const { subsystem } = build(config, { xray: adapter });
+
+    subsystem.applyCurrent();
+    await flush();
+
+    const last = indicatorCalls(setIndicator).at(-1);
+    expect(last?.state).toBe("ok");
+    expect(last?.sync).toEqual({ syncedAt, stale: false });
+    subsystem.dispose();
+  });
+});

@@ -63,6 +63,9 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   "traceability.testTagPrefix": (c) => c.traceabilityTestTagPrefix,
   "traceability.reqTagPrefix": (c) => c.traceabilityReqTagPrefix,
   "xray.siteUrl": (c) => c.xraySiteUrl,
+  "xray.apiRegion": (c) => c.xrayApiRegion,
+  "xray.syncProjectKeys": (c) => c.xraySyncProjectKeys,
+  "xray.cacheTtlMinutes": (c) => c.xrayCacheTtlMinutes,
 };
 
 describe("ExtensionConfig defaults vs package.json", () => {
@@ -118,6 +121,15 @@ describe("ExtensionConfig.validate", () => {
         ExtensionConfig.create(configReturning({ reporter }), false).validate()
       ).not.toThrow();
     }
+  });
+
+  it("rejects a non-positive xray.cacheTtlMinutes", () => {
+    expect(() =>
+      ExtensionConfig.create(configReturning({ "xray.cacheTtlMinutes": 0 }), false).validate()
+    ).toThrow(/cacheTtlMinutes/);
+    expect(() =>
+      ExtensionConfig.create(configReturning({ "xray.cacheTtlMinutes": -5 }), false).validate()
+    ).toThrow(/cacheTtlMinutes/);
   });
 
   it("rejects a reporter list with an empty or unknown token", () => {

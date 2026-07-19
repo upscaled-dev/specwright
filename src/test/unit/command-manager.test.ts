@@ -16,6 +16,7 @@ import { CommandBuilder } from "../../core/command-builder";
 import { ExternalRef, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayAdapter } from "../../xray/xray-adapter";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
+import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 
 function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): PlaywrightBddExtensionContext {
   const logger = Logger.create();
@@ -657,6 +658,95 @@ describe("traceability linkScenario contributions", () => {
     const palette = pkg.contributes.menus["commandPalette"]!;
     expect(palette.find((e) => e.command === CMD)?.when).toBe(
       "config.playwrightBddRunner.traceability.enablePanel"
+    );
+  });
+});
+
+describe("traceability sync command handler", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("guides the user when no metadata capability is active", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const handlers = captureHandlers(makeContext());
+    await handlers.get("playwrightBddRunner.traceability.sync")!();
+    expect(String(info.mock.calls[0]?.[0])).toContain("Connect");
+  });
+
+  it("syncs with the workspace + configured project scope and surfaces snapshot errors as a toast", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const adapter = {
+      metadata: {
+        sync,
+        snapshot: () => ({ tests: new Map(), fetchedScopes: [], stale: false, completeness: "unknown", errors: ["boom"] }),
+      },
+    };
+    const subsystem = {
+      getActiveAdapter: () => adapter,
+      knownTestKeys: () => ["CALC-1"],
+    } as unknown as TraceabilitySubsystem;
+    const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(subsystem);
+    await (mgr as unknown as { syncTraceability: () => Promise<void> }).syncTraceability();
+
+    expect(sync).toHaveBeenCalledWith({ testKeys: ["CALC-1"], projectKeys: [] }, expect.anything());
+    expect(errorToast).toHaveBeenCalled();
+  });
+
+  it("coalesces concurrent invocations into a single in-flight run", async () => {
+    let resolveSync!: () => void;
+    const sync = vi.fn(() => new Promise<void>((resolve) => { resolveSync = resolve; }));
+    const adapter = {
+      metadata: {
+        sync,
+        snapshot: () => ({ tests: new Map(), fetchedScopes: [], stale: false, completeness: "unknown", errors: [] }),
+      },
+    };
+    const subsystem = {
+      getActiveAdapter: () => adapter,
+      knownTestKeys: () => [],
+    } as unknown as TraceabilitySubsystem;
+
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(subsystem);
+    const run = mgr as unknown as { syncTraceability: () => Promise<void> };
+
+    const first = run.syncTraceability();
+    const second = run.syncTraceability();
+    resolveSync();
+    await Promise.all([first, second]);
+
+    // The second invoke joined the in-flight run rather than starting a second sync.
+    expect(sync).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("traceability sync contributions", () => {
+  interface Pkg {
+    contributes: {
+      commands: Array<{ command: string; category?: string; icon?: string }>;
+      menus: Record<string, Array<{ command?: string; when?: string; group?: string }>>;
+    };
+  }
+  const pkg = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf-8")
+  ) as Pkg;
+  const CMD = "playwrightBddRunner.traceability.sync";
+
+  it("declares the sync command under the Specwright category with a sync icon", () => {
+    const command = pkg.contributes.commands.find((c) => c.command === CMD);
+    expect(command?.category).toBe("Specwright");
+    expect(command?.icon).toBe("$(sync)");
+  });
+
+  it("gates the palette entry and the view-title button on the connected context key", () => {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    expect(palette.find((e) => e.command === CMD)?.when).toBe("playwrightBddRunner.traceability.connected");
+
+    const button = pkg.contributes.menus["view/title"]!.find((e) => e.command === CMD);
+    expect(button?.when).toBe(
+      "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected"
     );
   });
 });

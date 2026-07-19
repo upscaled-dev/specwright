@@ -12,6 +12,7 @@ import {
   runXrayConnectionTest,
   scrubJwtLike,
 } from "../../xray/xray-connection-test";
+import { XrayRegion } from "../../xray/xray-region";
 
 describe("describeShape", () => {
   it("emits types and lengths, never values", () => {
@@ -185,6 +186,7 @@ const SITE = "acme.atlassian.net";
 
 async function seededDeps(knownTestKeys: () => string[] = () => []): Promise<{
   site: string;
+  region: XrayRegion;
   credentialStore: XrayCredentialStore;
   logger: Logger;
   knownTestKeys: () => string[];
@@ -193,7 +195,7 @@ async function seededDeps(knownTestKeys: () => string[] = () => []): Promise<{
   const { logger, lines } = capturingLogger();
   const credentialStore = mapCredentialStore();
   await credentialStore.setCredentials(SITE, "fake-client-id", FAKE_SECRET);
-  return { site: SITE, credentialStore, logger, knownTestKeys, lines };
+  return { site: SITE, region: "global", credentialStore, logger, knownTestKeys, lines };
 }
 
 // Auth returns the JWT; every /graphql POST is answered by `handler`, which sees the query so a test
@@ -336,7 +338,7 @@ describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
     vi.stubGlobal("fetch", fetchMock);
     const warn = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
 
-    await runXrayConnectionTest({ site: SITE, credentialStore, logger, knownTestKeys: () => [] });
+    await runXrayConnectionTest({ site: SITE, region: "global", credentialStore, logger, knownTestKeys: () => [] });
 
     expect(warn).toHaveBeenCalledWith(
       "Connect to Xray before running a connection test.",

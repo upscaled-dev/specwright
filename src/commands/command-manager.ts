@@ -14,6 +14,8 @@ import { XrayConnectionCommands } from "../xray/xray-connection-commands";
 import { XrayCredentialStore } from "../xray/xray-credential-store";
 import { computeLinkEdit, linkScenarioPicks } from "../traceability/link-scenario";
 import { ScenarioRef } from "../traceability/traceability-model";
+import { runTraceabilitySync } from "../traceability/traceability-sync";
+import { SyncScope } from "../traceability/contracts";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
 
 interface OrganizationStrategy {
@@ -81,6 +83,7 @@ export class CommandManager {
   private credentialStore: XrayCredentialStore | undefined;
   private xrayConnectionCommands: XrayConnectionCommands | undefined;
   private traceabilitySubsystem: TraceabilitySubsystem | undefined;
+  private syncInFlight: Promise<void> | undefined;
 
   public static create(context: PlaywrightBddExtensionContext): CommandManager {
     return new CommandManager(context);
@@ -163,6 +166,7 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.openIssue", title: "Open Issue in Tracker", category: CATEGORY, handler: this.openIssueInTracker.bind(this) },
         { command: "playwrightBddRunner.traceability.copyKey", title: "Copy Issue Key", category: CATEGORY, handler: this.copyIssueKey.bind(this) },
         { command: "playwrightBddRunner.traceability.linkScenario", title: "Link Scenario to Test", category: CATEGORY, handler: this.linkScenario.bind(this) },
+        { command: "playwrightBddRunner.traceability.sync", title: "Sync Traceability", category: CATEGORY, handler: this.syncTraceability.bind(this) },
         { command: "playwrightBddRunner.traceability.manageConnection", title: "Manage Xray Connection", category: CATEGORY, handler: () => this.getXrayConnectionCommands().manageConnection() },
         { command: "playwrightBddRunner.traceability.connect", title: "Connect to Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().connect() },
         { command: "playwrightBddRunner.traceability.disconnect", title: "Disconnect from Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().disconnect() },
@@ -538,6 +542,48 @@ export class CommandManager {
     }
     await vscode.workspace.applyEdit(wsEdit);
     await doc.save();
+  }
+
+  // Serialize sync: the palette entry and the view-title button can both fire; a second invoke while
+  // one run is in flight awaits the same run rather than starting a second (interleaved state writes,
+  // two AbortControllers).
+  private syncTraceability(): Promise<void> {
+    if (this.syncInFlight) {
+      return this.syncInFlight;
+    }
+    this.syncInFlight = this.runTraceabilitySyncCommand().finally(() => {
+      this.syncInFlight = undefined;
+    });
+    return this.syncInFlight;
+  }
+
+  // Gated on the connected context key, but the metadata capability can still be absent (browse-only
+  // adapter, provider without a client); guide the user rather than throwing. Progress renders on the
+  // tree view; cancellation flows through to the fetch's AbortSignal.
+  private async runTraceabilitySyncCommand(): Promise<void> {
+    const metadata = this.traceabilitySubsystem?.getActiveAdapter()?.metadata;
+    if (!metadata) {
+      vscode.window.showInformationMessage("Connect to your test tracker before syncing.");
+      return;
+    }
+    const scope: SyncScope = {
+      testKeys: this.traceabilitySubsystem?.knownTestKeys() ?? [],
+      projectKeys: this.context.config.xraySyncProjectKeys,
+    };
+    const controller = new AbortController();
+    const result = await vscode.window.withProgress(
+      { location: { viewId: "playwrightBddRunner.traceability" }, title: "Syncing traceability…" },
+      (_progress, token) => {
+        token.onCancellationRequested(() => controller.abort());
+        return runTraceabilitySync({ metadata, scope, signal: controller.signal, logger: this.logger });
+      }
+    );
+    if (!result.ok) {
+      const pick = await vscode.window.showErrorMessage(result.message, "Show Output");
+      if (pick === "Show Output") {
+        this.logger.showOutput();
+      }
+    }
   }
 
   // Welcome-only "Hide this panel" affordance. Write to wherever the setting already lives so a

@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import * as vscode from "vscode";
-import { TraceabilityTreeDataProvider } from "../../traceability/traceability-tree-data-provider";
+import {
+  formatSyncedAgo,
+  TraceabilityNode,
+  TraceabilityTreeDataProvider,
+} from "../../traceability/traceability-tree-data-provider";
 import type { TraceabilityModel, TraceabilitySnapshot } from "../../traceability/traceability-model";
 
 const EMPTY: TraceabilitySnapshot = { links: [], untraced: [], orphans: [], stale: false, completeness: "unknown", errors: [] };
@@ -307,5 +311,65 @@ describe("TraceabilityTreeDataProvider", () => {
     p.dispose();
     fire();
     expect(refreshes).toBe(1);
+  });
+});
+
+describe("formatSyncedAgo", () => {
+  it("uses just now / minutes / hours / days buckets", () => {
+    expect(formatSyncedAgo(5_000)).toBe("just now");
+    expect(formatSyncedAgo(12 * 60_000)).toBe("12m ago");
+    expect(formatSyncedAgo(2 * 3_600_000)).toBe("2h ago");
+    expect(formatSyncedAgo(3 * 86_400_000)).toBe("3d ago");
+  });
+});
+
+describe("TraceabilityTreeDataProvider connection staleness row", () => {
+  function connectionRow(indicator: Parameters<TraceabilityTreeDataProvider["setConnectionIndicator"]>[0]): vscode.TreeItem {
+    const p = provider(SNAPSHOT);
+    p.setConnectionIndicator(indicator);
+    const roots: TraceabilityNode[] = p.getChildren();
+    return p.getTreeItem(roots[0]!);
+  }
+
+  it("appends 'synced Nm ago' to a fresh connected row and mirrors it in the tooltip", () => {
+    const item = connectionRow({
+      state: "ok",
+      label: "acme.atlassian.net",
+      message: "Connected to acme",
+      sync: { syncedAt: Date.now() - 12 * 60_000, stale: false },
+    });
+    expect(item.description).toBe("Connected · synced 12m ago");
+    expect(String(item.tooltip)).toBe("Connected to acme · synced 12m ago");
+  });
+
+  it("marks a past-TTL sync as stale in the description", () => {
+    const item = connectionRow({
+      state: "ok",
+      label: "acme.atlassian.net",
+      message: "Connected to acme",
+      sync: { syncedAt: Date.now() - 2 * 3_600_000, stale: true },
+    });
+    expect(item.description).toBe("Connected · synced 2h ago (stale)");
+  });
+
+  it("shows cached data on an unreachable row", () => {
+    const item = connectionRow({
+      state: "unreachable",
+      label: "acme.atlassian.net",
+      message: "Could not reach Xray",
+      sync: { syncedAt: Date.now() - 2 * 3_600_000, stale: true },
+    });
+    expect(item.description).toBe("Unreachable · showing data synced 2h ago");
+    expect(String(item.tooltip)).toBe("Could not reach Xray · showing cached data synced 2h ago");
+  });
+
+  it("re-renders when only the sync freshness changes", () => {
+    const p = provider(SNAPSHOT);
+    let refreshes = 0;
+    p.onDidChangeTreeData(() => { refreshes += 1; });
+    p.setConnectionIndicator({ state: "ok", label: "acme", message: "up", sync: { syncedAt: 1000, stale: false } });
+    expect(refreshes).toBe(1);
+    p.setConnectionIndicator({ state: "ok", label: "acme", message: "up", sync: { syncedAt: 2000, stale: false } });
+    expect(refreshes).toBe(2);
   });
 });

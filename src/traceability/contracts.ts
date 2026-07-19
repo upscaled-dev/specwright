@@ -41,6 +41,9 @@ export interface TestCaseMetadata {
   readonly status?: NormalizedStatus | undefined;
   // Stored Gherkin backing the P1 drift indicator; absent until the client slice populates it.
   readonly gherkin?: string | undefined;
+  // Canonical keys of the requirements this test covers (flat, provider-neutral). The coverage
+  // capability and P4 board read these; the tree join ignores them today.
+  readonly coverageKeys?: readonly string[] | undefined;
 }
 
 // The scope of a sync. `projectKeys` requests a full catalogue for orphan detection (an empty set

@@ -331,6 +331,30 @@
           "type": "string",
           "default": "",
           "description": "Your Jira/Xray Cloud site host, e.g. 'acme.atlassian.net'. Used to build browse links (https://{siteUrl}/browse/{KEY}) for the 'Open in tracker' action."
+        },
+        "playwrightBddRunner.xray.apiRegion": {
+          "type": "string",
+          "enum": [
+            "global",
+            "us",
+            "eu",
+            "au"
+          ],
+          "default": "global",
+          "description": "Xray Cloud API region host used for authentication, GraphQL, and sync. 'global' uses xray.cloud.getxray.app; the others use the matching regional host (us/eu/au). Must match your Xray site's region."
+        },
+        "playwrightBddRunner.xray.syncProjectKeys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Jira project keys (e.g. 'CALC') to fetch in full when syncing, so orphan Xray tests (a test with no local scenario) can be detected for those projects. Empty means only the projects your local @TEST_ tags reference are fetched — orphans are not reported."
+        },
+        "playwrightBddRunner.xray.cacheTtlMinutes": {
+          "type": "number",
+          "default": 15,
+          "description": "How long a synced Xray snapshot is considered fresh, in minutes. Past this the panel dims the data and marks it stale — display only; nothing is re-fetched until you run Sync again."
         }
       }
     },
@@ -510,6 +534,12 @@
         "icon": "$(link)"
       },
       {
+        "command": "playwrightBddRunner.traceability.sync",
+        "title": "Sync Traceability",
+        "category": "Specwright",
+        "icon": "$(sync)"
+      },
+      {
         "command": "playwrightBddRunner.traceability.manageConnection",
         "title": "Manage Xray Connection",
         "category": "Specwright",
@@ -641,6 +671,10 @@
           "when": "config.playwrightBddRunner.traceability.enablePanel"
         },
         {
+          "command": "playwrightBddRunner.traceability.sync",
+          "when": "playwrightBddRunner.traceability.connected"
+        },
+        {
           "command": "playwrightBddRunner.traceability.hidePanel",
           "when": "false"
         }
@@ -660,6 +694,11 @@
           "command": "playwrightBddRunner.exportScenarios",
           "when": "view == playwrightBddRunner.stepsExplorer",
           "group": "navigation@3"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.sync",
+          "when": "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected",
+          "group": "navigation@0"
         },
         {
           "command": "playwrightBddRunner.traceability.manageConnection",

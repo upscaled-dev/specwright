@@ -223,6 +223,21 @@ export const window = {
   showInputBox: (..._args: unknown[]): Promise<string | undefined> => Promise.resolve(undefined),
   showSaveDialog: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showTextDocument: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
+  // Runs the task immediately with a no-op progress reporter and a never-cancelled token. Tests that
+  // need cancellation drive the AbortSignal directly rather than through this token.
+  withProgress: <R>(
+    _options: unknown,
+    task: (
+      progress: { report: (value: unknown) => void },
+      token: { isCancellationRequested: boolean; onCancellationRequested: (listener: () => void) => { dispose: () => void } }
+    ) => Thenable<R>
+  ): Thenable<R> =>
+    Promise.resolve(
+      task(
+        { report: () => { /* no-op */ } },
+        { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) }
+      )
+    ),
   createWebviewPanel: (
     viewType: string,
     title: string,
@@ -600,6 +615,7 @@ export const extensions = {
 export { Position, Range, Location, Uri };
 
 export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
+export const ProgressLocation = { SourceControl: 1, Window: 10, Notification: 15 };
 export const ViewColumn = { Active: -1, Beside: -2, One: 1, Two: 2, Three: 3 };
 export const EndOfLine = { LF: 1, CRLF: 2 };
 export const TestRunProfileKind = { Run: 1, Debug: 2, Coverage: 3 };

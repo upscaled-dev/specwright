@@ -1,0 +1,331 @@
+import * as vscode from "vscode";
+import { ExtensionConfig } from "../core/extension-config";
+import { Logger } from "../utils/logger";
+import {
+  MetadataCapability,
+  RemoteMetadataSnapshot,
+  SyncScope,
+  TestCaseMetadata,
+} from "../traceability/contracts";
+import { XrayAbortError, XrayCachePage, XrayClient, XrayFetchOutcome } from "./xray-client";
+import { CachedMetadata, CACHE_SCHEMA_VERSION, XrayMetadataCache } from "./xray-metadata-cache";
+
+const GHERKIN_KEYWORD =
+  /^(Feature|Background|Scenario Outline|Scenario|Examples|Given|When|Then|And|But)\b/;
+
+interface MetadataState {
+  tests: Map<string, TestCaseMetadata>;
+  fetchedScopes: string[];
+  syncedAt: number | undefined;
+  completeness: "complete" | "partial" | "unknown";
+  errors: string[];
+  pages: XrayCachePage[];
+}
+
+function emptyState(): MetadataState {
+  return {
+    tests: new Map(),
+    fetchedScopes: [],
+    syncedAt: undefined,
+    completeness: "unknown",
+    errors: [],
+    pages: [],
+  };
+}
+
+function stateFromCached(cached: CachedMetadata): MetadataState {
+  return {
+    tests: new Map(cached.tests.map((test) => [test.key, test])),
+    fetchedScopes: [...cached.fetchedScopes],
+    syncedAt: cached.syncedAt,
+    completeness: cached.completeness,
+    errors: [...cached.errors],
+    pages: [...cached.pages],
+  };
+}
+
+function dedupe(keys: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const key of keys) {
+    if (!out.includes(key)) {
+      out.push(key);
+    }
+  }
+  return out;
+}
+
+export interface XrayMetadataDeps {
+  client: XrayClient;
+  cache: XrayMetadataCache;
+  config: ExtensionConfig;
+  logger: Logger;
+  // The non-secret account identifier (Xray client id) the current state must belong to. Read live
+  // so a credential change re-evaluates it; `undefined` when no credentials are stored.
+  account: () => Promise<string | undefined>;
+  onCredentialsChange: vscode.Event<void>;
+  now?: (() => number) | undefined;
+}
+
+/**
+ * The Xray `metadata` capability. Offline-first: it loads last-known state from the cache on
+ * construction (rendering the tree instantly without a network call), then `sync` batch-fetches
+ * test keys plus the configured project catalogue, maps to a neutral snapshot with honest
+ * `completeness`/`errors`, persists it, and fires `onDidChange`. A partial or failed fetch never
+ * upgrades completeness to a value that would let the model derive authoritative orphans.
+ *
+ * State is stamped with the account it belongs to and guarded by an account epoch, so an account
+ * switch on the same site never surfaces the prior account's metadata: the JWT is dropped, in-memory
+ * state is reset and reloaded for the new account, and any sync that straddles the switch is
+ * discarded wholesale (no commit, no persist, no fire).
+ */
+export class XrayMetadataCapability implements MetadataCapability, vscode.Disposable {
+  private readonly _onDidChange = new vscode.EventEmitter<void>();
+  public readonly onDidChange = this._onDidChange.event;
+  private readonly now: () => number;
+  private readonly credentialsSub: vscode.Disposable;
+  private state: MetadataState = emptyState();
+  // The account the in-memory state belongs to, and an epoch bumped on every credential change.
+  private accountStamp: string | undefined;
+  private accountEpoch = 0;
+
+  constructor(private readonly deps: XrayMetadataDeps) {
+    this.now = deps.now ?? ((): number => Date.now());
+    this.credentialsSub = deps.onCredentialsChange(() => this.onCredentialsChanged());
+    // Fire-and-forget: loadFromCache swallows and logs its own failures, so nothing here can reject.
+    this.loadFromCache().catch(() => undefined);
+  }
+
+  // Any credential-store change drops the JWT (covers same-account secret rotation) and, if the
+  // account actually changed or was cleared, resets and reloads state for the new account.
+  public onCredentialsChanged(): void {
+    this.deps.client.invalidateAuth();
+    this.accountEpoch += 1;
+    this.reconcileAccount().catch((error) => {
+      this.deps.logger.warn(`Xray metadata account reconcile failed: ${String(error)}`);
+    });
+  }
+
+  private async reconcileAccount(): Promise<void> {
+    const epoch = this.accountEpoch;
+    const account = await this.deps.account();
+    if (epoch !== this.accountEpoch) {
+      return;
+    }
+    if (account === this.accountStamp) {
+      return; // same account (secret rotation only) — keep the in-memory state
+    }
+    // Account switched or cleared: drop the prior account's state before anything can render it.
+    this.state = emptyState();
+    this.accountStamp = account;
+    if (account !== undefined) {
+      let cached: CachedMetadata | undefined;
+      try {
+        cached = await this.deps.cache.load();
+      } catch (error) {
+        this.deps.logger.warn(`Xray metadata cache load failed: ${String(error)}`);
+      }
+      if (epoch !== this.accountEpoch) {
+        return;
+      }
+      if (cached) {
+        this.state = stateFromCached(cached);
+      }
+    }
+    this._onDidChange.fire();
+  }
+
+  public snapshot(): RemoteMetadataSnapshot {
+    const ttlMs = Math.max(0, this.deps.config.xrayCacheTtlMinutes) * 60_000;
+    const stale =
+      this.state.syncedAt !== undefined && this.now() - this.state.syncedAt > ttlMs;
+    return {
+      tests: new Map(this.state.tests),
+      fetchedScopes: [...this.state.fetchedScopes],
+      syncedAt: this.state.syncedAt,
+      stale,
+      completeness: this.state.completeness,
+      errors: [...this.state.errors],
+    };
+  }
+
+  public async sync(scope: SyncScope, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      return;
+    }
+    const projectKeys = dedupe(scope.projectKeys ?? []);
+    const testKeys = dedupe(scope.testKeys ?? []);
+    if (projectKeys.length === 0 && testKeys.length === 0) {
+      // Nothing to fetch and no errors possible — leave state, persistence, and listeners untouched.
+      return;
+    }
+    // Capture the account and epoch at entry: the epoch guards against a mid-sync switch, and the
+    // captured account is what persist keys off (never a live read at write time), so a cross-window
+    // rotation landing between the guard and the write can't retarget the cache key (§7 TOCTOU). The
+    // stamp is the account whose cached token/state we hold; before the first stamp is established a
+    // live read is correct, since the first sync authenticates fresh with the current credentials.
+    const epoch = this.accountEpoch;
+    const account = this.accountStamp ?? (await this.deps.account());
+
+    const merged = new Map<string, TestCaseMetadata>();
+    const pages: XrayCachePage[] = [];
+    const errors: string[] = [];
+    let catalogueComplete = projectKeys.length > 0;
+
+    try {
+      for (const projectKey of projectKeys) {
+        const outcome = await this.deps.client.fetchProjectCatalogue(projectKey, signal);
+        this.absorb(merged, pages, errors, outcome);
+        if (!outcome.complete || outcome.errors.length > 0) {
+          catalogueComplete = false;
+        }
+      }
+      if (testKeys.length > 0) {
+        const outcome = await this.deps.client.fetchTestsByKeys(testKeys, signal);
+        this.absorb(merged, pages, errors, outcome);
+        // A test-key batch is never a full catalogue, so it can only ever yield a partial snapshot.
+        catalogueComplete = false;
+      }
+    } catch (error) {
+      if (error instanceof XrayAbortError || signal?.aborted) {
+        return;
+      }
+      throw error;
+    }
+    if (signal?.aborted) {
+      return;
+    }
+    // Discard everything this sync fetched — no state commit, no persist, no fire — on either
+    // mid-sync account-change window:
+    //   (a) the epoch moved: a credential change landed after entry;
+    //   (b) the stamp drifted from the captured account: this sync entered after the epoch bump but
+    //       before reconcile's restamp, so its JWT had been invalidated and it authenticated fresh
+    //       with the NEW account's credentials while capturing the OLD stamp — its data belongs to
+    //       the new account and must not land under the old one.
+    if (
+      epoch !== this.accountEpoch ||
+      (this.accountStamp !== undefined && this.accountStamp !== account)
+    ) {
+      return;
+    }
+
+    this.logDriftBasis(merged);
+
+    const gotData = merged.size > 0;
+    // Total failure with data already on screen: keep the previous tests + completeness rather than
+    // blanking the panel or lying about coverage — only surface the errors and re-emit.
+    if (!gotData && errors.length > 0 && this.state.tests.size > 0) {
+      this.state = { ...this.state, errors };
+      this._onDidChange.fire();
+      return;
+    }
+
+    const completeness = this.completenessFor(projectKeys.length > 0, catalogueComplete, errors, gotData);
+
+    this.state = {
+      tests: merged,
+      fetchedScopes: [...projectKeys, ...testKeys],
+      syncedAt: this.now(),
+      completeness,
+      errors,
+      pages,
+    };
+    await this.persist(account);
+    this._onDidChange.fire();
+  }
+
+  // Only a full catalogue fetch (project scope, every page complete, no errors) is authoritative
+  // enough for the model to derive orphans. A key-batch-only or partial fetch is "partial"; no data
+  // at all is "unknown".
+  private completenessFor(
+    hadProjectScope: boolean,
+    catalogueComplete: boolean,
+    errors: readonly string[],
+    gotData: boolean
+  ): MetadataState["completeness"] {
+    if (hadProjectScope && catalogueComplete && errors.length === 0) {
+      return "complete";
+    }
+    return gotData ? "partial" : "unknown";
+  }
+
+  private absorb(
+    merged: Map<string, TestCaseMetadata>,
+    pages: XrayCachePage[],
+    errors: string[],
+    outcome: XrayFetchOutcome
+  ): void {
+    for (const record of outcome.tests) {
+      merged.set(record.key, record);
+    }
+    pages.push(...outcome.pages);
+    errors.push(...outcome.errors);
+  }
+
+  // §8-P1 drift-basis guard: for the user's first real sync, confirm the local reconstruction's
+  // comparison basis against real stored-gherkin shapes — logging only booleans/counts, never the
+  // Gherkin text (the key is a tag already in the repo, not a secret).
+  private logDriftBasis(tests: Map<string, TestCaseMetadata>): void {
+    for (const test of tests.values()) {
+      if (test.gherkin === undefined) {
+        continue;
+      }
+      const lines = test.gherkin.replaceAll("\r\n", "\n").split("\n");
+      const firstContent = lines.find((line) => line.trim() !== "") ?? "";
+      const startsWithKeyword = GHERKIN_KEYWORD.test(firstContent.trim());
+      const tagLineCount = lines.filter((line) => line.trim().startsWith("@")).length;
+      const leadingIndent = lines.some((line) => line.trim() !== "" && /^\s/.test(line));
+      this.deps.logger.info(
+        `drift-basis ${test.key}: startsWithKeyword=${startsWithKeyword} tagLines=${tagLineCount} lines=${lines.length} leadingIndent=${leadingIndent}`
+      );
+    }
+  }
+
+  private async loadFromCache(): Promise<void> {
+    const epoch = this.accountEpoch;
+    const account = await this.deps.account();
+    let cached: CachedMetadata | undefined;
+    try {
+      cached = await this.deps.cache.load();
+    } catch (error) {
+      this.deps.logger.warn(`Xray metadata cache load failed: ${String(error)}`);
+      return;
+    }
+    // A credential change during the load supersedes it — reconcileAccount owns the state now.
+    if (epoch !== this.accountEpoch) {
+      return;
+    }
+    this.accountStamp = account;
+    if (!cached) {
+      return;
+    }
+    this.state = stateFromCached(cached);
+    this._onDidChange.fire();
+  }
+
+  // `account` is the identifier captured at sync entry, not a live read — the data belongs to that
+  // account, so it is keyed there even if the live credentials have since rotated.
+  private async persist(account: string | undefined): Promise<void> {
+    if (this.state.syncedAt === undefined) {
+      return;
+    }
+    const data: CachedMetadata = {
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      syncedAt: this.state.syncedAt,
+      completeness: this.state.completeness,
+      fetchedScopes: [...this.state.fetchedScopes],
+      errors: [...this.state.errors],
+      tests: [...this.state.tests.values()],
+      pages: [...this.state.pages],
+    };
+    try {
+      await this.deps.cache.saveForAccount(account, data);
+    } catch (error) {
+      this.deps.logger.warn(`Xray metadata cache save failed: ${String(error)}`);
+    }
+  }
+
+  public dispose(): void {
+    this.credentialsSub.dispose();
+    this._onDidChange.dispose();
+  }
+}

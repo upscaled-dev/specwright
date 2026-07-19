@@ -136,7 +136,10 @@ export function runAdapterContractTests(makeHarness: () => AdapterContractHarnes
       expect(url).toContain(mappedKey);
     });
 
-    it("records a published artifact and keeps its target listed", async () => {
+    // Publishing is an optional capability (P3 for Xray); gate the test on its presence so an
+    // adapter that has yet to implement it still runs the connection/metadata contract cleanly.
+    const supportsPublishing = makeHarness().adapter.resultPublishing !== undefined;
+    (supportsPublishing ? it : it.skip)("records a published artifact and keeps its target listed", async () => {
       const harness = makeHarness();
       await harness.connect();
       const publishing = harness.adapter.resultPublishing;

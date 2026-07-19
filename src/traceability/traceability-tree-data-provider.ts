@@ -36,10 +36,18 @@ interface InfoNode {
   label: string;
 }
 
+export interface ConnectionSyncStatus {
+  syncedAt: number;
+  stale: boolean;
+}
+
 export interface ConnectionIndicator {
   state: "checking" | "ok" | "auth-failed" | "unreachable";
   label: string;
   message: string;
+  // Present once a sync has produced cached data; drives the "synced Nm ago" description (§7,
+  // display-only). Absent before the first sync so the row shows the bare connection state.
+  sync?: ConnectionSyncStatus | undefined;
 }
 
 interface ConnectionNode extends ConnectionIndicator {
@@ -74,6 +82,16 @@ function connectionIcon(state: ConnectionIndicator["state"]): vscode.ThemeIcon {
   }
 }
 
+function sameSync(a: ConnectionSyncStatus | undefined, b: ConnectionSyncStatus | undefined): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return false;
+  }
+  return a.syncedAt === b.syncedAt && a.stale === b.stale;
+}
+
 function sameIndicator(
   a: ConnectionIndicator | undefined,
   b: ConnectionIndicator | undefined
@@ -84,15 +102,55 @@ function sameIndicator(
   if (!a || !b) {
     return false;
   }
-  return a.state === b.state && a.label === b.label && a.message === b.message;
+  return a.state === b.state && a.label === b.label && a.message === b.message && sameSync(a.sync, b.sync);
+}
+
+// Coarse "time ago" for the sync staleness suffix (§7). Minutes below an hour, hours below a day,
+// then days — enough resolution for a manually-triggered sync.
+export function formatSyncedAgo(elapsedMs: number): string {
+  const minutes = Math.floor(elapsedMs / 60_000);
+  if (minutes < 1) {
+    return "just now";
+  }
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+// Display-only staleness text (§7): fresh → "Connected · synced 12m ago"; past the TTL →
+// "… (stale)"; unreachable but holding cached data → "Unreachable · showing data synced 2h ago".
+// The full sentence rides in the tooltip.
+function connectionText(node: ConnectionNode, nowMs: number): { description: string; tooltip: string } {
+  const base = CONNECTION_DESCRIPTION[node.state];
+  if (!node.sync) {
+    return { description: base, tooltip: node.message };
+  }
+  const ago = formatSyncedAgo(nowMs - node.sync.syncedAt);
+  if (node.state === "unreachable") {
+    return {
+      description: `Unreachable · showing data synced ${ago}`,
+      tooltip: `${node.message} · showing cached data synced ${ago}`,
+    };
+  }
+  const staleSuffix = node.sync.stale ? " (stale)" : "";
+  return {
+    description: `${base} · synced ${ago}${staleSuffix}`,
+    tooltip: `${node.message} · synced ${ago}${staleSuffix}`,
+  };
 }
 
 // The description stays provider-neutral; the provider-specific detail lives in the tooltip. The
 // row's command opens the setup panel so a click resolves the connection in place.
 function connectionTreeItem(node: ConnectionNode): vscode.TreeItem {
   const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
-  item.description = CONNECTION_DESCRIPTION[node.state];
-  item.tooltip = node.message;
+  const { description, tooltip } = connectionText(node, Date.now());
+  item.description = description;
+  item.tooltip = tooltip;
   item.contextValue = "traceabilityConnection";
   item.iconPath = connectionIcon(node.state);
   item.command = { command: "playwrightBddRunner.traceability.connect", title: "Set Up Connection" };

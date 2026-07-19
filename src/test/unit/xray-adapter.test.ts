@@ -2,12 +2,12 @@ import { describe, it, expect } from "vitest";
 import type * as vscode from "vscode";
 import { ExtensionConfig } from "../../core/extension-config";
 import {
-  createXrayAdapterFactory,
   JIRA_KEY_SHAPE,
   normalizeSiteUrl,
   projectFromKey,
   XrayAdapter,
 } from "../../xray/xray-adapter";
+import { createXrayAdapterFactory } from "../../xray/xray-adapter-factory";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import type {
   XrayConnectionOutcome,
@@ -145,6 +145,18 @@ function mutableConfig(values: Record<string, unknown>): ExtensionConfig {
   return ExtensionConfig.create(workspaceConfig, false);
 }
 
+function fakeMemento(): vscode.Memento {
+  const map = new Map<string, unknown>();
+  return {
+    get: <T>(key: string): T | undefined => map.get(key) as T | undefined,
+    update: (key: string, value: unknown): Promise<void> => {
+      map.set(key, value);
+      return Promise.resolve();
+    },
+    keys: (): readonly string[] => [...map.keys()],
+  } as unknown as vscode.Memento;
+}
+
 interface ProbeCall {
   deps: XrayConnectionTestDeps;
   options: XrayProbeOptions | undefined;
@@ -175,7 +187,7 @@ describe("createXrayAdapterFactory verify", () => {
       site: "new.atlassian.net",
       message: "Connected to new.atlassian.net",
     });
-    const adapter = createXrayAdapterFactory(store, probe).create({ config, logger: Logger.create() });
+    const adapter = createXrayAdapterFactory(store, probe, fakeMemento()).create({ config, logger: Logger.create() });
 
     // The site is read at verify time, not captured at create time.
     values["xray.siteUrl"] = "new.atlassian.net";
@@ -197,7 +209,7 @@ describe("createXrayAdapterFactory verify", () => {
       site: "acme.atlassian.net",
       message: "Could not reach Xray — check your network connection.",
     });
-    const adapter = createXrayAdapterFactory(store, probe).create({ config, logger: Logger.create() });
+    const adapter = createXrayAdapterFactory(store, probe, fakeMemento()).create({ config, logger: Logger.create() });
 
     expect(await adapter.connection!.verify!()).toEqual({
       status: "unreachable",
@@ -214,7 +226,7 @@ describe("createXrayAdapterFactory verify", () => {
       site: "acme.atlassian.net",
       message: "Authentication failed — check your client ID and secret.",
     });
-    const adapter = createXrayAdapterFactory(store, probe).create({ config, logger: Logger.create() });
+    const adapter = createXrayAdapterFactory(store, probe, fakeMemento()).create({ config, logger: Logger.create() });
 
     expect(await adapter.connection!.verify!()).toEqual({
       status: "auth-failed",

@@ -10,10 +10,12 @@ import {
   XrayConnectionTestDeps,
   XrayProbeOptions,
 } from "./xray-connection-test";
+import { parseXrayRegion } from "./xray-region";
 import { XraySetupPanel } from "./xray-setup-panel";
 
 const CONFIG_NAMESPACE = "playwrightBddRunner";
 const SITE_URL_SETTING = "xray.siteUrl";
+const API_REGION_SETTING = "xray.apiRegion";
 const SETTINGS_QUERY = "playwrightBddRunner.traceability";
 
 const COMMAND = {
@@ -111,6 +113,13 @@ export class XrayConnectionCommands {
     return vscode.workspace.getConfiguration(CONFIG_NAMESPACE).get<string>(SITE_URL_SETTING, "");
   }
 
+  // Region is threaded the same fresh way as the site (never the ExtensionConfig snapshot), so a
+  // probe fired right after a settings edit reads the just-selected region.
+  private freshRegion(): ReturnType<typeof parseXrayRegion> {
+    const raw = vscode.workspace.getConfiguration(CONFIG_NAMESPACE).get<string>(API_REGION_SETTING, "global");
+    return parseXrayRegion(raw);
+  }
+
   public async saveConnection(site: string, clientId: string, clientSecret: string): Promise<string> {
     const trimmedSite = site.trim();
     if (normalizeSiteUrl(trimmedSite) === "") {
@@ -166,6 +175,7 @@ export class XrayConnectionCommands {
   private testDeps(site: string): XrayConnectionTestDeps {
     return {
       site,
+      region: this.freshRegion(),
       credentialStore: this.credentialStore,
       logger: this.logger,
       knownTestKeys: this.knownTestKeys,
