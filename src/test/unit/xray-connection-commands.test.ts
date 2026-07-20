@@ -114,13 +114,22 @@ async function openPanel(commands: XrayConnectionCommands): Promise<StubPanel> {
 }
 
 function saveMessage(
-  overrides: Partial<{ site: string; clientId: string; clientSecret: string; test: boolean }> = {}
+  overrides: Partial<{
+    site: string;
+    clientId: string;
+    clientSecret: string;
+    jiraEmail: string;
+    jiraToken: string;
+    test: boolean;
+  }> = {}
 ): Record<string, unknown> {
   return {
     type: "save",
     site: "acme.atlassian.net",
     clientId: "id",
     clientSecret: "secret",
+    jiraEmail: "",
+    jiraToken: "",
     test: false,
     ...overrides,
   };
@@ -318,7 +327,7 @@ describe("Xray setup panel save flow", () => {
 
     expect(map.get("specwright.xray:acme.atlassian.net:clientId")).toBe("id");
     expect(map.get("specwright.xray:acme.atlassian.net:clientSecret")).toBe("secret");
-    expect(panel.webview.__posted).toContainEqual({ type: "saved", site: "acme.atlassian.net" });
+    expect(panel.webview.__posted).toContainEqual({ type: "saved", site: "acme.atlassian.net", jira: false });
   });
 
   it("triggers an auth-only verify after a plain save and flips the dot to its outcome", async () => {
@@ -638,6 +647,187 @@ describe("Xray setup panel connection verification", () => {
     const terminal = connStates(panel).filter((m) => m.state !== "checking");
     expect(terminal).toHaveLength(1);
     expect(terminal[0]?.state).toBe("disconnected");
+  });
+});
+
+describe("Xray setup panel Jira access", () => {
+  function jiraKey(field: "jiraEmail" | "jiraToken", site = "acme.atlassian.net"): string {
+    return `specwright.xray:${site}:${field}`;
+  }
+
+  it("masks both Jira fields when Jira credentials are stored", async () => {
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    await store.setJiraCredentials("acme.atlassian.net", "me@example.com", "jira-token");
+
+    await commands.connect();
+
+    const html = win.__webviewPanels[0]!.webview.html;
+    expect(html).toContain(`<input id="jiraEmail" type="text" placeholder="you@example.com" value="${MASK}"`);
+    expect(html).toContain(`<input id="jiraToken" type="password" placeholder="Jira API token" value="${MASK}"`);
+  });
+
+  it("leaves both Jira fields empty when no Jira credentials are stored", async () => {
+    const { commands } = makeCommands("acme.atlassian.net");
+
+    await commands.connect();
+
+    const html = win.__webviewPanels[0]!.webview.html;
+    expect(html).toContain('<input id="jiraEmail" type="text" placeholder="you@example.com" value=""');
+    expect(html).toContain('<input id="jiraToken" type="password" placeholder="Jira API token" value=""');
+  });
+
+  it("rejects a lone Jira email with a both-or-neither error and stores nothing", async () => {
+    stubWorkspaceConfig();
+    const { commands, map } = makeCommands("acme.atlassian.net");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue(connected("acme.atlassian.net"));
+    const panel = await openPanel(commands);
+
+    await panel.__receive(saveMessage({ jiraEmail: "me@example.com", jiraToken: "" }));
+
+    const posted = panel.webview.__posted as Array<{ type: string; errors?: { jiraToken?: string } }>;
+    expect(posted.at(-1)?.type).toBe("validation");
+    expect(posted.at(-1)?.errors?.jiraToken).toBeTruthy();
+    expect(map.size).toBe(0);
+  });
+
+  it("stores both trimmed Jira secrets and reports jira: true on save", async () => {
+    stubWorkspaceConfig();
+    const { commands, map } = makeCommands("acme.atlassian.net");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue(connected("acme.atlassian.net"));
+    const panel = await openPanel(commands);
+
+    await panel.__receive(saveMessage({ jiraEmail: "  me@example.com  ", jiraToken: "  jira-token  " }));
+
+    expect(map.get(jiraKey("jiraEmail"))).toBe("me@example.com");
+    expect(map.get(jiraKey("jiraToken"))).toBe("jira-token");
+    expect(panel.webview.__posted).toContainEqual({ type: "saved", site: "acme.atlassian.net", jira: true });
+  });
+
+  it("clears stored Jira secrets when both Jira fields are saved blank", async () => {
+    stubWorkspaceConfig();
+    const { commands, store, map } = makeCommands("acme.atlassian.net");
+    await store.setJiraCredentials("acme.atlassian.net", "me@example.com", "jira-token");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue(connected("acme.atlassian.net"));
+    const panel = await openPanel(commands);
+    await flush();
+
+    await panel.__receive(saveMessage({ jiraEmail: "", jiraToken: "" }));
+
+    expect(map.get(jiraKey("jiraEmail"))).toBeUndefined();
+    expect(map.get(jiraKey("jiraToken"))).toBeUndefined();
+    expect(panel.webview.__posted).toContainEqual({ type: "saved", site: "acme.atlassian.net", jira: false });
+  });
+
+  it("rotates only the Jira token while a masked Jira email keeps the stored value", async () => {
+    stubWorkspaceConfig();
+    const { commands, store, map } = makeCommands("acme.atlassian.net");
+    await store.setJiraCredentials("acme.atlassian.net", "stored@example.com", "stored-token");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue(connected("acme.atlassian.net"));
+    const panel = await openPanel(commands);
+    await flush();
+
+    await panel.__receive(saveMessage({ jiraEmail: MASK, jiraToken: "rotated-token" }));
+
+    expect(map.get(jiraKey("jiraEmail"))).toBe("stored@example.com");
+    expect(map.get(jiraKey("jiraToken"))).toBe("rotated-token");
+  });
+
+  it("rejects a masked Jira field when the host changed and never carries old Jira creds over", async () => {
+    stubWorkspaceConfig();
+    const { commands, store, map } = makeCommands("acme.atlassian.net");
+    await store.setJiraCredentials("acme.atlassian.net", "stored@example.com", "stored-token");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue(connected("acme.atlassian.net"));
+    const panel = await openPanel(commands);
+    await flush();
+
+    await panel.__receive(saveMessage({ site: "other.atlassian.net", jiraEmail: MASK, jiraToken: MASK }));
+
+    const posted = panel.webview.__posted as Array<{
+      type: string;
+      errors?: { jiraEmail?: string; jiraToken?: string };
+    }>;
+    expect(posted.at(-1)?.type).toBe("validation");
+    expect(posted.at(-1)?.errors?.jiraEmail).toBe("Enter the Jira credentials for the new site");
+    expect(map.get(jiraKey("jiraEmail", "other.atlassian.net"))).toBeUndefined();
+    expect(map.get(jiraKey("jiraEmail"))).toBe("stored@example.com");
+  });
+
+  it("never leaks the Jira token into the HTML or the saved message", async () => {
+    stubWorkspaceConfig();
+    const { commands } = makeCommands("acme.atlassian.net");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue(connected("acme.atlassian.net"));
+    const panel = await openPanel(commands);
+    const token = "super-secret-jira-token";
+
+    await panel.__receive(saveMessage({ jiraEmail: "me@example.com", jiraToken: token }));
+
+    expect(panel.webview.html).not.toContain(token);
+    expect(JSON.stringify(panel.webview.__posted)).not.toContain(token);
+  });
+
+  it("posts a project-view carrying Jira and Xray data after a full probe", async () => {
+    stubWorkspaceConfig();
+    const { commands } = makeCommands("acme.atlassian.net");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue({
+      ok: true,
+      stage: "ok",
+      site: "acme.atlassian.net",
+      message: "Connected to acme.atlassian.net",
+      projects: [
+        { project: "CALC", totalTests: 5, existsOnSite: true },
+        { project: "MATH", totalTests: 0, existsOnSite: false },
+      ],
+      jiraProjects: [{ key: "CALC", name: "Calculator" }],
+    });
+    const panel = await openPanel(commands);
+
+    await panel.__receive(saveMessage({ test: true }));
+
+    const view = (panel.webview.__posted as Array<{ type: string }>).find((m) => m.type === "project-view");
+    expect(view).toEqual({
+      type: "project-view",
+      hasJira: true,
+      jiraProjects: [{ key: "CALC", name: "Calculator" }],
+      jiraTruncated: false,
+      probed: [
+        { project: "CALC", totalTests: 5, existsOnSite: true },
+        { project: "MATH", totalTests: 0, existsOnSite: false },
+      ],
+    });
+  });
+
+  it("marks the project-view truncated when the probe reports a capped Jira list", async () => {
+    stubWorkspaceConfig();
+    const { commands } = makeCommands("acme.atlassian.net");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue({
+      ok: true,
+      stage: "ok",
+      site: "acme.atlassian.net",
+      message: "Connected to acme.atlassian.net",
+      projects: [{ project: "CALC", totalTests: 0 }],
+      jiraProjects: [{ key: "OTHER", name: "Other" }],
+      jiraTruncated: true,
+    });
+    const panel = await openPanel(commands);
+
+    await panel.__receive(saveMessage({ test: true }));
+
+    const view = (panel.webview.__posted as Array<{ type: string; jiraTruncated?: boolean }>).find(
+      (m) => m.type === "project-view"
+    );
+    expect(view?.jiraTruncated).toBe(true);
+  });
+
+  it("posts no project-view for the auth-only open verify", async () => {
+    stubWorkspaceConfig();
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    await store.setCredentials("acme.atlassian.net", "id", "secret");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue(connected("acme.atlassian.net"));
+    const panel = await openPanel(commands);
+    await flush();
+
+    const views = (panel.webview.__posted as Array<{ type: string }>).filter((m) => m.type === "project-view");
+    expect(views).toHaveLength(0);
   });
 });
 

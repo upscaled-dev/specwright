@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import { normalizeSiteUrl } from "./xray-adapter";
-import { XrayConnectionOutcome } from "./xray-connection-test";
-import { XrayCredentials } from "./xray-credential-store";
+import { JiraProject } from "./jira-project-search";
+import { XrayConnectionOutcome, XrayProjectSummary } from "./xray-connection-test";
+import { XrayCredentials, XrayJiraCredentials } from "./xray-credential-store";
 
 const VIEW_TYPE = "playwrightBddRunner.xraySetup";
 
@@ -16,6 +17,11 @@ export interface XraySetupDelegate {
   hasCredentials(site: string): Promise<boolean>;
   getCredentials(site: string): Promise<XrayCredentials | undefined>;
   saveConnection(site: string, clientId: string, clientSecret: string): Promise<string>;
+  // Optional Jira access (§6 reserved slots): both-or-neither, stored/cleared for the saved host.
+  hasJiraCredentials(site: string): Promise<boolean>;
+  getJiraCredentials(site: string): Promise<XrayJiraCredentials | undefined>;
+  saveJira(site: string, email: string, token: string): Promise<void>;
+  clearJira(site: string): Promise<void>;
   // Full handshake + shape/project probes (Save & Test).
   probeConnection(site: string): Promise<XrayConnectionOutcome>;
   // Cheap auth-only handshake; drives the connection dot on open and after a plain Save.
@@ -26,6 +32,8 @@ export interface XraySetupValidationErrors {
   site?: string | undefined;
   clientId?: string | undefined;
   clientSecret?: string | undefined;
+  jiraEmail?: string | undefined;
+  jiraToken?: string | undefined;
 }
 
 type ConnState = "connected" | "disconnected" | "checking";
@@ -35,17 +43,36 @@ type ConnState = "connected" | "disconnected" | "checking";
 // stage can show a failure message while the dot stays connected (auth passed).
 type OutgoingMessage =
   | { type: "validation"; errors: XraySetupValidationErrors }
-  | { type: "saved"; site: string }
+  | { type: "saved"; site: string; jira: boolean }
   | { type: "test-result"; ok: boolean; message: string }
   | { type: "error"; message: string }
-  | { type: "conn-state"; state: ConnState; label: string };
+  | { type: "conn-state"; state: ConnState; label: string }
+  | {
+      type: "project-view";
+      hasJira: boolean;
+      jiraProjects: JiraProject[];
+      jiraTruncated: boolean;
+      probed: XrayProjectSummary[];
+      jiraError?: string | undefined;
+    };
 
 interface SaveMessage {
   type: "save";
   site: string;
   clientId: string;
   clientSecret: string;
+  jiraEmail: string;
+  jiraToken: string;
   test: boolean;
+}
+
+interface ResolvedJira {
+  email: string;
+  token: string;
+  // true → both present, store; false → both absent, clear/skip.
+  store: boolean;
+  emailError?: string | undefined;
+  tokenError?: string | undefined;
 }
 
 interface VerifyOptions {
@@ -100,10 +127,11 @@ function escapeAttr(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function renderHtml(site: string, hasCredentials: boolean): string {
+function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): string {
   const nonce = randomBytes(16).toString("hex");
   const siteValue = escapeAttr(site);
   const credentialValue = hasCredentials ? MASK : "";
+  const jiraValue = hasJira ? MASK : "";
   // Always emit the hint so the retained panel can un-hide it after a first-time save without a
   // re-render (a re-render would reload the page and race the posted `saved` message).
   const credHint = `<p class="hint" id="cred-hint"${hasCredentials ? "" : " hidden"}>Credentials are stored for this site. The masked fields keep the stored credentials — type over a field to replace it.</p>`;
@@ -181,6 +209,13 @@ function renderHtml(site: string, hasCredentials: boolean): string {
   button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
   #status { margin-top: 1rem; min-height: 1.2em; color: var(--vscode-descriptionForeground); }
   #status.error { color: var(--vscode-errorForeground); }
+  h2 { font-size: 1rem; font-weight: 600; margin: 1.75rem 0 0; }
+  #project-view:empty { display: none; }
+  #project-view { margin-top: 1.25rem; }
+  .pv-heading { font-weight: 600; margin-top: 1rem; }
+  .pv-note { color: var(--vscode-errorForeground); margin-top: 1rem; }
+  .pv-list { margin: 0.35rem 0 0; padding-left: 1.1rem; }
+  .pv-list li { line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -203,11 +238,23 @@ function renderHtml(site: string, hasCredentials: boolean): string {
   <input id="clientSecret" type="password" placeholder="client secret" value="${credentialValue}" spellcheck="false" autocapitalize="off">
   <div id="err-clientSecret" class="field-error"></div>
 
+  <h2>Jira access (optional)</h2>
+  <p class="hint">Add a Jira email and API token to list the projects you can access and verify your tagged projects exist. Leave both blank to skip.</p>
+
+  <label for="jiraEmail">Jira email</label>
+  <input id="jiraEmail" type="text" placeholder="you@example.com" value="${jiraValue}" spellcheck="false" autocapitalize="off">
+  <div id="err-jiraEmail" class="field-error"></div>
+
+  <label for="jiraToken">Jira API token</label>
+  <input id="jiraToken" type="password" placeholder="Jira API token" value="${jiraValue}" spellcheck="false" autocapitalize="off">
+  <div id="err-jiraToken" class="field-error"></div>
+
   <div class="actions">
     <button id="save-test" class="primary" type="button">Save &amp; Test Connection</button>
     <button id="save" class="secondary" type="button">Save</button>
   </div>
   <div id="status"></div>
+  <div id="project-view"></div>
 
 <script nonce="${nonce}">
   const MASK = ${JSON.stringify(MASK)};
@@ -215,10 +262,15 @@ function renderHtml(site: string, hasCredentials: boolean): string {
   const siteInput = document.getElementById('site');
   const idInput = document.getElementById('clientId');
   const secretInput = document.getElementById('clientSecret');
+  const jiraEmailInput = document.getElementById('jiraEmail');
+  const jiraTokenInput = document.getElementById('jiraToken');
   const statusEl = document.getElementById('status');
+  const projectView = document.getElementById('project-view');
   const errSite = document.getElementById('err-site');
   const errId = document.getElementById('err-clientId');
   const errSecret = document.getElementById('err-clientSecret');
+  const errJiraEmail = document.getElementById('err-jiraEmail');
+  const errJiraToken = document.getElementById('err-jiraToken');
   const credHint = document.getElementById('cred-hint');
   const connDot = document.getElementById('conn-dot');
   const connLabel = document.getElementById('conn-label');
@@ -230,6 +282,8 @@ function renderHtml(site: string, hasCredentials: boolean): string {
     errSite.textContent = '';
     errId.textContent = '';
     errSecret.textContent = '';
+    errJiraEmail.textContent = '';
+    errJiraToken.textContent = '';
   }
 
   function setBusy(busy) {
@@ -248,8 +302,57 @@ function renderHtml(site: string, hasCredentials: boolean): string {
       site: siteInput.value,
       clientId: idInput.value,
       clientSecret: secretInput.value,
+      jiraEmail: jiraEmailInput.value,
+      jiraToken: jiraTokenInput.value,
       test: test,
     });
+  }
+
+  function probedPhrase(s) {
+    if (s.existsOnSite === false) { return s.project + ': not found on this site'; }
+    if (s.existsOnSite === undefined && s.totalTests === 0) {
+      return s.project + ": 0 Xray tests — project may not exist, can't verify without Jira access";
+    }
+    return s.project + ': ' + s.totalTests + ' Xray tests';
+  }
+
+  function appendList(items, toText) {
+    const ul = document.createElement('ul');
+    ul.className = 'pv-list';
+    for (const item of items) {
+      const li = document.createElement('li');
+      li.textContent = toText(item);
+      ul.appendChild(li);
+    }
+    projectView.appendChild(ul);
+  }
+
+  function appendHeading(text) {
+    const el = document.createElement('div');
+    el.className = 'pv-heading';
+    el.textContent = text;
+    projectView.appendChild(el);
+  }
+
+  // Values come from Jira and are rendered with textContent only — never innerHTML — so a project
+  // name can never inject markup past the CSP.
+  function renderProjectView(msg) {
+    projectView.textContent = '';
+    if (msg.hasJira && msg.jiraError) {
+      const note = document.createElement('div');
+      note.className = 'pv-note';
+      note.textContent = 'Jira project list unavailable: ' + msg.jiraError;
+      projectView.appendChild(note);
+    } else if (msg.hasJira) {
+      appendHeading(msg.jiraTruncated
+        ? 'Accessible Jira projects (' + msg.jiraProjects.length + '+, list truncated)'
+        : 'Accessible Jira projects (' + msg.jiraProjects.length + ')');
+      appendList(msg.jiraProjects, function (p) { return p.key + ' — ' + p.name; });
+    }
+    if (msg.probed.length > 0) {
+      appendHeading('Xray coverage for tagged projects');
+      appendList(msg.probed, probedPhrase);
+    }
   }
 
   saveTestBtn.addEventListener('click', function () { submit(true); });
@@ -271,16 +374,22 @@ function renderHtml(site: string, hasCredentials: boolean): string {
       errSite.textContent = msg.errors.site || '';
       errId.textContent = msg.errors.clientId || '';
       errSecret.textContent = msg.errors.clientSecret || '';
+      errJiraEmail.textContent = msg.errors.jiraEmail || '';
+      errJiraToken.textContent = msg.errors.jiraToken || '';
     } else if (msg.type === 'saved') {
       clearErrors();
       credHint.hidden = false;
       idInput.value = MASK;
       secretInput.value = MASK;
+      jiraEmailInput.value = msg.jira ? MASK : '';
+      jiraTokenInput.value = msg.jira ? MASK : '';
       siteInput.value = msg.site;
       statusEl.classList.remove('error');
       statusEl.textContent = pendingTest
         ? 'Saved credentials for ' + msg.site + '. Testing connection…'
         : 'Saved credentials for ' + msg.site + '. Checking connection…';
+    } else if (msg.type === 'project-view') {
+      renderProjectView(msg);
     } else if (msg.type === 'conn-state') {
       // A "checking" state is not terminal, so it must not re-enable the buttons mid-flight.
       if (msg.state !== 'checking') { setBusy(false); }
@@ -343,8 +452,10 @@ export class XraySetupPanel {
     const site = this.deps.currentSite();
     const normalized = normalizeSiteUrl(site);
     const hasCredentials = normalized !== "" && (await this.deps.hasCredentials(site));
-    this.maskIssuedSite = hasCredentials ? normalized : undefined;
-    this.panel.webview.html = renderHtml(site, hasCredentials);
+    const hasJira = normalized !== "" && (await this.deps.hasJiraCredentials(site));
+    // The mask stands in for either stored pair, so it's issued for the host if either exists.
+    this.maskIssuedSite = hasCredentials || hasJira ? normalized : undefined;
+    this.panel.webview.html = renderHtml(site, hasCredentials, hasJira);
     // Stored credentials: the HTML already paints the checking dot, so verify in the background and
     // let the result flip it. No credentials: stay red, make no network call.
     if (hasCredentials) {
@@ -395,9 +506,62 @@ export class XraySetupPanel {
     return result;
   }
 
+  // Jira mirror of resolveCredentials with an extra both-or-neither rule: a masked field keeps its
+  // stored value (same host only), and a form with exactly one Jira field filled is rejected. Both
+  // blank means "no Jira access" — a valid state that clears any stored pair.
+  private async resolveJira(message: SaveMessage): Promise<ResolvedJira> {
+    let email = message.jiraEmail;
+    let token = message.jiraToken;
+    let emailError: string | undefined;
+    let tokenError: string | undefined;
+
+    if (email === MASK || token === MASK) {
+      const submittedHost = normalizeSiteUrl(message.site);
+      const sameHost = submittedHost !== "" && this.maskIssuedSite === submittedHost;
+      const hostChanged = this.maskIssuedSite !== undefined && !sameHost;
+      const stored = sameHost ? await this.deps.getJiraCredentials(message.site) : undefined;
+      const missing = hostChanged ? "Enter the Jira credentials for the new site" : undefined;
+      if (email === MASK) {
+        if (stored) {
+          email = stored.email;
+        } else {
+          email = "";
+          emailError = missing ?? "Enter your Jira email";
+        }
+      }
+      if (token === MASK) {
+        if (stored) {
+          token = stored.token;
+        } else {
+          token = "";
+          tokenError = missing ?? "Enter your Jira API token";
+        }
+      }
+    }
+
+    email = email.trim();
+    token = token.trim();
+    const bothOrNeither = "Enter both a Jira email and API token, or leave both blank";
+    if (email !== "" && token === "" && tokenError === undefined) {
+      tokenError = bothOrNeither;
+    }
+    if (token !== "" && email === "" && emailError === undefined) {
+      emailError = bothOrNeither;
+    }
+    const store = email !== "" && token !== "" && emailError === undefined && tokenError === undefined;
+    return {
+      email,
+      token,
+      store,
+      ...(emailError ? { emailError } : {}),
+      ...(tokenError ? { tokenError } : {}),
+    };
+  }
+
   private combinedErrors(
     message: SaveMessage,
-    resolved: ResolvedCredentials
+    resolved: ResolvedCredentials,
+    jira: ResolvedJira
   ): XraySetupValidationErrors | undefined {
     const errors: XraySetupValidationErrors =
       validateXraySetupInput(message.site, resolved.clientId, resolved.clientSecret) ?? {};
@@ -407,7 +571,15 @@ export class XraySetupPanel {
     if (resolved.clientSecretError) {
       errors.clientSecret = resolved.clientSecretError;
     }
-    return errors.site || errors.clientId || errors.clientSecret ? errors : undefined;
+    if (jira.emailError) {
+      errors.jiraEmail = jira.emailError;
+    }
+    if (jira.tokenError) {
+      errors.jiraToken = jira.tokenError;
+    }
+    return errors.site || errors.clientId || errors.clientSecret || errors.jiraEmail || errors.jiraToken
+      ? errors
+      : undefined;
   }
 
   private async handleMessage(message: SaveMessage): Promise<void> {
@@ -415,7 +587,8 @@ export class XraySetupPanel {
       return;
     }
     const resolved = await this.resolveCredentials(message);
-    const errors = this.combinedErrors(message, resolved);
+    const jira = await this.resolveJira(message);
+    const errors = this.combinedErrors(message, resolved, jira);
     if (errors) {
       await this.post({ type: "validation", errors });
       return;
@@ -426,7 +599,14 @@ export class XraySetupPanel {
     try {
       site = await this.deps.saveConnection(message.site, resolved.clientId, resolved.clientSecret);
       this.maskIssuedSite = site;
-      await this.post({ type: "saved", site });
+      // Jira is stored/cleared for the just-saved host; a host switch already dropped the old host's
+      // Jira pair inside saveConnection, so only clear when the saved host still holds one.
+      if (jira.store) {
+        await this.deps.saveJira(site, jira.email, jira.token);
+      } else if (await this.deps.hasJiraCredentials(site)) {
+        await this.deps.clearJira(site);
+      }
+      await this.post({ type: "saved", site, jira: jira.store });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       await this.post({ type: "error", message: `Could not save: ${reason}` });
@@ -461,13 +641,14 @@ export class XraySetupPanel {
       await this.post({ type: "error", message: `${options.throwPrefix}: ${reason}` });
       return;
     }
-    await this.settleVerify(epoch, run, options);
+    await this.settleVerify(epoch, run, options, full);
   }
 
   private async settleVerify(
     epoch: number,
     run: Promise<XrayConnectionOutcome>,
-    options: VerifyOptions
+    options: VerifyOptions,
+    full: boolean
   ): Promise<void> {
     let outcome: XrayConnectionOutcome;
     try {
@@ -495,6 +676,30 @@ export class XraySetupPanel {
     if (!outcome.ok || options.statusOnSuccess) {
       await this.post({ type: "test-result", ok: outcome.ok, message: outcome.message });
     }
+    // Only the full probe carries project/Jira data; the auth-only open verify never does, so it
+    // leaves the neutral initial view in place.
+    if (full && this.hasProjectData(outcome)) {
+      await this.post(this.projectViewMessage(outcome));
+    }
+  }
+
+  private hasProjectData(outcome: XrayConnectionOutcome): boolean {
+    return (
+      outcome.projects !== undefined ||
+      outcome.jiraProjects !== undefined ||
+      outcome.jiraError !== undefined
+    );
+  }
+
+  private projectViewMessage(outcome: XrayConnectionOutcome): OutgoingMessage {
+    return {
+      type: "project-view",
+      hasJira: outcome.jiraProjects !== undefined || outcome.jiraError !== undefined,
+      jiraProjects: outcome.jiraProjects ?? [],
+      jiraTruncated: outcome.jiraTruncated === true,
+      probed: outcome.projects ?? [],
+      ...(outcome.jiraError !== undefined ? { jiraError: outcome.jiraError } : {}),
+    };
   }
 
   private stale(epoch: number): boolean {

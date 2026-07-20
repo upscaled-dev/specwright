@@ -182,6 +182,8 @@ function makeResponse(status: number, body: string, headers: Record<string, stri
 
 const FAKE_JWT = `${"a".repeat(40)}.${"b".repeat(40)}.${"c".repeat(40)}`;
 const FAKE_SECRET = "client-secret-value-must-never-be-logged";
+const JIRA_EMAIL = "me@example.com";
+const JIRA_TOKEN = "jira-api-token-must-never-be-logged";
 const SITE = "acme.atlassian.net";
 
 async function seededDeps(knownTestKeys: () => string[] = () => []): Promise<{
@@ -241,8 +243,8 @@ describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
     expect(emitted).not.toContain(FAKE_SECRET.slice(0, 12));
     expect(emitted).toContain("JWT received");
     expect(emitted).toContain("quote-wrapped (JSON string)");
-    // authenticate + two shape probes + one project-count probe (single CALC project).
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    // authenticate + two shape probes + malformed-JQL error-shape probe + one project-count probe.
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it("keeps an echoed client secret out of the logs and reports the handshake status when auth fails", async () => {
@@ -395,8 +397,8 @@ describe("probeXrayConnection — structured outcome", () => {
     expect(outcome.message).toBe(
       `Connected to ${SITE} — project CALC: 42 Xray tests, project MATH: 7 Xray tests`
     );
-    // authenticate + two shape probes + one probe per project.
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    // authenticate + two shape probes + malformed-JQL probe + one probe per project.
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   it("probes at most three projects", async () => {
@@ -407,8 +409,8 @@ describe("probeXrayConnection — structured outcome", () => {
     const outcome = await probeXrayConnection(deps);
 
     expect(outcome.projects).toHaveLength(3);
-    // authenticate + two shape probes + three project probes (D is dropped by the cap).
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    // authenticate + two shape probes + malformed-JQL probe + three project probes (D dropped by cap).
+    expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 
   it("returns an auth-stage failure and runs no further requests when authentication fails", async () => {
@@ -492,5 +494,174 @@ describe("probeXrayConnection — structured outcome", () => {
     expect(listed[0]).toBe("CALC-1");
     expect(listed[19]).toBe("CALC-20");
     expect(capturedJql).not.toContain("CALC-21");
+  });
+
+  it("fires the deliberate malformed-JQL probe and logs its error shape without flipping ok", async () => {
+    const deps = await seededDeps(() => ["CALC-1"]);
+    const fetchMock = jwtThenGraphql((query) => {
+      if (query.includes("__specwright_probe")) {
+        return { errors: [{ message: "Field '__specwright_probe' does not exist", extensions: { code: "BAD_JQL" } }], data: null };
+      }
+      return { data: { getTests: { total: 4, results: [] } } };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.stage).toBe("ok");
+    const emitted = deps.lines.join("\n");
+    expect(emitted).toContain("malformed-JQL error-shape probe");
+    expect(emitted).toContain("BAD_JQL");
+  });
+});
+
+// Auth returns the JWT, the Jira project-search URL returns `jiraPage`, and every other /graphql POST
+// is answered by `graphql`. Keeps the three transports of a full probe in one deterministic mock.
+function jwtGraphqlAndJira(
+  graphql: (query: string) => unknown,
+  jira: { status: number; body: unknown }
+): ReturnType<typeof vi.fn> {
+  return vi.fn((url: string, init?: RequestInit) => {
+    if (url.endsWith("/authenticate")) {
+      return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));
+    }
+    if (url.includes("/rest/api/3/project/search")) {
+      const body = typeof jira.body === "string" ? jira.body : JSON.stringify(jira.body);
+      return Promise.resolve(makeResponse(jira.status, body));
+    }
+    const parsed = JSON.parse(String(init?.body ?? "{}")) as { query?: string };
+    return Promise.resolve(makeResponse(200, JSON.stringify(graphql(parsed.query ?? ""))));
+  });
+}
+
+async function jiraSeededDeps(knownTestKeys: () => string[]): Promise<Awaited<ReturnType<typeof seededDeps>>> {
+  const deps = await seededDeps(knownTestKeys);
+  await deps.credentialStore.setJiraCredentials(SITE, JIRA_EMAIL, JIRA_TOKEN);
+  return deps;
+}
+
+describe("probeXrayConnection — Jira project view", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("cross-checks probed projects against the Jira list and reports absent ones as not-found", async () => {
+    const deps = await jiraSeededDeps(() => ["CALC-1", "MATH-1"]);
+    const fetchMock = jwtGraphqlAndJira(
+      (query) => (query.includes("project = CALC") ? { data: { getTests: { total: 5 } } } : { data: { getTests: { total: 0, results: [] } } }),
+      { status: 200, body: { isLast: true, values: [{ key: "CALC", name: "Calculator" }] } }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.jiraProjects).toEqual([{ key: "CALC", name: "Calculator" }]);
+    expect(outcome.jiraError).toBeUndefined();
+    expect(outcome.projects).toEqual([
+      { project: "CALC", totalTests: 5, existsOnSite: true },
+      { project: "MATH", totalTests: 0, existsOnSite: false },
+    ]);
+    expect(outcome.message).toContain("project MATH: not found on this site");
+    expect(outcome.message).toContain("1 Jira project(s) accessible");
+    // No Xray probe is spent on the absent MATH project.
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ body: expect.stringContaining("project = MATH") })
+    );
+  });
+
+  it("uses honest can't-verify wording for a 0-total project when no Jira credentials are stored", async () => {
+    const deps = await seededDeps(() => ["ZZZ-1"]);
+    const fetchMock = jwtThenGraphql(() => ({ data: { getTests: { total: 0, results: [] } } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.projects).toEqual([{ project: "ZZZ", totalTests: 0 }]);
+    expect(outcome.message).toContain("project may not exist — can't verify without Jira access");
+    expect(outcome.jiraProjects).toBeUndefined();
+  });
+
+  it("keeps ok true and records jiraError when the Jira project list fails", async () => {
+    const deps = await jiraSeededDeps(() => ["CALC-1"]);
+    const fetchMock = jwtGraphqlAndJira(
+      () => ({ data: { getTests: { total: 3 } } }),
+      { status: 401, body: { errorMessages: ["nope"] } }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.stage).toBe("ok");
+    expect(outcome.jiraError).toContain("Jira authentication failed");
+    expect(outcome.jiraProjects).toBeUndefined();
+    // Falls back to tag-derived probing (existsOnSite left unset when no Jira list is available).
+    expect(outcome.projects).toEqual([{ project: "CALC", totalTests: 3 }]);
+  });
+
+  it("lists Jira projects even when the workspace has no @TEST_ tags", async () => {
+    const deps = await jiraSeededDeps(() => []);
+    const fetchMock = jwtGraphqlAndJira(
+      () => ({ data: { getTests: { total: 0 } } }),
+      { status: 200, body: { isLast: true, values: [{ key: "CALC", name: "Calculator" }, { key: "MATH", name: "Mathematics" }] } }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.jiraProjects).toHaveLength(2);
+    expect(outcome.projects).toBeUndefined();
+    expect(outcome.message).toContain("2 Jira project(s) accessible");
+  });
+
+  it("does not downgrade an absent project to not-found when the Jira list is truncated", async () => {
+    const deps = await jiraSeededDeps(() => ["CALC-1"]);
+    const jiraPage = JSON.stringify({
+      isLast: false,
+      nextPage: `https://${SITE}/rest/api/3/project/search?startAt=next`,
+      values: Array.from({ length: 50 }, (_v, i) => ({ key: `P${i}`, name: `Project ${i}` })),
+    });
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));
+      }
+      if (url.includes("/rest/api/3/project/search")) {
+        return Promise.resolve(makeResponse(200, jiraPage));
+      }
+      return Promise.resolve(makeResponse(200, JSON.stringify({ data: { getTests: { total: 0, results: [] } } })));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.jiraTruncated).toBe(true);
+    // CALC is absent from the (truncated) list, so it stays existsOnSite-unset rather than not-found.
+    expect(outcome.projects).toEqual([{ project: "CALC", totalTests: 0 }]);
+    expect(outcome.message).toContain("project may not exist — can't verify without Jira access");
+    expect(outcome.message).not.toContain("project CALC: not found on this site");
+    expect(outcome.message).toContain("(list truncated)");
+  });
+
+  it("never emits the Jira token or the basic-auth header while listing projects", async () => {
+    const deps = await jiraSeededDeps(() => ["CALC-1"]);
+    const fetchMock = jwtGraphqlAndJira(
+      () => ({ data: { getTests: { total: 1, results: [] } } }),
+      { status: 200, body: { isLast: true, values: [{ key: "CALC", name: "Calculator" }] } }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await probeXrayConnection(deps);
+
+    const emitted = deps.lines.join("\n");
+    const basic = Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString("base64");
+    expect(emitted).not.toContain(JIRA_TOKEN);
+    expect(emitted).not.toContain(basic);
+    expect(emitted).not.toContain(FAKE_SECRET);
   });
 });

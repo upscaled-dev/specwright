@@ -151,6 +151,90 @@ describe("XrayCredentialStore", () => {
     store.dispose();
   });
 
+  it("keys Jira secrets under jiraEmail/jiraToken and round-trips both-or-neither", async () => {
+    const { storage, map } = mapSecretStorage();
+    const store = new XrayCredentialStore(storage);
+
+    expect(await store.getJiraCredentials("acme.atlassian.net")).toBeUndefined();
+    expect(await store.hasJiraCredentials("acme.atlassian.net")).toBe(false);
+
+    await store.setJiraCredentials("acme.atlassian.net", "me@example.com", "jira-token");
+    expect([...map.keys()].sort()).toEqual([
+      "specwright.xray:acme.atlassian.net:jiraEmail",
+      "specwright.xray:acme.atlassian.net:jiraToken",
+    ]);
+    expect(await store.getJiraCredentials("acme.atlassian.net")).toEqual({
+      email: "me@example.com",
+      token: "jira-token",
+    });
+    expect(await store.hasJiraCredentials("acme.atlassian.net")).toBe(true);
+  });
+
+  it("returns undefined when only one Jira half is present", async () => {
+    const { storage, map } = mapSecretStorage();
+    const store = new XrayCredentialStore(storage);
+    map.set("specwright.xray:acme.atlassian.net:jiraEmail", "me@example.com");
+    expect(await store.getJiraCredentials("acme.atlassian.net")).toBeUndefined();
+    map.set("specwright.xray:acme.atlassian.net:jiraToken", "jira-token");
+    expect(await store.getJiraCredentials("acme.atlassian.net")).toEqual({
+      email: "me@example.com",
+      token: "jira-token",
+    });
+  });
+
+  it("clearJiraCredentials removes both Jira halves and leaves the Xray pair intact", async () => {
+    const { storage, map } = mapSecretStorage();
+    const store = new XrayCredentialStore(storage);
+    await store.setCredentials("acme.atlassian.net", "id", "secret");
+    await store.setJiraCredentials("acme.atlassian.net", "me@example.com", "jira-token");
+    expect(map.size).toBe(4);
+
+    await store.clearJiraCredentials("acme.atlassian.net");
+
+    expect(await store.getJiraCredentials("acme.atlassian.net")).toBeUndefined();
+    expect(await store.getCredentials("acme.atlassian.net")).toEqual({ clientId: "id", clientSecret: "secret" });
+  });
+
+  it("clearCredentials tears down both the Xray and the Jira pair for the host", async () => {
+    const { storage, map } = mapSecretStorage();
+    const store = new XrayCredentialStore(storage);
+    await store.setCredentials("acme.atlassian.net", "id", "secret");
+    await store.setJiraCredentials("acme.atlassian.net", "me@example.com", "jira-token");
+    expect(map.size).toBe(4);
+
+    await store.clearCredentials("acme.atlassian.net");
+
+    expect(map.size).toBe(0);
+    expect(await store.hasCredentials("acme.atlassian.net")).toBe(false);
+    expect(await store.hasJiraCredentials("acme.atlassian.net")).toBe(false);
+  });
+
+  it("fires onDidChange once per Jira write and once per Jira clear", async () => {
+    const { storage } = mapSecretStorage();
+    const store = new XrayCredentialStore(storage);
+    let fires = 0;
+    store.onDidChange(() => { fires += 1; });
+    await store.setJiraCredentials("acme.atlassian.net", "me@example.com", "jira-token");
+    expect(fires).toBe(1);
+    await store.clearJiraCredentials("acme.atlassian.net");
+    expect(fires).toBe(2);
+    store.dispose();
+  });
+
+  it("does not double-fire when the bridge re-delivers a Jira key the store itself just wrote", async () => {
+    const { storage, fireChange } = bridgedSecretStorage();
+    const store = new XrayCredentialStore(storage);
+    let fires = 0;
+    store.onDidChange(() => { fires += 1; });
+
+    await store.setJiraCredentials("acme.atlassian.net", "me@example.com", "jira-token");
+    expect(fires).toBe(1);
+    fireChange("specwright.xray:acme.atlassian.net:jiraEmail");
+    fireChange("specwright.xray:acme.atlassian.net:jiraToken");
+    expect(fires).toBe(1);
+    store.dispose();
+  });
+
   it("does not double-fire when the bridge re-delivers a key the store itself just wrote", async () => {
     const { storage, fireChange } = bridgedSecretStorage();
     const store = new XrayCredentialStore(storage);
