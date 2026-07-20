@@ -11,6 +11,7 @@ import {
 import { Logger } from "../utils/logger";
 import { OutlineExampleRow, Scenario } from "../types";
 import { extractKeys } from "./tag-extraction";
+import { RunResultStore } from "./run-result-store";
 import {
   KeyGrammar,
   RemoteMetadataSnapshot,
@@ -36,6 +37,9 @@ export interface TraceLink {
   reqKeys: string[];
   meta?: TestCaseMetadata | undefined;
   lastResult?: RunOutcome | undefined;
+  // Passed/total iterations for a data-driven row (Scenario Outline / Examples block); drives the
+  // "N/M" badge. Absent for non-outline links and for outlines with no run result yet.
+  iterations?: { passed: number; total: number } | undefined;
   // Set when the snapshot's stored Gherkin differs from the local scenario source (display-only; a
   // reconcile action arrives in P3). Absent until a snapshot populates `meta.gherkin`.
   drift?: boolean | undefined;
@@ -130,6 +134,28 @@ function lookupStatus(
   );
 }
 
+// N/M for a data-driven row: total = iterations that produced a result this run, passed = those that
+// passed. Iterations with no result (never ran) are excluded from both, so a partial run reports only
+// what actually ran. Flaky retries already collapse to passed in the parser, so they count as passed.
+function countIterations(
+  statusMap: Record<string, ScenarioStatus>,
+  filePath: string,
+  rows: readonly OutlineExampleRow[]
+): { passed: number; total: number } | undefined {
+  let passed = 0;
+  let total = 0;
+  for (const row of rows) {
+    const status = lookupStatus(statusMap, filePath, row.lineNumber, row.name, row.substitutedName);
+    if (status !== undefined) {
+      total += 1;
+      if (status === "passed") {
+        passed += 1;
+      }
+    }
+  }
+  return total > 0 ? { passed, total } : undefined;
+}
+
 function subtract(a: readonly string[], b: readonly string[]): string[] {
   return a.filter((tag) => !b.includes(tag));
 }
@@ -176,7 +202,8 @@ export function buildTraceabilitySnapshot(
     scenario: ScenarioRef,
     reqKeys: string[],
     lastResult: ScenarioStatus | undefined,
-    localGherkin?: string
+    localGherkin?: string,
+    iterations?: { passed: number; total: number }
   ): void => {
     const link: TraceLink = {
       testKey,
@@ -188,6 +215,9 @@ export function buildTraceabilitySnapshot(
     }
     if (lastResult !== undefined) {
       link.lastResult = lastResult;
+    }
+    if (iterations) {
+      link.iterations = iterations;
     }
     const meta = remote?.tests.get(testKey);
     if (meta) {
@@ -250,9 +280,10 @@ export function buildTraceabilitySnapshot(
       const lastResult = worstStatus(
         outlineLevelRows.map((r) => lookupStatus(statusMap, filePath, r.lineNumber, r.name, r.substitutedName))
       );
+      const iterations = countIterations(statusMap, filePath, outlineLevelRows);
       const localGherkin = reconstructScenarioGherkin("Scenario Outline", outlineName, first.steps);
       for (const testKey of outlineKeys) {
-        addLink(testKey, outlineRef, reqKeys, lastResult, localGherkin);
+        addLink(testKey, outlineRef, reqKeys, lastResult, localGherkin, iterations);
       }
     }
 
@@ -273,9 +304,10 @@ export function buildTraceabilitySnapshot(
       const lastResult = worstStatus(
         blockRows.map((r) => lookupStatus(statusMap, filePath, r.lineNumber, r.name, r.substitutedName))
       );
+      const iterations = countIterations(statusMap, filePath, blockRows);
       const localGherkin = reconstructScenarioGherkin("Scenario Outline", ref.name, sample.steps);
       for (const testKey of blockKeys) {
-        addLink(testKey, ref, reqKeys, lastResult, localGherkin);
+        addLink(testKey, ref, reqKeys, lastResult, localGherkin, iterations);
       }
     }
 
@@ -361,12 +393,14 @@ export const REPORT_CANDIDATES = [
 export interface FoundReport {
   path: string;
   root: string;
+  // The winning report's mtime, so the model can weigh an external CLI run against the session store.
+  mtimeMs: number;
 }
 
 export async function findPlaywrightReport(
   roots: readonly string[]
 ): Promise<FoundReport | undefined> {
-  let newest: { path: string; root: string; mtimeMs: number } | undefined;
+  let newest: FoundReport | undefined;
   for (const root of roots) {
     for (const candidate of REPORT_CANDIDATES) {
       const full = path.join(root, candidate);
@@ -380,7 +414,7 @@ export async function findPlaywrightReport(
       }
     }
   }
-  return newest ? { path: newest.path, root: newest.root } : undefined;
+  return newest;
 }
 
 export class TraceabilityModel implements vscode.Disposable {
@@ -393,6 +427,7 @@ export class TraceabilityModel implements vscode.Disposable {
     private readonly discoveryManager: TestDiscoveryManager,
     private readonly playwrightJsonParser: PlaywrightJsonParser,
     private readonly adapter: TraceabilityAdapter,
+    private readonly runResultStore: RunResultStore,
     private readonly logger: Logger
   ) {}
 
@@ -427,12 +462,26 @@ export class TraceabilityModel implements vscode.Disposable {
     this._onDidChange.fire();
   }
 
+  // Badge precedence (§3.5): fresh extension-run outcomes from the session store are the primary
+  // source, the workspace-report scan the external-CLI-run fallback. With no report on disk a Test
+  // Explorer run still badges the tree (store-only). When both exist, a coarse whole-map mtime check
+  // keeps a stale store outcome from permanently masking a newer external report: a report written
+  // after the last ingest wins the whole map, otherwise the store does. Per-key is impossible with a
+  // single report timestamp — that limitation is accepted. A never-fed store collapses to scan-only.
   private async readStatusMap(): Promise<Record<string, ScenarioStatus>> {
     const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
     const found = await findPlaywrightReport(roots);
-    if (!found) {return {};}
-    const results = this.playwrightJsonParser.parseFromFile(found.path);
-    return this.playwrightJsonParser.toStatusMap(results, found.root);
+    const store = this.runResultStore.statusMap();
+    if (!found) {
+      return store;
+    }
+    const scan = this.playwrightJsonParser.toStatusMap(
+      this.playwrightJsonParser.parseFromFile(found.path),
+      found.root
+    );
+    return found.mtimeMs > this.runResultStore.lastIngestAt
+      ? { ...store, ...scan }
+      : { ...scan, ...store };
   }
 
   public dispose(): void {

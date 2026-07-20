@@ -8,6 +8,7 @@ import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { validateXraySetupInput } from "../../xray/xray-setup-panel";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { TraceabilityAdapterRegistry } from "../../traceability/adapter-registry";
+import { RunResultStore } from "../../traceability/run-result-store";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
@@ -841,6 +842,7 @@ describe("TraceabilitySubsystem.knownTestKeys", () => {
       FeatureParser.create(logger),
       TestDiscoveryManager.create(logger, config),
       PlaywrightJsonParser.create(logger),
+      new RunResultStore(),
       logger
     );
   }

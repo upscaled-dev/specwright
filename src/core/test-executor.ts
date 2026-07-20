@@ -680,6 +680,9 @@ export class TestExecutor {
   ): RunOutputResult {
     const scenarioDetails = this.readScenarioDetails(reportPath, result.output);
     const scenarioResults = this.playwrightJsonParser.toStatusMap(scenarioDetails, workingDir);
+    // Feed the badge store before the ephemeral report is gone: this is the extension-launched run
+    // that leaves nothing on disk for the traceability panel to scan (§3.5).
+    this.context?.runResultStore?.ingest(scenarioResults);
     const { passed, failed } = countScenarioStatuses(scenarioDetails);
     this.runEventEmitter.fire({
       kind: result.success && failed === 0 ? "success" : "failure",

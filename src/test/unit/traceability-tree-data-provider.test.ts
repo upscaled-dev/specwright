@@ -314,6 +314,169 @@ describe("TraceabilityTreeDataProvider", () => {
   });
 });
 
+describe("TraceabilityTreeDataProvider remote summaries and N/M badges", () => {
+  it("renders the remote summary alongside the key on a covered row", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "CALC-1042",
+          scenario: { filePath: "/ws/a.feature", line: 2, name: "Add two positive numbers", kind: "scenario" },
+          reqKeys: [],
+          lastResult: "passed",
+          meta: { key: "CALC-1042", summary: "Add two positive numbers" },
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "complete",
+      errors: [],
+    });
+    const testKeys = p.getChildren(p.getChildren()[1]);
+    const item = p.getTreeItem(testKeys[0]!);
+    expect(item.label).toBe("CALC-1042");
+    expect(item.description).toBe("Add two positive numbers");
+  });
+
+  it("shows a literal N/M passed-iterations count on a data-driven row, after the summary", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "MUL-1",
+          project: "MUL",
+          scenario: { filePath: "/ws/a.feature", line: 4, name: "multiply", kind: "outline", outlineName: "multiply" },
+          reqKeys: [],
+          lastResult: "failed",
+          meta: { key: "MUL-1", summary: "multiply values" },
+          iterations: { passed: 4, total: 6 },
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "complete",
+      errors: [],
+    });
+    const testKeys = p.getChildren(p.getChildren()[1]);
+    expect(p.getTreeItem(testKeys[0]!).description).toBe("multiply values · 4/6");
+  });
+
+  it("falls back to the offline count text and still appends N/M before the summary syncs", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "MUL-1",
+          project: "MUL",
+          scenario: { filePath: "/ws/a.feature", line: 4, name: "multiply", kind: "outline", outlineName: "multiply" },
+          reqKeys: [],
+          lastResult: "passed",
+          iterations: { passed: 6, total: 6 },
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "unknown",
+      errors: [],
+    });
+    const testKeys = p.getChildren(p.getChildren()[1]);
+    expect(p.getTreeItem(testKeys[0]!).description).toBe("MUL · 1 scenario · 6/6");
+  });
+
+  it("sums N/M across the data-driven links that share one test key", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "MUL-1",
+          scenario: { filePath: "/ws/a.feature", line: 8, name: "multiply — small", kind: "examplesBlock", outlineName: "multiply", examplesBlockName: "small" },
+          reqKeys: [],
+          lastResult: "failed",
+          iterations: { passed: 2, total: 3 },
+        },
+        {
+          testKey: "MUL-1",
+          scenario: { filePath: "/ws/a.feature", line: 14, name: "multiply — big", kind: "examplesBlock", outlineName: "multiply", examplesBlockName: "big" },
+          reqKeys: [],
+          lastResult: "passed",
+          iterations: { passed: 1, total: 2 },
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "complete",
+      errors: [],
+    });
+    const testKeys = p.getChildren(p.getChildren()[1]);
+    expect(p.getTreeItem(testKeys[0]!).description).toBe("2 scenarios · 3/5");
+  });
+});
+
+describe("TraceabilityTreeDataProvider orphan section", () => {
+  const withOrphans = (completeness: TraceabilitySnapshot["completeness"]): TraceabilitySnapshot => ({
+    links: SNAPSHOT.links,
+    untraced: SNAPSHOT.untraced,
+    orphans: [
+      { testKey: "CALC-9999", meta: { key: "CALC-9999", summary: "Ghost test" } },
+      { testKey: "CALC-9000", meta: { key: "CALC-9000", summary: "Another ghost" } },
+    ],
+    stale: false,
+    completeness,
+    errors: [],
+  });
+
+  it("renders orphans as the last section, untraced → covered → orphan", () => {
+    const p = provider(withOrphans("complete"));
+    expect(p.getChildren().map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
+      "untraced",
+      "covered",
+      "orphan",
+    ]);
+  });
+
+  it("labels the orphan header with the provider and shows the count, like the other sections", () => {
+    const p = provider(withOrphans("complete"), "Xray");
+    const orphanSection = p.getChildren()[2]!;
+    const header = p.getTreeItem(orphanSection);
+    expect(header.label).toBe("Orphan Xray tests");
+    expect(header.description).toBe("2");
+  });
+
+  it("renders each orphan row with key + remote summary and the open/copy affordances", () => {
+    const p = provider(withOrphans("complete"));
+    const rows = p.getChildren(p.getChildren()[2]);
+    expect(rows.map((n) => (n.kind === "orphan" ? n.testKey : n.kind))).toEqual(["CALC-9000", "CALC-9999"]);
+    const item = p.getTreeItem(rows[1]!);
+    expect(item.label).toBe("CALC-9999");
+    expect(item.description).toBe("Ghost test");
+    expect(item.contextValue).toBe("traceabilityOrphan");
+    const command = item.command as { command: string; arguments: unknown[] };
+    expect(command.command).toBe("playwrightBddRunner.traceability.openIssue");
+    expect((command.arguments[0] as { testKey: string }).testKey).toBe("CALC-9999");
+  });
+
+  it("never renders orphans from a partial fetch, even when orphan data is present", () => {
+    const p = provider(withOrphans("partial"));
+    expect(p.getChildren().map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
+      "untraced",
+      "covered",
+    ]);
+  });
+
+  it("never renders orphans from an unknown fetch", () => {
+    const p = provider(withOrphans("unknown"));
+    expect(p.getChildren().some((n) => n.kind === "section" && n.section === "orphan")).toBe(false);
+  });
+
+  it("shows an empty-state child when the catalogue is complete but has no orphans", () => {
+    const p = provider({ ...SNAPSHOT, completeness: "complete", orphans: [] });
+    const orphanSection = p.getChildren()[2]!;
+    expect(p.getTreeItem(orphanSection).description).toBe("0");
+    const children = p.getChildren(orphanSection);
+    expect(children[0]!.kind).toBe("info");
+  });
+});
+
 describe("formatSyncedAgo", () => {
   it("uses just now / minutes / hours / days buckets", () => {
     expect(formatSyncedAgo(5_000)).toBe("just now");

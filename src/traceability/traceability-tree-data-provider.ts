@@ -11,7 +11,7 @@ import { NormalizedStatus } from "./contracts";
 
 interface SectionNode {
   kind: "section";
-  section: "covered" | "untraced";
+  section: "covered" | "untraced" | "orphan";
 }
 
 interface TestKeyNode {
@@ -29,6 +29,14 @@ interface LinkNode {
 interface UntracedNode {
   kind: "untraced";
   item: UntracedScenario;
+}
+
+// Carries `testKey` at the top level so the shared openIssue/copyKey handlers read it the same way
+// they read a TestKeyNode.
+interface OrphanNode {
+  kind: "orphan";
+  testKey: string;
+  summary?: string | undefined;
 }
 
 interface InfoNode {
@@ -60,6 +68,7 @@ export type TraceabilityNode =
   | TestKeyNode
   | LinkNode
   | UntracedNode
+  | OrphanNode
   | InfoNode;
 
 const CONNECTION_DESCRIPTION: Record<ConnectionIndicator["state"], string> = {
@@ -182,6 +191,37 @@ function reqDescription(reqKeys: readonly string[]): string {
   return reqKeys.length > 0 ? `REQ ${reqKeys.join(", ")}` : "";
 }
 
+// Sum the passed/total iterations of a key's data-driven links so a mapped-test row shows a single
+// "N/M". Non-outline links carry no iterations, so a plain scenario key returns undefined (no badge).
+function aggregateIterations(links: readonly TraceLink[]): { passed: number; total: number } | undefined {
+  let passed = 0;
+  let total = 0;
+  let any = false;
+  for (const link of links) {
+    if (link.iterations) {
+      passed += link.iterations.passed;
+      total += link.iterations.total;
+      any = true;
+    }
+  }
+  return any ? { passed, total } : undefined;
+}
+
+// The mapped-test row's description: the remote summary once synced (mockup parity: "CALC-1042 Add
+// two positive numbers"), the offline project/scenario-count text before that, plus the "N/M"
+// iteration badge on data-driven rows.
+function testKeyDescription(node: TestKeyNode): string {
+  const scenarios = node.links.length === 1 ? "1 scenario" : `${node.links.length} scenarios`;
+  const countText = node.project ? `${node.project} · ${scenarios}` : scenarios;
+  const summary = node.links[0]?.meta?.summary;
+  const parts = [summary && summary !== "" ? summary : countText];
+  const iterations = aggregateIterations(node.links);
+  if (iterations) {
+    parts.push(`${iterations.passed}/${iterations.total}`);
+  }
+  return parts.join(" · ");
+}
+
 function revealCommand(ref: ScenarioRef): vscode.Command {
   return {
     command: "vscode.open",
@@ -245,21 +285,11 @@ export class TraceabilityTreeDataProvider
         item.iconPath = new vscode.ThemeIcon("info");
         return item;
       }
-      case "section": {
-        const snap = this.model.snapshot;
-        const covered = node.section === "covered";
-        const count = covered ? new Set(snap.links.map((l) => l.testKey)).size : snap.untraced.length;
-        const item = new vscode.TreeItem(
-          covered ? "Mapped tests" : "Untraced scenarios",
-          vscode.TreeItemCollapsibleState.Expanded
-        );
-        item.description = String(count);
-        return item;
-      }
+      case "section":
+        return this.sectionTreeItem(node);
       case "testKey": {
         const item = new vscode.TreeItem(node.testKey, vscode.TreeItemCollapsibleState.Collapsed);
-        const scenarios = node.links.length === 1 ? "1 scenario" : `${node.links.length} scenarios`;
-        item.description = node.project ? `${node.project} · ${scenarios}` : scenarios;
+        item.description = testKeyDescription(node);
         item.contextValue = "traceabilityTestKey";
         // All links under a key share the same snapshot entry, so the remote status is the test's,
         // not per-scenario. It wins over the aggregate local run result when present (§3.3).
@@ -297,7 +327,38 @@ export class TraceabilityTreeDataProvider
         item.command = revealCommand(scenario);
         return item;
       }
+      case "orphan": {
+        const item = new vscode.TreeItem(node.testKey, vscode.TreeItemCollapsibleState.None);
+        if (node.summary) {item.description = node.summary;}
+        item.contextValue = "traceabilityOrphan";
+        item.iconPath = new vscode.ThemeIcon("link-external");
+        item.tooltip = node.summary ? `${node.testKey} · ${node.summary}` : node.testKey;
+        // A click opens the remote issue; the same key rides the node for openIssue/copyKey.
+        item.command = {
+          command: "playwrightBddRunner.traceability.openIssue",
+          title: "Open Issue in Tracker",
+          arguments: [node],
+        };
+        return item;
+      }
     }
+  }
+
+  private sectionTreeItem(node: SectionNode): vscode.TreeItem {
+    const snap = this.model.snapshot;
+    const labels: Record<SectionNode["section"], string> = {
+      untraced: "Untraced scenarios",
+      covered: "Mapped tests",
+      orphan: `Orphan ${this.providerLabel} tests`,
+    };
+    const counts: Record<SectionNode["section"], number> = {
+      untraced: snap.untraced.length,
+      covered: new Set(snap.links.map((l) => l.testKey)).size,
+      orphan: snap.orphans.length,
+    };
+    const item = new vscode.TreeItem(labels[node.section], vscode.TreeItemCollapsibleState.Expanded);
+    item.description = String(counts[node.section]);
+    return item;
   }
 
   public getChildren(node?: TraceabilityNode): TraceabilityNode[] {
@@ -306,18 +367,25 @@ export class TraceabilityTreeDataProvider
       if (!this.connected || (snap.links.length === 0 && snap.untraced.length === 0)) {
         return [];
       }
-      // Untraced first: the gap bucket is the panel's work queue, so it sits above mapped tests.
+      // Untraced first (the gap bucket is the work queue), then covered, then orphans last. Orphans
+      // render only on a complete catalogue fetch — a partial/unknown snapshot can never distinguish
+      // a genuine orphan from a key whose covering scenario simply wasn't fetched (§2).
       const sections: TraceabilityNode[] = [
         { kind: "section", section: "untraced" },
         { kind: "section", section: "covered" },
       ];
+      if (snap.completeness === "complete") {
+        sections.push({ kind: "section", section: "orphan" });
+      }
       // The verified-connection row leads the tree when a status is set.
       return this.connectionIndicator
         ? [{ kind: "connection", ...this.connectionIndicator }, ...sections]
         : sections;
     }
     if (node.kind === "section") {
-      return node.section === "covered" ? this.coveredNodes() : this.untracedNodes();
+      if (node.section === "covered") {return this.coveredNodes();}
+      if (node.section === "orphan") {return this.orphanNodes();}
+      return this.untracedNodes();
     }
     if (node.kind === "testKey") {
       return node.links.map((link) => ({ kind: "link", link }));
@@ -353,5 +421,15 @@ export class TraceabilityTreeDataProvider
     return [...items]
       .sort((a, b) => a.scenario.name.localeCompare(b.scenario.name))
       .map((item) => ({ kind: "untraced", item }));
+  }
+
+  private orphanNodes(): TraceabilityNode[] {
+    const orphans = this.model.snapshot.orphans;
+    if (orphans.length === 0) {
+      return [{ kind: "info", label: `No orphan ${this.providerLabel} tests in the synced scope.` }];
+    }
+    return [...orphans]
+      .sort((a, b) => a.testKey.localeCompare(b.testKey))
+      .map((orphan) => ({ kind: "orphan", testKey: orphan.testKey, summary: orphan.meta.summary }));
   }
 }

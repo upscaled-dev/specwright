@@ -1196,6 +1196,8 @@ export class PlaywrightBddTestProvider {
     }
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     const results = this.context.playwrightJsonParser.toStatusMap(details, workspaceRoot);
+    // The debug report is deleted in the caller's finally; feed the badge store while it's parsed.
+    this.context.runResultStore?.ingest(results);
     const featurePath = test.uri?.fsPath;
 
     if (test.children.size > 0) {

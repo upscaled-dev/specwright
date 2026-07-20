@@ -13,6 +13,8 @@ import {
   TraceabilityTreeDataProvider,
 } from "./traceability-tree-data-provider";
 import { TagDiagnosticsProvider } from "./tag-diagnostics";
+import { TagDecorationProvider } from "./tag-decoration";
+import { RunResultStore } from "./run-result-store";
 
 const FALLBACK_PROVIDER_ID = "xray";
 const CONNECTED_CONTEXT_KEY = "playwrightBddRunner.traceability.connected";
@@ -34,6 +36,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   private treeProvider: TraceabilityTreeDataProvider | undefined;
   private model: TraceabilityModel | undefined;
   private tagDiagnostics: TagDiagnosticsProvider | undefined;
+  private tagDecorations: TagDecorationProvider | undefined;
   private activeAdapter: TraceabilityAdapter | undefined;
   private activeAdapterId: string | undefined;
   private watcherDisposables: vscode.Disposable[] = [];
@@ -56,15 +59,21 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   /** Debounce window for coalescing bursts of watcher events (overridable in tests). */
   public rebuildDebounceMs = 300;
 
+  private readonly runResultSubscription: vscode.Disposable;
+
   constructor(
     private readonly config: ExtensionConfig,
     private readonly registry: TraceabilityAdapterRegistry,
     private readonly featureParser: FeatureParser,
     private readonly discoveryManager: TestDiscoveryManager,
     private readonly playwrightJsonParser: PlaywrightJsonParser,
+    private readonly runResultStore: RunResultStore,
     private readonly logger: Logger
   ) {
     this.configChangeDisposable = config.addChangeListener(() => this.applyCurrent());
+    // The store outlives model rebuilds and provider swaps, so subscribe once here: a Test Explorer
+    // run's fresh badges land without a workspace report on disk (P1 exit criterion).
+    this.runResultSubscription = this.runResultStore.onDidChange(() => this.scheduleRebuild());
   }
 
   public applyCurrent(): void {
@@ -139,6 +148,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       this.discoveryManager,
       this.playwrightJsonParser,
       adapter,
+      this.runResultStore,
       this.logger
     );
     this.model = model;
@@ -151,6 +161,10 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     // on any prefix/provider change, so they always lint against the active adapter's grammar.
     this.tagDiagnostics = new TagDiagnosticsProvider(adapter.keyGrammar);
     this.tagDiagnostics.start();
+    // The tag-line decoration is gated and grammar-sourced the same way, so it lives and dies with
+    // the panel and always washes the active provider's prefixes.
+    this.tagDecorations = new TagDecorationProvider(adapter.keyGrammar);
+    this.tagDecorations.start();
     if (adapter.connection) {
       this.adapterSubscriptions.push(
         adapter.connection.onDidChange(() => this.queueConnectionRefresh())
@@ -319,6 +333,8 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.treeProvider = undefined;
     this.tagDiagnostics?.dispose();
     this.tagDiagnostics = undefined;
+    this.tagDecorations?.dispose();
+    this.tagDecorations = undefined;
     this.model?.dispose();
     this.model = undefined;
     this.activeAdapter?.dispose?.();
@@ -335,6 +351,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   public dispose(): void {
     this.disposed = true;
     this.configChangeDisposable.dispose();
+    this.runResultSubscription.dispose();
     this.teardown();
     // The discovery manager is handed to this subsystem for its exclusive use.
     this.discoveryManager.dispose();

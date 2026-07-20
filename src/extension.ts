@@ -12,6 +12,7 @@ import { PlaywrightJsonParser } from "./utils/playwright-json-parser";
 import { CommandBuilder } from "./core/command-builder";
 import { ProviderRegistry } from "./core/provider-registry";
 import { TraceabilitySubsystem } from "./traceability/traceability-subsystem";
+import { RunResultStore } from "./traceability/run-result-store";
 import { TraceabilityAdapterRegistry } from "./traceability/adapter-registry";
 import { createInMemoryAdapterFactory } from "./traceability/in-memory-adapter";
 import { createXrayAdapterFactory } from "./xray/xray-adapter-factory";
@@ -165,6 +166,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   const credentialStore = new XrayCredentialStore(context.secrets);
   context.subscriptions.push(credentialStore);
+  // One session-scoped store shared by the run seams (test executor + debug path) and the panel, so
+  // Test Explorer run/debug outcomes feed live badges (§3.5).
+  const runResultStore = new RunResultStore();
+  context.subscriptions.push(runResultStore);
   const traceabilityRegistry = new TraceabilityAdapterRegistry();
   const xrayFactory = createXrayAdapterFactory(credentialStore, probeXrayConnection, context.globalState);
   traceabilityRegistry.register(xrayFactory);
@@ -177,6 +182,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     featureParser,
     TestDiscoveryManager.create(logger, config),
     PlaywrightJsonParser.create(logger),
+    runResultStore,
     logger
   );
   context.subscriptions.push(traceabilitySubsystem);
@@ -201,6 +207,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandBuilder,
     bddgenDiagnostics: providerRegistry.bddgenDiagnostics,
     traceabilityAdapter,
+    runResultStore,
   };
 
   testExecutor.setContext(sharedContext);

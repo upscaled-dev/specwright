@@ -11,6 +11,7 @@ import {
   TraceabilityTreeDataProvider,
 } from "../../traceability/traceability-tree-data-provider";
 import { TraceabilityAdapterRegistry } from "../../traceability/adapter-registry";
+import { RunResultStore } from "../../traceability/run-result-store";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
@@ -183,14 +184,23 @@ function build(
   adapters?: Record<string, TraceabilityAdapter>,
   logger = Logger.create(),
   connection: ConnectionControl = makeConnection()
-): { subsystem: TraceabilitySubsystem; created: FakeWatcher[]; connection: ConnectionControl } {
+): {
+  subsystem: TraceabilitySubsystem;
+  created: FakeWatcher[];
+  connection: ConnectionControl;
+  store: RunResultStore;
+  discovery: TestDiscoveryManager;
+} {
   const registry = registryOf(adapters ?? { xray: fakeAdapter("xray", connection.connection) });
+  const store = new RunResultStore();
+  const discovery = TestDiscoveryManager.create(logger, config);
   const subsystem = new TraceabilitySubsystem(
     config,
     registry,
     FeatureParser.create(logger),
-    TestDiscoveryManager.create(logger, config),
+    discovery,
     PlaywrightJsonParser.create(logger),
+    store,
     logger
   );
   subsystem.rebuildDebounceMs = 0;
@@ -205,7 +215,7 @@ function build(
     created.push(watcher);
     return watcher as unknown as vscode.FileSystemWatcher;
   });
-  return { subsystem, created, connection };
+  return { subsystem, created, connection, store, discovery };
 }
 
 describe("TraceabilitySubsystem lifecycle", () => {
@@ -266,6 +276,24 @@ describe("TraceabilitySubsystem lifecycle", () => {
     for (let i = 0; i < initial; i++) {
       expect(created[i]!.dispose).toHaveBeenCalled();
     }
+    subsystem.dispose();
+  });
+
+  it("rebuilds the model when the run-result store reports fresh badges (P1 live-badge wiring)", async () => {
+    const { config } = makeConfig();
+    const { subsystem, store, discovery } = build(config);
+    const discover = vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
+
+    subsystem.applyCurrent();
+    await flush();
+    const afterInitial = discover.mock.calls.length;
+    expect(afterInitial).toBeGreaterThan(0);
+
+    // A Test Explorer run feeds the store, which must drive a rebuild with no config or watcher event.
+    store.ingest({ "/ws/a.feature:4": "passed" });
+    await flush();
+
+    expect(discover.mock.calls.length).toBeGreaterThan(afterInitial);
     subsystem.dispose();
   });
 

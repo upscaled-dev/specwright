@@ -14,6 +14,7 @@ import {
   TraceabilityAdapterRegistry,
 } from "../../traceability/adapter-registry";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
+import { RunResultStore } from "../../traceability/run-result-store";
 import { ConnectionCapability, TraceabilityAdapter } from "../../traceability/contracts";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
@@ -233,6 +234,7 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
       FeatureParser.create(logger),
       TestDiscoveryManager.create(logger, config),
       PlaywrightJsonParser.create(logger),
+      new RunResultStore(),
       logger
     );
     subsystem.rebuildDebounceMs = 0;
@@ -283,6 +285,7 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
       FeatureParser.create(logger),
       discovery,
       PlaywrightJsonParser.create(logger),
+      new RunResultStore(),
       logger
     );
     subsystem.rebuildDebounceMs = 0;

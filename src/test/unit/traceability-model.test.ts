@@ -2,7 +2,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, expect, afterEach } from "vitest";
+import * as vscode from "vscode";
 import { FeatureParser } from "../../parsers/feature-parser";
+import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { Logger } from "../../utils/logger";
 import { normalizePathKey, PlaywrightJsonParser, ScenarioStatus } from "../../utils/playwright-json-parser";
 import {
@@ -10,9 +12,11 @@ import {
   findPlaywrightReport,
   hasGherkinDrift,
   ParsedFeatureInput,
+  TraceabilityModel,
   TraceLink,
 } from "../../traceability/traceability-model";
-import { RemoteMetadataSnapshot, TestCaseMetadata } from "../../traceability/contracts";
+import { RunResultStore } from "../../traceability/run-result-store";
+import { RemoteMetadataSnapshot, TestCaseMetadata, TraceabilityAdapter } from "../../traceability/contracts";
 import { JIRA_KEY_SHAPE, projectFromKey } from "../../xray/xray-adapter";
 
 function remoteSnapshot(
@@ -262,6 +266,72 @@ Scenario Outline: multiply <a> by <b>
   });
 });
 
+const OUTLINE_FEATURE = `Feature: F
+
+@TEST_MUL-1
+Scenario Outline: multiply
+  When I multiply <a> by <b>
+  Then the result is <r>
+  Examples:
+    | a | b | r  |
+    | 2 | 3 | 6  |
+    | 4 | 5 | 20 |
+    | 6 | 7 | 42 |
+`;
+
+describe("buildTraceabilitySnapshot — N/M outline iterations", () => {
+  const K = normalizePathKey(FILE);
+
+  it("counts passed-of-total across a mixed run (some passed, some failed, some skipped)", () => {
+    const statusMap: Record<string, ScenarioStatus> = {
+      [`${K}:9`]: "passed",
+      [`${K}:10`]: "failed",
+      [`${K}:11`]: "skipped",
+    };
+    const snap = buildTraceabilitySnapshot([parse(OUTLINE_FEATURE)], statusMap, GRAMMAR);
+    const outline = link(snap.links, "MUL-1");
+    expect(outline.iterations).toEqual({ passed: 1, total: 3 });
+    expect(outline.lastResult).toBe("failed");
+  });
+
+  it("counts a flaky-then-passed row as passed (the parser already collapsed the retry)", () => {
+    const statusMap: Record<string, ScenarioStatus> = {
+      [`${K}:9`]: "passed",
+      [`${K}:10`]: "passed",
+      [`${K}:11`]: "passed",
+    };
+    const outline = link(buildTraceabilitySnapshot([parse(OUTLINE_FEATURE)], statusMap, GRAMMAR).links, "MUL-1");
+    expect(outline.iterations).toEqual({ passed: 3, total: 3 });
+  });
+
+  it("only counts iterations that actually ran on a partial run", () => {
+    const statusMap: Record<string, ScenarioStatus> = { [`${K}:9`]: "passed" };
+    const outline = link(buildTraceabilitySnapshot([parse(OUTLINE_FEATURE)], statusMap, GRAMMAR).links, "MUL-1");
+    expect(outline.iterations).toEqual({ passed: 1, total: 1 });
+  });
+
+  it("leaves iterations undefined when no row has a result", () => {
+    const outline = link(buildTraceabilitySnapshot([parse(OUTLINE_FEATURE)], {}, GRAMMAR).links, "MUL-1");
+    expect(outline.iterations).toBeUndefined();
+  });
+
+  it("derives iterations per split Examples block independently", () => {
+    const key = normalizePathKey(FILE);
+    const statusMap: Record<string, ScenarioStatus> = {
+      [`${key}:16`]: "passed", // outline-level Examples row
+      [`${key}:21`]: "failed", // split @TEST_CALC-1052 block row
+    };
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], statusMap, GRAMMAR);
+    expect(link(snap.links, "CALC-1051").iterations).toEqual({ passed: 1, total: 1 });
+    expect(link(snap.links, "CALC-1052").iterations).toEqual({ passed: 0, total: 1 });
+  });
+
+  it("leaves plain (non-outline) scenario links with no iterations", () => {
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], { [`${K}:4`]: "passed" }, GRAMMAR);
+    expect(link(snap.links, "CALC-1043").iterations).toBeUndefined();
+  });
+});
+
 describe("hasGherkinDrift", () => {
   it("ignores line endings and trailing whitespace", () => {
     expect(hasGherkinDrift("Scenario: A\r\n  Given x  \n", "Scenario: A\n  Given x")).toBe(false);
@@ -273,6 +343,107 @@ describe("hasGherkinDrift", () => {
 
   it("ignores per-line indentation differences", () => {
     expect(hasGherkinDrift("Scenario: A\n  Given x", "Scenario: A\n        Given x")).toBe(false);
+  });
+});
+
+describe("TraceabilityModel.rebuild badge precedence (readStatusMap)", () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    for (const d of dirs) {
+      try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    dirs.length = 0;
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+  });
+
+  const FEATURE_SRC = "Feature: Calc\n\n@TEST_CALC-1\nScenario: A\n  Given x\n";
+
+  function makeWorkspace(): { root: string; featurePath: string; key: string } {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "xray-badge-"));
+    dirs.push(root);
+    const featurePath = path.join(root, "calc.feature");
+    fs.writeFileSync(featurePath, FEATURE_SRC, "utf8");
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [{ uri: vscode.Uri.file(root) }];
+    return { root, featurePath, key: `${normalizePathKey(featurePath)}:4` };
+  }
+
+  function writeReport(root: string, featurePath: string, status: ScenarioStatus, mtimeMs: number): void {
+    const report = {
+      config: { rootDir: root },
+      suites: [
+        {
+          specs: [
+            {
+              title: "A",
+              file: "calc.feature",
+              line: 4,
+              tests: [{ annotations: [{ type: `${featurePath}:4` }], results: [{ status }] }],
+            },
+          ],
+        },
+      ],
+    };
+    const full = path.join(root, "results.json");
+    fs.writeFileSync(full, JSON.stringify(report), "utf8");
+    fs.utimesSync(full, new Date(mtimeMs), new Date(mtimeMs));
+  }
+
+  async function rebuiltResult(featurePath: string, store: RunResultStore): Promise<RunOutcomeOf> {
+    const logger = Logger.create();
+    const discovery = {
+      discoverTestFiles: () => Promise.resolve([featurePath]),
+      dispose: () => { /* no-op */ },
+    } as unknown as TestDiscoveryManager;
+    const adapter = {
+      id: "xray",
+      label: "Xray",
+      keyGrammar: GRAMMAR,
+      browseUrl: () => undefined,
+    } as unknown as TraceabilityAdapter;
+    const model = new TraceabilityModel(
+      FeatureParser.create(logger),
+      discovery,
+      PlaywrightJsonParser.create(logger),
+      adapter,
+      store,
+      logger
+    );
+    await model.rebuild();
+    const result = model.snapshot.links.find((l) => l.testKey === "CALC-1")?.lastResult;
+    model.dispose();
+    return result;
+  }
+
+  type RunOutcomeOf = ScenarioStatus | undefined;
+
+  it("store outcome wins when it was ingested after the report's mtime", async () => {
+    const { root, featurePath, key } = makeWorkspace();
+    writeReport(root, featurePath, "failed", Date.now() - 100_000);
+    const store = new RunResultStore();
+    store.ingest({ [key]: "passed" });
+    expect(await rebuiltResult(featurePath, store)).toBe("passed");
+  });
+
+  it("scan outcome wins when the report is newer than the last ingest", async () => {
+    const { root, featurePath, key } = makeWorkspace();
+    const store = new RunResultStore();
+    store.ingest({ [key]: "failed" });
+    writeReport(root, featurePath, "passed", Date.now() + 100_000);
+    expect(await rebuiltResult(featurePath, store)).toBe("passed");
+  });
+
+  it("badges from the store with no report on disk (the P1 exit criterion)", async () => {
+    const { featurePath, key } = makeWorkspace();
+    const store = new RunResultStore();
+    store.ingest({ [key]: "passed" });
+    expect(await rebuiltResult(featurePath, store)).toBe("passed");
+  });
+
+  it("badges from the scan when the store was never fed", async () => {
+    const { root, featurePath } = makeWorkspace();
+    writeReport(root, featurePath, "failed", Date.now());
+    expect(await rebuiltResult(featurePath, new RunResultStore())).toBe("failed");
   });
 });
 

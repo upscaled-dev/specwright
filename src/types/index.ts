@@ -184,4 +184,7 @@ export interface PlaywrightBddExtensionContext {
   commandBuilder: import("../core/command-builder").CommandBuilder;
   bddgenDiagnostics?: import("../providers/bddgen-diagnostics-provider").BddgenDiagnosticsProvider | undefined;
   traceabilityAdapter: import("../traceability/contracts").TraceabilityAdapter;
+  // Badge-feeding subset of the run-artifact seam (§3.5): the ephemeral JSON report parsed after an
+  // extension-launched run lands here so the traceability tree updates without a report on disk.
+  runResultStore?: import("../traceability/run-result-store").RunResultStore | undefined;
 }

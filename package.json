@@ -741,6 +741,16 @@
           "command": "playwrightBddRunner.traceability.linkScenario",
           "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityScenario",
           "group": "inline@1"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.openIssue",
+          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityOrphan",
+          "group": "inline@1"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.copyKey",
+          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityOrphan",
+          "group": "inline@2"
         }
       ],
       "editor/context": [
@@ -839,6 +849,62 @@
       {
         "id": "playwrightBddRunner.contextSubmenu",
         "label": "Specwright"
+      }
+    ],
+    "colors": [
+      {
+        "id": "specwright.traceabilityTagBackground",
+        "description": "Faint background wash on @TEST_/@REQ_ traceability tag lines in .feature files.",
+        "defaults": {
+          "dark": "#1de9b614",
+          "light": "#00897b12",
+          "highContrast": "#1de9b640",
+          "highContrastLight": "#00897b33"
+        }
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "specwright.setupXray",
+        "title": "Set up Xray",
+        "description": "Connect Specwright to Jira Xray Cloud: map scenarios to tests, see coverage at a glance, and publish run results back to Jira.",
+        "steps": [
+          {
+            "id": "specwright.setupXray.site",
+            "title": "Set your Xray site URL and region",
+            "description": "Open the Xray setup panel and enter your Atlassian site (for example `your-team.atlassian.net`) and API region.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
+            "media": { "markdown": "media/walkthrough/site.md" },
+            "completionEvents": ["onCommand:playwrightBddRunner.traceability.connect"]
+          },
+          {
+            "id": "specwright.setupXray.apiKey",
+            "title": "Create an Xray API key",
+            "description": "In Jira, open Xray → API Keys and create a key. You'll get a client id and client secret used only for authentication.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
+            "media": { "markdown": "media/walkthrough/api-key.md" },
+            "completionEvents": ["onCommand:playwrightBddRunner.traceability.connect"]
+          },
+          {
+            "id": "specwright.setupXray.credentials",
+            "title": "Paste your client id and secret",
+            "description": "Paste the client id and client secret into the setup panel. Specwright validates them with a live connection test and stores them in the OS secret store — never in settings or the repo.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
+            "media": { "markdown": "media/walkthrough/credentials.md" },
+            "completionEvents": ["onCommand:playwrightBddRunner.traceability.connect"]
+          },
+          {
+            "id": "specwright.setupXray.jira",
+            "title": "Add Jira access (optional)",
+            "description": "Add a Jira email and API token to unlock the real project view and issue attachments. This is optional — skip it to keep tag-derived project probes.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
+            "media": { "markdown": "media/walkthrough/jira.md" },
+            "completionEvents": ["onCommand:playwrightBddRunner.traceability.connect"]
+          },
+          {
+            "id": "specwright.setupXray.sync",
+            "title": "Run your first Sync",
+            "description": "Sync pulls remote test metadata, status, and coverage for your tagged scenarios. The Traceability tree then shows remote summaries, status badges, and orphan tests.\n[Sync with Xray](command:playwrightBddRunner.traceability.sync)",
+            "media": { "markdown": "media/walkthrough/sync.md" },
+            "completionEvents": ["onCommand:playwrightBddRunner.traceability.sync"]
+          }
+        ]
       }
     ]
   },

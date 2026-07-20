@@ -216,6 +216,10 @@ export const window = {
   },
   // Settable by tests that exercise active-editor commands (insert step, go to definition).
   activeTextEditor: undefined as unknown,
+  // Settable by tests that exercise editor decorations; empty so nothing is decorated by default.
+  visibleTextEditors: [] as ReadonlyArray<unknown>,
+  createTextEditorDecorationType: (_options: unknown): { dispose: () => void } => ({ dispose: () => {} }),
+  onDidChangeVisibleTextEditors: (_listener: unknown): { dispose: () => void } => ({ dispose: () => {} }),
   showInformationMessage: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showWarningMessage: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showErrorMessage: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
@@ -616,6 +620,7 @@ export { Position, Range, Location, Uri };
 
 export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
 export const ProgressLocation = { SourceControl: 1, Window: 10, Notification: 15 };
+export const OverviewRulerLane = { Left: 1, Center: 2, Right: 4, Full: 7 };
 export const ViewColumn = { Active: -1, Beside: -2, One: 1, Two: 2, Three: 3 };
 export const EndOfLine = { LF: 1, CRLF: 2 };
 export const TestRunProfileKind = { Run: 1, Debug: 2, Coverage: 3 };
