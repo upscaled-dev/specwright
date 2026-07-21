@@ -13,6 +13,7 @@ import { CommandBuilder } from "./core/command-builder";
 import { ProviderRegistry } from "./core/provider-registry";
 import { TraceabilitySubsystem } from "./traceability/traceability-subsystem";
 import { RunResultStore } from "./traceability/run-result-store";
+import { RunArtifactStore } from "./traceability/run-artifact-store";
 import { TraceabilityAdapterRegistry } from "./traceability/adapter-registry";
 import { createInMemoryAdapterFactory } from "./traceability/in-memory-adapter";
 import { createXrayAdapterFactory } from "./xray/xray-adapter-factory";
@@ -171,6 +172,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   // Test Explorer run/debug outcomes feed live badges (§3.5).
   const runResultStore = new RunResultStore();
   context.subscriptions.push(runResultStore);
+  // The publishable sibling of the badge store, fed at the same seams and persisted to
+  // workspaceState so the last few runs survive a reload.
+  const runArtifactStore = new RunArtifactStore(context.workspaceState, logger);
   const traceabilityRegistry = new TraceabilityAdapterRegistry();
   // One credential-save event fans out into the subsystem's connection-refresh verify and the setup
   // panel's post-save verify; keyed by (site, authOnly), coincident identical probes share a single
@@ -217,6 +221,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     bddgenDiagnostics: providerRegistry.bddgenDiagnostics,
     traceabilityAdapter,
     runResultStore,
+    runArtifactStore,
   };
 
   testExecutor.setContext(sharedContext);

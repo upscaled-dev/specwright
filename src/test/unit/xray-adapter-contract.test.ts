@@ -113,7 +113,23 @@ function xrayHarness(): AdapterContractHarness {
     grammarSample: { tags: ["@TEST_calc-1", "@TEST_CALC-2", "@REQ_calc-9"], testKeys: ["CALC-1", "CALC-2"], reqKeys: ["CALC-9"] },
     mappedKey: "CALC-1",
     orphanKey: "CALC-9",
-    makeArtifact: () => ({ id: "run", createdAt: 1, results: [{ testKey: "CALC-1", outcome: "passed" }] }),
+    makeArtifact: () => ({
+      id: "run",
+      createdAt: 1,
+      results: [{
+        testKey: "CALC-1",
+        outcome: "passed",
+        scenario: { filePath: "/ws/a.feature", line: 3, name: "S", kind: "scenario" },
+        durationMs: 5,
+        attempts: 1,
+        flaky: false,
+        evidenceRefs: [],
+      }],
+      shards: [],
+      selection: "CALC-1",
+      preflight: [],
+      state: "complete",
+    }),
     publishTarget: { id: "EXEC-1", label: "Execution 1" },
   };
 }

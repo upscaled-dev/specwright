@@ -8,6 +8,10 @@ import { Logger } from "./logger";
  */
 export type ScenarioStatus = "passed" | "failed" | "skipped";
 
+// Finer-grained than {@link ScenarioStatus} (which collapses timed-out/interrupted into failed):
+// the run-artifact store keeps these distinct. Structurally identical to `RunArtifactOutcome`.
+export type ScenarioOutcome = ScenarioStatus | "timed-out" | "interrupted";
+
 const ANSI_PATTERN = new RegExp("\\u001b\\[[0-9;]*m", "g");
 
 /** Strip ANSI color/style escape codes so error text is legible in plain-text panels. */
@@ -66,6 +70,14 @@ export interface ScenarioResult {
   outlineName?: string | undefined;
   /** Per-step outcomes (Gherkin steps, with outline values already substituted by the title). */
   steps?: StepResult[] | undefined;
+  /** Finer-grained outcome, present only when it diverges from `status` (timed-out/interrupted). */
+  outcome?: ScenarioOutcome | undefined;
+  /** Attempts (retries) for this entry; present only when >1. */
+  attempts?: number | undefined;
+  /** Passed on retry (a failing attempt preceded a passing final one); present only when true. */
+  flaky?: boolean | undefined;
+  /** Absolute paths to Playwright evidence attachments; present only when non-empty. */
+  attachmentPaths?: string[] | undefined;
 }
 
 /** A single Gherkin step within a scenario run. */
@@ -120,6 +132,7 @@ interface RawResult {
   duration?: number;
   error?: { message?: string; stack?: string };
   steps?: RawStep[];
+  attachments?: Array<{ path?: string }>;
 }
 
 interface RawTest {
@@ -129,6 +142,33 @@ interface RawTest {
 
 /** Matches a Gherkin step title so hook/fixture steps in the report can be filtered out. */
 const GHERKIN_STEP = /^(Given|When|Then|And|But|\*)\s/;
+
+/** Map a raw Playwright last-attempt status onto the finer-grained {@link ScenarioOutcome}. */
+function detailedOutcome(rawStatus: string | undefined): ScenarioOutcome {
+  const status = (rawStatus ?? "").toLowerCase();
+  if (status === "failed") {return "failed";}
+  if (status === "timedout") {return "timed-out";}
+  if (status === "interrupted") {return "interrupted";}
+  if (status === "skipped") {return "skipped";}
+  return "passed";
+}
+
+function isFailureOutcome(outcome: ScenarioOutcome): boolean {
+  return outcome === "failed" || outcome === "timed-out" || outcome === "interrupted";
+}
+
+/** Collect on-disk evidence paths across every attempt, skipping inline (blob) attachments. */
+function collectAttachmentPaths(attempts: RawResult[]): string[] {
+  const paths: string[] = [];
+  for (const attempt of attempts) {
+    for (const attachment of attempt.attachments ?? []) {
+      if (typeof attachment.path === "string" && attachment.path !== "" && !paths.includes(attachment.path)) {
+        paths.push(attachment.path);
+      }
+    }
+  }
+  return paths;
+}
 
 /**
  * Canonical form for status-map keys: forward slashes on every platform, so keys built from
@@ -296,11 +336,18 @@ export class PlaywrightJsonParser {
     const annotation = this.extractSourceLocation(test);
     const featurePath = annotation?.featurePath ?? resolved?.featurePath ?? spec.file ?? "";
     const lineNumber = annotation?.lineNumber ?? resolved?.lineNumber;
-    const lastResult = (test.results ?? []).at(-1);
+    const attempts = test.results ?? [];
+    const lastResult = attempts.at(-1);
     const steps = this.extractSteps(lastResult);
     const duration = lastResult?.duration;
     const errorMessage = lastResult?.error?.message;
     const stack = lastResult?.error?.stack;
+    const outcome = lastResult ? detailedOutcome(lastResult.status) : "skipped";
+    const flaky =
+      outcome === "passed" &&
+      attempts.length > 1 &&
+      attempts.slice(0, -1).some((r) => isFailureOutcome(detailedOutcome(r.status)));
+    const attachmentPaths = collectAttachmentPaths(attempts);
 
     return {
       scenarioName,
@@ -312,6 +359,10 @@ export class PlaywrightJsonParser {
       ...(errorMessage !== undefined ? { errorMessage: stripAnsi(errorMessage) } : {}),
       ...(stack !== undefined ? { errorStack: stripAnsi(stack) } : {}),
       ...(steps.length > 0 ? { steps } : {}),
+      ...(outcome === "timed-out" || outcome === "interrupted" ? { outcome } : {}),
+      ...(attempts.length > 1 ? { attempts: attempts.length } : {}),
+      ...(flaky ? { flaky } : {}),
+      ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
     };
   }
 

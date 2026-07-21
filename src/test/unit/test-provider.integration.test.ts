@@ -21,7 +21,17 @@ import { ExtensionConfig } from "../../core/extension-config";
 import { Logger } from "../../utils/logger";
 import { PlaywrightBddExtensionContext } from "../../types";
 import { BreakpointMirror } from "../../core/breakpoint-mirror";
+import { RunArtifactStore } from "../../traceability/run-artifact-store";
 import { FakeTestController, FakeTestItem } from "./helpers/fake-test-controller";
+
+function fakeMemento(): import("vscode").Memento {
+  const store = new Map<string, unknown>();
+  return {
+    keys: () => [...store.keys()],
+    get: (key: string, def?: unknown) => (store.has(key) ? store.get(key) : def),
+    update: (key: string, value: unknown) => { store.set(key, value); return Promise.resolve(); },
+  } as unknown as import("vscode").Memento;
+}
 
 const FEATURE = [
   "@feature",
@@ -113,6 +123,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
     provider: PlaywrightBddTestProvider;
     controller: FakeTestController;
     executor: TestExecutor;
+    artifactStore: RunArtifactStore;
     discoveryManager: { discoverTestFiles: ReturnType<typeof vi.fn>; clearCache: ReturnType<typeof vi.fn> };
   } {
     const logger = Logger.create();
@@ -132,6 +143,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
       discoverTestFiles: vi.fn().mockResolvedValue([fixture.featurePath]),
       clearCache: vi.fn(),
     };
+    const artifactStore = new RunArtifactStore(fakeMemento(), logger);
     const context: PlaywrightBddExtensionContext = {
       logger,
       config,
@@ -142,12 +154,13 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
       playwrightJsonParser: parser,
       commandBuilder,
       traceabilityAdapter: {} as PlaywrightBddExtensionContext["traceabilityAdapter"],
+      runArtifactStore: artifactStore,
     };
     executor.setContext(context);
 
     const controller = new FakeTestController();
     const provider = PlaywrightBddTestProvider.create(controller as never, context);
-    return { provider, controller, executor, discoveryManager };
+    return { provider, controller, executor, artifactStore, discoveryManager };
   }
 
   async function runItem(controller: FakeTestController, item: FakeTestItem): Promise<void> {
@@ -221,6 +234,60 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
     expect(run.outcome.failed).toEqual([]);
     expect(events.some((e) => e.kind === "failure")).toBe(false);
     expect(run.outcome.ended).toBe(true);
+  });
+
+  describe("run-artifact capture (wiring)", () => {
+    it("a command-driven executor run during an open batch injects no shard into it", async () => {
+      const shell: ShellRunner = async (_cmd, _dir, env) => {
+        if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+          fs.writeFileSync(
+            env["PLAYWRIGHT_JSON_OUTPUT_NAME"],
+            reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "passed" }])
+          );
+        }
+        return { success: true, output: "", error: "", returnCode: 0 };
+      };
+      const { executor, artifactStore } = buildProvider(shell);
+      // The Test Explorer opened a batch; a codelens/palette run then fires at the shared seam with
+      // no handle. Its parsed results must not land in the open Explorer artifact.
+      const batch = artifactStore.beginBatch("explorer");
+      await executor.runFeatureFileWithOutput({ filePath: fixture.featurePath, featureName: "Sample feature" });
+      const sealed = artifactStore.sealBatch(batch, false);
+
+      expect(sealed?.shards).toEqual([]);
+      expect(sealed?.results).toEqual([]);
+      expect(sealed?.state).toBe("complete");
+    });
+
+    it("a throwing invocation seals the batch partial through the provider run path", async () => {
+      const shell: ShellRunner = async () => { throw new Error("spawn failed"); };
+      const { provider, controller, artifactStore } = buildProvider(shell);
+      await provider.discoverTests();
+
+      const feature = controller.find(fixture.featurePath)!;
+      await runItem(controller, feature);
+
+      const latest = artifactStore.latest();
+      expect(latest?.state).toBe("partial");
+      expect(latest?.shards).toHaveLength(1);
+      expect(latest?.shards[0]?.success).toBe(false);
+    });
+
+    it("cancelling the run seals the batch cancelled through the provider run path", async () => {
+      const source = new vscode.CancellationTokenSource();
+      const shell: ShellRunner = async () => {
+        source.cancel();
+        return { success: false, output: "", error: "killed", returnCode: 130 };
+      };
+      const { provider, controller, artifactStore } = buildProvider(shell);
+      await provider.discoverTests();
+
+      const leaf = controller.find(`${fixture.featurePath}:4`)!;
+      const runProfile = controller.profile("Run")!;
+      await runProfile.runHandler(new vscode.TestRunRequest([leaf]), source.token);
+
+      expect(artifactStore.latest()?.state).toBe("cancelled");
+    });
   });
 
   it("maps outline examples by their .feature line (Example #N → passed/failed)", async () => {

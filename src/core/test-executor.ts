@@ -12,7 +12,7 @@ import {
 import { Logger } from "../utils/logger";
 import { ExtensionConfig } from "./extension-config";
 import { spawn, ChildProcess } from "node:child_process";
-import { PlaywrightJsonParser, ScenarioStatus, ScenarioResult } from "../utils/playwright-json-parser";
+import { PlaywrightJsonParser, ScenarioStatus, ScenarioResult, normalizePathKey } from "../utils/playwright-json-parser";
 import { shellQuote } from "../utils/shell";
 import {
   canonicalCwd,
@@ -419,9 +419,12 @@ export class TestExecutor {
       // publish() is a no-op parse+clear on non-bddgen failures, so calling it unconditionally
       // is safe and is the only path those errors reach the Problems panel.
       this.publishBddgenDiagnostics(result, workingDir);
-      return this.buildOutputResult(result, reportPath, workingDir, start);
+      return this.buildOutputResult(result, reportPath, workingDir, start, command, options.artifactBatch);
     } catch (error) {
       if (signal?.aborted) { return this.cancelledResult(start); }
+      // A spawn/binary failure never reaches buildOutputResult, so contribute the failed invocation's
+      // shard here — one shard per invocation, and the batch honestly seals partial.
+      this.contributeArtifactShard(options.artifactBatch, workingDir, command, false, 1, []);
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return { success: false, output: "", error: errMsg(error), duration: Math.max(1, Date.now() - start) };
     }
@@ -433,15 +436,17 @@ export class TestExecutor {
     return this.runWithJsonReport(
       () => this.commandBuilder().buildFeatureCommand(options),
       options.filePath,
-      options.signal
+      options.signal,
+      options.artifactBatch
     );
   }
 
   public async runAllTestsWithTagsOutput(
     tag: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    artifactBatch?: number
   ): Promise<RunOutputResult> {
-    return this.runWithJsonReport(() => this.commandBuilder().buildTagCommand(tag), undefined, signal);
+    return this.runWithJsonReport(() => this.commandBuilder().buildTagCommand(tag), undefined, signal, artifactBatch);
   }
 
   public async discoverFeatureFiles(): Promise<string[]> {
@@ -571,7 +576,8 @@ export class TestExecutor {
   private async runWithJsonReport(
     buildCommand: () => string,
     forFile?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    artifactBatch?: number
   ): Promise<RunOutputResult> {
     const start = Date.now();
     const workingDir = this.getWorkingDirectory(forFile);
@@ -609,9 +615,10 @@ export class TestExecutor {
       );
       if (signal?.aborted) { return this.cancelledResult(start); }
       this.publishBddgenDiagnostics(result, workingDir);
-      return this.buildOutputResult(result, reportPath, workingDir, start);
+      return this.buildOutputResult(result, reportPath, workingDir, start, command, artifactBatch);
     } catch (error) {
       if (signal?.aborted) { return this.cancelledResult(start); }
+      this.contributeArtifactShard(artifactBatch, workingDir, command, false, 1, []);
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return {
         success: false,
@@ -671,18 +678,62 @@ export class TestExecutor {
     }
   }
 
+  // Contribute one shard to the open artifact batch (no-op when the run carries no handle, e.g. a
+  // command-driven run). Every invocation contributes exactly once — success or spawn failure.
+  private contributeArtifactShard(
+    artifactBatch: number | undefined,
+    workingDir: string,
+    command: string,
+    success: boolean,
+    exitCode: number,
+    details: ScenarioResult[]
+  ): void {
+    if (artifactBatch === undefined) { return; }
+    const workspaceRoot = this.workspaceRootFor(workingDir);
+    this.context?.runArtifactStore?.contributeShard(artifactBatch, {
+      workingDir,
+      command: this.commandSummary(command, workspaceRoot),
+      success,
+      exitCode,
+      details,
+      workspaceRoot,
+    });
+  }
+
+  // The workspace folder that owns this run (multi-root aware), mirroring the debug-launch cwd
+  // resolution — a run under folder #2 must relativize evidence against folder #2, not the first.
+  private workspaceRootFor(workingDir: string): string | undefined {
+    const folders = this.workspace.workspaceFolders;
+    return (folders?.find((f) => isSameOrInsideDir(workingDir, f.uri.fsPath)) ?? folders?.[0])?.uri.fsPath;
+  }
+
+  // A publish-safe command summary: strip the JSON reporter we inject for result mapping, forward-
+  // slash separators, and relativize any absolute workspace path so shard info never leaks the tree.
+  private commandSummary(command: string, workspaceRoot: string | undefined): string {
+    let summary = command.replaceAll(" --reporter=json", "").split(path.sep).join("/");
+    if (workspaceRoot !== undefined) {
+      summary = summary.replaceAll(`${normalizePathKey(workspaceRoot)}/`, "");
+    }
+    return summary;
+  }
+
   /** Parse the JSON report into a RunOutputResult and fire the matching success/failure event. */
   private buildOutputResult(
     result: CommandResult,
     reportPath: string,
     workingDir: string,
-    start: number
+    start: number,
+    command: string,
+    artifactBatch: number | undefined
   ): RunOutputResult {
     const scenarioDetails = this.readScenarioDetails(reportPath, result.output);
     const scenarioResults = this.playwrightJsonParser.toStatusMap(scenarioDetails, workingDir);
     // Feed the badge store before the ephemeral report is gone: this is the extension-launched run
     // that leaves nothing on disk for the traceability panel to scan (§3.5).
     this.context?.runResultStore?.ingest(scenarioResults);
+    // Same seam feeds the richer artifact store. The report is unlinked in readScenarioDetails, so
+    // the shard carries the already-parsed details.
+    this.contributeArtifactShard(artifactBatch, workingDir, command, result.success, result.returnCode, scenarioDetails);
     const { passed, failed } = countScenarioStatuses(scenarioDetails);
     this.runEventEmitter.fire({
       kind: result.success && failed === 0 ? "success" : "failure",

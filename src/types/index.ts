@@ -97,6 +97,8 @@ export interface TestExecutionOptions {
   dryRun?: boolean;
   /** Aborts the spawned run when the Test Explorer stop button is pressed. */
   signal?: AbortSignal | undefined;
+  /** Open run-artifact batch this invocation's shard belongs to; unset → no artifact is captured. */
+  artifactBatch?: number | undefined;
 }
 
 /**
@@ -125,6 +127,8 @@ export interface FeatureExecutionOptions {
   dryRun?: boolean;
   /** Aborts the spawned run when the Test Explorer stop button is pressed. */
   signal?: AbortSignal | undefined;
+  /** Open run-artifact batch this invocation's shard belongs to; unset → no artifact is captured. */
+  artifactBatch?: number | undefined;
 }
 
 export type CommandArguments = unknown[];
@@ -187,4 +191,7 @@ export interface PlaywrightBddExtensionContext {
   // Badge-feeding subset of the run-artifact seam (§3.5): the ephemeral JSON report parsed after an
   // extension-launched run lands here so the traceability tree updates without a report on disk.
   runResultStore?: import("../traceability/run-result-store").RunResultStore | undefined;
+  // The richer sibling fed at the same capture seams: a Test Explorer batch opens a builder, each
+  // executor invocation contributes a shard, and the batch seals one immutable, publishable artifact.
+  runArtifactStore?: import("../traceability/run-artifact-store").RunArtifactStore | undefined;
 }

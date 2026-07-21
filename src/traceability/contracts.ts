@@ -1,4 +1,5 @@
 import type { Event } from "vscode";
+import type { ScenarioRef } from "./traceability-model";
 
 export interface KeyGrammar {
   testPrefix: string;
@@ -77,24 +78,70 @@ export interface RemoteMetadataSnapshot {
   readonly errors: readonly string[];
 }
 
-export type RunArtifactOutcome = "passed" | "failed" | "skipped";
+// Retry/flake is per-iteration data, never a top-level outcome: a result that passed on retry is
+// `passed` with `flaky: true`, and `timed-out`/`interrupted` stay distinct from a plain `failed`.
+export type RunArtifactOutcome = "passed" | "failed" | "skipped" | "timed-out" | "interrupted";
 
-export interface RunArtifactResult {
-  readonly testKey: string;
+export type RunArtifactState = "complete" | "partial" | "cancelled";
+
+// One example row of a Scenario Outline run.
+export interface RunArtifactIteration {
+  readonly name: string;
   readonly outcome: RunArtifactOutcome;
+  readonly durationMs: number;
+  readonly attempts: number;
 }
 
-// One immutable, multi-test capture of a local run. The full shape (shards, iterations, evidence)
-// lands in P2; P1 carries only what publishing and badges consume.
+export interface RunArtifactResult {
+  // Absent means an unmapped scenario ran anyway; the scenario→key join lands with preflight (2c).
+  readonly testKey?: string | undefined;
+  readonly scenario: ScenarioRef;
+  readonly outcome: RunArtifactOutcome;
+  readonly durationMs: number;
+  readonly attempts: number;
+  readonly flaky: boolean;
+  readonly iterations?: readonly RunArtifactIteration[] | undefined;
+  // Workspace-relative, forward-slashed paths to Playwright evidence (screenshots/traces/videos);
+  // paths only, never blobs.
+  readonly evidenceRefs: readonly string[];
+}
+
+// One TestExecutor invocation within a batch (there is no Playwright `--shard` here, only
+// `--workers`): its cwd, the command that ran, and the exit state it produced.
+export interface ShardInfo {
+  readonly workingDir: string;
+  readonly command: string;
+  readonly exitCode: number;
+  readonly success: boolean;
+}
+
+// A non-`ready` preflight item's recorded resolution. Minimal until slice 2c owns the full shape.
+export interface PreflightDecision {
+  readonly scenario: ScenarioRef;
+  readonly decision: string;
+}
+
+// One immutable, multi-test capture of a local run: a batch opens a builder, each executor
+// invocation contributes a shard, and closing the batch seals exactly one of these.
 export interface RunArtifact {
   readonly id: string;
   readonly createdAt: number;
   readonly results: readonly RunArtifactResult[];
+  readonly shards: readonly ShardInfo[];
+  // The batch-scope descriptor that produced it — an opaque string until slice 2c's type lands.
+  readonly selection: string;
+  // Empty until slice 2c wires preflight.
+  readonly preflight: readonly PreflightDecision[];
+  readonly state: RunArtifactState;
 }
 
-// Badge-feeding subset of the artifact store; the full immutable multi-test store lands in P2.
+// Immutable multi-test store: a publish buffer keeping the last few runs, newest first. Badge parity
+// is `latestOutcome`; badges themselves still flow through the separate `RunResultStore`.
 export interface RunArtifactStore {
   latestOutcome(testKey: string): RunArtifactOutcome | undefined;
+  latest(): RunArtifact | undefined;
+  list(): RunArtifact[];
+  append(artifact: RunArtifact): void;
 }
 
 export interface PublishTarget {

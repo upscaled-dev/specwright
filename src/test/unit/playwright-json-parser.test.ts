@@ -62,6 +62,58 @@ describe("PlaywrightJsonParser", () => {
     expect(r?.errorMessage).toBeUndefined();
   });
 
+  it("records attempts and the flaky flag for a passed-on-retry sequence", () => {
+    const report = JSON.stringify({
+      suites: [{
+        specs: [{
+          title: "Flaky scenario",
+          tests: [{ results: [{ status: "failed" }, { status: "passed" }] }],
+        }],
+      }],
+    });
+    const r = parser.parse(report)[0];
+    expect(r?.attempts).toBe(2);
+    expect(r?.flaky).toBe(true);
+  });
+
+  it("leaves attempts and flaky unset for a clean single-attempt run", () => {
+    const report = JSON.stringify({
+      suites: [{ specs: [{ title: "Clean", tests: [{ results: [{ status: "passed" }] }] }] }],
+    });
+    const r = parser.parse(report)[0];
+    expect(r?.attempts).toBeUndefined();
+    expect(r?.flaky).toBeUndefined();
+  });
+
+  it("keeps a finer outcome for timed-out and interrupted while status stays failed", () => {
+    const outcomeFor = (raw: string): ScenarioResult | undefined => parser.parse(JSON.stringify({
+      suites: [{ specs: [{ title: raw, tests: [{ results: [{ status: raw }] }] }] }],
+    }))[0];
+    expect(outcomeFor("timedout")).toMatchObject({ status: "failed", outcome: "timed-out" });
+    expect(outcomeFor("interrupted")).toMatchObject({ status: "failed", outcome: "interrupted" });
+    expect(outcomeFor("failed")?.outcome).toBeUndefined();
+  });
+
+  it("collects on-disk attachment paths and skips inline blobs", () => {
+    const report = JSON.stringify({
+      suites: [{
+        specs: [{
+          title: "With evidence",
+          tests: [{
+            results: [{
+              status: "failed",
+              attachments: [
+                { name: "trace", path: "/ws/test-results/trace.zip" },
+                { name: "inline", contentType: "text/plain" },
+              ],
+            }],
+          }],
+        }],
+      }],
+    });
+    expect(parser.parse(report)[0]?.attachmentPaths).toEqual(["/ws/test-results/trace.zip"]);
+  });
+
   it("extracts feature path + line from annotation", () => {
     const report = JSON.stringify({
       suites: [{

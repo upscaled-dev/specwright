@@ -492,6 +492,10 @@ export class PlaywrightBddTestProvider {
     }
     this.isTestRunning = true;
     const run = this.testController.createTestRun(request);
+    // Open the artifact batch and thread its handle through every executor call below, so a
+    // command-driven run firing at the shared seam mid-batch can't inject a foreign shard. The
+    // finally seals exactly one immutable artifact for the whole Test Explorer run.
+    const batch = this.context.runArtifactStore?.beginBatch(this.describeSelection(request));
     // One AbortController per run: cancelling the Test Explorer aborts the spawned Playwright
     // process (see spawnCommand). runSingleTopLevelItem also reads token to skip — rather than
     // fail — a subtree whose process was killed mid-run.
@@ -509,16 +513,24 @@ export class PlaywrightBddTestProvider {
           continue;
         }
         run.started(test);
-        await this.runSingleTopLevelItem(test, run, abort.signal);
+        await this.runSingleTopLevelItem(test, run, abort.signal, batch);
       }
     } catch (error) {
       const msg = errMsg(error);
       this.context.logger.error(`Error running tests: ${msg}`);
     } finally {
       cancelSub.dispose();
+      if (batch !== undefined) {
+        this.context.runArtifactStore?.sealBatch(batch, token.isCancellationRequested);
+      }
       run.end();
       this.isTestRunning = false;
     }
+  }
+
+  private describeSelection(request: vscode.TestRunRequest): string {
+    if (!request.include || request.include.length === 0) {return "all";}
+    return request.include.map((item) => item.label).join(", ");
   }
 
   private markSubtreeSkipped(item: vscode.TestItem, run: vscode.TestRun): void {
@@ -567,7 +579,8 @@ export class PlaywrightBddTestProvider {
   private async runSingleTopLevelItem(
     test: vscode.TestItem,
     run: vscode.TestRun,
-    signal: AbortSignal
+    signal: AbortSignal,
+    batch: number | undefined
   ): Promise<void> {
     try {
       if (test.uri) {
@@ -583,6 +596,7 @@ export class PlaywrightBddTestProvider {
             filePath: test.uri.fsPath,
             featureName: this.featureTitleByPath.get(test.uri.fsPath) ?? test.label,
             signal,
+            artifactBatch: batch,
           });
           if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
           this.appendRunOutput(run, result, test, test.uri.fsPath);
@@ -596,6 +610,7 @@ export class PlaywrightBddTestProvider {
           const options: TestExecutionOptions = {
             filePath: test.uri.fsPath,
             signal,
+            artifactBatch: batch,
             ...(outlineName ? { outlineName } : {}),
           };
           const result = await this.context.testExecutor.runScenarioWithOutput(options);
@@ -609,6 +624,7 @@ export class PlaywrightBddTestProvider {
           const options: TestExecutionOptions = {
             filePath: test.uri.fsPath,
             signal,
+            artifactBatch: batch,
             ...(lineNumber ? { lineNumber } : {}),
             scenarioName: test.label,
             ...(outlineName ? { outlineName } : {}),
@@ -619,7 +635,7 @@ export class PlaywrightBddTestProvider {
           this.applyStatusToItem(test, run, result, test.uri.fsPath);
         }
       } else if (test.id.startsWith("group:") || test.id.startsWith("tag:")) {
-        await this.runGroupOrTag(test, run, signal);
+        await this.runGroupOrTag(test, run, signal, batch);
       }
     } catch (error) {
       const msg = errMsg(error);
@@ -632,11 +648,12 @@ export class PlaywrightBddTestProvider {
   private async runGroupOrTag(
     test: vscode.TestItem,
     run: vscode.TestRun,
-    signal: AbortSignal
+    signal: AbortSignal,
+    batch: number | undefined
   ): Promise<void> {
     if (test.id.startsWith("tag:")) {
       const tag = test.id.slice("tag:".length) || test.label;
-      const result = await this.context.testExecutor.runAllTestsWithTagsOutput(tag, signal);
+      const result = await this.context.testExecutor.runAllTestsWithTagsOutput(tag, signal, batch);
       if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
       this.appendRunOutput(run, result, test);
       this.applyResultsToChildren(test, run, result);
@@ -653,6 +670,7 @@ export class PlaywrightBddTestProvider {
       const result = await this.context.testExecutor.runFeatureFileWithOutput({
         filePath,
         signal,
+        artifactBatch: batch,
         ...(featureName ? { featureName } : {}),
       });
       // Killed mid-group: don't aggregate the killed file's red result, and skip the whole subtree
@@ -1125,6 +1143,7 @@ export class PlaywrightBddTestProvider {
     // TestRun ends; returning at session start made VS Code tear down the run before the
     // debuggee attached, so feature-file breakpoints never bound from the Test Explorer.
     const run = this.testController.createTestRun(request);
+    const batch = this.context.runArtifactStore?.beginBatch(this.describeSelection(request));
     try {
       for (const test of this.requestedItems(request)) {
         try {
@@ -1157,7 +1176,7 @@ export class PlaywrightBddTestProvider {
                 waitForSessionEnd: true,
                 jsonReportPath,
               });
-              this.applyDebugReportStatus(test, run, jsonReportPath);
+              this.applyDebugReportStatus(test, run, jsonReportPath, batch);
             } finally {
               try { fs.unlinkSync(jsonReportPath); } catch { /* best effort */ }
             }
@@ -1169,6 +1188,9 @@ export class PlaywrightBddTestProvider {
         }
       }
     } finally {
+      if (batch !== undefined) {
+        this.context.runArtifactStore?.sealBatch(batch, false);
+      }
       run.end();
       this.isTestRunning = false;
     }
@@ -1179,7 +1201,8 @@ export class PlaywrightBddTestProvider {
   private applyDebugReportStatus(
     test: vscode.TestItem,
     run: vscode.TestRun,
-    reportPath: string
+    reportPath: string,
+    batch: number | undefined
   ): void {
     if (!fs.existsSync(reportPath)) {
       this.context.logger.debug(
@@ -1198,6 +1221,21 @@ export class PlaywrightBddTestProvider {
     const results = this.context.playwrightJsonParser.toStatusMap(details, workspaceRoot);
     // The debug report is deleted in the caller's finally; feed the badge store while it's parsed.
     this.context.runResultStore?.ingest(results);
+    // Debug runs in a terminal with no captured command or exit code, so this shard is outcome-only
+    // (accepted degradation): its exit state is derived from whether any scenario failed. Relativize
+    // evidence against the folder owning the feature (multi-root aware), not blindly the first.
+    if (batch !== undefined) {
+      const shardRoot = (test.uri ? vscode.workspace.getWorkspaceFolder(test.uri)?.uri.fsPath : undefined) ?? workspaceRoot;
+      const anyFailed = details.some((detail) => detail.status === "failed");
+      this.context.runArtifactStore?.contributeShard(batch, {
+        workingDir: shardRoot,
+        command: "playwright debug run",
+        success: !anyFailed,
+        exitCode: anyFailed ? 1 : 0,
+        details,
+        workspaceRoot: shardRoot,
+      });
+    }
     const featurePath = test.uri?.fsPath;
 
     if (test.children.size > 0) {

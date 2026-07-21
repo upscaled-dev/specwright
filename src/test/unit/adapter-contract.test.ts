@@ -15,7 +15,7 @@ import {
 } from "../../traceability/adapter-registry";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { RunResultStore } from "../../traceability/run-result-store";
-import { ConnectionCapability, TraceabilityAdapter } from "../../traceability/contracts";
+import { ConnectionCapability, RunArtifact, TraceabilityAdapter } from "../../traceability/contracts";
 import { buildTraceabilitySnapshot } from "../../traceability/traceability-model";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
@@ -39,7 +39,19 @@ function inMemoryHarness(): AdapterContractHarness {
     makeArtifact: () => ({
       id: "run-1",
       createdAt: 1,
-      results: [{ testKey: "42", outcome: "passed" }],
+      results: [{
+        testKey: "42",
+        outcome: "passed",
+        scenario: { filePath: "/ws/a.feature", line: 3, name: "S", kind: "scenario" },
+        durationMs: 5,
+        attempts: 1,
+        flaky: false,
+        evidenceRefs: [],
+      }],
+      shards: [],
+      selection: "42",
+      preflight: [],
+      state: "complete",
     }),
     publishTarget: { id: "EXEC-1", label: "Execution 1" },
   };
@@ -58,7 +70,23 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
 
   it("stores each published artifact against its target", async () => {
     const adapter = new InMemoryTraceabilityAdapter();
-    const artifact = { id: "run-9", createdAt: 5, results: [{ testKey: "1", outcome: "failed" as const }] };
+    const artifact: RunArtifact = {
+      id: "run-9",
+      createdAt: 5,
+      results: [{
+        testKey: "1",
+        outcome: "failed",
+        scenario: { filePath: "/ws/a.feature", line: 3, name: "S", kind: "scenario" },
+        durationMs: 5,
+        attempts: 1,
+        flaky: false,
+        evidenceRefs: [],
+      }],
+      shards: [],
+      selection: "1",
+      preflight: [],
+      state: "complete",
+    };
     await adapter.resultPublishing.publish(artifact, { id: "EXEC-9", label: "Nine" });
 
     expect(adapter.publications).toEqual([{ artifact, targetId: "EXEC-9" }]);
