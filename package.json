@@ -534,6 +534,18 @@
         "icon": "$(link)"
       },
       {
+        "command": "playwrightBddRunner.traceability.runAndPublish",
+        "title": "Run Locally and Publish…",
+        "category": "Specwright",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.publishLastRun",
+        "title": "Publish Last Run…",
+        "category": "Specwright",
+        "icon": "$(cloud-upload)"
+      },
+      {
         "command": "playwrightBddRunner.traceability.sync",
         "title": "Sync Traceability",
         "category": "Specwright",
@@ -671,6 +683,14 @@
           "when": "config.playwrightBddRunner.traceability.enablePanel"
         },
         {
+          "command": "playwrightBddRunner.traceability.runAndPublish",
+          "when": "config.playwrightBddRunner.traceability.enablePanel"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.publishLastRun",
+          "when": "config.playwrightBddRunner.traceability.enablePanel"
+        },
+        {
           "command": "playwrightBddRunner.traceability.sync",
           "when": "playwrightBddRunner.traceability.connected"
         },
@@ -699,6 +719,16 @@
           "command": "playwrightBddRunner.traceability.sync",
           "when": "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected",
           "group": "navigation@0"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.runAndPublish",
+          "when": "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected",
+          "group": "navigation@2"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.publishLastRun",
+          "when": "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected",
+          "group": "navigation@3"
         },
         {
           "command": "playwrightBddRunner.traceability.manageConnection",
@@ -741,6 +771,11 @@
           "command": "playwrightBddRunner.traceability.linkScenario",
           "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityScenario",
           "group": "inline@1"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.runAndPublish",
+          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityScenario",
+          "group": "traceability@1"
         },
         {
           "command": "playwrightBddRunner.traceability.openIssue",

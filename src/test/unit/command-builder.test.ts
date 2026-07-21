@@ -38,6 +38,18 @@ function makeConfig(overrides: Partial<ConfigStub> = {}): ConfigStub {
   };
 }
 
+// Extract the --grep regex from a built command, reversing posixQuote (tests run on posix) so the
+// pattern can be exercised against realistic Playwright grep targets.
+function grepRegexOf(cmd: string): RegExp {
+  const quoted = /--grep "(.*)" --reporter/.exec(cmd)?.[1] ?? "";
+  const raw = quoted
+    .replaceAll('\\"', '"')
+    .replaceAll("\\`", "`")
+    .replaceAll("\\$", "$")
+    .replaceAll("\\\\", "\\");
+  return new RegExp(raw);
+}
+
 describe("CommandBuilder", () => {
   it("chains bddgen and playwright test for a scenario, --grep'd by name", async () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
@@ -295,5 +307,21 @@ describe("CommandBuilder", () => {
     const cmd = builder.buildPathFilterCommand("features/login\\.feature");
     expect(cmd).toMatch(/^npx bddgen && npx playwright test "features\/login/);
     expect(cmd).not.toContain("--grep");
+  });
+
+  it("collapses several scenarios into one UNANCHORED, regex-escaped combined --grep (all-mapped)", () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const cmd = builder.buildGrepCommand(["Add to cart", "Checkout (guest)"]);
+    expect(cmd).toMatch(/^npx bddgen && npx playwright test --grep/);
+    // Unanchored like every grep here: Playwright's grep target is `path › describes › title › tags`
+    // joined, so a `^`/`$` would match nothing (the anchored form ran ZERO tests). Behavioral proof:
+    // reconstruct the regex from the (posix-shell-quoted) --grep argument and run it against a
+    // realistic grep target for each member scenario.
+    const regex = grepRegexOf(cmd);
+    expect(regex.test("features/cart.feature.spec.js Cart Add to cart @TEST_APEX-1")).toBe(true);
+    expect(regex.test("features/shop.feature.spec.js Shop Checkout (guest) @TEST_APEX-2")).toBe(true);
+    expect(regex.test("features/other.feature.spec.js Shop Refund order @TEST_APEX-3")).toBe(false);
+    // The parens in the second name are regex-escaped, so they match literal parentheses.
+    expect(regex.source).toContain("Checkout \\(guest\\)");
   });
 });

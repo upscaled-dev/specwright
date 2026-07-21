@@ -235,12 +235,42 @@ export interface CoverageCapability {
   coverageFor(ref: TestCaseRef, signal?: AbortSignal): Promise<readonly RequirementRef[]>;
 }
 
+// A capability method that is declared on the interface but deliberately unimplemented at the current
+// phase (e.g. the Xray automation-binding write, which lands in P3). Callers catch this to degrade
+// gracefully rather than surface it as an unexpected failure.
+export class NotSupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NotSupportedError";
+  }
+}
+
 export interface AutomationBindingCapability {
   // Pure, offline classification of a target test's automation compatibility for preflight. Provider
   // logic lives here, never in the neutral preflight core. `undefined`/partial metadata → `unknown`.
+  // This is the P2 deliverable — validation only.
   classify(meta: TestCaseMetadata | undefined): AutomationBindingClassification;
-  // Establishing the binding by writing to the remote is a P3 write path; it throws until then.
+  // Establishing the binding by writing to the remote is a P3 write path; it rejects with a
+  // `NotSupportedError` until then. P2 never binds — it only classifies.
   bind(ref: TestCaseRef, signal?: AbortSignal): Promise<void>;
+}
+
+// The outcome of a remote search beyond the synced snapshot. An EMPTY `tests` with `complete: true`
+// is an honest "no matches" (§5: a bad JQL clause returns 0 rows, it never errors), never an "invalid
+// query"; `complete: false` means the fetch paged short or hit a transport fault.
+export interface RemoteSearchResult {
+  readonly tests: readonly TestCaseMetadata[];
+  readonly complete: boolean;
+}
+
+// Optional capability: search the provider for tests the local snapshot never synced, and merge a
+// picked test's metadata into the snapshot without a full sync. Capability-gated — the linkScenario
+// picker only offers remote search when the active adapter exposes this.
+export interface RemoteSearchCapability {
+  search(text: string, signal?: AbortSignal): Promise<RemoteSearchResult>;
+  // Additive, non-destructive merge of specific keys' metadata into the local snapshot (fires the
+  // metadata change event). Never demotes catalogue completeness — it supplements, like a key batch.
+  mergeKeys(keys: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
 export interface ResultPublishingCapability {
@@ -264,6 +294,7 @@ export interface TraceabilityAdapter {
   readonly metadata?: MetadataCapability | undefined;
   readonly coverage?: CoverageCapability | undefined;
   readonly automationBinding?: AutomationBindingCapability | undefined;
+  readonly remoteSearch?: RemoteSearchCapability | undefined;
   readonly resultPublishing?: ResultPublishingCapability | undefined;
   readonly attachments?: AttachmentCapability | undefined;
 

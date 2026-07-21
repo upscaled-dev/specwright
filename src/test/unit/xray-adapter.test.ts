@@ -15,7 +15,7 @@ import type {
   XrayConnectionTestDeps,
   XrayProbeOptions,
 } from "../../xray/xray-connection-test";
-import { TraceabilityAdapter } from "../../traceability/contracts";
+import { NotSupportedError, TraceabilityAdapter } from "../../traceability/contracts";
 import { Logger } from "../../utils/logger";
 
 function mapSecretStorage(): vscode.SecretStorage {
@@ -252,9 +252,10 @@ describe("classifyXrayBinding", () => {
 });
 
 describe("XrayAdapter.automationBinding", () => {
-  it("exposes classify offline and rejects bind (a P3 write path)", async () => {
+  it("exposes classify offline and rejects bind with a typed NotSupportedError (a P3 write path)", async () => {
     const adapter = new XrayAdapter(configWith({}));
     expect(adapter.automationBinding.classify({ key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } })).toBe("compatible");
     await expect(adapter.automationBinding.bind({ kind: "testCase", key: "CALC-1" })).rejects.toThrow(/P3/);
+    await expect(adapter.automationBinding.bind({ kind: "testCase", key: "CALC-1" })).rejects.toBeInstanceOf(NotSupportedError);
   });
 });

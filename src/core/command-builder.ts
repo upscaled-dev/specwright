@@ -147,6 +147,28 @@ export class CommandBuilder {
   }
 
   /**
+   * Run several scenarios in one bddgen+playwright pass via a combined `--grep` regex — the batch
+   * all-mapped collapse. Each name is regex-escaped (and its outline `<placeholders>` wildcarded) the
+   * same way {@link buildScenarioCommand} escapes a single grep, then OR-joined. Stays UNANCHORED
+   * like every other grep here: Playwright's grep target is `path › describes › title › @tags`
+   * joined, so a `^`/`$` anchor would fail on the path prefix / appended tags and match nothing.
+   */
+  public buildGrepCommand(names: readonly string[]): string {
+    const parts: string[] = [];
+    const gen = this.buildBddgen(undefined);
+    if (gen) {parts.push(gen);}
+    const pattern = names.map((name) => this.gripPattern(name)).join("|");
+    const playwrightParts: string[] = [this.config.playwrightCommand, "--grep", this.quote(pattern)];
+    this.appendCommonFlags(playwrightParts, {
+      reporter: this.config.reporter,
+      parallel: this.config.parallelExecution,
+      dryRun: this.config.dryRun,
+    });
+    parts.push(playwrightParts.join(" "));
+    return parts.join(" && ");
+  }
+
+  /**
    * Debug command, split into its bddgen and playwright halves. The executor runs bddgen
    * itself (so the generated specs exist before breakpoints are mirrored into them) and then
    * launches ONLY the playwright half under VS Code's JS debugger via a `node-terminal`

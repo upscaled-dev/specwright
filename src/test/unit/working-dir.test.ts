@@ -1,5 +1,36 @@
 import { describe, it, expect } from "vitest";
-import { canonicalCwd, isSameOrInsideDir } from "../../utils/working-dir";
+import { canonicalCwd, isSameOrInsideDir, toPathFilterRegex } from "../../utils/working-dir";
+
+describe("toPathFilterRegex", () => {
+  it("relativizes a feature file against the workspace-root working dir (non-monorepo)", () => {
+    expect(toPathFilterRegex("/ws", "/ws/features/a.feature")).toBe("features/a\\.feature");
+  });
+
+  it("relativizes against the PACKAGE working dir so a monorepo path filter matches its generated specs", () => {
+    // The Playwright config lives in packages/ui; relativizing against it (not /ws) yields the short
+    // path that appears inside <pkg>/.features-gen/features/a.feature.
+    expect(toPathFilterRegex("/ws/packages/ui", "/ws/packages/ui/features/a.feature")).toBe("features/a\\.feature");
+  });
+
+  it("relativizes a folder target the same way", () => {
+    expect(toPathFilterRegex("/ws/packages/ui", "/ws/packages/ui/features/sub")).toBe("features/sub");
+  });
+
+  it("escapes every regex metacharacter so Playwright reads a literal path, not a pattern", () => {
+    expect(toPathFilterRegex("/ws", "/ws/a.b+c(1).feature")).toBe("a\\.b\\+c\\(1\\)\\.feature");
+  });
+
+  it("falls back to the (forward-slashed, escaped) target when it is outside the working dir", () => {
+    expect(toPathFilterRegex("/ws/pkg", "/other/features/a.feature")).toBe("/other/features/a\\.feature");
+  });
+
+  it("forward-slashes a backslash-separator target and regex-escapes it (v0.3.9 gotcha)", () => {
+    // A Windows-separator path outside the working dir falls back to the target as-is: backslashes
+    // become forward slashes (a backslash path reads as regex poison, matching nothing) and every
+    // regex metacharacter (the dots) is escaped, so Playwright reads a literal path.
+    expect(toPathFilterRegex("/ws/pkg", "C:\\repo\\features\\a.b.feature")).toBe("C:/repo/features/a\\.b\\.feature");
+  });
+});
 
 describe("canonicalCwd", () => {
   describe("on Windows", () => {

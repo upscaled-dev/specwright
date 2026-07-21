@@ -28,10 +28,16 @@ export function recordDecisions(
     }));
 }
 
-// Drops the per-scenario invocations for excluded scenarios. A coarse invocation (path-filter/tags)
-// runs a whole feature/folder/tag set and can't be surgically narrowed, so an excluded scenario that
-// falls under one STILL runs and lands in `RunArtifact.results` — the exclusion is recorded as intent
-// on `RunArtifact.preflight` only.
+function isExcluded(ref: ScenarioRef, excluded: readonly ScenarioRef[]): boolean {
+  return excluded.some((ex) => sameScenario(ref, ex));
+}
+
+// Removes excluded scenarios from the invocations. A per-scenario invocation is dropped outright; a
+// combined-grep invocation is rebuilt from its remaining refs (dropped if none survive) — so
+// exclusion stays surgical for the all-mapped scope. A coarse invocation (path-filter/tags) runs a
+// whole feature/folder/tag set and can't be narrowed, so an excluded scenario that falls under one
+// STILL runs and lands in `RunArtifact.results` — the exclusion is recorded as intent on
+// `RunArtifact.preflight` only.
 //
 // CONTRACT for publish (P3): the publish path is the reconciliation seam. It MUST filter `results`
 // against the `preflight` decisions (drop every result whose scenario carries an `exclude` decision)
@@ -44,9 +50,22 @@ export function invocationsAfterExclusions(
   if (excluded.length === 0) {
     return [...invocations];
   }
-  return invocations.filter(
-    (inv) => inv.kind !== "scenario" || !excluded.some((ref) => sameScenario(inv.ref, ref))
-  );
+  const out: BatchInvocation[] = [];
+  for (const inv of invocations) {
+    if (inv.kind === "scenario") {
+      if (!isExcluded(inv.ref, excluded)) {
+        out.push(inv);
+      }
+    } else if (inv.kind === "grep") {
+      const refs = inv.refs.filter((ref) => !isExcluded(ref, excluded));
+      if (refs.length > 0) {
+        out.push({ kind: "grep", refs });
+      }
+    } else {
+      out.push(inv);
+    }
+  }
+  return out;
 }
 
 // The user's resolution of a preflight round.
@@ -74,6 +93,9 @@ export interface PreflightFlowDeps {
   resolve(selection: BatchSelection): ResolvedBatch;
   snapshot(): TraceabilitySnapshot;
   classifyBinding?: ((meta: TestCaseMetadata | undefined) => AutomationBindingClassification) | undefined;
+  // Canonical member keys of the run's target Test Plan (slice 2d); a mapped scenario outside it
+  // classifies `not-in-target-plan`. Absent → the state is never produced.
+  targetPlanKeys?: ReadonlySet<string> | undefined;
   ui: PreflightUi;
   runner: PreflightRunner;
 }
@@ -89,7 +111,10 @@ const MAX_ROUNDS = 50;
 export async function runPreflightFlow(selection: BatchSelection, deps: PreflightFlowDeps): Promise<boolean> {
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
     const resolved = deps.resolve(selection);
-    const items = classifyPreflight(resolved.scenarios, deps.snapshot(), { classifyBinding: deps.classifyBinding });
+    const items = classifyPreflight(resolved.scenarios, deps.snapshot(), {
+      classifyBinding: deps.classifyBinding,
+      ...(deps.targetPlanKeys !== undefined ? { targetPlanKeys: deps.targetPlanKeys } : {}),
+    });
     const nonReady = items.filter((item) => item.state !== "ready");
 
     if (nonReady.length === 0) {

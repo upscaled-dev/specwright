@@ -780,7 +780,8 @@ describe("traceability runAndPublish — preflight batch flow", () => {
   function harness(links: TraceLink[]) {
     const store = new RunArtifactStore(memento(), Logger.create());
     const runScenarioWithOutput = vi.fn(() => Promise.resolve({ success: true, output: "", error: "", duration: 1 }));
-    const executor = { runScenarioWithOutput, runPathFilterWithOutput: vi.fn(), runAllTestsWithTagsOutput: vi.fn() };
+    const runGrepWithOutput = vi.fn((_names: readonly string[]) => Promise.resolve({ success: true, output: "", error: "", duration: 1 }));
+    const executor = { runScenarioWithOutput, runGrepWithOutput, runPathFilterWithOutput: vi.fn(), runAllTestsWithTagsOutput: vi.fn() };
     const config = ExtensionConfig.create();
     const mgr = CommandManager.create(makeContext({
       testExecutor: executor as unknown as TestExecutor,
@@ -792,7 +793,7 @@ describe("traceability runAndPublish — preflight batch flow", () => {
       rebuildNow: () => Promise.resolve(),
     } as unknown as TraceabilitySubsystem;
     mgr.setTraceabilitySubsystem(subsystem);
-    return { mgr, store, runScenarioWithOutput };
+    return { mgr, store, runScenarioWithOutput, runGrepWithOutput };
   }
 
   function pickBy(predicate: (c: PreflightChoice) => boolean): void {
@@ -803,48 +804,51 @@ describe("traceability runAndPublish — preflight batch flow", () => {
     });
   }
 
-  it("resolves all-mapped, classifies, and runs every scenario on local-only", async () => {
-    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
+  it("resolves all-mapped, classifies, and runs the whole set in one combined-grep on local-only", async () => {
+    const { mgr, store, runGrepWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
     pickBy((c) => c.kind === "run" && c.outcome === "local-only");
     await mgr.runAndPublish();
-    expect(runScenarioWithOutput).toHaveBeenCalledTimes(2);
+    expect(runGrepWithOutput).toHaveBeenCalledTimes(1);
+    expect(runGrepWithOutput.mock.calls[0]![0]).toEqual(["A", "B"]);
     expect(store.latest()?.preflight).toEqual([
       { scenario: B, testKey: "CALC-2", state: "invalid-key", outcome: "local-only" },
     ]);
   });
 
-  it("drops the flagged scenario's run and records its exclusion on exclude", async () => {
-    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
+  it("rebuilds the grep without the flagged scenario and records its exclusion on exclude", async () => {
+    const { mgr, store, runGrepWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
     pickBy((c) => c.kind === "run" && c.outcome === "exclude");
     await mgr.runAndPublish();
-    // Only the ready scenario ran; the flagged one was excluded.
-    expect(runScenarioWithOutput).toHaveBeenCalledTimes(1);
+    // The combined grep runs only the ready scenario; the flagged one is surgically removed.
+    expect(runGrepWithOutput).toHaveBeenCalledTimes(1);
+    expect(runGrepWithOutput.mock.calls[0]![0]).toEqual(["A"]);
     expect(store.latest()?.preflight).toEqual([
       { scenario: B, testKey: "CALC-2", state: "invalid-key", outcome: "exclude" },
     ]);
   });
 
   it("runs nothing and seals nothing when the preflight is cancelled", async () => {
-    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
+    const { mgr, store, runGrepWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
     vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     await mgr.runAndPublish();
-    expect(runScenarioWithOutput).not.toHaveBeenCalled();
+    expect(runGrepWithOutput).not.toHaveBeenCalled();
     expect(store.latest()).toBeUndefined();
     expect(String(info.mock.calls.at(-1)?.[0])).toContain("cancelled");
   });
 
   it("runs directly with no quick-pick when every scenario is ready", async () => {
-    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
+    const { mgr, store, runGrepWithOutput } = harness([READY_LINK]);
     const quickPick = vi.spyOn(vscode.window, "showQuickPick");
     await mgr.runAndPublish();
     expect(quickPick).not.toHaveBeenCalled();
-    expect(runScenarioWithOutput).toHaveBeenCalledTimes(1);
+    expect(runGrepWithOutput).toHaveBeenCalledTimes(1);
+    expect(runGrepWithOutput.mock.calls[0]![0]).toEqual(["A"]);
     expect(store.latest()?.preflight).toEqual([]);
   });
 
   it("wires the progress cancel token to the abort controller and seals cancelled", async () => {
-    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
+    const { mgr, store, runGrepWithOutput } = harness([READY_LINK]);
     // A cancelled progress token fires immediately; the batch must abort before dispatching and seal
     // the artifact `cancelled`.
     vi.spyOn(vscode.window, "withProgress").mockImplementation((_opts, task) =>
@@ -854,7 +858,7 @@ describe("traceability runAndPublish — preflight batch flow", () => {
       )
     );
     await mgr.runAndPublish();
-    expect(runScenarioWithOutput).not.toHaveBeenCalled();
+    expect(runGrepWithOutput).not.toHaveBeenCalled();
     expect(store.latest()?.state).toBe("cancelled");
   });
 });

@@ -71,7 +71,10 @@ export function createXrayAdapterFactory(
         onCredentialsChange: credentialStore.onDidChange,
         canonicalizeKey: canonicalizeXrayKey,
       });
-      return new XrayAdapter(ctx.config, credentialStore, verify, metadata);
+      // The capability implements both metadata and remote search over the same client/state, so it
+      // fills both adapter slots — the linkScenario picker's remote-search section is thereby gated on
+      // the live (synced) adapter, never the browse-only instance.
+      return new XrayAdapter(ctx.config, credentialStore, verify, metadata, metadata);
     },
   };
 }

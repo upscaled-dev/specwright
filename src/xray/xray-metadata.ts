@@ -4,11 +4,14 @@ import { Logger } from "../utils/logger";
 import {
   MetadataCapability,
   RemoteMetadataSnapshot,
+  RemoteSearchCapability,
+  RemoteSearchResult,
   SyncScope,
   TestCaseMetadata,
 } from "../traceability/contracts";
 import { XrayAbortError, XrayCachePage, XrayClient, XrayFetchOutcome } from "./xray-client";
 import { CachedMetadata, CACHE_SCHEMA_VERSION, XrayMetadataCache } from "./xray-metadata-cache";
+import { buildSearchJql } from "./xray-search";
 
 const GHERKIN_KEYWORD =
   /^(Feature|Background|Scenario Outline|Scenario|Examples|Given|When|Then|And|But)\b/;
@@ -87,7 +90,9 @@ export interface XrayMetadataDeps {
  * state is reset and reloaded for the new account, and any sync that straddles the switch is
  * discarded wholesale (no commit, no persist, no fire).
  */
-export class XrayMetadataCapability implements MetadataCapability, vscode.Disposable {
+export class XrayMetadataCapability
+  implements MetadataCapability, RemoteSearchCapability, vscode.Disposable
+{
   private readonly _onDidChange = new vscode.EventEmitter<void>();
   public readonly onDidChange = this._onDidChange.event;
   private readonly now: () => number;
@@ -159,6 +164,63 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
       completeness: this.state.completeness,
       errors: [...this.state.errors],
     };
+  }
+
+  // Remote free-text/key search beyond the synced snapshot. The neutral JQL builder scopes a summary
+  // match to the configured projects (or a direct key lookup for a key-shaped input); §5 leniency
+  // means an empty `tests` is an honest "no matches", never an invalid query. The JQL carries only
+  // the user's search text (a repo tag, not a secret), so logging it at debug is safe.
+  public async search(text: string, signal?: AbortSignal): Promise<RemoteSearchResult> {
+    const jql = buildSearchJql(this.deps.config.xraySyncProjectKeys, text);
+    if (jql === undefined) {
+      return { tests: [], complete: true };
+    }
+    this.deps.logger.debug(`Xray remote search: ${jql}`);
+    const outcome = await this.deps.client.searchTests(jql, signal);
+    return { tests: outcome.tests, complete: outcome.complete && outcome.errors.length === 0 };
+  }
+
+  // Additive background merge for a test picked from remote search: fetch its metadata and fold it
+  // into the in-memory snapshot without disturbing the catalogue (no completeness change, like a key
+  // batch). No per-key fallback — `fetchTestsByKeys` batches, and one stale key never poisons it.
+  public async mergeKeys(keys: readonly string[], signal?: AbortSignal): Promise<void> {
+    const wanted = dedupe(keys.map((key) => this.canonicalizeKey(key))).filter((key) => key !== "");
+    if (wanted.length === 0) {
+      return;
+    }
+    // Capture epoch AND account at entry (mirrors `sync`): the account is what persist keys off, and
+    // the stamp-drift check below closes the window where this merge authenticated fresh with the NEW
+    // account's creds while capturing the OLD stamp — persisting its data under the old cache key
+    // would leak across accounts (§7).
+    const epoch = this.accountEpoch;
+    const account = this.accountStamp ?? (await this.deps.account());
+    let outcome: XrayFetchOutcome;
+    try {
+      outcome = await this.deps.client.fetchTestsByKeys(wanted, signal);
+    } catch (error) {
+      if (error instanceof XrayAbortError || signal?.aborted) {
+        return;
+      }
+      throw error;
+    }
+    if (signal?.aborted || outcome.tests.length === 0) {
+      return;
+    }
+    if (epoch !== this.accountEpoch || (this.accountStamp !== undefined && this.accountStamp !== account)) {
+      return;
+    }
+    const merged = new Map(this.state.tests);
+    const found = new Set<string>();
+    for (const record of outcome.tests) {
+      merged.set(record.key, record);
+      found.add(record.key);
+    }
+    // A key the merge just found can't also be "verified absent" — drop it from the absent set so the
+    // snapshot never carries a key in both (internally inconsistent, even if model precedence hides it).
+    const verifiedAbsentKeys = this.state.verifiedAbsentKeys.filter((key) => !found.has(key));
+    this.state = { ...this.state, tests: merged, verifiedAbsentKeys };
+    await this.persist(account);
+    this._onDidChange.fire();
   }
 
   public async sync(scope: SyncScope, signal?: AbortSignal): Promise<void> {

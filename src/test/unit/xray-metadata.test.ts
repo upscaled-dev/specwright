@@ -29,8 +29,11 @@ function cacheFor(memento: vscode.Memento, account = "account-a"): XrayMetadataC
   });
 }
 
-function fakeConfig(ttlMinutes = 15): ExtensionConfig {
-  return { get xrayCacheTtlMinutes(): number { return ttlMinutes; } } as unknown as ExtensionConfig;
+function fakeConfig(ttlMinutes = 15, projectKeys: string[] = []): ExtensionConfig {
+  return {
+    get xrayCacheTtlMinutes(): number { return ttlMinutes; },
+    get xraySyncProjectKeys(): string[] { return projectKeys; },
+  } as unknown as ExtensionConfig;
 }
 
 function silentLogger(): Logger {
@@ -44,6 +47,7 @@ function outcome(tests: XrayTestRecord[], opts: { complete?: boolean; errors?: s
 interface FakeClient {
   fetchProjectCatalogue?: (projectKey: string, signal?: AbortSignal) => Promise<XrayFetchOutcome>;
   fetchTestsByKeys?: (keys: readonly string[], signal?: AbortSignal) => Promise<XrayFetchOutcome>;
+  searchTests?: (jql: string, signal?: AbortSignal) => Promise<XrayFetchOutcome>;
   invalidateAuth?: () => void;
 }
 
@@ -51,6 +55,7 @@ function fakeClient(impl: FakeClient): XrayClient {
   return {
     fetchProjectCatalogue: impl.fetchProjectCatalogue ?? (() => Promise.resolve(outcome([]))),
     fetchTestsByKeys: impl.fetchTestsByKeys ?? (() => Promise.resolve(outcome([]))),
+    searchTests: impl.searchTests ?? (() => Promise.resolve(outcome([]))),
     invalidateAuth: impl.invalidateAuth ?? (() => { /* no-op */ }),
   } as unknown as XrayClient;
 }
@@ -572,6 +577,158 @@ describe("XrayMetadataCapability account isolation", () => {
     expect(capability.snapshot().tests.size).toBe(0);
     expect(await loadCacheFor(memento, "acct-A")).toBeUndefined();
     expect(await loadCacheFor(memento, "acct-B")).toBeUndefined();
+    expect(fired).toBe(0);
+  });
+
+  it("discards a merge that entered after the epoch bump but captured the pre-restamp account", async () => {
+    const memento = fakeMemento();
+    let accountValue: string | undefined = "acct-A";
+    let deferNext = false;
+    let releaseAccount: (() => void) | undefined;
+    const accountProvider = (): Promise<string | undefined> => {
+      if (deferNext) {
+        deferNext = false;
+        return new Promise<string | undefined>((resolve) => { releaseAccount = () => resolve(accountValue); });
+      }
+      return Promise.resolve(accountValue);
+    };
+
+    let resolveFetch!: (value: XrayFetchOutcome) => void;
+    const client = fakeClient({
+      fetchTestsByKeys: () => new Promise<XrayFetchOutcome>((resolve) => { resolveFetch = resolve; }),
+    });
+    const cache = new XrayMetadataCache(memento, { endpoint: ENDPOINT, account: accountProvider, workspaceId: "ws" });
+    const capability = new XrayMetadataCapability({
+      client,
+      cache,
+      config: fakeConfig(),
+      logger: silentLogger(),
+      account: accountProvider,
+      onCredentialsChange: new vscode.EventEmitter<void>().event,
+      now: () => 10_000,
+    });
+    await flush(); // loadFromCache stamps "acct-A"
+
+    // Switch target, with reconcile's account() read deferred so it parks before restamping.
+    accountValue = "acct-B";
+    deferNext = true;
+    capability.onCredentialsChanged(); // epoch bump now; reconcile parks on the deferred account()
+
+    // Merge enters IN THE GAP: post-bump epoch, still-old stamp ("acct-A"), then parks on its fetch.
+    const mergePromise = capability.mergeKeys(["CALC-1"]);
+    await flush();
+
+    releaseAccount?.(); // let reconcile restamp to "acct-B"
+    await flush();
+
+    let fired = 0;
+    capability.onDidChange(() => { fired += 1; });
+    resolveFetch(outcome([{ key: "CALC-1", summary: "B data fetched with B creds" }]));
+    await mergePromise;
+
+    // The stamp drifted from the captured account, so the merge is discarded — nothing under either
+    // key, no fire. Without the captured-account guard this would persist B's data under "acct-A".
+    expect(capability.snapshot().tests.size).toBe(0);
+    expect(await loadCacheFor(memento, "acct-A")).toBeUndefined();
+    expect(await loadCacheFor(memento, "acct-B")).toBeUndefined();
+    expect(fired).toBe(0);
+  });
+
+  it("resurrects a merged key — a found key is dropped from verifiedAbsentKeys", async () => {
+    const fetchTestsByKeys = vi
+      .fn<(keys: readonly string[]) => Promise<XrayFetchOutcome>>()
+      .mockResolvedValueOnce(outcome([])) // sync key-batch: CALC-1 queried, not returned → absent
+      .mockResolvedValueOnce(outcome([{ key: "CALC-1", summary: "found now" }])); // merge finds it
+    const h = harness({ fetchProjectCatalogue: () => Promise.resolve(outcome([])), fetchTestsByKeys });
+    await flush();
+
+    await h.capability.sync({ projectKeys: ["CALC"], testKeys: ["CALC-1"] });
+    expect(h.capability.snapshot().verifiedAbsentKeys).toContain("CALC-1");
+
+    await h.capability.mergeKeys(["CALC-1"]);
+    const snap = h.capability.snapshot();
+    expect(snap.verifiedAbsentKeys).not.toContain("CALC-1");
+    expect(snap.tests.get("CALC-1")?.summary).toBe("found now");
+  });
+});
+
+describe("XrayMetadataCapability.search", () => {
+  it("builds project-scoped JQL and returns the matched tests", async () => {
+    const seen: string[] = [];
+    const capability = makeCapability({
+      config: fakeConfig(15, ["CALC"]),
+      client: fakeClient({
+        searchTests: (jql) => {
+          seen.push(jql);
+          return Promise.resolve(outcome([{ key: "CALC-9", summary: "login flow" }]));
+        },
+      }),
+    });
+
+    const result = await capability.search("login");
+
+    expect(seen).toEqual(['project = CALC AND summary ~ "login*"']);
+    expect(result.complete).toBe(true);
+    expect(result.tests.map((t) => t.key)).toEqual(["CALC-9"]);
+  });
+
+  it("returns an honest empty result (no transport hit) when there is nothing searchable", async () => {
+    const searchTests = vi.fn(() => Promise.resolve(outcome([])));
+    const capability = makeCapability({
+      config: fakeConfig(15, []),
+      client: fakeClient({ searchTests }),
+    });
+
+    const result = await capability.search("login"); // free text, no configured project
+
+    expect(searchTests).not.toHaveBeenCalled();
+    expect(result).toEqual({ tests: [], complete: true });
+  });
+
+  it("reports incomplete when the fetch carried errors, so the caller words it honestly", async () => {
+    const capability = makeCapability({
+      config: fakeConfig(15, ["CALC"]),
+      client: fakeClient({
+        searchTests: () => Promise.resolve(outcome([], { complete: false, errors: ["boom"] })),
+      }),
+    });
+
+    const result = await capability.search("login");
+    expect(result.complete).toBe(false);
+  });
+});
+
+describe("XrayMetadataCapability.mergeKeys", () => {
+  it("additively folds a fetched test into the snapshot and fires onDidChange", async () => {
+    const memento = fakeMemento();
+    const capability = makeCapability({
+      memento,
+      client: fakeClient({
+        fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-2", summary: "two" }])),
+        fetchTestsByKeys: (keys) =>
+          Promise.resolve(outcome(keys.map((key) => ({ key: key.toUpperCase(), summary: `merged ${key}` })))),
+      }),
+    });
+    await capability.sync({ projectKeys: ["CALC"] });
+
+    let fired = 0;
+    capability.onDidChange(() => { fired += 1; });
+    await capability.mergeKeys(["calc-1"]);
+
+    const tests = capability.snapshot().tests;
+    expect([...tests.keys()].sort()).toEqual(["CALC-1", "CALC-2"]);
+    expect(tests.get("CALC-1")?.summary).toBe("merged CALC-1");
+    expect(fired).toBe(1);
+  });
+
+  it("no-ops (no fire) when the remote returns nothing for the keys", async () => {
+    const capability = makeCapability({
+      client: fakeClient({ fetchTestsByKeys: () => Promise.resolve(outcome([])) }),
+    });
+    let fired = 0;
+    capability.onDidChange(() => { fired += 1; });
+    await capability.mergeKeys(["CALC-1"]);
+    expect(capability.snapshot().tests.size).toBe(0);
     expect(fired).toBe(0);
   });
 });

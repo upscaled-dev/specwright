@@ -7,6 +7,8 @@ import {
   ExternalRef,
   KeyGrammar,
   MetadataCapability,
+  NotSupportedError,
+  RemoteSearchCapability,
   TestCaseMetadata,
   TraceabilityAdapter,
 } from "../traceability/contracts";
@@ -53,11 +55,15 @@ export function classifyXrayBinding(meta: TestCaseMetadata | undefined): Automat
   return kind === "Gherkin" ? "compatible" : "incompatible-test-type";
 }
 
-// P2 delivers `classify` (offline). `bind` — writing the binding to the remote — is a P3 write path
-// and rejects until then, keeping the local-execution invariant.
+// P2 delivers `classify` (offline validation). `bind` — writing the binding to the remote — is a P3
+// write path and rejects with a typed `NotSupportedError` until then, keeping the local-execution
+// invariant.
 const xrayAutomationBinding: AutomationBindingCapability = {
   classify: classifyXrayBinding,
-  bind: () => Promise.reject(new Error("Establishing an Xray automation binding lands in P3.")),
+  bind: () =>
+    Promise.reject(
+      new NotSupportedError("Establishing an Xray automation binding is a P3 write path — P2 only validates.")
+    ),
 };
 
 // An empty/whitespace prefix would match every tag; treat it as unset and fall back to the default.
@@ -93,20 +99,24 @@ export class XrayAdapter implements TraceabilityAdapter {
   public readonly label = "Xray";
   public readonly connection: ConnectionCapability | undefined;
   public readonly metadata: MetadataCapability | undefined;
+  public readonly remoteSearch: RemoteSearchCapability | undefined;
   // Offline classification is always available (no network); it degrades to `unknown` on a partial
   // snapshot. Even the browse-only adapter instance carries it harmlessly.
   public readonly automationBinding: AutomationBindingCapability = xrayAutomationBinding;
 
   // The model degrades to the offline tag-only join when a capability is absent, so the browse-URL
-  // command instance (built without a credential store or client) leaves both undefined.
+  // command instance (built without a credential store or client) leaves them undefined. The live
+  // capability instance implements both metadata and remote search, so the factory passes it twice.
   constructor(
     private readonly config: ExtensionConfig,
     credentialStore?: XrayCredentialStore,
     verify?: () => Promise<ConnectionVerifyResult>,
-    metadata?: MetadataCapability
+    metadata?: MetadataCapability,
+    remoteSearch?: RemoteSearchCapability
   ) {
     this.connection = credentialStore ? xrayConnection(config, credentialStore, verify) : undefined;
     this.metadata = metadata;
+    this.remoteSearch = remoteSearch;
   }
 
   public get keyGrammar(): KeyGrammar {

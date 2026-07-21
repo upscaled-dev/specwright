@@ -98,10 +98,42 @@ describe("classifyPreflight", () => {
     expect(classifyPreflight([scenario], snap)[0]?.state).toBe("ready");
   });
 
-  it("never emits `not-in-target-plan` in slice 2c", () => {
+  it("never emits `not-in-target-plan` when no target plan is supplied", () => {
     const scenario = ref({ name: "Untagged" });
     const snap = snapshot({ untraced: [{ scenario, reqKeys: [], malformedTags: [] }] });
     expect(classifyPreflight([scenario], snap).some((i) => i.state === "not-in-target-plan")).toBe(false);
+  });
+
+  it("is `not-in-target-plan` for a mapped scenario whose key is absent from the target plan", () => {
+    const inPlan = ref({ name: "InPlan", line: 3 });
+    const outOfPlan = ref({ name: "OutOfPlan", line: 8 });
+    const snap = snapshot({
+      links: [
+        link({ scenario: inPlan, testKey: "CALC-1", meta: gherkin }),
+        link({ scenario: outOfPlan, testKey: "CALC-2", meta: gherkin }),
+      ],
+    });
+    const items = classifyPreflight([inPlan, outOfPlan], snap, {
+      classifyBinding: classifyXrayBinding,
+      targetPlanKeys: new Set(["CALC-1"]),
+    });
+    expect(items.map((i) => i.state)).toEqual(["ready", "not-in-target-plan"]);
+    expect(items[1]?.testKey).toBe("CALC-2");
+  });
+
+  it("ranks `invalid-key` and `duplicate-mapping` above `not-in-target-plan`", () => {
+    const absent = ref({ name: "Absent" });
+    const dup = ref({ name: "Dup" });
+    const snap = snapshot({
+      links: [
+        link({ scenario: absent, testKey: "CALC-9", remoteMissing: true }),
+        link({ scenario: dup, testKey: "CALC-8" }),
+        link({ scenario: dup, testKey: "CALC-7" }),
+      ],
+    });
+    // Neither key is in the plan, but the soundness/ambiguity states take precedence.
+    const items = classifyPreflight([absent, dup], snap, { targetPlanKeys: new Set(["CALC-1"]) });
+    expect(items.map((i) => i.state)).toEqual(["invalid-key", "duplicate-mapping"]);
   });
 
   it("does not false-flag two same-titled scenarios at different lines as duplicates (strict identity)", () => {

@@ -307,6 +307,14 @@ export class XrayClient {
     return this.fetchScope(`project = ${projectKey}`, signal);
   }
 
+  // Forward a caller-built JQL through the shared scope engine (pagination/auth/backoff/normalization
+  // for free). The neutral search/plan layer owns the JQL; the client only transports it. §5: a bad
+  // clause still returns 200 with 0 rows — never an error — so an empty `tests` means "no matches",
+  // which the caller must word honestly, never as an invalid query.
+  public searchTests(jql: string, signal?: AbortSignal): Promise<XrayFetchOutcome> {
+    return this.fetchScope(jql, signal);
+  }
+
   private async fetchScope(jql: string, signal?: AbortSignal): Promise<XrayFetchOutcome> {
     const outcome: XrayFetchOutcome = { tests: [], pages: [], complete: true, errors: [] };
     let start = 0;

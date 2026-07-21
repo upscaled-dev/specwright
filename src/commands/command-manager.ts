@@ -13,12 +13,22 @@ import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
 import { XrayConnectionCommands } from "../xray/xray-connection-commands";
 import { XrayCredentialStore } from "../xray/xray-credential-store";
 import type { XrayProbe } from "../xray/xray-connection-test";
-import { computeLinkEdit, linkScenarioPicks } from "../traceability/link-scenario";
+import { computeLinkEdit, LinkScenarioPick, linkScenarioPicks } from "../traceability/link-scenario";
 import { ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
-import { BatchSelection, PreflightDecision, PreflightItem, PreflightState, SyncScope } from "../traceability/contracts";
+import {
+  BatchSelection,
+  PreflightDecision,
+  PreflightItem,
+  PreflightState,
+  RemoteSearchCapability,
+  RunArtifact,
+  SyncScope,
+  TraceabilityAdapter,
+} from "../traceability/contracts";
 import { BatchInvocation, resolveBatchSelection } from "../traceability/batch-selection";
 import { PreflightChoice, runPreflightFlow } from "../traceability/preflight-flow";
+import { PublishStubModal, runPublishStub, summarizeArtifact } from "../traceability/publish-stub";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
 
 const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
@@ -186,6 +196,8 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.openIssue", title: "Open Issue in Tracker", category: CATEGORY, handler: this.openIssueInTracker.bind(this) },
         { command: "playwrightBddRunner.traceability.copyKey", title: "Copy Issue Key", category: CATEGORY, handler: this.copyIssueKey.bind(this) },
         { command: "playwrightBddRunner.traceability.linkScenario", title: "Link Scenario to Test", category: CATEGORY, handler: this.linkScenario.bind(this) },
+        { command: "playwrightBddRunner.traceability.runAndPublish", title: "Run Locally and Publish…", category: CATEGORY, handler: this.runAndPublish.bind(this) },
+        { command: "playwrightBddRunner.traceability.publishLastRun", title: "Publish Last Run…", category: CATEGORY, handler: this.publishLastRun.bind(this) },
         { command: "playwrightBddRunner.traceability.sync", title: "Sync Traceability", category: CATEGORY, handler: this.syncTraceability.bind(this) },
         { command: "playwrightBddRunner.traceability.manageConnection", title: "Manage Xray Connection", category: CATEGORY, handler: () => this.getXrayConnectionCommands().manageConnection() },
         { command: "playwrightBddRunner.traceability.connect", title: "Connect to Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().connect() },
@@ -535,16 +547,12 @@ export class CommandManager {
       return;
     }
     const picks = linkScenarioPicks(metadata.snapshot());
-    if (picks.length === 0) {
+    if (picks.length === 0 && !adapter.remoteSearch) {
       vscode.window.showInformationMessage("No synced tests to link yet — run Sync first.");
       return;
     }
 
-    const items = picks.map((pick) => ({ label: pick.key, description: pick.summary ?? "", key: pick.key }));
-    const chosen = await vscode.window.showQuickPick(items, {
-      placeHolder: "Select a test to link to this scenario",
-      matchOnDescription: true,
-    });
+    const chosen = await this.pickTestToLink(adapter, picks);
     if (!chosen) {return;}
 
     const uri = vscode.Uri.file(scenario.filePath);
@@ -568,17 +576,136 @@ export class CommandManager {
     }
     await vscode.workspace.applyEdit(wsEdit);
     await doc.save();
+
+    // A test picked from the remote search section was never synced, so its metadata is missing from
+    // the tree. Fire an additive background merge so the summary/status appear without a full sync.
+    if (!chosen.synced && adapter.remoteSearch) {
+      adapter.remoteSearch.mergeKeys([chosen.key]).catch((error) => {
+        this.logger.warn("Xray metadata merge for a newly linked test failed", { error: errMsg(error) });
+      });
+    }
+  }
+
+  // The link-target picker. Default list = the synced snapshot; when the adapter exposes remote
+  // search, typing ≥3 chars runs a debounced (400ms) Xray search appended as a separate section, so a
+  // never-synced test can still be linked. `synced` tells the caller whether to background-merge it.
+  private pickTestToLink(
+    adapter: TraceabilityAdapter,
+    syncedPicks: readonly LinkScenarioPick[]
+  ): Promise<{ key: string; synced: boolean } | undefined> {
+    const remoteSearch = adapter.remoteSearch;
+    if (!remoteSearch) {
+      const items = syncedPicks.map((pick) => ({ label: pick.key, description: pick.summary ?? "", key: pick.key }));
+      return Promise.resolve(
+        vscode.window
+          .showQuickPick(items, { placeHolder: "Select a test to link to this scenario", matchOnDescription: true })
+          .then((chosen) => (chosen ? { key: chosen.key, synced: true } : undefined))
+      );
+    }
+    return this.pickWithRemoteSearch(remoteSearch, syncedPicks);
+  }
+
+  private pickWithRemoteSearch(
+    remoteSearch: RemoteSearchCapability,
+    syncedPicks: readonly LinkScenarioPick[]
+  ): Promise<{ key: string; synced: boolean } | undefined> {
+    interface Row extends vscode.QuickPickItem {
+      key?: string | undefined;
+      synced?: boolean | undefined;
+    }
+    const syncedKeys = new Set(syncedPicks.map((pick) => pick.key));
+    const syncedRows: Row[] = syncedPicks.map((pick) => ({
+      label: pick.key,
+      description: pick.summary ?? "",
+      key: pick.key,
+      synced: true,
+    }));
+
+    return new Promise((resolve) => {
+      const qp = vscode.window.createQuickPick<Row>();
+      qp.placeholder = "Filter synced tests, or type ≥3 characters to search Xray";
+      qp.matchOnDescription = true;
+      qp.items = syncedRows;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let searchToken = 0;
+      let searchController: AbortController | undefined;
+      let disposed = false;
+
+      // Supersede any pending/in-flight search: cancel the debounce, bump the token so a late resolve
+      // no-ops, and abort the fetch so it stops paging. Bumping the token here (not just on a new
+      // search) is what stops a sub-3-char reset from being clobbered by an earlier search landing.
+      const supersede = (): void => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        searchToken += 1;
+        searchController?.abort();
+        searchController = undefined;
+      };
+
+      const runSearch = (value: string): void => {
+        const token = (searchToken += 1);
+        const controller = new AbortController();
+        searchController = controller;
+        qp.busy = true;
+        remoteSearch
+          .search(value, controller.signal)
+          .then((result) => {
+            if (disposed || token !== searchToken) {return;}
+            const remoteRows: Row[] = result.tests
+              .filter((test) => !syncedKeys.has(test.key))
+              .map((test) => ({ label: test.key, description: test.summary ?? "", key: test.key, synced: false }));
+            const header =
+              remoteRows.length > 0
+                ? "Xray search results"
+                : result.complete
+                  ? "No matches — or the summary field isn't searchable with these credentials"
+                  : "Search did not complete — try again";
+            qp.items = [...syncedRows, { label: header, kind: vscode.QuickPickItemKind.Separator }, ...remoteRows];
+          })
+          .catch((error: unknown) => {
+            // A superseded/aborted search is expected — only a live, current failure is worth a note.
+            if (disposed || token !== searchToken) {return;}
+            this.logger.warn("Xray remote search failed", { error: errMsg(error) });
+          })
+          .finally(() => {
+            if (!disposed && token === searchToken) {qp.busy = false;}
+          });
+      };
+
+      qp.onDidChangeValue((value) => {
+        supersede();
+        const trimmed = value.trim();
+        if (trimmed.length < 3) {
+          qp.items = syncedRows;
+          qp.busy = false;
+          return;
+        }
+        timer = setTimeout(() => runSearch(trimmed), 400);
+      });
+      qp.onDidAccept(() => {
+        const picked = qp.selectedItems[0];
+        supersede();
+        // Resolve BEFORE hide so a synchronous onDidHide can't win the race with `undefined`.
+        resolve(picked?.key ? { key: picked.key, synced: picked.synced ?? false } : undefined);
+        qp.hide();
+      });
+      qp.onDidHide(() => {
+        disposed = true;
+        supersede();
+        qp.dispose();
+        resolve(undefined);
+      });
+      qp.show();
+    });
   }
 
   // Run Locally and Publish… — the P2 preflight batch flow. Resolves the scope, classifies every
   // scenario against the snapshot, collects an explicit decision for each flagged one, then runs the
-  // batch locally and seals one artifact carrying those decisions. Publishing itself is a P3 write
-  // path (not wired here). A scenario/link node scopes the batch to that scenario; otherwise the whole
-  // mapped set.
-  //
-  // Public seam, not yet in the `registerCommands` list: its `playwrightBddRunner.traceability
-  // .runAndPublish` command + menu contribution lands with the package.json patch (slice 2c handoff),
-  // at which point it registers like the others.
+  // batch locally, seals one artifact carrying those decisions, and hands it to the publish stub.
+  // Publishing itself is a P3 write path (the stub performs no remote write). A scenario/link node
+  // scopes the batch to that scenario; otherwise the whole mapped set.
   public async runAndPublish(...args: CommandArguments): Promise<void> {
     const subsystem = this.traceabilitySubsystem;
     const snapshot = subsystem?.getSnapshot();
@@ -589,10 +716,10 @@ export class CommandManager {
     const scenario = this.scenarioRefFromArg(args[0]);
     const selection: BatchSelection = scenario ? { kind: "scenario", scenario } : { kind: "all-mapped" };
     const binding = subsystem.getActiveAdapter()?.automationBinding;
-    const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
 
+    let sealed: RunArtifact | undefined;
     const ran = await runPreflightFlow(selection, {
-      resolve: (sel) => resolveBatchSelection(sel, subsystem.getSnapshot() ?? snapshot, { roots }),
+      resolve: (sel) => resolveBatchSelection(sel, subsystem.getSnapshot() ?? snapshot),
       snapshot: () => subsystem.getSnapshot() ?? snapshot,
       classifyBinding: binding ? (meta) => binding.classify(meta) : undefined,
       ui: {
@@ -605,12 +732,62 @@ export class CommandManager {
         },
       },
       runner: {
-        run: (sel, invocations, decisions) => this.runResolvedBatch(sel, invocations, decisions),
+        run: async (sel, invocations, decisions) => {
+          sealed = await this.runResolvedBatch(sel, invocations, decisions);
+        },
       },
     });
     if (!ran) {
       vscode.window.showInformationMessage("Preflight cancelled — nothing was run.");
+      return;
     }
+    // Hand the sealed artifact to the P2 publish stub. A cancelled or partial batch is gated there —
+    // it never renders the publishable modal, so an incomplete run can't be mistaken for one worth
+    // sending.
+    if (sealed) {
+      await this.presentPublishStub(sealed);
+    }
+  }
+
+  // Publish Last Run… — pick one of the recent sealed artifacts and hand it to the P2 publish stub.
+  private async publishLastRun(): Promise<void> {
+    const artifacts = this.context.runArtifactStore?.list() ?? [];
+    if (artifacts.length === 0) {
+      vscode.window.showInformationMessage("No local runs to publish yet — run a batch first.");
+      return;
+    }
+    const items = artifacts.map((artifact) => {
+      const summary = summarizeArtifact(artifact);
+      return {
+        label: `${new Date(artifact.createdAt).toLocaleString()} · ${artifact.selection.kind}`,
+        description: `${summary.total} results · ${summary.passed} passed · ${summary.failed} failed · ${artifact.state}`,
+        artifact,
+      };
+    });
+    const picked = await vscode.window.showQuickPick(items, { placeHolder: "Select a run to publish" });
+    if (!picked) {return;}
+    await this.presentPublishStub(picked.artifact);
+  }
+
+  // Wire the transport-free publish stub to vscode UI: `publishing` is deliberately never passed, so
+  // the stub structurally cannot reach the remote write path in P2.
+  private async presentPublishStub(artifact: RunArtifact): Promise<void> {
+    await runPublishStub(artifact, {
+      presentModal: (modal) => this.showPublishModal(modal),
+      reportBlocked: (reason) => {
+        vscode.window.showWarningMessage(reason);
+      },
+    });
+  }
+
+  private showPublishModal(modal: PublishStubModal): Promise<string | undefined> {
+    return Promise.resolve(
+      vscode.window.showInformationMessage(
+        modal.title,
+        { modal: true, detail: `${modal.summary}\n\n${modal.notice}` },
+        ...modal.options
+      )
+    );
   }
 
   // The quick-pick preflight surface (no webview in P2). Batch-level actions assign an explicit
@@ -657,10 +834,11 @@ export class CommandManager {
     selection: BatchSelection,
     invocations: readonly BatchInvocation[],
     decisions: readonly PreflightDecision[]
-  ): Promise<void> {
+  ): Promise<RunArtifact | undefined> {
     const store = this.context.runArtifactStore;
     const handle = store?.beginBatch(selection, decisions);
     const controller = new AbortController();
+    let sealed: RunArtifact | undefined;
     try {
       // Notification (not the view location) so the stop button is actually surfaced — a batch run is
       // cancellable, unlike the deliberately-uncancellable sync that renders on the tree view.
@@ -676,9 +854,10 @@ export class CommandManager {
       );
     } finally {
       if (handle !== undefined) {
-        store?.sealBatch(handle, controller.signal.aborted);
+        sealed = store?.sealBatch(handle, controller.signal.aborted);
       }
     }
+    return sealed;
   }
 
   private async dispatchInvocation(
@@ -688,7 +867,12 @@ export class CommandManager {
   ): Promise<void> {
     const executor = this.context.testExecutor;
     if (invocation.kind === "path-filter") {
-      await executor.runPathFilterWithOutput(invocation.pathFilter, invocation.workingDir, signal, handle);
+      await executor.runPathFilterWithOutput(invocation.target, signal, handle);
+      return;
+    }
+    if (invocation.kind === "grep") {
+      const names = invocation.refs.map((ref) => ref.outlineName ?? ref.name);
+      await executor.runGrepWithOutput(names, signal, handle);
       return;
     }
     if (invocation.kind === "tags") {

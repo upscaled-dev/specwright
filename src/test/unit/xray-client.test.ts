@@ -133,6 +133,41 @@ describe("XrayClient.fetchTestsByKeys", () => {
   });
 });
 
+describe("XrayClient.searchTests", () => {
+  it("forwards a caller-built JQL through the getTests engine and maps the records", async () => {
+    const queries: string[] = [];
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        queries.push(query);
+        return testsPage(["CALC-7"]);
+      }),
+    });
+
+    const outcome = await client.searchTests('project = CALC AND summary ~ "login*"');
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("project = CALC AND summary ~");
+    expect(queries[0]).toContain("limit: 100");
+    expect(outcome.complete).toBe(true);
+    expect(outcome.tests.map((t) => t.key)).toEqual(["CALC-7"]);
+  });
+
+  it("carries a test-plan JQL verbatim (the plan → test-keys lookup rides the same engine)", async () => {
+    const queries: string[] = [];
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        queries.push(query);
+        return testsPage(["CALC-1", "CALC-2"]);
+      }),
+    });
+
+    const outcome = await client.searchTests('issue in testPlanTests("CALC-100")');
+
+    expect(queries[0]).toContain("testPlanTests(");
+    expect(outcome.tests.map((t) => t.key)).toEqual(["CALC-1", "CALC-2"]);
+  });
+});
+
 describe("XrayClient auth invalidation", () => {
   it("re-authenticates on the next request after invalidateAuth drops the cached token", async () => {
     let authCalls = 0;

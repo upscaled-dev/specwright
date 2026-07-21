@@ -11,6 +11,10 @@ export interface PreflightAdapterHooks {
   // Provider-specific compatibility check (Xray: Gherkin-only). Absent → every mapped scenario is
   // `ready` (the neutral core makes no provider claims of its own).
   classifyBinding?: ((meta: TestCaseMetadata | undefined) => AutomationBindingClassification) | undefined;
+  // Canonical test keys of the target Test Plan, when the run carries one (slice 2d's plan lookup).
+  // A mapped scenario whose key is absent from this set classifies `not-in-target-plan`; absent →
+  // the state is never produced. The caller supplies keys canonicalized to match the model's links.
+  targetPlanKeys?: ReadonlySet<string> | undefined;
 }
 
 // Precomputed duplicate sets over the WHOLE snapshot (the model does not carry them): a link is a
@@ -94,7 +98,8 @@ function withDetail(
  * `duplicate-mapping`, which outranks the binding-derived states — an unsound key makes the mapping
  * moot before ambiguity matters. `unknown` from the hook never blocks (maps to `ready`), and a broken
  * `@TEST_` tag sitting beside a working key is surfaced as a note without overriding the sound state.
- * `not-in-target-plan` is never produced here (it awaits slice 2d's plan lookup).
+ * `not-in-target-plan` (a mapped key absent from `targetPlanKeys` when the run carries a plan) ranks
+ * below duplicate but above the binding states — it can't publish there regardless of compatibility.
  */
 export function classifyPreflight(
   scenarios: readonly ScenarioRef[],
@@ -118,6 +123,9 @@ export function classifyPreflight(
         matching.length > 1 || multiKeyScenarios.has(id) || matching.some((link) => sharedKeys.has(link.testKey));
       if (isDuplicate) {
         return { scenario, testKey: primary.testKey, ...withDetail("duplicate-mapping", warning) };
+      }
+      if (hooks.targetPlanKeys !== undefined && !hooks.targetPlanKeys.has(primary.testKey)) {
+        return { scenario, testKey: primary.testKey, ...withDetail("not-in-target-plan", warning) };
       }
       const bound = bindingState(primary.meta, hooks);
       return { scenario, testKey: primary.testKey, ...withDetail(bound.state, bound.detail, warning) };

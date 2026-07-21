@@ -1,14 +1,17 @@
-import * as path from "node:path";
 import { BatchSelection } from "./contracts";
 import type { TraceabilitySnapshot } from "./traceability-model";
 import { ScenarioRef, normalizePath, refIdentity, sameScenario } from "./scenario-ref";
 
-// One thing to run for a resolved batch. `scenario` greps by name/outline; `path-filter` is a
-// Playwright positional regex over the (forward-slashed, escaped) source path; `tags` routes the
-// expression through the existing `bddgen --tags` path.
+// One thing to run for a resolved batch. `scenario` greps by name/outline; `grep` runs one combined
+// name-regex over several scenarios in a single bddgen+playwright pass (the all-mapped collapse);
+// `path-filter` carries the source feature file or folder — the executor resolves its working dir
+// (the owning Playwright config, monorepo-aware) and derives a forward-slashed, regex-escaped
+// positional filter relative to that dir; `tags` routes the expression through the `bddgen --tags`
+// path.
 export type BatchInvocation =
   | { readonly kind: "scenario"; readonly ref: ScenarioRef }
-  | { readonly kind: "path-filter"; readonly pathFilter: string; readonly workingDir?: string | undefined }
+  | { readonly kind: "grep"; readonly refs: readonly ScenarioRef[] }
+  | { readonly kind: "path-filter"; readonly target: string }
   | { readonly kind: "tags"; readonly expression: string };
 
 export interface ResolvedBatch {
@@ -17,9 +20,9 @@ export interface ResolvedBatch {
 }
 
 export interface BatchResolutionOptions {
-  // Workspace roots used to relativize a feature/folder path filter so it matches the generated spec
-  // path (mirrored under the features-gen dir). No matching root → the forward-slashed path is used.
-  readonly roots?: readonly string[] | undefined;
+  // Canonical member test keys of the target Test Plan, when the selection is `test-plan-derived`
+  // (slice 2d's remote plan lookup supplies them). Absent/empty → that scope resolves to nothing.
+  readonly planTestKeys?: readonly string[] | undefined;
 }
 
 function allScenarioRefs(snapshot: TraceabilitySnapshot): ScenarioRef[] {
@@ -48,27 +51,8 @@ function mappedScenarioRefs(snapshot: TraceabilitySnapshot): ScenarioRef[] {
   return refs;
 }
 
-// Regex-escape after forward-slashing so a Windows-separator path never reads as regex poison (the
-// v0.3.9 path gotcha) — Playwright treats CLI filters as regular expressions.
-function toEscapedPathFilter(target: string, roots: readonly string[]): string {
-  const owning = roots.find((root) => isUnder(target, root));
-  const relative = owning ? path.relative(owning, target) : target;
-  const slashed = relative.replaceAll("\\", "/");
-  return slashed.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function isUnder(target: string, dir: string): boolean {
-  const rel = path.relative(dir, target);
-  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
-}
-
-function pathFilterInvocation(target: string, roots: readonly string[]): BatchInvocation {
-  const workingDir = roots.find((root) => isUnder(target, root));
-  return {
-    kind: "path-filter",
-    pathFilter: toEscapedPathFilter(target, roots),
-    ...(workingDir ? { workingDir } : {}),
-  };
+function pathFilterInvocation(target: string): BatchInvocation {
+  return { kind: "path-filter", target };
 }
 
 function underFolder(filePath: string, folderPath: string): boolean {
@@ -82,14 +66,14 @@ function underFolder(filePath: string, folderPath: string): boolean {
  * reusing the existing command-builder routes. Pure: derives its scenario set from the snapshot so a
  * scope's refs always agree with the ones preflight classifies. `tag-expression`'s membership is
  * bddgen's to decide, so its scenario set is left empty (nothing to preflight offline);
- * `test-plan-derived` awaits slice 2d's plan lookup and resolves to nothing.
+ * `test-plan-derived` needs `options.planTestKeys` from the remote plan lookup — without them it
+ * resolves to nothing (the lookup hasn't run).
  */
 export function resolveBatchSelection(
   selection: BatchSelection,
   snapshot: TraceabilitySnapshot,
   options: BatchResolutionOptions = {}
 ): ResolvedBatch {
-  const roots = options.roots ?? [];
   const known = allScenarioRefs(snapshot);
   const canonical = (ref: ScenarioRef): ScenarioRef => known.find((k) => sameScenario(k, ref)) ?? ref;
 
@@ -104,19 +88,28 @@ export function resolveBatchSelection(
     }
     case "feature": {
       const scenarios = known.filter((ref) => normalizePath(ref.filePath) === normalizePath(selection.filePath));
-      return { scenarios, invocations: [pathFilterInvocation(selection.filePath, roots)] };
+      return { scenarios, invocations: [pathFilterInvocation(selection.filePath)] };
     }
     case "folder": {
       const scenarios = known.filter((ref) => underFolder(ref.filePath, selection.folderPath));
-      return { scenarios, invocations: [pathFilterInvocation(selection.folderPath, roots)] };
+      return { scenarios, invocations: [pathFilterInvocation(selection.folderPath)] };
     }
     case "all-mapped": {
       const scenarios = mappedScenarioRefs(snapshot);
+      // Collapse to one combined-grep invocation (one bddgen regeneration for the whole set) instead
+      // of one full bddgen+playwright pass per scenario. Exclusion stays surgical — the grep is
+      // rebuilt from the remaining refs (see `invocationsAfterExclusions`).
+      const invocations = scenarios.length > 0 ? [{ kind: "grep" as const, refs: scenarios }] : [];
+      return { scenarios, invocations };
+    }
+    case "test-plan-derived": {
+      const planKeys = new Set(options.planTestKeys ?? []);
+      const scenarios = mappedScenarioRefs(snapshot).filter((ref) =>
+        snapshot.links.some((link) => refIdentity(link.scenario) === refIdentity(ref) && planKeys.has(link.testKey))
+      );
       return { scenarios, invocations: scenarios.map((ref) => ({ kind: "scenario", ref })) };
     }
     case "tag-expression":
       return { scenarios: [], invocations: [{ kind: "tags", expression: selection.expression }] };
-    case "test-plan-derived":
-      return { scenarios: [], invocations: [] };
   }
 }

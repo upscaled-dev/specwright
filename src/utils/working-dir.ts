@@ -81,6 +81,21 @@ export function workspaceFolderRootFor(
 }
 
 /**
+ * The Playwright positional path filter for a feature file or folder, expressed relative to the
+ * resolved working dir. Playwright treats a positional argument as a regular expression, so this
+ * forward-slashes it (a Windows-separator path reads as regex poison and matches nothing — the
+ * v0.3.9 gotcha) and escapes every regex metacharacter. Relativizing against the working dir (the
+ * owning Playwright-config package) — not the workspace root — is what makes the filter match the
+ * generated specs when the config lives in a monorepo subdirectory. A target outside the working dir
+ * falls back to the target as-is, still forward-slashed and escaped.
+ */
+export function toPathFilterRegex(workingDir: string, target: string): string {
+  const rel = path.relative(workingDir, target);
+  const base = rel === "" || rel.startsWith("..") ? target : rel;
+  return base.replaceAll("\\", "/").replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
  * Directory of the nearest `playwright.config.*` at or above the feature file,
  * walking up to the workspace folder root (inclusive). In a monorepo this finds
  * the package that owns the playwright-bdd setup — the right cwd for `npx` /

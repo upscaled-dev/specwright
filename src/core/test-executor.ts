@@ -18,6 +18,7 @@ import {
   canonicalCwd,
   findNearestPlaywrightConfigDir,
   isSameOrInsideDir,
+  toPathFilterRegex,
   workspaceFolderRootFor,
 } from "../utils/working-dir";
 import { BreakpointMirror } from "./breakpoint-mirror";
@@ -449,17 +450,36 @@ export class TestExecutor {
     return this.runWithJsonReport(() => this.commandBuilder().buildTagCommand(tag), undefined, signal, artifactBatch);
   }
 
-  // Batch feature/folder scopes: run every generated spec matching a positional path filter, capturing
-  // the shard into the open artifact. `forFile` steers the working directory to the owning package.
-  public async runPathFilterWithOutput(
-    pathFilter: string,
-    forFile?: string,
+  // Batch all-mapped collapse: run several scenarios in one bddgen+playwright pass via a combined
+  // `--grep`, capturing one shard for the whole set (one regeneration instead of one per scenario).
+  public async runGrepWithOutput(
+    names: readonly string[],
     signal?: AbortSignal,
     artifactBatch?: number
   ): Promise<RunOutputResult> {
     return this.runWithJsonReport(
+      () => this.commandBuilder().buildGrepCommand(names),
+      undefined,
+      signal,
+      artifactBatch
+    );
+  }
+
+  // Batch feature/folder/all-mapped scopes: run every generated spec matching a positional path filter,
+  // capturing the shard into the open artifact. `target` is the source feature file or folder — the
+  // working dir is resolved from it the same way as every run (the owning Playwright-config package,
+  // monorepo-aware), and the filter is relativized against that dir so it matches the generated specs
+  // even when the config lives in a subdirectory. Relativizing off the pre-canonical dir keeps the
+  // drive-letter case aligned with `target`; the spawn cwd is canonicalized separately downstream.
+  public async runPathFilterWithOutput(
+    target: string,
+    signal?: AbortSignal,
+    artifactBatch?: number
+  ): Promise<RunOutputResult> {
+    const pathFilter = toPathFilterRegex(this.resolveWorkingDirectory(target), target);
+    return this.runWithJsonReport(
       () => this.commandBuilder().buildPathFilterCommand(pathFilter),
-      forFile,
+      target,
       signal,
       artifactBatch
     );
