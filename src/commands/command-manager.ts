@@ -16,8 +16,20 @@ import type { XrayProbe } from "../xray/xray-connection-test";
 import { computeLinkEdit, linkScenarioPicks } from "../traceability/link-scenario";
 import { ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
-import { SyncScope } from "../traceability/contracts";
+import { BatchSelection, PreflightDecision, PreflightItem, PreflightState, SyncScope } from "../traceability/contracts";
+import { BatchInvocation, resolveBatchSelection } from "../traceability/batch-selection";
+import { PreflightChoice, runPreflightFlow } from "../traceability/preflight-flow";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
+
+const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
+  "ready": "ready",
+  "unmapped": "no @TEST_ tag",
+  "invalid-key": "broken test tag",
+  "duplicate-mapping": "duplicate mapping",
+  "incompatible-test-type": "not a Gherkin test",
+  "automation-binding-required": "automation binding required",
+  "not-in-target-plan": "not in the target plan",
+};
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -510,6 +522,12 @@ export class CommandManager {
       vscode.window.showInformationMessage("Link Scenario: run this from a scenario row in the Traceability view.");
       return;
     }
+    await this.linkScenarioForRef(scenario);
+  }
+
+  // The linkScenario quick-pick + idempotent tag insert for a known scenario ref. Shared by the
+  // context-menu command and the preflight flow's `repair` outcome.
+  private async linkScenarioForRef(scenario: ScenarioRef): Promise<void> {
     const adapter = this.traceabilitySubsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
     const metadata = adapter.metadata;
     if (!metadata) {
@@ -550,6 +568,148 @@ export class CommandManager {
     }
     await vscode.workspace.applyEdit(wsEdit);
     await doc.save();
+  }
+
+  // Run Locally and Publish… — the P2 preflight batch flow. Resolves the scope, classifies every
+  // scenario against the snapshot, collects an explicit decision for each flagged one, then runs the
+  // batch locally and seals one artifact carrying those decisions. Publishing itself is a P3 write
+  // path (not wired here). A scenario/link node scopes the batch to that scenario; otherwise the whole
+  // mapped set.
+  //
+  // Public seam, not yet in the `registerCommands` list: its `playwrightBddRunner.traceability
+  // .runAndPublish` command + menu contribution lands with the package.json patch (slice 2c handoff),
+  // at which point it registers like the others.
+  public async runAndPublish(...args: CommandArguments): Promise<void> {
+    const subsystem = this.traceabilitySubsystem;
+    const snapshot = subsystem?.getSnapshot();
+    if (!subsystem || !snapshot) {
+      vscode.window.showInformationMessage("Enable and sync the Traceability panel before running a batch.");
+      return;
+    }
+    const scenario = this.scenarioRefFromArg(args[0]);
+    const selection: BatchSelection = scenario ? { kind: "scenario", scenario } : { kind: "all-mapped" };
+    const binding = subsystem.getActiveAdapter()?.automationBinding;
+    const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+
+    const ran = await runPreflightFlow(selection, {
+      resolve: (sel) => resolveBatchSelection(sel, subsystem.getSnapshot() ?? snapshot, { roots }),
+      snapshot: () => subsystem.getSnapshot() ?? snapshot,
+      classifyBinding: binding ? (meta) => binding.classify(meta) : undefined,
+      ui: {
+        choose: (items) => this.choosePreflight(items),
+        // Insert the tag, then force a synchronous rebuild so the flow re-classifies against the
+        // updated snapshot rather than the stale cached one the debounced watcher hasn't refreshed.
+        repair: async (ref) => {
+          await this.linkScenarioForRef(ref);
+          await subsystem.rebuildNow();
+        },
+      },
+      runner: {
+        run: (sel, invocations, decisions) => this.runResolvedBatch(sel, invocations, decisions),
+      },
+    });
+    if (!ran) {
+      vscode.window.showInformationMessage("Preflight cancelled — nothing was run.");
+    }
+  }
+
+  // The quick-pick preflight surface (no webview in P2). Batch-level actions assign an explicit
+  // decision to every flagged item so none is silently dropped; a per-item entry jumps into repair.
+  private async choosePreflight(items: readonly PreflightItem[]): Promise<PreflightChoice> {
+    const flagged = items.filter((item) => item.state !== "ready");
+    const readyCount = items.length - flagged.length;
+    interface Row extends vscode.QuickPickItem {
+      choice?: PreflightChoice | undefined;
+    }
+    const rows: Row[] = [
+      {
+        label: "$(play) Run all locally",
+        description: `${readyCount} ready · ${flagged.length} flagged`,
+        choice: { kind: "run", outcome: "local-only" },
+      },
+    ];
+    if (flagged.length > 0) {
+      rows.push({
+        label: "$(circle-slash) Exclude flagged and run the rest",
+        description: `${flagged.length} excluded`,
+        choice: { kind: "run", outcome: "exclude" },
+      });
+      rows.push({ label: "Repair", kind: vscode.QuickPickItemKind.Separator });
+      for (const item of flagged) {
+        rows.push({
+          label: `$(tools) ${item.scenario.name}`,
+          description: PREFLIGHT_STATE_LABEL[item.state],
+          ...(item.detail ? { detail: item.detail } : {}),
+          choice: { kind: "repair", scenario: item.scenario },
+        });
+      }
+    }
+    const picked = await vscode.window.showQuickPick(rows, {
+      placeHolder: "Preflight — resolve flagged scenarios before the batch runs",
+      ignoreFocusOut: true,
+    });
+    return picked?.choice ?? { kind: "cancel" };
+  }
+
+  // Opens one artifact batch, dispatches every invocation with output capture (threading the batch
+  // handle + a shared AbortController), and seals — cancelled when the progress stop button aborts.
+  private async runResolvedBatch(
+    selection: BatchSelection,
+    invocations: readonly BatchInvocation[],
+    decisions: readonly PreflightDecision[]
+  ): Promise<void> {
+    const store = this.context.runArtifactStore;
+    const handle = store?.beginBatch(selection, decisions);
+    const controller = new AbortController();
+    try {
+      // Notification (not the view location) so the stop button is actually surfaced — a batch run is
+      // cancellable, unlike the deliberately-uncancellable sync that renders on the tree view.
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "Running batch locally…", cancellable: true },
+        async (_progress, token) => {
+          token.onCancellationRequested(() => controller.abort());
+          for (const invocation of invocations) {
+            if (controller.signal.aborted) {break;}
+            await this.dispatchInvocation(invocation, controller.signal, handle);
+          }
+        }
+      );
+    } finally {
+      if (handle !== undefined) {
+        store?.sealBatch(handle, controller.signal.aborted);
+      }
+    }
+  }
+
+  private async dispatchInvocation(
+    invocation: BatchInvocation,
+    signal: AbortSignal,
+    handle: number | undefined
+  ): Promise<void> {
+    const executor = this.context.testExecutor;
+    if (invocation.kind === "path-filter") {
+      await executor.runPathFilterWithOutput(invocation.pathFilter, invocation.workingDir, signal, handle);
+      return;
+    }
+    if (invocation.kind === "tags") {
+      await executor.runAllTestsWithTagsOutput(invocation.expression, signal, handle);
+      return;
+    }
+    const ref = invocation.ref;
+    const options: TestExecutionOptions = {
+      filePath: ref.filePath,
+      signal,
+      ...(handle !== undefined ? { artifactBatch: handle } : {}),
+    };
+    if (ref.kind === "scenario") {
+      options.scenarioName = ref.name;
+    } else {
+      options.outlineName = ref.outlineName ?? ref.name;
+    }
+    if (ref.line > 0) {
+      options.lineNumber = ref.line;
+    }
+    await executor.runScenarioWithOutput(options);
   }
 
   // Serialize sync: the palette entry and the view-title button can both fire; a second invoke while

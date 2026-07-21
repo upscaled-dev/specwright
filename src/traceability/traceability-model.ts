@@ -10,8 +10,9 @@ import {
 } from "../utils/playwright-json-parser";
 import { Logger } from "../utils/logger";
 import { OutlineExampleRow, Scenario } from "../types";
-import { extractKeys } from "./tag-extraction";
+import { extractKeys, malformedTestTags } from "./tag-extraction";
 import { RunResultStore } from "./run-result-store";
+import { ScenarioRef, sameScenario } from "./scenario-ref";
 import {
   KeyGrammar,
   RemoteMetadataSnapshot,
@@ -19,16 +20,10 @@ import {
   TraceabilityAdapter,
 } from "./contracts";
 
-export type RunOutcome = ScenarioStatus;
+export { sameScenario, scenarioRefFromScenario } from "./scenario-ref";
+export type { ScenarioRef } from "./scenario-ref";
 
-export interface ScenarioRef {
-  filePath: string;
-  line: number;
-  name: string;
-  kind: "scenario" | "outline" | "examplesBlock";
-  outlineName?: string | undefined;
-  examplesBlockName?: string | undefined;
-}
+export type RunOutcome = ScenarioStatus;
 
 export interface TraceLink {
   testKey: string;
@@ -37,6 +32,10 @@ export interface TraceLink {
   reqKeys: string[];
   meta?: TestCaseMetadata | undefined;
   lastResult?: RunOutcome | undefined;
+  // Test-prefixed tags on this scenario whose key body is malformed (`@TEST_notakey`), sitting
+  // ALONGSIDE the valid key that formed this link. The mapping stands; preflight surfaces these as a
+  // non-blocking warning rather than hiding a broken extra tag.
+  malformedTags?: string[] | undefined;
   // Passed/total iterations for a data-driven row (Scenario Outline / Examples block); drives the
   // "N/M" badge. Absent for non-outline links and for outlines with no run result yet.
   iterations?: { passed: number; total: number } | undefined;
@@ -51,6 +50,11 @@ export interface TraceLink {
 export interface UntracedScenario {
   scenario: ScenarioRef;
   reqKeys: string[];
+  // Tags carrying the test prefix whose key body is malformed (`@TEST_notakey`). Non-empty means the
+  // scenario is untraced because of a broken tag, not the absence of one — preflight reads this to
+  // classify `invalid-key` rather than `unmapped`. Always populated by the model; optional only so a
+  // hand-built snapshot fixture need not spell out an empty list.
+  malformedTags?: string[] | undefined;
 }
 
 export interface OrphanTest {
@@ -81,6 +85,14 @@ const EMPTY_SNAPSHOT: TraceabilitySnapshot = {
   completeness: "unknown",
   errors: [],
 };
+
+// Artifact testKey resolution keys off `sameScenario` so a run's refs and the snapshot's refs agree.
+export function findLinkForScenario(
+  links: readonly TraceLink[],
+  ref: ScenarioRef
+): TraceLink | undefined {
+  return links.find((link) => sameScenario(link.scenario, ref));
+}
 
 export const OUTCOME_SEVERITY: Record<ScenarioStatus, number> = {
   passed: 0,
@@ -206,7 +218,8 @@ export function buildTraceabilitySnapshot(
     reqKeys: string[],
     lastResult: ScenarioStatus | undefined,
     localGherkin?: string,
-    iterations?: { passed: number; total: number }
+    iterations?: { passed: number; total: number },
+    malformedTags?: readonly string[]
   ): void => {
     const link: TraceLink = {
       testKey,
@@ -221,6 +234,9 @@ export function buildTraceabilitySnapshot(
     }
     if (iterations) {
       link.iterations = iterations;
+    }
+    if (malformedTags && malformedTags.length > 0) {
+      link.malformedTags = [...malformedTags];
     }
     const meta = remote?.tests.get(testKey);
     if (meta) {
@@ -287,8 +303,9 @@ export function buildTraceabilitySnapshot(
       );
       const iterations = countIterations(statusMap, filePath, outlineLevelRows);
       const localGherkin = reconstructScenarioGherkin("Scenario Outline", outlineName, first.steps);
+      const malformed = malformedTestTags(outlineTagsFor(rows), keyGrammar);
       for (const testKey of outlineKeys) {
-        addLink(testKey, outlineRef, reqKeys, lastResult, localGherkin, iterations);
+        addLink(testKey, outlineRef, reqKeys, lastResult, localGherkin, iterations, malformed);
       }
     }
 
@@ -311,13 +328,20 @@ export function buildTraceabilitySnapshot(
       );
       const iterations = countIterations(statusMap, filePath, blockRows);
       const localGherkin = reconstructScenarioGherkin("Scenario Outline", ref.name, sample.steps);
+      const blockMalformed = malformedTestTags(sample.examplesBlockTags ?? [], keyGrammar);
       for (const testKey of blockKeys) {
-        addLink(testKey, ref, reqKeys, lastResult, localGherkin, iterations);
+        addLink(testKey, ref, reqKeys, lastResult, localGherkin, iterations, blockMalformed);
       }
     }
 
     if (untracedRows.length > 0) {
-      untraced.push({ scenario: outlineRef, reqKeys: unionReq(untracedRows) });
+      const malformed: string[] = [];
+      for (const row of untracedRows) {
+        for (const tag of malformedTestTags([...(row.tags ?? []), ...(row.examplesBlockTags ?? [])], keyGrammar)) {
+          if (!malformed.includes(tag)) {malformed.push(tag);}
+        }
+      }
+      untraced.push({ scenario: outlineRef, reqKeys: unionReq(untracedRows), malformedTags: malformed });
     }
   };
 
@@ -343,12 +367,13 @@ export function buildTraceabilitySnapshot(
       const lastResult = lookupStatus(statusMap, filePath, line, name);
 
       if (testKeys.length === 0) {
-        untraced.push({ scenario: ref, reqKeys });
+        untraced.push({ scenario: ref, reqKeys, malformedTags: malformedTestTags(scenario.tags ?? [], keyGrammar) });
         continue;
       }
       const localGherkin = reconstructScenarioGherkin(isOutline ? "Scenario Outline" : "Scenario", name, scenario.steps);
+      const malformed = malformedTestTags(scenario.tags ?? [], keyGrammar);
       for (const testKey of testKeys) {
-        addLink(testKey, ref, reqKeys, lastResult, localGherkin);
+        addLink(testKey, ref, reqKeys, lastResult, localGherkin, undefined, malformed);
       }
     }
 

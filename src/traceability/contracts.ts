@@ -1,5 +1,5 @@
 import type { Event } from "vscode";
-import type { ScenarioRef } from "./traceability-model";
+import type { ScenarioRef } from "./scenario-ref";
 
 export interface KeyGrammar {
   testPrefix: string;
@@ -45,6 +45,10 @@ export interface TestCaseMetadata {
   // Canonical keys of the requirements this test covers (flat, provider-neutral). The coverage
   // capability and P4 board read these; the tree join ignores them today.
   readonly coverageKeys?: readonly string[] | undefined;
+  // The remote test's type, neutral shape (`kind` ∈ e.g. Gherkin/Steps/Unstructured for Xray). The
+  // automation-binding hook reads it to classify preflight compatibility; absent on a partial
+  // snapshot, which the hook treats as `unknown` (never blocking).
+  readonly testType?: { readonly name: string; readonly kind: string } | undefined;
 }
 
 // The scope of a sync. `projectKeys` requests a full catalogue for orphan detection (an empty set
@@ -77,6 +81,51 @@ export interface RemoteMetadataSnapshot {
   readonly completeness: "complete" | "partial" | "unknown";
   readonly errors: readonly string[];
 }
+
+// The scope that produced a batch run. Resolution (`resolveBatchSelection`) expands each into the
+// scenario set to preflight and the executor invocations to run. `test-plan-derived` is declared
+// here but only resolvable once slice 2d adds the remote plan lookup.
+export type BatchSelection =
+  | { readonly kind: "scenario"; readonly scenario: ScenarioRef }
+  | { readonly kind: "multi-select"; readonly scenarios: readonly ScenarioRef[] }
+  | { readonly kind: "feature"; readonly filePath: string }
+  | { readonly kind: "folder"; readonly folderPath: string }
+  | { readonly kind: "tag-expression"; readonly expression: string }
+  | { readonly kind: "all-mapped" }
+  | { readonly kind: "test-plan-derived"; readonly planKey: string };
+
+// Preflight verdict for one scenario about to run in a batch. `ready` means publishable-in-principle;
+// every other state needs an explicit decision before the batch runs. `not-in-target-plan` is
+// declared for slice 2d's plan lookup — 2c never produces it.
+export type PreflightState =
+  | "ready"
+  | "unmapped"
+  | "invalid-key"
+  | "duplicate-mapping"
+  | "incompatible-test-type"
+  | "automation-binding-required"
+  | "not-in-target-plan";
+
+// What the user chose for a non-`ready` item. `repair` re-enters the linkScenario flow and
+// re-classifies (never persisted); `cancel` runs nothing; the other two seal onto the artifact.
+export type PreflightOutcome = "repair" | "exclude" | "local-only" | "cancel";
+
+export interface PreflightItem {
+  readonly scenario: ScenarioRef;
+  readonly testKey?: string | undefined;
+  readonly state: PreflightState;
+  readonly decision?: PreflightOutcome | undefined;
+  // A value-free note (e.g. why an `unknown` binding still resolves to `ready` on a partial snapshot).
+  readonly detail?: string | undefined;
+}
+
+// The automation-binding hook's verdict for a target test's metadata. `unknown` (no metadata / a
+// partial snapshot) never blocks — preflight maps it to `ready` with an honest note.
+export type AutomationBindingClassification =
+  | "compatible"
+  | "incompatible-test-type"
+  | "binding-required"
+  | "unknown";
 
 // Retry/flake is per-iteration data, never a top-level outcome: a result that passed on retry is
 // `passed` with `flaky: true`, and `timed-out`/`interrupted` stay distinct from a plain `failed`.
@@ -115,10 +164,13 @@ export interface ShardInfo {
   readonly success: boolean;
 }
 
-// A non-`ready` preflight item's recorded resolution. Minimal until slice 2c owns the full shape.
+// A non-`ready` preflight item's recorded resolution, sealed onto the artifact. `repair`/`cancel`
+// never reach here — repair loops back into classification and cancel runs nothing.
 export interface PreflightDecision {
   readonly scenario: ScenarioRef;
-  readonly decision: string;
+  readonly testKey?: string | undefined;
+  readonly state: PreflightState;
+  readonly outcome: "exclude" | "local-only";
 }
 
 // One immutable, multi-test capture of a local run: a batch opens a builder, each executor
@@ -128,9 +180,9 @@ export interface RunArtifact {
   readonly createdAt: number;
   readonly results: readonly RunArtifactResult[];
   readonly shards: readonly ShardInfo[];
-  // The batch-scope descriptor that produced it — an opaque string until slice 2c's type lands.
-  readonly selection: string;
-  // Empty until slice 2c wires preflight.
+  // The batch-scope descriptor that produced it.
+  readonly selection: BatchSelection;
+  // The recorded resolutions for every non-`ready` scenario in the batch; empty when all were ready.
   readonly preflight: readonly PreflightDecision[];
   readonly state: RunArtifactState;
 }
@@ -184,6 +236,10 @@ export interface CoverageCapability {
 }
 
 export interface AutomationBindingCapability {
+  // Pure, offline classification of a target test's automation compatibility for preflight. Provider
+  // logic lives here, never in the neutral preflight core. `undefined`/partial metadata → `unknown`.
+  classify(meta: TestCaseMetadata | undefined): AutomationBindingClassification;
+  // Establishing the binding by writing to the remote is a P3 write path; it throws until then.
   bind(ref: TestCaseRef, signal?: AbortSignal): Promise<void>;
 }
 

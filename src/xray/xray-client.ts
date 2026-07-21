@@ -36,6 +36,9 @@ export interface XrayTestRecord {
   readonly status?: NormalizedStatus | undefined;
   readonly gherkin?: string | undefined;
   readonly coverageKeys?: readonly string[] | undefined;
+  // Xray's `testType { name kind }` (kind ∈ Gherkin/Steps/Unstructured). The automation-binding
+  // hook reads `kind` to classify preflight compatibility (Gherkin-only).
+  readonly testType?: { readonly name: string; readonly kind: string } | undefined;
 }
 
 // The result of fetching one or more scopes. `complete` is false when any page failed or pagination
@@ -164,6 +167,7 @@ function readString(value: unknown): string | undefined {
 interface RawTest {
   gherkin?: unknown;
   status?: { name?: unknown; color?: unknown } | null;
+  testType?: { name?: unknown; kind?: unknown } | null;
   jira?: { key?: unknown; summary?: unknown } | null;
   coverableIssues?: { results?: Array<{ jira?: { key?: unknown } | null } | null> | null } | null;
 }
@@ -179,6 +183,7 @@ function toTestRecord(raw: RawTest | null): XrayTestRecord | undefined {
     status?: NormalizedStatus;
     gherkin?: string;
     coverageKeys?: string[];
+    testType?: { name: string; kind: string };
   } = { key };
   const summary = readString(raw?.jira?.summary);
   if (summary !== undefined) {
@@ -187,6 +192,10 @@ function toTestRecord(raw: RawTest | null): XrayTestRecord | undefined {
   const statusName = readString(raw?.status?.name);
   if (statusName !== undefined) {
     record.status = normalizeXrayStatus(statusName, readString(raw?.status?.color));
+  }
+  const testTypeKind = readString(raw?.testType?.kind);
+  if (testTypeKind !== undefined) {
+    record.testType = { name: readString(raw?.testType?.name) ?? testTypeKind, kind: testTypeKind };
   }
   const gherkin = readString(raw?.gherkin);
   if (gherkin !== undefined) {

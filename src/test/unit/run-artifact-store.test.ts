@@ -7,10 +7,13 @@ import {
   ShardCapture,
   buildArtifactResults,
 } from "../../traceability/run-artifact-store";
-import { RunArtifact, RunArtifactResult } from "../../traceability/contracts";
+import { BatchSelection, PreflightDecision, RunArtifact, RunArtifactResult } from "../../traceability/contracts";
 import { ScenarioResult } from "../../utils/playwright-json-parser";
 
 const logger = Logger.create();
+
+const SEL: BatchSelection = { kind: "all-mapped" };
+const FEATURE_SEL: BatchSelection = { kind: "feature", filePath: "/ws/a.feature" };
 
 // Mirror workspaceState: JSON-serialize on write so a round-trip catches anything non-JSON-safe.
 function fakeMemento(initial: Record<string, unknown> = {}): Memento {
@@ -47,7 +50,7 @@ function result(over: Partial<RunArtifactResult> = {}): RunArtifactResult {
 }
 
 function artifact(over: Partial<RunArtifact> = {}): RunArtifact {
-  return { id: "id", createdAt: 1, results: [], shards: [], selection: "sel", preflight: [], state: "complete", ...over };
+  return { id: "id", createdAt: 1, results: [], shards: [], selection: SEL, preflight: [], state: "complete", ...over };
 }
 
 describe("buildArtifactResults", () => {
@@ -126,43 +129,43 @@ describe("buildArtifactResults", () => {
 
 describe("ArtifactBuilder", () => {
   it("seals complete when every invocation produced results", () => {
-    const builder = new ArtifactBuilder("sel");
+    const builder = new ArtifactBuilder(SEL);
     builder.addShard(shard({ details: [scenario()] }));
     expect(builder.seal(false).state).toBe("complete");
   });
 
   it("seals partial when an invocation failed without producing results", () => {
-    const builder = new ArtifactBuilder("sel");
+    const builder = new ArtifactBuilder(SEL);
     builder.addShard(shard({ success: false, exitCode: 1, details: [] }));
     expect(builder.seal(false).state).toBe("partial");
   });
 
   it("stays complete when tests failed but the invocation produced results", () => {
-    const builder = new ArtifactBuilder("sel");
+    const builder = new ArtifactBuilder(SEL);
     builder.addShard(shard({ success: false, exitCode: 1, details: [scenario({ status: "failed" })] }));
     expect(builder.seal(false).state).toBe("complete");
   });
 
   it("seals cancelled regardless of shard success", () => {
-    const builder = new ArtifactBuilder("sel");
+    const builder = new ArtifactBuilder(SEL);
     builder.addShard(shard({ success: false, exitCode: 1, details: [] }));
     expect(builder.seal(true).state).toBe("cancelled");
   });
 
   it("forward-slashes the shard working dir and records its exit state", () => {
-    const builder = new ArtifactBuilder("sel");
+    const builder = new ArtifactBuilder(SEL);
     builder.addShard(shard({ workingDir: "C:\\repo\\pkg", command: "cmd", success: false, exitCode: 2 }));
     expect(builder.seal(false).shards[0]).toEqual({ workingDir: "C:/repo/pkg", command: "cmd", exitCode: 2, success: false });
   });
 
   it("aggregates shards and results across invocations under one selection", () => {
-    const builder = new ArtifactBuilder("Group X");
+    const builder = new ArtifactBuilder(FEATURE_SEL);
     builder.addShard(shard({ command: "cmd1", details: [scenario({ scenarioName: "A", lineNumber: 3 })] }));
     builder.addShard(shard({ command: "cmd2", details: [scenario({ scenarioName: "B", lineNumber: 5 })] }));
     const art = builder.seal(false);
     expect(art.shards.map((s) => s.command)).toEqual(["cmd1", "cmd2"]);
     expect(art.results.map((r) => r.scenario.name)).toEqual(["A", "B"]);
-    expect(art.selection).toBe("Group X");
+    expect(art.selection).toEqual(FEATURE_SEL);
     expect(typeof art.id).toBe("string");
     expect(typeof art.createdAt).toBe("number");
   });
@@ -195,17 +198,17 @@ describe("RunArtifactStore", () => {
 
   it("opens, contributes to, and seals a batch into one stored artifact", () => {
     const store = new RunArtifactStore(fakeMemento(), logger);
-    const batch = store.beginBatch("Feature A");
+    const batch = store.beginBatch(FEATURE_SEL);
     store.contributeShard(batch, shard({ details: [scenario()] }));
     const sealed = store.sealBatch(batch, false);
     expect(sealed?.state).toBe("complete");
-    expect(sealed?.selection).toBe("Feature A");
+    expect(sealed?.selection).toEqual(FEATURE_SEL);
     expect(store.latest()).toEqual(sealed);
   });
 
   it("rejects a shard or seal carrying a foreign or stale batch handle", () => {
     const store = new RunArtifactStore(fakeMemento(), logger);
-    const batch = store.beginBatch("Feature A");
+    const batch = store.beginBatch(FEATURE_SEL);
     store.contributeShard(batch + 1, shard({ details: [scenario({ scenarioName: "foreign" })] }));
     expect(store.sealBatch(batch + 1, false)).toBeUndefined();
     const sealed = store.sealBatch(batch, false);
@@ -223,7 +226,7 @@ describe("RunArtifactStore", () => {
   it("survives a reload via workspaceState", () => {
     const memento = fakeMemento();
     const store = new RunArtifactStore(memento, logger);
-    const batch = store.beginBatch("Feature A");
+    const batch = store.beginBatch(FEATURE_SEL);
     store.contributeShard(batch, shard({ command: "npx playwright test a.feature", details: [scenario({ scenarioName: "Logs in", durationMs: 42 })] }));
     const sealed = store.sealBatch(batch, false);
 
@@ -246,7 +249,7 @@ describe("RunArtifactStore", () => {
     const stored = [
       artifact({ id: "good" }),
       { id: 7, results: [] },
-      { id: "no-state", createdAt: 1, selection: "x", results: [], shards: [], preflight: [] },
+      { id: "no-state", createdAt: 1, selection: SEL, results: [], shards: [], preflight: [] },
       artifact({ id: "also-good", results: [result({ testKey: "T-9", outcome: "failed" })] }),
     ];
     const store = new RunArtifactStore(fakeMemento({ "specwright.runArtifacts": stored }), logger);
@@ -259,5 +262,53 @@ describe("RunArtifactStore", () => {
     const store = new RunArtifactStore(fakeMemento({ "specwright.runArtifacts": many }), logger);
     expect(store.list()).toHaveLength(10);
     expect(store.latest()?.id).toBe("run-0");
+  });
+});
+
+describe("testKey threading and preflight decisions", () => {
+  it("buildArtifactResults resolves a mapped scenario's key and leaves an unmapped one bare", () => {
+    const resolve = (s: { name: string }): string | undefined => (s.name === "Mapped" ? "CALC-1" : undefined);
+    const [mapped] = buildArtifactResults([scenario({ scenarioName: "Mapped", lineNumber: 3 })], "/ws", resolve);
+    const [unmapped] = buildArtifactResults([scenario({ scenarioName: "Other", lineNumber: 9 })], "/ws", resolve);
+    expect(mapped?.testKey).toBe("CALC-1");
+    expect(unmapped?.testKey).toBeUndefined();
+  });
+
+  it("threads the resolver factory through a captured batch so latestOutcome lights up", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    store.setKeyResolver(() => (s) => (s.name === "Logs in" ? "CALC-7" : undefined));
+    const batch = store.beginBatch(FEATURE_SEL);
+    store.contributeShard(batch, shard({ details: [scenario({ scenarioName: "Logs in", status: "failed" })] }));
+    const sealed = store.sealBatch(batch, false);
+    expect(sealed?.results[0]?.testKey).toBe("CALC-7");
+    expect(store.latestOutcome("CALC-7")).toBe("failed");
+  });
+
+  it("freezes the resolver at beginBatch so a sync mid-batch can't split one artifact's keys", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    let currentKey = "K1";
+    // The factory snapshots currentKey's value when called (at beginBatch), mirroring how the
+    // subsystem snapshots the links array — later mutation of currentKey must not leak in.
+    store.setKeyResolver(() => {
+      const frozen = currentKey;
+      return (s) => (s.name === "S" ? frozen : undefined);
+    });
+    const batch = store.beginBatch(FEATURE_SEL);
+    store.contributeShard(batch, shard({ details: [scenario({ scenarioName: "S", lineNumber: 3 })] }));
+    currentKey = "K2"; // a sync landed between shards
+    store.contributeShard(batch, shard({ details: [scenario({ scenarioName: "S", lineNumber: 8 })] }));
+    const sealed = store.sealBatch(batch, false);
+    expect(sealed?.results.map((r) => r.testKey)).toEqual(["K1", "K1"]);
+  });
+
+  it("seals the preflight decisions the batch opened with onto the artifact", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    const decisions: PreflightDecision[] = [
+      { scenario: { filePath: "/ws/a.feature", line: 7, name: "Untagged", kind: "scenario" }, state: "unmapped", outcome: "exclude" },
+    ];
+    const batch = store.beginBatch(SEL, decisions);
+    store.contributeShard(batch, shard({ details: [scenario()] }));
+    const sealed = store.sealBatch(batch, false);
+    expect(sealed?.preflight).toEqual(decisions);
   });
 });

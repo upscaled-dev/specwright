@@ -49,7 +49,7 @@ function inMemoryHarness(): AdapterContractHarness {
         evidenceRefs: [],
       }],
       shards: [],
-      selection: "42",
+      selection: { kind: "all-mapped" },
       preflight: [],
       state: "complete",
     }),
@@ -83,7 +83,7 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
         evidenceRefs: [],
       }],
       shards: [],
-      selection: "1",
+      selection: { kind: "all-mapped" },
       preflight: [],
       state: "complete",
     };

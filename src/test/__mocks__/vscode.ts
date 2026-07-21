@@ -620,6 +620,7 @@ export { Position, Range, Location, Uri };
 
 export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
 export const ProgressLocation = { SourceControl: 1, Window: 10, Notification: 15 };
+export const QuickPickItemKind = { Separator: -1, Default: 0 };
 export const OverviewRulerLane = { Left: 1, Center: 2, Right: 4, Full: 7 };
 export const ViewColumn = { Active: -1, Beside: -2, One: 1, Two: 2, Three: 3 };
 export const EndOfLine = { LF: 1, CRLF: 2 };

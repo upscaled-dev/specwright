@@ -1,10 +1,13 @@
 import { ExtensionConfig } from "../core/extension-config";
 import {
+  AutomationBindingCapability,
+  AutomationBindingClassification,
   ConnectionCapability,
   ConnectionVerifyResult,
   ExternalRef,
   KeyGrammar,
   MetadataCapability,
+  TestCaseMetadata,
   TraceabilityAdapter,
 } from "../traceability/contracts";
 import { XrayCredentialStore } from "./xray-credential-store";
@@ -40,6 +43,23 @@ const DEFAULT_REQ_PREFIX = "REQ_";
 // so its absent-set/catalogue keying can never drift from the keys the model derives from tags.
 export const canonicalizeXrayKey = (key: string): string => key.toUpperCase();
 
+// Xray publishes only Gherkin/Cucumber outcomes (§1 out-of-scope: Manual/Generic). A missing
+// testType means a partial snapshot never fetched it — `unknown` never blocks preflight.
+export function classifyXrayBinding(meta: TestCaseMetadata | undefined): AutomationBindingClassification {
+  const kind = meta?.testType?.kind;
+  if (kind === undefined) {
+    return "unknown";
+  }
+  return kind === "Gherkin" ? "compatible" : "incompatible-test-type";
+}
+
+// P2 delivers `classify` (offline). `bind` — writing the binding to the remote — is a P3 write path
+// and rejects until then, keeping the local-execution invariant.
+const xrayAutomationBinding: AutomationBindingCapability = {
+  classify: classifyXrayBinding,
+  bind: () => Promise.reject(new Error("Establishing an Xray automation binding lands in P3.")),
+};
+
 // An empty/whitespace prefix would match every tag; treat it as unset and fall back to the default.
 function effectivePrefix(prefix: string, fallback: string): string {
   return prefix.trim() === "" ? fallback : prefix;
@@ -73,6 +93,9 @@ export class XrayAdapter implements TraceabilityAdapter {
   public readonly label = "Xray";
   public readonly connection: ConnectionCapability | undefined;
   public readonly metadata: MetadataCapability | undefined;
+  // Offline classification is always available (no network); it degrades to `unknown` on a partial
+  // snapshot. Even the browse-only adapter instance carries it harmlessly.
+  public readonly automationBinding: AutomationBindingCapability = xrayAutomationBinding;
 
   // The model degrades to the offline tag-only join when a capability is absent, so the browse-URL
   // command instance (built without a credential store or client) leaves both undefined.

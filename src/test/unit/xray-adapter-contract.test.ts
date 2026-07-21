@@ -126,7 +126,7 @@ function xrayHarness(): AdapterContractHarness {
         evidenceRefs: [],
       }],
       shards: [],
-      selection: "CALC-1",
+      selection: { kind: "all-mapped" },
       preflight: [],
       state: "complete",
     }),

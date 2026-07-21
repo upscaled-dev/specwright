@@ -25,6 +25,8 @@ import {
 } from "../utils/playwright-json-parser";
 import { CommandBuilder } from "../core/command-builder";
 import { XrayAdapter } from "../xray/xray-adapter";
+import { BatchSelection } from "../traceability/contracts";
+import { ScenarioRef, scenarioRefFromScenario } from "../traceability/traceability-model";
 import { isUnderExcludedDir, workspaceExcludeFragments } from "../utils/discovery-excludes";
 import {
   ensureWorkerCount,
@@ -528,9 +530,33 @@ export class PlaywrightBddTestProvider {
     }
   }
 
-  private describeSelection(request: vscode.TestRunRequest): string {
-    if (!request.include || request.include.length === 0) {return "all";}
-    return request.include.map((item) => item.label).join(", ");
+  // The batch-scope descriptor for a Test Explorer run: the deduplicated scenario refs the request
+  // expands to (a feature/group node walks down to its scenarios), so the sealed artifact records
+  // what actually ran. testKey threading is independent of this — it resolves from the snapshot at
+  // capture time — so a coarse-but-honest descriptor here is enough.
+  private describeSelection(request: vscode.TestRunRequest): BatchSelection {
+    const refs: ScenarioRef[] = [];
+    const seen = new Set<string>();
+    const collect = (item: vscode.TestItem): void => {
+      const scenario = this.scenarioByTestId.get(item.id);
+      if (scenario) {
+        const ref = scenarioRefFromScenario(scenario);
+        const key = `${ref.filePath}|${ref.line}|${ref.name}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          refs.push(ref);
+        }
+      }
+      item.children.forEach(collect);
+    };
+    for (const item of this.requestedItems(request)) {
+      collect(item);
+    }
+    const single = refs[0];
+    if (refs.length === 1 && single) {
+      return { kind: "scenario", scenario: single };
+    }
+    return { kind: "multi-select", scenarios: refs };
   }
 
   private markSubtreeSkipped(item: vscode.TestItem, run: vscode.TestRun): void {

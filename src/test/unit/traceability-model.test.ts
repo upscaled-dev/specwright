@@ -97,6 +97,20 @@ describe("buildTraceabilitySnapshot", () => {
     const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR);
     expect(snap.untraced.map((u) => u.scenario.name)).toEqual(["Untagged thing"]);
     expect(snap.untraced[0]!.scenario.line).toBe(7);
+    expect(snap.untraced[0]!.malformedTags).toEqual([]);
+  });
+
+  it("carries a broken test tag on the untraced scenario so preflight can tell it from an untagged one", () => {
+    const content = `Feature: Calc
+
+@TEST_notakey
+Scenario: Broken mapping
+  Given x
+`;
+    const snap = buildTraceabilitySnapshot([parse(content)], {}, GRAMMAR);
+    expect(snap.links).toEqual([]);
+    expect(snap.untraced).toHaveLength(1);
+    expect(snap.untraced[0]!.malformedTags).toEqual(["@TEST_notakey"]);
   });
 
   it("groups an outline under one test key and splits a tagged Examples block into its own", () => {

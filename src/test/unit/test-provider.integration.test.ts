@@ -250,7 +250,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
       const { executor, artifactStore } = buildProvider(shell);
       // The Test Explorer opened a batch; a codelens/palette run then fires at the shared seam with
       // no handle. Its parsed results must not land in the open Explorer artifact.
-      const batch = artifactStore.beginBatch("explorer");
+      const batch = artifactStore.beginBatch({ kind: "all-mapped" });
       await executor.runFeatureFileWithOutput({ filePath: fixture.featurePath, featureName: "Sample feature" });
       const sealed = artifactStore.sealBatch(batch, false);
 

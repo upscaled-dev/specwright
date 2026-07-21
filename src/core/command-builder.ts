@@ -112,6 +112,26 @@ export class CommandBuilder {
     return parts.join(" && ");
   }
 
+  /**
+   * Run every generated spec whose path matches a positional filter. Playwright treats the filter as
+   * a regular expression, so the caller passes an already forward-slashed, regex-escaped path (see
+   * `resolveBatchSelection`) — a Windows-separator path would read as regex poison and match nothing
+   * (the v0.3.9 gotcha). Used by the batch feature/folder scopes.
+   */
+  public buildPathFilterCommand(pathFilter: string): string {
+    const parts: string[] = [];
+    const gen = this.buildBddgen(undefined);
+    if (gen) {parts.push(gen);}
+    const playwrightParts: string[] = [this.config.playwrightCommand, this.quote(pathFilter)];
+    this.appendCommonFlags(playwrightParts, {
+      reporter: this.config.reporter,
+      parallel: this.config.parallelExecution,
+      dryRun: this.config.dryRun,
+    });
+    parts.push(playwrightParts.join(" "));
+    return parts.join(" && ");
+  }
+
   public buildTagCommand(tag: string): string {
     const parts: string[] = [];
     const gen = this.buildBddgen(tag);

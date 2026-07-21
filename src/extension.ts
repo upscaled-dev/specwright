@@ -199,6 +199,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     logger
   );
   context.subscriptions.push(traceabilitySubsystem);
+  // Thread scenario→testKey from the snapshot into every artifact capture (Test Explorer runs
+  // included), so a mapped scenario's result carries its key and `latestOutcome(testKey)` lights up.
+  // The factory is invoked per batch, freezing one snapshot for the whole artifact.
+  const subsystemForKeys = traceabilitySubsystem;
+  runArtifactStore.setKeyResolver(() => subsystemForKeys.captureKeyResolver());
 
   // The command context needs a browse-URL adapter for the active provider; construct one from the
   // registry (Xray fallback) and own its lifetime if it holds resources.

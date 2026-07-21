@@ -38,6 +38,26 @@ function pushUnique(keys: string[], key: string): void {
   if (!keys.includes(key)) {keys.push(key);}
 }
 
+// Tags carrying the test prefix whose key body fails the grammar's `keyShape` — a broken `@TEST_`
+// tag, not the absence of one. `extractKeys` drops these silently (the scenario lands in untraced);
+// the model carries them so preflight can tell "no tag" from "invalid key".
+export function malformedTestTags(
+  tags: readonly string[],
+  grammar: KeyExtractionGrammar
+): string[] {
+  const keyShape = stateless(grammar.keyShape);
+  const prefix = grammar.testPrefix;
+  const out: string[] = [];
+  for (const tag of tags) {
+    const body = tag.startsWith("@") ? tag.slice(1) : tag;
+    if (body.length < prefix.length) {continue;}
+    if (body.slice(0, prefix.length).toLowerCase() !== prefix.toLowerCase()) {continue;}
+    // An empty or shape-failing body is a broken `@TEST_` tag (`@TEST_`, `@TEST_notakey`).
+    if (!keyShape.test(body.slice(prefix.length)) && !out.includes(tag)) {out.push(tag);}
+  }
+  return out;
+}
+
 export function extractKeys(
   tags: readonly string[],
   grammar: KeyExtractionGrammar

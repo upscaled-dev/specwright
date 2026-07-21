@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import type * as vscode from "vscode";
 import { ExtensionConfig } from "../../core/extension-config";
 import {
+  classifyXrayBinding,
   JIRA_KEY_SHAPE,
   normalizeSiteUrl,
   projectFromKey,
@@ -232,5 +233,28 @@ describe("createXrayAdapterFactory verify", () => {
       status: "auth-failed",
       message: "Authentication failed — check your client ID and secret.",
     });
+  });
+});
+
+describe("classifyXrayBinding", () => {
+  it("treats a Gherkin target as compatible", () => {
+    expect(classifyXrayBinding({ key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } })).toBe("compatible");
+  });
+
+  it("treats a non-Gherkin target as an incompatible test type", () => {
+    expect(classifyXrayBinding({ key: "CALC-1", testType: { name: "Manual", kind: "Manual" } })).toBe("incompatible-test-type");
+  });
+
+  it("returns unknown (never blocking) when metadata or its testType is absent", () => {
+    expect(classifyXrayBinding(undefined)).toBe("unknown");
+    expect(classifyXrayBinding({ key: "CALC-1" })).toBe("unknown");
+  });
+});
+
+describe("XrayAdapter.automationBinding", () => {
+  it("exposes classify offline and rejects bind (a P3 write path)", async () => {
+    const adapter = new XrayAdapter(configWith({}));
+    expect(adapter.automationBinding.classify({ key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } })).toBe("compatible");
+    await expect(adapter.automationBinding.bind({ kind: "testCase", key: "CALC-1" })).rejects.toThrow(/P3/);
   });
 });

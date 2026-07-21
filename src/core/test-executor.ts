@@ -449,6 +449,22 @@ export class TestExecutor {
     return this.runWithJsonReport(() => this.commandBuilder().buildTagCommand(tag), undefined, signal, artifactBatch);
   }
 
+  // Batch feature/folder scopes: run every generated spec matching a positional path filter, capturing
+  // the shard into the open artifact. `forFile` steers the working directory to the owning package.
+  public async runPathFilterWithOutput(
+    pathFilter: string,
+    forFile?: string,
+    signal?: AbortSignal,
+    artifactBatch?: number
+  ): Promise<RunOutputResult> {
+    return this.runWithJsonReport(
+      () => this.commandBuilder().buildPathFilterCommand(pathFilter),
+      forFile,
+      signal,
+      artifactBatch
+    );
+  }
+
   public async discoverFeatureFiles(): Promise<string[]> {
     try {
       const pattern = this.config.testFilePattern;

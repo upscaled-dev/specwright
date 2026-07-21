@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractKeys, KeyExtractionGrammar } from "../../traceability/tag-extraction";
+import { extractKeys, KeyExtractionGrammar, malformedTestTags } from "../../traceability/tag-extraction";
 import { JIRA_KEY_SHAPE, projectFromKey } from "../../xray/xray-adapter";
 
 const upper = (key: string): string => key.toUpperCase();
@@ -71,5 +71,22 @@ describe("extractKeys", () => {
     const second = extractKeys(["@TEST_AB-2"], stateful);
     expect(first.testKeys).toEqual(["AB-1"]);
     expect(second.testKeys).toEqual(["AB-2"]);
+  });
+});
+
+describe("malformedTestTags", () => {
+  it("flags test-prefixed tags whose key body fails the shape", () => {
+    expect(malformedTestTags(["@TEST_", "@TEST_nodigits", "@TEST_CALC-1", "@wip"], DEFAULTS)).toEqual([
+      "@TEST_",
+      "@TEST_nodigits",
+    ]);
+  });
+
+  it("ignores a bare key-shaped tag with no test prefix (a valid convention, not a broken tag)", () => {
+    expect(malformedTestTags(["@APEX-5", "@REQ_CALC-9"], DEFAULTS)).toEqual([]);
+  });
+
+  it("does not treat a longer prefix token as the configured prefix", () => {
+    expect(malformedTestTags(["@TESTING_oops"], DEFAULTS)).toEqual([]);
   });
 });

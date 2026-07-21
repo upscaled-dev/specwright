@@ -4,7 +4,13 @@ import { FeatureParser } from "../parsers/feature-parser";
 import { TestDiscoveryManager } from "../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../utils/playwright-json-parser";
 import { Logger } from "../utils/logger";
-import { REPORT_CANDIDATES, TraceabilityModel } from "./traceability-model";
+import {
+  REPORT_CANDIDATES,
+  TraceabilityModel,
+  TraceabilitySnapshot,
+  findLinkForScenario,
+} from "./traceability-model";
+import { ArtifactKeyResolver } from "./run-artifact-store";
 import { ConnectionVerifyResult, TraceabilityAdapter } from "./contracts";
 import { TraceabilityAdapterRegistry } from "./adapter-registry";
 import {
@@ -89,6 +95,27 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // adapter the command context holds is a separate instance and is never synced.
   public getActiveAdapter(): TraceabilityAdapter | undefined {
     return this.activeAdapter;
+  }
+
+  // The current joined snapshot (undefined when the panel is off or still building). The batch
+  // preflight flow resolves scopes and classifies against it.
+  public getSnapshot(): TraceabilitySnapshot | undefined {
+    return this.model?.snapshot;
+  }
+
+  // A testKey resolver frozen over the snapshot's links AS THEY STAND NOW. The artifact store calls
+  // this at `beginBatch` so one artifact keys off a single consistent snapshot even if a sync lands
+  // mid-batch (the model swaps `current` wholesale on rebuild, so the captured array never mutates).
+  public captureKeyResolver(): ArtifactKeyResolver {
+    const links = this.model?.snapshot.links ?? [];
+    return (scenario) => findLinkForScenario(links, scenario)?.testKey;
+  }
+
+  // A synchronous, awaitable rebuild — the debounced watcher path can't be awaited, so the preflight
+  // `repair` outcome uses this to guarantee the snapshot reflects the just-inserted tag before it
+  // re-classifies.
+  public async rebuildNow(): Promise<void> {
+    await this.model?.rebuild();
   }
 
   // Deduped test keys from the offline `@TEST_` tag scan; empty when no model exists (panel off or

@@ -287,4 +287,13 @@ describe("CommandBuilder", () => {
     const cmd = await builder.buildAllTestsCommand();
     expect(cmd).not.toContain("--workers");
   });
+
+  it("passes a positional path filter through bddgen + playwright, not a --grep", () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    // The batch scope pre-escapes the filter (forward slashes + regex metacharacters); the builder
+    // just quotes it as a positional argument (shell-quoting doubles the backslash for the shell).
+    const cmd = builder.buildPathFilterCommand("features/login\\.feature");
+    expect(cmd).toMatch(/^npx bddgen && npx playwright test "features\/login/);
+    expect(cmd).not.toContain("--grep");
+  });
 });

@@ -17,6 +17,11 @@ import { ExternalRef, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayAdapter } from "../../xray/xray-adapter";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
+import { RunArtifactStore } from "../../traceability/run-artifact-store";
+import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
+import type { ScenarioRef } from "../../traceability/scenario-ref";
+import type { PreflightChoice } from "../../traceability/preflight-flow";
+import type { Memento } from "vscode";
 
 function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): PlaywrightBddExtensionContext {
   const logger = Logger.create();
@@ -748,5 +753,108 @@ describe("traceability sync contributions", () => {
     expect(button?.when).toBe(
       "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected"
     );
+  });
+});
+
+describe("traceability runAndPublish — preflight batch flow", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function memento(): Memento {
+    const store = new Map<string, unknown>();
+    return {
+      keys: () => [...store.keys()],
+      get: (k: string, d?: unknown) => (store.has(k) ? store.get(k) : d),
+      update: (k: string, v: unknown) => { store.set(k, JSON.parse(JSON.stringify(v))); return Promise.resolve(); },
+    } as unknown as Memento;
+  }
+
+  const A: ScenarioRef = { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" };
+  const B: ScenarioRef = { filePath: "/ws/a.feature", line: 8, name: "B", kind: "scenario" };
+  const READY_LINK: TraceLink = { testKey: "CALC-1", scenario: A, reqKeys: [], meta: { key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } } };
+  const FLAGGED_LINK: TraceLink = { testKey: "CALC-2", scenario: B, reqKeys: [], remoteMissing: true };
+
+  function snapshot(links: TraceLink[]): TraceabilitySnapshot {
+    return { links, untraced: [], orphans: [], stale: false, completeness: "complete", errors: [] };
+  }
+
+  function harness(links: TraceLink[]) {
+    const store = new RunArtifactStore(memento(), Logger.create());
+    const runScenarioWithOutput = vi.fn(() => Promise.resolve({ success: true, output: "", error: "", duration: 1 }));
+    const executor = { runScenarioWithOutput, runPathFilterWithOutput: vi.fn(), runAllTestsWithTagsOutput: vi.fn() };
+    const config = ExtensionConfig.create();
+    const mgr = CommandManager.create(makeContext({
+      testExecutor: executor as unknown as TestExecutor,
+      runArtifactStore: store,
+    }));
+    const subsystem = {
+      getSnapshot: () => snapshot(links),
+      getActiveAdapter: () => new XrayAdapter(config),
+      rebuildNow: () => Promise.resolve(),
+    } as unknown as TraceabilitySubsystem;
+    mgr.setTraceabilitySubsystem(subsystem);
+    return { mgr, store, runScenarioWithOutput };
+  }
+
+  function pickBy(predicate: (c: PreflightChoice) => boolean): void {
+    vi.spyOn(vscode.window, "showQuickPick").mockImplementation((items) => {
+      const rows = items as unknown as Array<{ choice?: PreflightChoice }>;
+      const picked = rows.find((r) => r.choice !== undefined && predicate(r.choice));
+      return Promise.resolve(picked as unknown as vscode.QuickPickItem | undefined);
+    });
+  }
+
+  it("resolves all-mapped, classifies, and runs every scenario on local-only", async () => {
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
+    pickBy((c) => c.kind === "run" && c.outcome === "local-only");
+    await mgr.runAndPublish();
+    expect(runScenarioWithOutput).toHaveBeenCalledTimes(2);
+    expect(store.latest()?.preflight).toEqual([
+      { scenario: B, testKey: "CALC-2", state: "invalid-key", outcome: "local-only" },
+    ]);
+  });
+
+  it("drops the flagged scenario's run and records its exclusion on exclude", async () => {
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
+    pickBy((c) => c.kind === "run" && c.outcome === "exclude");
+    await mgr.runAndPublish();
+    // Only the ready scenario ran; the flagged one was excluded.
+    expect(runScenarioWithOutput).toHaveBeenCalledTimes(1);
+    expect(store.latest()?.preflight).toEqual([
+      { scenario: B, testKey: "CALC-2", state: "invalid-key", outcome: "exclude" },
+    ]);
+  });
+
+  it("runs nothing and seals nothing when the preflight is cancelled", async () => {
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    await mgr.runAndPublish();
+    expect(runScenarioWithOutput).not.toHaveBeenCalled();
+    expect(store.latest()).toBeUndefined();
+    expect(String(info.mock.calls.at(-1)?.[0])).toContain("cancelled");
+  });
+
+  it("runs directly with no quick-pick when every scenario is ready", async () => {
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick");
+    await mgr.runAndPublish();
+    expect(quickPick).not.toHaveBeenCalled();
+    expect(runScenarioWithOutput).toHaveBeenCalledTimes(1);
+    expect(store.latest()?.preflight).toEqual([]);
+  });
+
+  it("wires the progress cancel token to the abort controller and seals cancelled", async () => {
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
+    // A cancelled progress token fires immediately; the batch must abort before dispatching and seal
+    // the artifact `cancelled`.
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((_opts, task) =>
+      (task as (p: unknown, t: unknown) => Thenable<unknown>)(
+        { report: () => {} },
+        { isCancellationRequested: true, onCancellationRequested: (cb: () => void) => { cb(); return { dispose: () => {} }; } }
+      )
+    );
+    await mgr.runAndPublish();
+    expect(runScenarioWithOutput).not.toHaveBeenCalled();
+    expect(store.latest()?.state).toBe("cancelled");
   });
 });
