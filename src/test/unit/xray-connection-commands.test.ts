@@ -3,8 +3,15 @@ import * as vscode from "vscode";
 import { ExtensionConfig } from "../../core/extension-config";
 import { Logger, LogLevel } from "../../utils/logger";
 import { XrayConnectionCommands } from "../../xray/xray-connection-commands";
-import { XrayConnectionOutcome } from "../../xray/xray-connection-test";
+import {
+  probeXrayConnection,
+  XrayConnectionOutcome,
+  XrayConnectionTestDeps,
+  XrayProbeOptions,
+} from "../../xray/xray-connection-test";
+import { createXrayAdapterFactory } from "../../xray/xray-adapter-factory";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
+import { singleFlight } from "../../utils/single-flight";
 import { validateXraySetupInput } from "../../xray/xray-setup-panel";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { TraceabilityAdapterRegistry } from "../../traceability/adapter-registry";
@@ -90,9 +97,24 @@ function makeCommands(site: string): {
 } {
   const { store, map } = mapCredentialStore();
   return {
-    commands: new XrayConnectionCommands(configWith({ "xray.siteUrl": site }), store, silentLogger(), () => []),
+    commands: new XrayConnectionCommands(
+      configWith({ "xray.siteUrl": site }),
+      store,
+      silentLogger(),
+      () => [],
+      (deps) => Promise.resolve(connected(deps.site))
+    ),
     store,
     map,
+  };
+}
+
+function fakeMemento(): vscode.Memento {
+  const store = new Map<string, unknown>();
+  return {
+    get: (<T>(key: string, dflt?: T): T | undefined => (store.has(key) ? (store.get(key) as T) : dflt)) as vscode.Memento["get"],
+    update: (key: string, value: unknown): Promise<void> => { store.set(key, value); return Promise.resolve(); },
+    keys: (): readonly string[] => [...store.keys()],
   };
 }
 
@@ -977,5 +999,60 @@ describe("XrayConnectionCommands.manageConnection", () => {
 
     expect(placeHolder).toBe("Connected to new.atlassian.net");
     expect(labels).toContain("$(sign-out) Disconnect");
+  });
+});
+
+describe("connection-probe single-flight across production seams", () => {
+  const JWT = `${"a".repeat(40)}.${"b".repeat(40)}.${"c".repeat(40)}`;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("collapses a coincident factory verify and panel verify into one transport hit", async () => {
+    const site = "acme.atlassian.net";
+    stubWorkspaceConfig({}, { "xray.siteUrl": site, "xray.apiRegion": "global" });
+    const { store } = mapCredentialStore();
+    await store.setCredentials(site, "id", "secret");
+
+    let authCalls = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/authenticate")) {
+        authCalls += 1;
+      }
+      return Promise.resolve({
+        status: 200,
+        ok: true,
+        headers: new Headers(),
+        text: (): Promise<string> => Promise.resolve(JSON.stringify(JWT)),
+      } as unknown as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Exactly the extension.ts wiring: ONE wrapped probe shared by the factory `verify` and the
+    // connection commands, so a coincident subsystem verify and panel verify share one handshake.
+    const probe = singleFlight(
+      (deps: XrayConnectionTestDeps, options?: XrayProbeOptions) =>
+        `${deps.site} ${options?.authOnly ? "auth" : "full"}`,
+      probeXrayConnection
+    );
+    const config = configWith({ "xray.siteUrl": site, "xray.apiRegion": "global" });
+    const adapter = createXrayAdapterFactory(store, probe, fakeMemento()).create({
+      config,
+      logger: silentLogger(),
+    });
+    const commands = new XrayConnectionCommands(config, store, silentLogger(), () => [], probe);
+
+    const [verifyResult, probeOutcome] = await Promise.all([
+      adapter.connection!.verify!(),
+      commands.probeConnection(site, { authOnly: true }),
+    ]);
+
+    expect(verifyResult.status).toBe("ok");
+    expect(probeOutcome.ok).toBe(true);
+    expect(authCalls).toBe(1);
+
+    (adapter as { dispose?: () => void }).dispose?.();
   });
 });

@@ -16,6 +16,7 @@ import {
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { RunResultStore } from "../../traceability/run-result-store";
 import { ConnectionCapability, TraceabilityAdapter } from "../../traceability/contracts";
+import { buildTraceabilitySnapshot } from "../../traceability/traceability-model";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
@@ -98,6 +99,35 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
     const snap = adapter.metadata.snapshot();
     expect(snap.verifiedAbsentKeys).toEqual(["99"]);
     expect(snap.tests.has("42")).toBe(true);
+  });
+
+  it("canonicalizes catalogue and scoped keys numerically when recording verified-absence", async () => {
+    const adapter = new InMemoryTraceabilityAdapter();
+    // The catalogue returns a leading-zero variant of key 7; the numeric grammar must treat "007" and
+    // "7" as one key, so only the genuinely-absent 8 lands in the absent set. A plain uppercase
+    // compare (the old behavior) would wrongly mark both queried keys absent.
+    adapter.seedCatalogue([{ key: "007", summary: "kept" }], "complete");
+    await adapter.metadata.sync({ testKeys: ["7", "008"] });
+    expect(adapter.metadata.snapshot().verifiedAbsentKeys).toEqual(["8"]);
+  });
+
+  it("keeps model absence verdicts correct under a non-uppercasing grammar", async () => {
+    const adapter = new InMemoryTraceabilityAdapter();
+    adapter.seedCatalogue([{ key: "7", summary: "present" }], "complete");
+    // The sync queries the non-canonical tag bodies the model later canonicalizes to 7 (present) and
+    // 8 (verified absent).
+    await adapter.metadata.sync({ testKeys: ["007", "008"] });
+
+    const content = "Feature: F\n\n@TC-007\nScenario: a\n  Given x\n\n@TC-008\nScenario: b\n  Given y\n";
+    const parsed = FeatureParser.create().parseFeatureContent(content);
+    const feature = { filePath: "/ws/f.feature", scenarios: parsed?.scenarios ?? [] };
+    const snap = buildTraceabilitySnapshot([feature], {}, adapter.keyGrammar, adapter.metadata.snapshot());
+
+    const present = snap.links.find((l) => l.testKey === "7");
+    const absent = snap.links.find((l) => l.testKey === "8");
+    expect(present?.meta?.summary).toBe("present");
+    expect(present?.remoteMissing).toBeUndefined();
+    expect(absent?.remoteMissing).toBe(true);
   });
 });
 

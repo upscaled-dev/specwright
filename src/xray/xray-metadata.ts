@@ -70,6 +70,9 @@ export interface XrayMetadataDeps {
   account: () => Promise<string | undefined>;
   onCredentialsChange: vscode.Event<void>;
   now?: (() => number) | undefined;
+  // The active grammar's key canonicalization, so absent-set and catalogue keying match the keys the
+  // model derives from tags. Defaults to the Xray rule (keys are definitionally uppercase).
+  canonicalizeKey?: ((key: string) => string) | undefined;
 }
 
 /**
@@ -88,6 +91,7 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
   private readonly _onDidChange = new vscode.EventEmitter<void>();
   public readonly onDidChange = this._onDidChange.event;
   private readonly now: () => number;
+  private readonly canonicalizeKey: (key: string) => string;
   private readonly credentialsSub: vscode.Disposable;
   private state: MetadataState = emptyState();
   // The account the in-memory state belongs to, and an epoch bumped on every credential change.
@@ -96,6 +100,7 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
 
   constructor(private readonly deps: XrayMetadataDeps) {
     this.now = deps.now ?? ((): number => Date.now());
+    this.canonicalizeKey = deps.canonicalizeKey ?? ((key): string => key.toUpperCase());
     this.credentialsSub = deps.onCredentialsChange(() => this.onCredentialsChanged());
     // Fire-and-forget: loadFromCache swallows and logs its own failures, so nothing here can reject.
     this.loadFromCache().catch(() => undefined);
@@ -199,8 +204,8 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
         // outcome with no per-chunk attribution, so only trust the batch when the whole outcome is
         // clean. A failed or partial batch proves nothing.
         if (outcome.complete && outcome.errors.length === 0) {
-          const returned = new Set(outcome.tests.map((test) => test.key.toUpperCase()));
-          verifiedAbsent = testKeys.map((key) => key.toUpperCase()).filter((key) => !returned.has(key));
+          const returned = new Set(outcome.tests.map((test) => this.canonicalizeKey(test.key)));
+          verifiedAbsent = testKeys.map((key) => this.canonicalizeKey(key)).filter((key) => !returned.has(key));
         }
       }
     } catch (error) {
@@ -242,7 +247,7 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
     this.state = {
       tests: merged,
       fetchedScopes: [...projectKeys, ...testKeys],
-      catalogueProjects: projectKeys.map((key) => key.toUpperCase()),
+      catalogueProjects: projectKeys.map((key) => this.canonicalizeKey(key)),
       verifiedAbsentKeys: verifiedAbsent,
       syncedAt: this.now(),
       completeness,

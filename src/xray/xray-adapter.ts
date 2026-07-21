@@ -36,6 +36,10 @@ export function normalizeSiteUrl(raw: string): string {
 const DEFAULT_TEST_PREFIX = "TEST_";
 const DEFAULT_REQ_PREFIX = "REQ_";
 
+// Xray issue keys are definitionally uppercase; the metadata capability shares this exact function
+// so its absent-set/catalogue keying can never drift from the keys the model derives from tags.
+export const canonicalizeXrayKey = (key: string): string => key.toUpperCase();
+
 // An empty/whitespace prefix would match every tag; treat it as unset and fall back to the default.
 function effectivePrefix(prefix: string, fallback: string): string {
   return prefix.trim() === "" ? fallback : prefix;
@@ -87,7 +91,7 @@ export class XrayAdapter implements TraceabilityAdapter {
       testPrefix: effectivePrefix(this.config.traceabilityTestTagPrefix, DEFAULT_TEST_PREFIX),
       reqPrefix: effectivePrefix(this.config.traceabilityReqTagPrefix, DEFAULT_REQ_PREFIX),
       keyShape: JIRA_KEY_SHAPE,
-      canonicalizeKey: (key) => key.toUpperCase(),
+      canonicalizeKey: canonicalizeXrayKey,
       projectOf: projectFromKey,
     };
   }

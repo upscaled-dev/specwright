@@ -1,6 +1,6 @@
 import { Logger } from "../utils/logger";
 import { XrayJiraCredentials } from "./xray-credential-store";
-import { describeShape, scrubJwtLike } from "./xray-connection-test";
+import { describeShape, scrubJwtLike } from "./xray-diagnostics";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const PAGE_SIZE = 50;

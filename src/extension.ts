@@ -16,8 +16,9 @@ import { RunResultStore } from "./traceability/run-result-store";
 import { TraceabilityAdapterRegistry } from "./traceability/adapter-registry";
 import { createInMemoryAdapterFactory } from "./traceability/in-memory-adapter";
 import { createXrayAdapterFactory } from "./xray/xray-adapter-factory";
-import { probeXrayConnection } from "./xray/xray-connection-test";
+import { probeXrayConnection, type XrayConnectionTestDeps, type XrayProbeOptions } from "./xray/xray-connection-test";
 import { XrayCredentialStore } from "./xray/xray-credential-store";
+import { singleFlight } from "./utils/single-flight";
 import { PROMPTED_STATE_KEY } from "./commands/prompt-worker-count";
 import { StatusBar } from "./ui/status-bar";
 
@@ -171,7 +172,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const runResultStore = new RunResultStore();
   context.subscriptions.push(runResultStore);
   const traceabilityRegistry = new TraceabilityAdapterRegistry();
-  const xrayFactory = createXrayAdapterFactory(credentialStore, probeXrayConnection, context.globalState);
+  // One credential-save event fans out into the subsystem's connection-refresh verify and the setup
+  // panel's post-save verify; keyed by (site, authOnly), coincident identical probes share a single
+  // handshake instead of racing three of them (§12 F5 finding #3).
+  const probe = singleFlight(
+    (deps: XrayConnectionTestDeps, options?: XrayProbeOptions) =>
+      `${deps.site} ${options?.authOnly ? "auth" : "full"}`,
+    probeXrayConnection
+  );
+  const xrayFactory = createXrayAdapterFactory(credentialStore, probe, context.globalState);
   traceabilityRegistry.register(xrayFactory);
   // Not in the public settings enum — resolved only from a hand-typed `traceability.provider`
   // value so the contract-test adapter can be driven in a dev window.
@@ -242,6 +251,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandManager.setTestProvider(testProvider as unknown);
     commandManager.setUsageIndexHost(providerRegistry);
     commandManager.setCredentialStore(credentialStore);
+    commandManager.setXrayProbe(probe);
     commandManager.setTraceabilitySubsystem(traceabilitySubsystem);
 
     providerRegistry.applyCurrent();

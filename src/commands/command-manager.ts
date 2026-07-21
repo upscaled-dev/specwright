@@ -12,6 +12,7 @@ import { runInsertStep } from "./insert-step";
 import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
 import { XrayConnectionCommands } from "../xray/xray-connection-commands";
 import { XrayCredentialStore } from "../xray/xray-credential-store";
+import type { XrayProbe } from "../xray/xray-connection-test";
 import { computeLinkEdit, linkScenarioPicks } from "../traceability/link-scenario";
 import { ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
@@ -81,6 +82,7 @@ export class CommandManager {
   private stepDefinitionConfigListener: vscode.Disposable | undefined;
   private usageIndexHost: UsageIndexHost | undefined;
   private credentialStore: XrayCredentialStore | undefined;
+  private xrayProbe: XrayProbe | undefined;
   private xrayConnectionCommands: XrayConnectionCommands | undefined;
   private traceabilitySubsystem: TraceabilitySubsystem | undefined;
   private syncInFlight: Promise<void> | undefined;
@@ -107,6 +109,12 @@ export class CommandManager {
 
   public setCredentialStore(store: XrayCredentialStore): void {
     this.credentialStore = store;
+  }
+
+  // The single-flighted probe built in activation and shared with the adapter factory's `verify`, so
+  // the connection commands and the subsystem refresh coalesce onto one in-flight handshake.
+  public setXrayProbe(probe: XrayProbe): void {
+    this.xrayProbe = probe;
   }
 
   public setTraceabilitySubsystem(subsystem: TraceabilitySubsystem): void {
@@ -794,14 +802,15 @@ export class CommandManager {
   }
 
   private getXrayConnectionCommands(): XrayConnectionCommands {
-    if (!this.credentialStore) {
-      throw new Error("Xray connection commands are unavailable: credential store not wired.");
+    if (!this.credentialStore || !this.xrayProbe) {
+      throw new Error("Xray connection commands are unavailable: credential store or probe not wired.");
     }
     this.xrayConnectionCommands ??= new XrayConnectionCommands(
       this.context.config,
       this.credentialStore,
       this.context.logger,
-      () => this.traceabilitySubsystem?.knownTestKeys() ?? []
+      () => this.traceabilitySubsystem?.knownTestKeys() ?? [],
+      this.xrayProbe
     );
     return this.xrayConnectionCommands;
   }

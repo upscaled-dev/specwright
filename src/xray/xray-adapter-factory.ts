@@ -1,22 +1,13 @@
 import type { Memento } from "vscode";
 import { ConnectionVerifyResult } from "../traceability/contracts";
 import { TraceabilityAdapterFactory } from "../traceability/adapter-registry";
-import { XrayAdapter } from "./xray-adapter";
+import { canonicalizeXrayKey, XrayAdapter } from "./xray-adapter";
 import { XrayClient } from "./xray-client";
 import { XrayMetadataCapability } from "./xray-metadata";
 import { currentWorkspaceId, XrayMetadataCache } from "./xray-metadata-cache";
 import { parseXrayRegion, xrayBaseUrl } from "./xray-region";
 import { XrayCredentialStore } from "./xray-credential-store";
-import type {
-  XrayConnectionOutcome,
-  XrayConnectionTestDeps,
-  XrayProbeOptions,
-} from "./xray-connection-test";
-
-type XrayProbe = (
-  deps: XrayConnectionTestDeps,
-  options?: XrayProbeOptions
-) => Promise<XrayConnectionOutcome>;
+import type { XrayConnectionOutcome, XrayProbe } from "./xray-connection-test";
 
 // An auth-only probe can only land in the ok/auth/network stages: ok is a verified handshake,
 // network means the site was unreachable, and every other stage is an authentication failure.
@@ -78,6 +69,7 @@ export function createXrayAdapterFactory(
         // Every credential change drops the JWT and re-stamps/reloads state for the current account,
         // so a same-site account switch never serves the prior account's data.
         onCredentialsChange: credentialStore.onDidChange,
+        canonicalizeKey: canonicalizeXrayKey,
       });
       return new XrayAdapter(ctx.config, credentialStore, verify, metadata);
     },

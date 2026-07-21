@@ -3,96 +3,12 @@ import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import {
-  describeJwt,
-  describeShape,
   extractTotal,
-  graphqlErrorSummaries,
   probeXrayConnection,
   rateLimitHeaders,
   runXrayConnectionTest,
-  scrubJwtLike,
 } from "../../xray/xray-connection-test";
 import { XrayRegion } from "../../xray/xray-region";
-
-describe("describeShape", () => {
-  it("emits types and lengths, never values", () => {
-    const input = { name: "secret-value", count: 3, ok: true, none: null };
-    expect(describeShape(input)).toEqual({
-      name: "string(12)",
-      count: "number",
-      ok: "boolean",
-      none: "null",
-    });
-  });
-
-  it("summarizes arrays by first-element skeleton plus count", () => {
-    expect(describeShape([{ a: "x" }, { a: "yy" }, { a: "zzz" }])).toEqual([
-      { a: "string(1)" },
-      "… 3 items total",
-    ]);
-    expect(describeShape([42])).toEqual(["number"]);
-    expect(describeShape([])).toEqual(["(empty)"]);
-  });
-
-  it("stops recursing past the depth cap", () => {
-    const deep = { l0: { l1: { l2: { l3: { l4: { l5: { l6: "too deep" } } } } } } };
-    const result = describeShape(deep);
-    const dig = (value: unknown, keys: string[]): unknown =>
-      keys.reduce<unknown>((acc, key) => (acc as Record<string, unknown>)[key], value);
-    expect(dig(result, ["l0", "l1", "l2", "l3", "l4", "l5"])).toBe("…");
-  });
-
-  it("never reproduces a long secret-like string in its output", () => {
-    const secret = "client-secret-0123456789-abcdefghij";
-    const out = JSON.stringify(describeShape({ request: { client_secret: secret } }));
-    expect(out).not.toContain(secret);
-    expect(out).toContain(`string(${secret.length})`);
-  });
-});
-
-describe("scrubJwtLike", () => {
-  const jwt = `${"a".repeat(40)}.${"b".repeat(40)}.${"c".repeat(40)}`;
-
-  it("masks a three-segment token embedded in a sentence", () => {
-    const scrubbed = scrubJwtLike(`denied for token ${jwt} on resource`);
-    expect(scrubbed).not.toContain(jwt);
-    expect(scrubbed).toContain("[jwt-like-token]");
-    expect(scrubbed).toContain("denied for token");
-  });
-
-  it("keeps hostnames and short dotted values intact", () => {
-    expect(scrubJwtLike("see acme.atlassian.net and v1.2.3")).toBe(
-      "see acme.atlassian.net and v1.2.3"
-    );
-  });
-});
-
-describe("graphqlErrorSummaries", () => {
-  it("returns empty for non-objects and bodies without errors", () => {
-    expect(graphqlErrorSummaries("plain text")).toEqual([]);
-    expect(graphqlErrorSummaries(null)).toEqual([]);
-    expect(graphqlErrorSummaries({ data: { ok: true } })).toEqual([]);
-    expect(graphqlErrorSummaries({ errors: [] })).toEqual([]);
-  });
-
-  it("formats message and extensions.code, with a fallback for missing messages", () => {
-    const summaries = graphqlErrorSummaries({
-      errors: [{ message: "denied", extensions: { code: "FORBIDDEN" } }, {}],
-    });
-    expect(summaries[0]).toBe("errors[0] [FORBIDDEN]: denied");
-    expect(summaries[1]).toBe("errors[1]: (no message)");
-  });
-
-  it("clips long messages and scrubs jwt-like tokens inside them", () => {
-    const jwt = `${"a".repeat(40)}.${"b".repeat(40)}.${"c".repeat(40)}`;
-    const summaries = graphqlErrorSummaries({
-      errors: [{ message: `bad token ${jwt} ${"x".repeat(400)}` }],
-    });
-    expect(summaries[0]).not.toContain(jwt);
-    expect(summaries[0]).toContain("[jwt-like-token]");
-    expect((summaries[0] ?? "").length).toBeLessThanOrEqual("errors[0]: ".length + 160);
-  });
-});
 
 describe("extractTotal", () => {
   it("returns the numeric total when present", () => {
@@ -107,20 +23,6 @@ describe("extractTotal", () => {
     expect(extractTotal({ errors: [{ message: "boom" }] })).toBeUndefined();
     expect(extractTotal("plain text")).toBeUndefined();
     expect(extractTotal(null)).toBeUndefined();
-  });
-});
-
-describe("describeJwt", () => {
-  it("reports length and segment count without emitting the token", () => {
-    const jwt = `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`;
-    const line = describeJwt(jwt);
-    expect(line).not.toContain(jwt);
-    expect(line).toContain(`length ${jwt.length}`);
-    expect(line).toContain("three-segment shape: true");
-  });
-
-  it("flags a token without three segments", () => {
-    expect(describeJwt("no-dots")).toContain("three-segment shape: false");
   });
 });
 

@@ -4,10 +4,10 @@ import { Logger } from "../utils/logger";
 import { normalizeSiteUrl } from "./xray-adapter";
 import { XrayCredentialStore } from "./xray-credential-store";
 import {
-  probeXrayConnection,
   runXrayConnectionTest,
   XrayConnectionOutcome,
   XrayConnectionTestDeps,
+  XrayProbe,
   XrayProbeOptions,
 } from "./xray-connection-test";
 import { parseXrayRegion } from "./xray-region";
@@ -47,7 +47,10 @@ export class XrayConnectionCommands {
     private readonly logger: Logger,
     // Call-time supplier: the traceability subsystem is set on the CommandManager after this is
     // constructed, so the test keys must be read when a probe runs, not captured here.
-    private readonly knownTestKeys: () => string[]
+    private readonly knownTestKeys: () => string[],
+    // The single-flighted probe shared with the factory `verify`, so a coincident subsystem verify
+    // and panel verify collapse onto one handshake instead of racing two probe sequences.
+    private readonly probe: XrayProbe
   ) {}
 
   public async manageConnection(): Promise<void> {
@@ -110,7 +113,7 @@ export class XrayConnectionCommands {
   // Site is the just-saved host when the panel supplies it; otherwise read fresh from the config
   // store (never the ExtensionConfig snapshot, which only refreshes on config-change).
   public probeConnection(site?: string, options?: XrayProbeOptions): Promise<XrayConnectionOutcome> {
-    return probeXrayConnection(this.testDeps(site ?? this.freshSite()), options);
+    return this.probe(this.testDeps(site ?? this.freshSite()), options);
   }
 
   private freshSite(): string {

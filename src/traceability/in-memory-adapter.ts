@@ -161,9 +161,11 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
       this.errors = [];
       this.tests = new Map(this.catalogue);
       this.completeness = this.nextCompleteness;
-      const present = new Set([...this.catalogue.keys()].map((key) => key.toUpperCase()));
+      // Canonicalize through the grammar (numeric here, not uppercase) so "007" and "7" collapse to
+      // one key — the model derives its link keys the same way, so absence verdicts stay honest.
+      const present = new Set([...this.catalogue.keys()].map((key) => this.keyGrammar.canonicalizeKey(key)));
       this.verifiedAbsentKeys = (scope.testKeys ?? [])
-        .map((key) => key.toUpperCase())
+        .map((key) => this.keyGrammar.canonicalizeKey(key))
         .filter((key) => !present.has(key));
     }
     this._onMetadataChange.fire();

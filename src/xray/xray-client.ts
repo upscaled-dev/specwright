@@ -2,7 +2,7 @@ import { Logger } from "../utils/logger";
 import { NormalizedStatus } from "../traceability/contracts";
 import { XrayCredentials } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
-import { describeJwt, describeShape, graphqlErrorSummaries, scrubJwtLike } from "./xray-connection-test";
+import { describeJwt, describeShape, graphqlErrorSummaries, scrubJwtLike } from "./xray-diagnostics";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 // Proactively reuse the JWT well inside its ~24h life so an in-flight batch never trips the true
@@ -259,6 +259,7 @@ export class XrayClient {
 
   private jwt: string | undefined;
   private jwtObtainedAt = 0;
+  private authInFlight: Promise<string> | undefined;
 
   constructor(private readonly deps: XrayClientDeps) {
     this.base = xrayBaseUrl(deps.region);
@@ -269,10 +270,13 @@ export class XrayClient {
   }
 
   // Drop the cached JWT so the next request re-authenticates. Called on any credential change —
-  // cheap, and it covers both an account switch and a same-account secret rotation.
+  // cheap, and it covers both an account switch and a same-account secret rotation. Dropping the
+  // in-flight authenticate too closes the cross-account window: a probe already fetching the prior
+  // account's token is disowned (identity-guarded below) so it can neither install nor clear state.
   public invalidateAuth(): void {
     this.jwt = undefined;
     this.jwtObtainedAt = 0;
+    this.authInFlight = undefined;
   }
 
   public async fetchTestsByKeys(keys: readonly string[], signal?: AbortSignal): Promise<XrayFetchOutcome> {
@@ -378,14 +382,33 @@ export class XrayClient {
     }
   }
 
-  private async getJwt(signal: AbortSignal | undefined, force: boolean): Promise<string> {
+  // Concurrent callers that all miss the cached JWT (or all force-refresh after a shared 401) ride
+  // one /authenticate round-trip instead of each firing their own; the entry clears when it settles,
+  // so the sequential reuse path above still owns the common case. The identity guards make a probe
+  // that invalidateAuth disowned mid-flight inert — it neither installs its (now stale) JWT nor
+  // clobbers a newer in-flight entry.
+  private getJwt(signal: AbortSignal | undefined, force: boolean): Promise<string> {
     if (!force && this.jwt !== undefined && this.now() - this.jwtObtainedAt < JWT_REUSE_MS) {
-      return this.jwt;
+      return Promise.resolve(this.jwt);
     }
-    const jwt = await this.authenticate(signal);
-    this.jwt = jwt;
-    this.jwtObtainedAt = this.now();
-    return jwt;
+    if (this.authInFlight) {
+      return this.authInFlight;
+    }
+    const inFlight: Promise<string> = this.authenticate(signal)
+      .then((jwt) => {
+        if (this.authInFlight === inFlight) {
+          this.jwt = jwt;
+          this.jwtObtainedAt = this.now();
+        }
+        return jwt;
+      })
+      .finally(() => {
+        if (this.authInFlight === inFlight) {
+          this.authInFlight = undefined;
+        }
+      });
+    this.authInFlight = inFlight;
+    return inFlight;
   }
 
   private async authenticate(signal?: AbortSignal): Promise<string> {

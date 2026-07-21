@@ -155,6 +155,77 @@ describe("XrayClient auth invalidation", () => {
   });
 });
 
+describe("XrayClient invalidateAuth during an in-flight authenticate", () => {
+  it("disowns the stale token so it is neither installed nor reused, and re-auths with current creds", async () => {
+    let authCalls = 0;
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const creds = [
+      { clientId: "old", clientSecret: "old-secret" },
+      { clientId: "new", clientSecret: "new-secret" },
+    ];
+    let credIndex = 0;
+    const authBodies: string[] = [];
+    const usedBearers: string[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      if (url.endsWith("/authenticate")) {
+        authCalls += 1;
+        authBodies.push(String(init.body ?? ""));
+        if (authCalls === 1) {
+          await firstGate; // park the first authenticate until after invalidateAuth disowns it
+          return response(200, JSON.stringify(JWT));
+        }
+        return response(200, JSON.stringify(JWT2));
+      }
+      usedBearers.push((init.headers as Record<string, string>)["Authorization"] ?? "");
+      return response(200, JSON.stringify(testsPage([])));
+    };
+    const client = makeClient({ fetchImpl, credentials: () => Promise.resolve(creds[credIndex]) });
+
+    // First fetch's authInFlight is set synchronously; invalidateAuth then disowns it while its
+    // /authenticate is still parked at the gate.
+    const first = client.fetchProjectCatalogue("CALC");
+    client.invalidateAuth();
+    credIndex = 1;
+
+    const second = await client.fetchProjectCatalogue("MATH");
+    expect(authCalls).toBe(2);
+    expect(authBodies[1]).toContain("new");
+    expect(usedBearers.at(-1)).toBe(`Bearer ${JWT2}`);
+    expect(second.complete).toBe(true);
+
+    // Release the stale first authenticate; its old JWT must neither install nor be reused.
+    releaseFirst();
+    await first;
+    usedBearers.length = 0;
+    await client.fetchProjectCatalogue("PHYS");
+    expect(authCalls).toBe(2); // JWT2 reused — the stale token never clobbered the cache
+    expect(usedBearers).toEqual([`Bearer ${JWT2}`]);
+  });
+});
+
+describe("XrayClient auth single-flight", () => {
+  it("shares one /authenticate round-trip across concurrent fetches", async () => {
+    let authCalls = 0;
+    const fetchImpl: FetchLike = (url) => {
+      if (url.endsWith("/authenticate")) {
+        authCalls += 1;
+        return Promise.resolve(response(200, JSON.stringify(JWT)));
+      }
+      return Promise.resolve(response(200, JSON.stringify(testsPage([]))));
+    };
+    const client = makeClient({ fetchImpl });
+
+    await Promise.all([
+      client.fetchProjectCatalogue("CALC"),
+      client.fetchTestsByKeys(["MATH-1"]),
+      client.fetchProjectCatalogue("PHYS"),
+    ]);
+
+    expect(authCalls).toBe(1);
+  });
+});
+
 describe("XrayClient pagination", () => {
   it("pages a project catalogue with start/total until every item is collected", async () => {
     const starts: number[] = [];
