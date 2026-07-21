@@ -20,6 +20,10 @@ interface TagRef {
   readonly endCol: number;
 }
 
+interface SuggestionRef extends TagRef {
+  readonly kind: "test" | "req";
+}
+
 interface ExecutableUnit {
   readonly id: number;
   readonly kind: "scenario" | "outline" | "examplesBlock";
@@ -48,11 +52,13 @@ function collectTestTags(lineText: string, lineIdx: number, grammar: KeyGrammar)
   return tags;
 }
 
-// Key-shaped tags carrying neither the test nor the req prefix — a likely dropped `TEST_`. `key` is
-// canonicalized so the suggestion rebuilds `@<testPrefix><key>`.
-function collectSuggestionTags(lineText: string, lineIdx: number, grammar: KeyGrammar): TagRef[] {
+// Key-shaped tags carrying neither the test nor the req prefix — a likely dropped prefix. Only
+// uppercase bodies qualify: Jira project keys are uppercase by definition, so a lowercase or
+// mixed-case key-shaped tag (`@v2-1`, `@sprint-42`, `@Apex-5`) is a team convention we must never
+// nag. This deliberately trades away the lowercase-typo hint.
+function collectSuggestionTags(lineText: string, lineIdx: number, grammar: KeyGrammar): SuggestionRef[] {
   const keyShape = stateless(grammar.keyShape);
-  const tags: TagRef[] = [];
+  const tags: SuggestionRef[] = [];
   for (const match of lineText.matchAll(new RegExp(TAG_TOKEN_PATTERN, "g"))) {
     const token = match[0];
     const extracted = extractKeys([token], grammar);
@@ -60,13 +66,43 @@ function collectSuggestionTags(lineText: string, lineIdx: number, grammar: KeyGr
       continue;
     }
     const body = token.startsWith("@") ? token.slice(1) : token;
-    if (!keyShape.test(body)) {
+    if (!keyShape.test(body) || body !== body.toUpperCase()) {
       continue;
     }
     const startCol = match.index ?? 0;
-    tags.push({ key: grammar.canonicalizeKey(body), line: lineIdx, startCol, endCol: startCol + token.length });
+    const range = { line: lineIdx, startCol, endCol: startCol + token.length };
+    const stripped = separatorTypoSuggestion(body, grammar, keyShape);
+    tags.push(stripped ? { ...stripped, ...range } : { key: grammar.canonicalizeKey(body), kind: "test", ...range });
   }
   return tags;
+}
+
+// A wrong-separator form like `@TEST-APEX-5` should suggest the joined key `@TEST_APEX-5`, not a
+// doubled `@TEST_TEST-APEX-5`. Derive each prefix's word by stripping trailing `-`/`_` ("TEST_" →
+// "TEST", "xt-" → "xt"); when the body is that word plus a single separator plus a key-shaped
+// remainder, suggest the properly-joined form. Test wins over req. (The correctly-joined form never
+// reaches here — it extracts as a real key upstream — so only wrong-separator variants arrive.)
+function separatorTypoSuggestion(
+  body: string,
+  grammar: KeyGrammar,
+  keyShape: RegExp
+): { key: string; kind: "test" | "req" } | undefined {
+  for (const kind of ["test", "req"] as const) {
+    const prefix = kind === "test" ? grammar.testPrefix : grammar.reqPrefix;
+    const word = prefix.replace(/[-_]+$/, "");
+    if (word === "") {
+      continue;
+    }
+    const sep = body.charAt(word.length);
+    if (body.slice(0, word.length).toLowerCase() !== word.toLowerCase() || (sep !== "-" && sep !== "_")) {
+      continue;
+    }
+    const remainder = body.slice(word.length + 1);
+    if (keyShape.test(remainder)) {
+      return { key: grammar.canonicalizeKey(remainder), kind };
+    }
+  }
+  return undefined;
 }
 
 // Feature-level test tags inherit to every scenario (mirrors the parser's `[...featureTags, ...]`
@@ -75,15 +111,15 @@ function collectSuggestionTags(lineText: string, lineIdx: number, grammar: KeyGr
 function scanUnits(
   text: string,
   grammar: KeyGrammar
-): { featureTestTags: TagRef[]; units: ExecutableUnit[]; suggestions: TagRef[] } {
+): { featureTestTags: TagRef[]; units: ExecutableUnit[]; suggestions: SuggestionRef[] } {
   const lines = text.replaceAll("\r\n", "\n").split("\n");
   let pending: TagRef[] = [];
-  let pendingSuggestions: TagRef[] = [];
+  let pendingSuggestions: SuggestionRef[] = [];
   let featureTestTags: TagRef[] = [];
   const units: ExecutableUnit[] = [];
   // Bare key-shaped tags that attached to a Feature/Scenario/Outline/Examples block (same scope the
   // test tags inherit through — Rule-/Background-level tags are dropped by the parser and here too).
-  const suggestions: TagRef[] = [];
+  const suggestions: SuggestionRef[] = [];
   let nextId = 0;
   let inOutline = false;
   let docString: string | undefined;
@@ -211,12 +247,14 @@ export function computeTagDiagnostics(text: string, grammar: KeyGrammar): TagDia
     }
   }
 
-  // A key-shaped tag missing the test prefix links to nothing; suggest the prefixed form. Information,
+  // A key-shaped tag missing its prefix links to nothing; suggest the prefixed form. Information,
   // not a warning: a bare key-shaped tag can be a legitimate team convention.
   for (const tag of suggestions) {
+    const prefix = tag.kind === "req" ? grammar.reqPrefix : grammar.testPrefix;
+    const noun = tag.kind === "req" ? "requirements" : "tests";
     diagnostics.push({
       ...toRange(tag),
-      message: `Did you mean @${grammar.testPrefix}${tag.key}? Tags link to tests only with the ${grammar.testPrefix} prefix.`,
+      message: `Did you mean @${prefix}${tag.key}? Tags link to ${noun} only with the ${prefix} prefix.`,
       severity: "information",
     });
   }

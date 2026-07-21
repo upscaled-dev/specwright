@@ -143,10 +143,43 @@ describe("computeTagDiagnostics — prefix suggestion (F5 finding #4)", () => {
     expect(computeTagDiagnostics("Feature: F\n\n@ui\nScenario: A\n  Given x\n", GRAMMAR)).toEqual([]);
   });
 
-  it("canonicalizes the key in the suggestion (JIRA_KEY_SHAPE is case-insensitive, so @apex-5 fires)", () => {
-    const diags = computeTagDiagnostics("Feature: F\n\n@apex-5\nScenario: A\n  Given x\n", GRAMMAR);
+  it("never nags a lowercase or mixed-case key-shaped tag (team convention, not a dropped prefix)", () => {
+    for (const body of ["@apex-5", "@v2-1", "@iso-8601", "@sprint-42", "@Apex-5"]) {
+      const feature = `Feature: F\n\n${body}\nScenario: A\n  Given x\n`;
+      expect(computeTagDiagnostics(feature, GRAMMAR)).toEqual([]);
+    }
+  });
+
+  it("rewrites a wrong-separator test form to the joined key rather than doubling the prefix", () => {
+    const diags = computeTagDiagnostics("Feature: F\n\n@TEST-APEX-5\nScenario: A\n  Given x\n", GRAMMAR);
     expect(diags).toHaveLength(1);
-    expect(diags[0]!.message).toContain("@TEST_APEX-5");
+    expect(diags[0]!.message).toBe("Did you mean @TEST_APEX-5? Tags link to tests only with the TEST_ prefix.");
+  });
+
+  it("rewrites a wrong-separator req form with the requirement-worded message", () => {
+    const diags = computeTagDiagnostics("Feature: F\n\n@REQ-APEX-5\nScenario: A\n  Given x\n", GRAMMAR);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]!.message).toBe("Did you mean @REQ_APEX-5? Tags link to requirements only with the REQ_ prefix.");
+  });
+
+  it("keeps the plain suggestion when the strip remainder is not key-shaped (@TEST-5)", () => {
+    const diags = computeTagDiagnostics("Feature: F\n\n@TEST-5\nScenario: A\n  Given x\n", GRAMMAR);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]!.message).toBe("Did you mean @TEST_TEST-5? Tags link to tests only with the TEST_ prefix.");
+  });
+
+  it("applies the wrong-separator strip against a lowercase custom prefix word", () => {
+    const grammar: KeyGrammar = { ...GRAMMAR, testPrefix: "xt-" };
+    const diags = computeTagDiagnostics("Feature: F\n\n@XT_APEX-5\nScenario: A\n  Given x\n", grammar);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]!.message).toBe("Did you mean @xt-APEX-5? Tags link to tests only with the xt- prefix.");
+  });
+
+  it("drops a bare key-shaped tag placed directly above a Rule or Background (no suggestion)", () => {
+    const aboveRule = "Feature: F\n\n@APEX-5\nRule: R1\n\n  Scenario: A\n    Given x\n";
+    expect(computeTagDiagnostics(aboveRule, GRAMMAR)).toEqual([]);
+    const aboveBackground = "Feature: F\n\n@APEX-5\nBackground:\n  Given x\n\nScenario: A\n  Given y\n";
+    expect(computeTagDiagnostics(aboveBackground, GRAMMAR)).toEqual([]);
   });
 
   it("suggests for feature-level and outline tags too", () => {
@@ -167,6 +200,18 @@ describe("computeTagDiagnostics — prefix suggestion (F5 finding #4)", () => {
     const diags = computeTagDiagnostics("Feature: F\n\n@APEX-5\nScenario: A\n  Given x\n", grammar);
     expect(diags).toHaveLength(1);
     expect(diags[0]!.message).toBe("Did you mean @xt-APEX-5? Tags link to tests only with the xt- prefix.");
+  });
+
+  it("stays silent on a mixed-case wrong-separator body (uppercase gate precedes the strip)", () => {
+    expect(computeTagDiagnostics("Feature: F\n\n@TEST-apex-5\nScenario: A\n  Given x\n", GRAMMAR)).toEqual([]);
+    expect(computeTagDiagnostics("Feature: F\n\n@Test-APEX-5\nScenario: A\n  Given x\n", GRAMMAR)).toEqual([]);
+  });
+
+  it("skips the separator strip when a prefix word strips to empty (testPrefix '_')", () => {
+    const grammar: KeyGrammar = { ...GRAMMAR, testPrefix: "_" };
+    const diags = computeTagDiagnostics("Feature: F\n\n@APEX-5\nScenario: A\n  Given x\n", grammar);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]!.message).toBe("Did you mean @_APEX-5? Tags link to tests only with the _ prefix.");
   });
 });
 
