@@ -54,12 +54,23 @@ export interface SyncScope {
   readonly testKeys?: readonly string[] | undefined;
 }
 
-// The offline-first metadata snapshot. `completeness` gates orphan derivation: orphans are only
-// authoritative on a `"complete"` catalogue fetch — a `"partial"` or `"unknown"` snapshot must
-// never yield orphan counts.
+// The offline-first metadata snapshot. `completeness` describes catalogue integrity only (project
+// scope present, every project's pages complete, no catalogue errors — a supplemental key batch,
+// present or failed, never affects it) and gates orphan derivation: orphans are only authoritative
+// on a `"complete"` catalogue fetch — a `"partial"` or `"unknown"` snapshot must never yield orphan
+// counts.
 export interface RemoteMetadataSnapshot {
   readonly tests: ReadonlyMap<string, TestCaseMetadata>;
   readonly fetchedScopes: readonly string[];
+  // The project keys whose full catalogue this snapshot attempted; authoritative for key-absence
+  // verdicts only when `completeness === "complete"` (which already implies every catalogue page
+  // complete with no catalogue errors — `errors` may still carry key-batch failures).
+  readonly catalogueProjects: readonly string[];
+  // Canonical keys a *successful* key-batch fetch explicitly queried and the remote did not return —
+  // authoritative absence evidence regardless of `completeness` (§5 key-batch leniency: getTests
+  // silently omits nonexistent keys and still returns 200). A failed or partial batch contributes
+  // nothing.
+  readonly verifiedAbsentKeys: readonly string[];
   readonly syncedAt?: number | undefined;
   readonly stale: boolean;
   readonly completeness: "complete" | "partial" | "unknown";

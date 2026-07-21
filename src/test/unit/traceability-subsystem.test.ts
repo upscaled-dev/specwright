@@ -702,7 +702,7 @@ describe("TraceabilitySubsystem sync staleness row", () => {
       },
       metadata: {
         onDidChange: new vscode.EventEmitter<void>().event,
-        snapshot: () => ({ tests: new Map(), fetchedScopes: [], syncedAt, stale: false, completeness: "partial", errors: [] }),
+        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], verifiedAbsentKeys: [], syncedAt, stale: false, completeness: "partial", errors: [] }),
         sync: () => Promise.resolve(),
       },
     };

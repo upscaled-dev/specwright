@@ -677,7 +677,7 @@ describe("traceability sync command handler", () => {
     const adapter = {
       metadata: {
         sync,
-        snapshot: () => ({ tests: new Map(), fetchedScopes: [], stale: false, completeness: "unknown", errors: ["boom"] }),
+        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], verifiedAbsentKeys: [], stale: false, completeness: "unknown", errors: ["boom"] }),
       },
     };
     const subsystem = {
@@ -700,7 +700,7 @@ describe("traceability sync command handler", () => {
     const adapter = {
       metadata: {
         sync,
-        snapshot: () => ({ tests: new Map(), fetchedScopes: [], stale: false, completeness: "unknown", errors: [] }),
+        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], verifiedAbsentKeys: [], stale: false, completeness: "unknown", errors: [] }),
       },
     };
     const subsystem = {

@@ -7,6 +7,8 @@ function snapshot(overrides: Partial<RemoteMetadataSnapshot> = {}): RemoteMetada
   return {
     tests: new Map(),
     fetchedScopes: [],
+    catalogueProjects: [],
+    verifiedAbsentKeys: [],
     stale: false,
     completeness: "unknown",
     errors: [],

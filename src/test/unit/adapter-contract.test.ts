@@ -78,6 +78,27 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
     expect(snap.tests.get("42")?.summary).toBe("kept");
     expect(snap.errors).toEqual(["boom"]);
   });
+
+  it("carries the uppercased catalogue project scope onto the snapshot", async () => {
+    const adapter = new InMemoryTraceabilityAdapter();
+    await adapter.metadata.sync({ projectKeys: ["calc", "MATH"], testKeys: ["42"] });
+    expect(adapter.metadata.snapshot().catalogueProjects).toEqual(["CALC", "MATH"]);
+  });
+
+  it("leaves catalogueProjects empty when a sync carried no project scope", async () => {
+    const adapter = new InMemoryTraceabilityAdapter();
+    await adapter.metadata.sync({ testKeys: ["42"] });
+    expect(adapter.metadata.snapshot().catalogueProjects).toEqual([]);
+  });
+
+  it("records queried keys absent from the seeded catalogue as verified-absent", async () => {
+    const adapter = new InMemoryTraceabilityAdapter();
+    adapter.seedCatalogue([{ key: "42", summary: "kept" }], "complete");
+    await adapter.metadata.sync({ testKeys: ["42", "99"] });
+    const snap = adapter.metadata.snapshot();
+    expect(snap.verifiedAbsentKeys).toEqual(["99"]);
+    expect(snap.tests.has("42")).toBe(true);
+  });
 });
 
 const ctx: AdapterContext = { config: {} as ExtensionConfig, logger: Logger.create() };
@@ -198,7 +219,7 @@ function controllableAdapter(id: string): Controllable {
     },
     metadata: {
       onDidChange: metaEmitter.event,
-      snapshot: () => ({ tests: new Map(), fetchedScopes: [], stale: false, completeness: "unknown", errors: [] }),
+      snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], verifiedAbsentKeys: [], stale: false, completeness: "unknown", errors: [] }),
       sync: () => Promise.resolve(),
     },
     dispose,

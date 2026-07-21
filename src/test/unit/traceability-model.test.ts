@@ -26,6 +26,8 @@ function remoteSnapshot(
   return {
     tests: new Map(tests.map((test) => [test.key, test])),
     fetchedScopes: ["CALC"],
+    catalogueProjects: ["CALC"],
+    verifiedAbsentKeys: [],
     syncedAt: 1_700_000_000_000,
     stale: false,
     completeness: "complete",
@@ -263,6 +265,92 @@ Scenario Outline: multiply <a> by <b>
     ]);
     const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
     expect(link(snap.links, "CALC-1043").drift).toBeUndefined();
+  });
+});
+
+const DEMO_FEATURE = `Feature: Demo
+
+@TEST_DEMO-404
+Scenario: Bogus tag
+  Given x
+`;
+
+describe("buildTraceabilitySnapshot — remote-absence verdict", () => {
+  it("flags a key provably absent from a complete catalogue covering its project", () => {
+    const remote = remoteSnapshot([], { completeness: "complete", catalogueProjects: ["CALC"] });
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").remoteMissing).toBe(true);
+  });
+
+  it("does not flag absence on a partial snapshot", () => {
+    const remote = remoteSnapshot([], { completeness: "partial", catalogueProjects: ["CALC"] });
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").remoteMissing).toBeUndefined();
+  });
+
+  it("does not flag absence on an unknown snapshot", () => {
+    const remote = remoteSnapshot([], { completeness: "unknown", catalogueProjects: ["CALC"] });
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").remoteMissing).toBeUndefined();
+  });
+
+  it("does not flag a key whose project was outside the fetched catalogue scope", () => {
+    const remote = remoteSnapshot([], { completeness: "complete", catalogueProjects: ["MATH"] });
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").remoteMissing).toBeUndefined();
+  });
+
+  it("leaves the verdict unset when the key is present in the catalogue", () => {
+    const remote = remoteSnapshot([{ key: "CALC-1043", summary: "Divide by zero" }], {
+      completeness: "complete",
+      catalogueProjects: ["CALC"],
+    });
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").remoteMissing).toBeUndefined();
+  });
+
+  it("matches the catalogue project case-insensitively", () => {
+    const remote = remoteSnapshot([], { completeness: "complete", catalogueProjects: ["calc"] });
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "CALC-1043").remoteMissing).toBe(true);
+  });
+
+  it("never flags absence when the grammar cannot derive a project", () => {
+    const { projectOf: _drop, ...noProject } = GRAMMAR;
+    const remote = remoteSnapshot([], { completeness: "complete", catalogueProjects: ["CALC"] });
+    const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, noProject, remote);
+    expect(link(snap.links, "CALC-1043").remoteMissing).toBeUndefined();
+  });
+
+  it("flags a key a successful batch verified absent even outside the catalogue scope (DEMO repro)", () => {
+    const remote = remoteSnapshot([], {
+      completeness: "partial",
+      catalogueProjects: ["CALC"],
+      verifiedAbsentKeys: ["DEMO-404"],
+    });
+    const snap = buildTraceabilitySnapshot([parse(DEMO_FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "DEMO-404").remoteMissing).toBe(true);
+  });
+
+  it("lets metadata win over a verified-absent listing", () => {
+    const remote = remoteSnapshot([{ key: "DEMO-404", summary: "actually here" }], {
+      completeness: "partial",
+      catalogueProjects: ["CALC"],
+      verifiedAbsentKeys: ["DEMO-404"],
+    });
+    const snap = buildTraceabilitySnapshot([parse(DEMO_FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "DEMO-404").remoteMissing).toBeUndefined();
+    expect(link(snap.links, "DEMO-404").meta?.summary).toBe("actually here");
+  });
+
+  it("matches a verified-absent key case-insensitively", () => {
+    const remote = remoteSnapshot([], {
+      completeness: "unknown",
+      catalogueProjects: [],
+      verifiedAbsentKeys: ["demo-404"],
+    });
+    const snap = buildTraceabilitySnapshot([parse(DEMO_FEATURE)], {}, GRAMMAR, remote);
+    expect(link(snap.links, "DEMO-404").remoteMissing).toBe(true);
   });
 });
 

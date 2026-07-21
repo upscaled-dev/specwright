@@ -60,6 +60,8 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
 
   private tests = new Map<string, TestCaseMetadata>();
   private fetchedScopes: string[] = [];
+  private catalogueProjects: string[] = [];
+  private verifiedAbsentKeys: string[] = [];
   private completeness: RemoteMetadataSnapshot["completeness"] = "unknown";
   private syncedAt: number | undefined;
   private errors: string[] = [];
@@ -131,6 +133,8 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
     return {
       tests: new Map(this.tests),
       fetchedScopes: [...this.fetchedScopes],
+      catalogueProjects: [...this.catalogueProjects],
+      verifiedAbsentKeys: [...this.verifiedAbsentKeys],
       syncedAt: this.syncedAt,
       stale: false,
       completeness: this.completeness,
@@ -143,17 +147,24 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
       return Promise.resolve();
     }
     this.fetchedScopes = [...(scope.projectKeys ?? []), ...(scope.testKeys ?? [])];
+    this.catalogueProjects = (scope.projectKeys ?? []).map((key) => key.toUpperCase());
     this.syncedAt = Date.now();
     if (this.nextError !== undefined) {
       // A failed fetch surfaces in `errors` and demotes completeness (offline-first: last-known
-      // metadata is kept, orphans are suppressed) rather than throwing.
+      // metadata is kept, orphans are suppressed) rather than throwing. A failed batch proves no
+      // absence.
       this.errors = [this.nextError];
       this.completeness = "unknown";
+      this.verifiedAbsentKeys = [];
       this.nextError = undefined;
     } else {
       this.errors = [];
       this.tests = new Map(this.catalogue);
       this.completeness = this.nextCompleteness;
+      const present = new Set([...this.catalogue.keys()].map((key) => key.toUpperCase()));
+      this.verifiedAbsentKeys = (scope.testKeys ?? [])
+        .map((key) => key.toUpperCase())
+        .filter((key) => !present.has(key));
     }
     this._onMetadataChange.fire();
     return Promise.resolve();

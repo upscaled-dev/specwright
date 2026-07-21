@@ -43,6 +43,9 @@ export interface TraceLink {
   // Set when the snapshot's stored Gherkin differs from the local scenario source (display-only; a
   // reconcile action arrives in P3). Absent until a snapshot populates `meta.gherkin`.
   drift?: boolean | undefined;
+  // Provably absent from a complete remote catalogue covering the key's project (display-only
+  // verdict). Never set on a partial/unknown snapshot or a project outside the catalogue scope.
+  remoteMissing?: boolean | undefined;
 }
 
 export interface UntracedScenario {
@@ -225,6 +228,8 @@ export function buildTraceabilitySnapshot(
       if (meta.gherkin !== undefined && localGherkin !== undefined && hasGherkinDrift(localGherkin, meta.gherkin)) {
         link.drift = true;
       }
+    } else if (isProvablyAbsent(link.project, remote) || isVerifiedAbsent(testKey, remote)) {
+      link.remoteMissing = true;
     }
     links.push(link);
   };
@@ -361,6 +366,26 @@ export function buildTraceabilitySnapshot(
     completeness: remote?.completeness ?? "unknown",
     errors: remote ? [...remote.errors] : [],
   };
+}
+
+// A key is provably absent only when the same gate that authorizes orphans holds: a complete
+// catalogue that covered the key's project, yet the key never appeared. A partial/unknown snapshot,
+// or a key whose project was outside the fetched catalogue scope, proves nothing either way.
+function isProvablyAbsent(
+  project: string | undefined,
+  remote: RemoteMetadataSnapshot | undefined
+): boolean {
+  if (project === undefined || remote?.completeness !== "complete") {
+    return false;
+  }
+  return remote.catalogueProjects.some((p) => p.toLowerCase() === project.toLowerCase());
+}
+
+// A successful key-batch fetch that queried this key and did not get it back proves absence outright
+// (§5), independent of catalogue scope or completeness — this covers a tag whose project is not in
+// the configured catalogue scope.
+function isVerifiedAbsent(testKey: string, remote: RemoteMetadataSnapshot | undefined): boolean {
+  return remote?.verifiedAbsentKeys.some((key) => key.toLowerCase() === testKey.toLowerCase()) ?? false;
 }
 
 // Orphans are only authoritative on a complete catalogue fetch — a partial or unknown snapshot may

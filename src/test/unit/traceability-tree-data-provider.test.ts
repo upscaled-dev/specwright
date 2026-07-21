@@ -193,6 +193,85 @@ describe("TraceabilityTreeDataProvider", () => {
     expect((failed.iconPath as vscode.ThemeIcon).id).toBe("testing-failed-icon");
   });
 
+  it("renders a warning verdict on a key the complete catalogue proved absent", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "CALC-999",
+          project: "CALC",
+          scenario: { filePath: "/ws/a.feature", line: 2, name: "Ghost tag", kind: "scenario" },
+          reqKeys: [],
+          remoteMissing: true,
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "complete",
+      errors: [],
+    });
+    const item = p.getTreeItem(p.getChildren(p.getChildren()[1])[0]!);
+    const icon = item.iconPath as vscode.ThemeIcon;
+    expect(icon.id).toBe("warning");
+    expect((icon.color as vscode.ThemeColor).id).toBe("problemsWarningIcon.foreground");
+    expect(item.description).toBe("CALC · 1 scenario · not found on remote");
+    expect(item.tooltip).toBe(
+      "CALC-999 was not found in project CALC on the connected site. The tag may be stale, mistyped, or reference a Jira issue that is not a test."
+    );
+  });
+
+  it("lets the remote-absence warning outrank a local passed outcome", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "CALC-999",
+          project: "CALC",
+          scenario: { filePath: "/ws/a.feature", line: 2, name: "Ghost tag", kind: "scenario" },
+          reqKeys: [],
+          lastResult: "passed",
+          remoteMissing: true,
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "complete",
+      errors: [],
+    });
+    const item = p.getTreeItem(p.getChildren(p.getChildren()[1])[0]!);
+    expect((item.iconPath as vscode.ThemeIcon).id).toBe("warning");
+  });
+
+  it("renders a no-meta row without remoteMissing exactly as before", () => {
+    const p = provider(SNAPSHOT);
+    const item = p.getTreeItem(p.getChildren(p.getChildren()[1])[0]!);
+    expect((item.iconPath as vscode.ThemeIcon).id).toBe("testing-passed-icon");
+    expect(item.description).toBe("CALC · 1 scenario");
+    expect(item.tooltip).toBe("CALC-1043");
+  });
+
+  it("degrades the remote-absence tooltip when the link carries no project", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "T-404",
+          scenario: { filePath: "/ws/a.feature", line: 2, name: "Ghost", kind: "scenario" },
+          reqKeys: [],
+          remoteMissing: true,
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "partial",
+      errors: [],
+    });
+    const item = p.getTreeItem(p.getChildren(p.getChildren()[1])[0]!);
+    expect((item.iconPath as vscode.ThemeIcon).id).toBe("warning");
+    expect(item.description).toBe("1 scenario · not found on remote");
+    expect(item.tooltip).toBe("T-404 was not found on the connected site. The tag may be stale, mistyped, or reference a Jira issue that is not a test.");
+  });
+
   it("marks a drifting link with a description suffix and an explanatory tooltip", () => {
     const p = provider({
       links: [

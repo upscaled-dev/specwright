@@ -289,12 +289,22 @@ export class TraceabilityTreeDataProvider
         return this.sectionTreeItem(node);
       case "testKey": {
         const item = new vscode.TreeItem(node.testKey, vscode.TreeItemCollapsibleState.Collapsed);
-        item.description = testKeyDescription(node);
+        const description = testKeyDescription(node);
+        item.description = description;
         item.contextValue = "traceabilityTestKey";
-        // All links under a key share the same snapshot entry, so the remote status is the test's,
-        // not per-scenario. It wins over the aggregate local run result when present (§3.3).
-        const status = node.links[0]?.meta?.status;
-        if (status) {
+        // All links under a key share the same snapshot entry, so the verdict and remote status are
+        // the test's, not per-scenario. It wins over the aggregate local run result when present (§3.3).
+        const first = node.links[0];
+        const status = first?.meta?.status;
+        if (first?.remoteMissing) {
+          // A provably-absent key: the warning outranks any local pass so a green tick can never
+          // vouch for a test the complete remote catalogue proved missing. No summary exists here,
+          // so `description` is the offline count text.
+          item.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("problemsWarningIcon.foreground"));
+          item.description = `${description} · not found on remote`;
+          const where = first.project ? ` in project ${first.project}` : "";
+          item.tooltip = `${node.testKey} was not found${where} on the connected site. The tag may be stale, mistyped, or reference a Jira issue that is not a test.`;
+        } else if (status) {
           item.iconPath = statusIcon(status);
           item.tooltip = `${node.testKey} · ${status.providerValue}`;
         } else {

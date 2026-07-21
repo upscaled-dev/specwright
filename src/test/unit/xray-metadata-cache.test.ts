@@ -39,6 +39,8 @@ function sample(): CachedMetadata {
     syncedAt: 1234,
     completeness: "complete",
     fetchedScopes: ["CALC"],
+    catalogueProjects: ["CALC"],
+    verifiedAbsentKeys: ["CALC-404"],
     errors: [],
     tests: [{ key: "CALC-1", summary: "one" }],
     pages: [{ fetchedAt: 1, query: "project = CALC", start: 0, total: 1 }],
@@ -66,7 +68,10 @@ describe("XrayMetadataCache", () => {
       workspaceId: "ws-hash",
     });
     expect(store.has(key)).toBe(true);
-    expect((await cache.load())?.tests[0]?.key).toBe("CALC-1");
+    const loaded = await cache.load();
+    expect(loaded?.tests[0]?.key).toBe("CALC-1");
+    expect(loaded?.catalogueProjects).toEqual(["CALC"]);
+    expect(loaded?.verifiedAbsentKeys).toEqual(["CALC-404"]);
   });
 
   it("never surfaces another account's cache when credentials switch", async () => {
@@ -96,6 +101,23 @@ describe("XrayMetadataCache", () => {
     store.set(key, { ...sample(), schemaVersion: CACHE_SCHEMA_VERSION + 99 });
 
     expect(await new XrayMetadataCache(memento, identity("client-a")).load()).toBeUndefined();
+  });
+
+  it("does not read a pre-catalogueProjects entry stored under the previous schema version's key", async () => {
+    const { memento, store } = fakeMemento();
+    // Schema version is the last key segment, so an entry written under the old version lives in a
+    // different slot: key-segment isolation hides it even before the inner version guard runs.
+    const oldKey = `traceability:xray:xray.cloud.getxray.app:client-a:ws-hash:${CACHE_SCHEMA_VERSION - 1}`;
+    store.set(oldKey, { ...sample(), schemaVersion: CACHE_SCHEMA_VERSION - 1 });
+    const currentKey = metadataCacheStorageKey({
+      endpoint: "xray.cloud.getxray.app",
+      account: "client-a",
+      workspaceId: "ws-hash",
+    });
+
+    expect(await new XrayMetadataCache(memento, identity("client-a")).load()).toBeUndefined();
+    expect(store.has(oldKey)).toBe(true);
+    expect(store.has(currentKey)).toBe(false);
   });
 
   it("is a no-op when there is no account to key on", async () => {

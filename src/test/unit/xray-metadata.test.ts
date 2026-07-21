@@ -94,6 +94,7 @@ describe("XrayMetadataCapability sync", () => {
     expect(snap.completeness).toBe("complete");
     expect(snap.syncedAt).toBe(10_000);
     expect([...snap.tests.keys()].sort()).toEqual(["CALC-1", "CALC-2"]);
+    expect(snap.catalogueProjects).toEqual(["CALC"]);
     expect(snap.errors).toEqual([]);
     expect(fired).toBeGreaterThan(0);
   });
@@ -118,6 +119,128 @@ describe("XrayMetadataCapability sync", () => {
 
     await capability.sync({ projectKeys: ["CALC"] });
     expect(capability.snapshot().completeness).toBe("partial");
+  });
+
+  it("reaches complete on the production combined scope (project catalogue + tag-derived key batch)", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1", summary: "one" }])),
+        fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "CALC-1", summary: "one" }])),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"], testKeys: ["CALC-1"] });
+    expect(capability.snapshot().completeness).toBe("complete");
+  });
+
+  it("stays complete when the supplemental key batch errors, surfacing the error without demoting", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1", summary: "one" }])),
+        fetchTestsByKeys: () => Promise.resolve(outcome([], { errors: ["key batch failed"] })),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"], testKeys: ["CALC-9"] });
+    const snap = capability.snapshot();
+    expect(snap.completeness).toBe("complete");
+    expect(snap.errors).toEqual(["key batch failed"]);
+  });
+
+  it("stays unknown for a test-key-only fetch that returns no data", async () => {
+    const capability = makeCapability({
+      client: fakeClient({ fetchTestsByKeys: () => Promise.resolve(outcome([])) }),
+    });
+
+    await capability.sync({ testKeys: ["CALC-1"] });
+    expect(capability.snapshot().completeness).toBe("unknown");
+  });
+
+  it("demotes to partial when a catalogue page errors even with a key batch present", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1" }], { errors: ["page 2 failed"] })),
+        fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "CALC-1" }])),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"], testKeys: ["CALC-1"] });
+    expect(capability.snapshot().completeness).toBe("partial");
+  });
+
+  it("records a queried key the successful batch did not return as verified-absent", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "CALC-1", summary: "one" }])),
+      }),
+    });
+
+    await capability.sync({ testKeys: ["CALC-1", "demo-9"] });
+    const snap = capability.snapshot();
+    expect(snap.verifiedAbsentKeys).toEqual(["DEMO-9"]);
+    expect(snap.verifiedAbsentKeys).not.toContain("CALC-1");
+  });
+
+  it("records nothing when the key batch reported errors", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "CALC-1" }], { errors: ["boom"] })),
+      }),
+    });
+
+    await capability.sync({ testKeys: ["CALC-1", "DEMO-9"] });
+    expect(capability.snapshot().verifiedAbsentKeys).toEqual([]);
+  });
+
+  it("records nothing when the key batch was incomplete", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "CALC-1" }], { complete: false })),
+      }),
+    });
+
+    await capability.sync({ testKeys: ["CALC-1", "DEMO-9"] });
+    expect(capability.snapshot().verifiedAbsentKeys).toEqual([]);
+  });
+
+  it("wholly replaces the verified-absent set when a later sync returns a previously-absent key", async () => {
+    let returnDemo = false;
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchTestsByKeys: () =>
+          Promise.resolve(outcome(returnDemo ? [{ key: "DEMO-9", summary: "now exists" }] : [])),
+      }),
+    });
+
+    await capability.sync({ testKeys: ["DEMO-9"] });
+    expect(capability.snapshot().verifiedAbsentKeys).toEqual(["DEMO-9"]);
+
+    returnDemo = true;
+    await capability.sync({ testKeys: ["DEMO-9"] });
+    expect(capability.snapshot().verifiedAbsentKeys).toEqual([]);
+    expect(capability.snapshot().tests.has("DEMO-9")).toBe(true);
+  });
+
+  it("wipes a prior verified-absent set when a later committing sync has an untrustworthy batch", async () => {
+    let batchFails = false;
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1", summary: "one" }])),
+        fetchTestsByKeys: () =>
+          Promise.resolve(batchFails ? outcome([], { errors: ["boom"] }) : outcome([])),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"], testKeys: ["DEMO-9"] });
+    expect(capability.snapshot().verifiedAbsentKeys).toEqual(["DEMO-9"]);
+
+    // The catalogue still returns data so this sync commits, but its key batch can no longer vouch
+    // for the prior absence claim — so the set is wiped, not carried.
+    batchFails = true;
+    await capability.sync({ projectKeys: ["CALC"], testKeys: ["DEMO-9"] });
+    const snap = capability.snapshot();
+    expect(snap.verifiedAbsentKeys).toEqual([]);
+    expect(snap.errors).toEqual(["boom"]);
   });
 
   it("keeps previous data and completeness on a total fetch failure, surfacing only the errors", async () => {
@@ -304,6 +427,8 @@ describe("XrayMetadataCapability account isolation", () => {
       syncedAt: 5,
       completeness: "complete",
       fetchedScopes: [],
+      catalogueProjects: [],
+      verifiedAbsentKeys: [],
       errors: [],
       tests,
       pages: [],

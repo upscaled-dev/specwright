@@ -16,6 +16,8 @@ const GHERKIN_KEYWORD =
 interface MetadataState {
   tests: Map<string, TestCaseMetadata>;
   fetchedScopes: string[];
+  catalogueProjects: string[];
+  verifiedAbsentKeys: string[];
   syncedAt: number | undefined;
   completeness: "complete" | "partial" | "unknown";
   errors: string[];
@@ -26,6 +28,8 @@ function emptyState(): MetadataState {
   return {
     tests: new Map(),
     fetchedScopes: [],
+    catalogueProjects: [],
+    verifiedAbsentKeys: [],
     syncedAt: undefined,
     completeness: "unknown",
     errors: [],
@@ -37,6 +41,8 @@ function stateFromCached(cached: CachedMetadata): MetadataState {
   return {
     tests: new Map(cached.tests.map((test) => [test.key, test])),
     fetchedScopes: [...cached.fetchedScopes],
+    catalogueProjects: [...(cached.catalogueProjects ?? [])],
+    verifiedAbsentKeys: [...(cached.verifiedAbsentKeys ?? [])],
     syncedAt: cached.syncedAt,
     completeness: cached.completeness,
     errors: [...cached.errors],
@@ -141,6 +147,8 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
     return {
       tests: new Map(this.state.tests),
       fetchedScopes: [...this.state.fetchedScopes],
+      catalogueProjects: [...this.state.catalogueProjects],
+      verifiedAbsentKeys: [...this.state.verifiedAbsentKeys],
       syncedAt: this.state.syncedAt,
       stale,
       completeness: this.state.completeness,
@@ -170,6 +178,7 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
     const pages: XrayCachePage[] = [];
     const errors: string[] = [];
     let catalogueComplete = projectKeys.length > 0;
+    let verifiedAbsent: string[] = [];
 
     try {
       for (const projectKey of projectKeys) {
@@ -181,9 +190,18 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
       }
       if (testKeys.length > 0) {
         const outcome = await this.deps.client.fetchTestsByKeys(testKeys, signal);
+        // The key batch supplements the catalogue with out-of-scope keys; its presence or failure
+        // never affects catalogue completeness. Its errors surface in `errors` only.
         this.absorb(merged, pages, errors, outcome);
-        // A test-key batch is never a full catalogue, so it can only ever yield a partial snapshot.
-        catalogueComplete = false;
+        // §5 key-batch leniency: getTests silently omits nonexistent keys and still returns 200, so a
+        // trustworthy batch (whole outcome complete, no errors) that queried a key and did not get it
+        // back is authoritative absence evidence. fetchTestsByKeys merges its internal chunks into one
+        // outcome with no per-chunk attribution, so only trust the batch when the whole outcome is
+        // clean. A failed or partial batch proves nothing.
+        if (outcome.complete && outcome.errors.length === 0) {
+          const returned = new Set(outcome.tests.map((test) => test.key.toUpperCase()));
+          verifiedAbsent = testKeys.map((key) => key.toUpperCase()).filter((key) => !returned.has(key));
+        }
       }
     } catch (error) {
       if (error instanceof XrayAbortError || signal?.aborted) {
@@ -219,11 +237,13 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
       return;
     }
 
-    const completeness = this.completenessFor(projectKeys.length > 0, catalogueComplete, errors, gotData);
+    const completeness = this.completenessFor(projectKeys.length > 0, catalogueComplete, gotData);
 
     this.state = {
       tests: merged,
       fetchedScopes: [...projectKeys, ...testKeys],
+      catalogueProjects: projectKeys.map((key) => key.toUpperCase()),
+      verifiedAbsentKeys: verifiedAbsent,
       syncedAt: this.now(),
       completeness,
       errors,
@@ -233,16 +253,16 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
     this._onDidChange.fire();
   }
 
-  // Only a full catalogue fetch (project scope, every page complete, no errors) is authoritative
-  // enough for the model to derive orphans. A key-batch-only or partial fetch is "partial"; no data
-  // at all is "unknown".
+  // Completeness describes catalogue integrity only: project scope present, every project's pages
+  // complete, no catalogue errors — all already folded into `catalogueComplete` by the per-project
+  // loop. A key batch, present or failed, never demotes it (its errors surface in `errors` only).
+  // A key-batch-only or otherwise-incomplete fetch is "partial"; no data at all is "unknown".
   private completenessFor(
     hadProjectScope: boolean,
     catalogueComplete: boolean,
-    errors: readonly string[],
     gotData: boolean
   ): MetadataState["completeness"] {
-    if (hadProjectScope && catalogueComplete && errors.length === 0) {
+    if (hadProjectScope && catalogueComplete) {
       return "complete";
     }
     return gotData ? "partial" : "unknown";
@@ -313,6 +333,8 @@ export class XrayMetadataCapability implements MetadataCapability, vscode.Dispos
       syncedAt: this.state.syncedAt,
       completeness: this.state.completeness,
       fetchedScopes: [...this.state.fetchedScopes],
+      catalogueProjects: [...this.state.catalogueProjects],
+      verifiedAbsentKeys: [...this.state.verifiedAbsentKeys],
       errors: [...this.state.errors],
       tests: [...this.state.tests.values()],
       pages: [...this.state.pages],
