@@ -443,6 +443,155 @@ describe("XrayClient abort", () => {
   });
 });
 
+describe("XrayClient.postJson", () => {
+  it("POSTs JSON to the given path with a Bearer JWT and returns the parsed body", async () => {
+    let capturedUrl = "";
+    let capturedHeaders: Record<string, string> = {};
+    let capturedBody = "";
+    const fetchImpl: FetchLike = (url, init) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(response(200, JSON.stringify(JWT)));
+      }
+      capturedUrl = url;
+      capturedHeaders = init.headers as Record<string, string>;
+      capturedBody = String(init.body ?? "");
+      return Promise.resolve(response(200, JSON.stringify({ id: "10200", key: "XNP-24", self: "https://x/10200" })));
+    };
+    const client = makeClient({ fetchImpl });
+
+    const result = await client.postJson("/import/execution", { testExecutionKey: "XNP-24", tests: [] });
+
+    expect(capturedUrl).toBe("https://xray.cloud.getxray.app/api/v2/import/execution");
+    expect(capturedHeaders["Authorization"]).toBe(`Bearer ${JWT}`);
+    expect(capturedHeaders["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(capturedBody)).toEqual({ testExecutionKey: "XNP-24", tests: [] });
+    expect(result).toEqual({ status: 200, ok: true, body: { id: "10200", key: "XNP-24", self: "https://x/10200" } });
+  });
+
+  it("surfaces a non-2xx response as {status, ok:false, body} without throwing (400 is the importer's to validate)", async () => {
+    const fetchImpl: FetchLike = (url) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(response(200, JSON.stringify(JWT)));
+      }
+      return Promise.resolve(response(400, JSON.stringify({ error: "No execution results were provided." })));
+    };
+    const client = makeClient({ fetchImpl });
+
+    const result = await client.postJson("/import/execution", { tests: [] });
+
+    expect(result).toEqual({ status: 400, ok: false, body: { error: "No execution results were provided." } });
+  });
+
+  it("refreshes the JWT exactly once on a 401 and retries with the new token", async () => {
+    const authTokens: string[] = [];
+    const usedBearers: string[] = [];
+    let posts = 0;
+    const fetchImpl: FetchLike = (url, init) => {
+      if (url.endsWith("/authenticate")) {
+        const token = authTokens.length === 0 ? JWT : JWT2;
+        authTokens.push(token);
+        return Promise.resolve(response(200, JSON.stringify(token)));
+      }
+      usedBearers.push((init.headers as Record<string, string>)["Authorization"] ?? "");
+      posts += 1;
+      return posts === 1
+        ? Promise.resolve(response(401, "expired"))
+        : Promise.resolve(response(200, JSON.stringify({ key: "XNP-24" })));
+    };
+    const client = makeClient({ fetchImpl });
+
+    const result = await client.postJson("/import/execution", { tests: [] });
+
+    expect(authTokens).toEqual([JWT, JWT2]);
+    expect(usedBearers).toEqual([`Bearer ${JWT}`, `Bearer ${JWT2}`]);
+    expect(result.body).toEqual({ key: "XNP-24" });
+  });
+
+  it("throws XrayAbortError and makes no request when the signal is already aborted", async () => {
+    const fetchImpl = vi.fn<FetchLike>(() => Promise.resolve(response(200, "{}")));
+    const client = makeClient({ fetchImpl });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(client.postJson("/import/execution", {}, controller.signal)).rejects.toBeInstanceOf(XrayAbortError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("XrayClient.postMultipart", () => {
+  it("POSTs two application/json file parts named results/info with a Bearer JWT and no hand-set Content-Type", async () => {
+    let capturedUrl = "";
+    let capturedHeaders: Record<string, string> = {};
+    let capturedBody: unknown;
+    const fetchImpl: FetchLike = (url, init) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(response(200, JSON.stringify(JWT)));
+      }
+      capturedUrl = url;
+      capturedHeaders = init.headers as Record<string, string>;
+      capturedBody = init.body;
+      return Promise.resolve(response(200, JSON.stringify({ id: "10200", key: "XNP-24", self: "https://x/10200" })));
+    };
+    const client = makeClient({ fetchImpl });
+
+    const result = await client.postMultipart("/import/execution/cucumber/multipart", {
+      results: '[{"uri":"features/a.feature"}]',
+      info: '{"fields":{"project":{"key":"CALC"}}}',
+    });
+
+    expect(capturedUrl).toBe("https://xray.cloud.getxray.app/api/v2/import/execution/cucumber/multipart");
+    expect(capturedHeaders["Authorization"]).toBe(`Bearer ${JWT}`);
+    expect(capturedHeaders["Content-Type"]).toBeUndefined();
+    const form = capturedBody as FormData;
+    expect([...form.keys()]).toEqual(["results", "info"]);
+    const results = form.get("results");
+    const info = form.get("info");
+    expect(results).toBeInstanceOf(Blob);
+    expect(info).toBeInstanceOf(Blob);
+    expect((results as Blob).type).toBe("application/json");
+    expect(await (results as Blob).text()).toBe('[{"uri":"features/a.feature"}]');
+    expect(await (info as Blob).text()).toBe('{"fields":{"project":{"key":"CALC"}}}');
+    expect(result).toEqual({ status: 200, ok: true, body: { id: "10200", key: "XNP-24", self: "https://x/10200" } });
+  });
+
+  it("refreshes the JWT once on a 401 and retries the multipart POST", async () => {
+    const authTokens: string[] = [];
+    const usedBearers: string[] = [];
+    let posts = 0;
+    const fetchImpl: FetchLike = (url, init) => {
+      if (url.endsWith("/authenticate")) {
+        const token = authTokens.length === 0 ? JWT : JWT2;
+        authTokens.push(token);
+        return Promise.resolve(response(200, JSON.stringify(token)));
+      }
+      usedBearers.push((init.headers as Record<string, string>)["Authorization"] ?? "");
+      posts += 1;
+      return posts === 1
+        ? Promise.resolve(response(401, "expired"))
+        : Promise.resolve(response(200, JSON.stringify({ key: "XNP-24" })));
+    };
+    const client = makeClient({ fetchImpl });
+
+    const result = await client.postMultipart("/import/execution/cucumber/multipart", { results: "[]", info: "{}" });
+
+    expect(authTokens).toEqual([JWT, JWT2]);
+    expect(usedBearers).toEqual([`Bearer ${JWT}`, `Bearer ${JWT2}`]);
+    expect(result.body).toEqual({ key: "XNP-24" });
+  });
+
+  it("throws XrayAbortError and makes no request when the signal is already aborted", async () => {
+    const fetchImpl = vi.fn<FetchLike>(() => Promise.resolve(response(200, "{}")));
+    const client = makeClient({ fetchImpl });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      client.postMultipart("/import/execution/cucumber/multipart", { results: "[]", info: "{}" }, controller.signal)
+    ).rejects.toBeInstanceOf(XrayAbortError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
 describe("XrayClient redaction", () => {
   it("never emits the JWT or the client secret on the happy path", async () => {
     const { logger, lines } = capturingLogger();

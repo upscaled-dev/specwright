@@ -22,6 +22,13 @@ const BACKOFF_CAP_MS = 8_000;
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
+// The two JSON file parts of the Cucumber multipart import (`results` = Cucumber report, `info` = issue
+// fields + xrayFields), each already serialized. postMultipart wraps them as `application/json` Blobs.
+export interface MultipartParts {
+  readonly results: string;
+  readonly info: string;
+}
+
 // A page the cache records so it can reason about pagination completion and staleness per §7.
 export interface XrayCachePage {
   readonly fetchedAt: number;
@@ -372,21 +379,18 @@ export class XrayClient {
     return parseTestPage(body);
   }
 
-  private async graphql(query: string, signal?: AbortSignal): Promise<unknown> {
+  // A Bearer-authorized POST with a single refresh-on-401 retry, shared by graphql/postJson/postMultipart.
+  // The init is rebuilt per attempt so the fresh JWT rides the retry. A 401 that survives a fresh token
+  // is a real auth failure, not an empty page — surface it so the scope is recorded incomplete.
+  private async sendAuthorized(
+    url: string,
+    buildInit: (jwt: string) => RequestInit,
+    signal: AbortSignal | undefined
+  ): Promise<TimedResponse> {
     let refreshed = false;
     for (;;) {
       const jwt = await this.getJwt(signal, refreshed);
-      const response = await this.sendWithRetry(
-        `${this.base}/graphql`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-          body: JSON.stringify({ query }),
-        },
-        signal
-      );
-      // Refresh exactly once on a 401 (expired token). A 401 that survives a fresh token is a real
-      // auth failure, not an empty page — surface it so the scope is recorded incomplete.
+      const response = await this.sendWithRetry(url, buildInit(jwt), signal);
       if (response.status === 401) {
         if (!refreshed) {
           this.jwt = undefined;
@@ -395,8 +399,54 @@ export class XrayClient {
         }
         throw new XrayAuthError("Authentication failed — check your client ID and secret.");
       }
-      return parseBody(response.bodyText);
+      return response;
     }
+  }
+
+  private async graphql(query: string, signal?: AbortSignal): Promise<unknown> {
+    const response = await this.sendAuthorized(
+      `${this.base}/graphql`,
+      (jwt) => ({
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ query }),
+      }),
+      signal
+    );
+    return parseBody(response.bodyText);
+  }
+
+  // Import execution results as Xray JSON (append via top-level `testExecutionKey`, or create via `info`).
+  // A thin sibling of graphql: same bearer + refresh-once-on-401, riding the shared backoff/timeout/abort
+  // layers. Returns `{status, ok, body}` so a non-2xx (e.g. 400 "No execution results…") reaches the
+  // importer intact — the server message is never stripped here.
+  public async postJson(path: string, body: unknown, signal?: AbortSignal): Promise<{ status: number; ok: boolean; body: unknown }> {
+    const response = await this.sendAuthorized(
+      `${this.base}${path}`,
+      (jwt) => ({
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify(body),
+      }),
+      signal
+    );
+    return { status: response.status, ok: response.ok, body: parseBody(response.bodyText) };
+  }
+
+  // Import Cucumber results as multipart/form-data. `results` and `info` ride as `application/json` file
+  // parts (part names verbatim per the swagger extract); fetch sets the boundary/Content-Type, never us.
+  public async postMultipart(path: string, parts: MultipartParts, signal?: AbortSignal): Promise<{ status: number; ok: boolean; body: unknown }> {
+    const response = await this.sendAuthorized(
+      `${this.base}${path}`,
+      (jwt) => {
+        const form = new FormData();
+        form.append("results", new Blob([parts.results], { type: "application/json" }), "results.json");
+        form.append("info", new Blob([parts.info], { type: "application/json" }), "info.json");
+        return { method: "POST", headers: { Authorization: `Bearer ${jwt}` }, body: form };
+      },
+      signal
+    );
+    return { status: response.status, ok: response.ok, body: parseBody(response.bodyText) };
   }
 
   // Concurrent callers that all miss the cached JWT (or all force-refresh after a shared 401) ride
