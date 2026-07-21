@@ -1,13 +1,16 @@
 import * as vscode from "vscode";
 import { KeyGrammar } from "./contracts";
-import { extractKeys } from "./tag-extraction";
+import { extractKeys, stateless } from "./tag-extraction";
 import { TAG_TOKEN_PATTERN } from "../parsers/tag-regex";
+
+export type TagDiagnosticSeverity = "warning" | "information";
 
 export interface TagDiagnostic {
   readonly line: number;
   readonly startCol: number;
   readonly endCol: number;
   readonly message: string;
+  readonly severity: TagDiagnosticSeverity;
 }
 
 interface TagRef {
@@ -45,14 +48,42 @@ function collectTestTags(lineText: string, lineIdx: number, grammar: KeyGrammar)
   return tags;
 }
 
+// Key-shaped tags carrying neither the test nor the req prefix — a likely dropped `TEST_`. `key` is
+// canonicalized so the suggestion rebuilds `@<testPrefix><key>`.
+function collectSuggestionTags(lineText: string, lineIdx: number, grammar: KeyGrammar): TagRef[] {
+  const keyShape = stateless(grammar.keyShape);
+  const tags: TagRef[] = [];
+  for (const match of lineText.matchAll(new RegExp(TAG_TOKEN_PATTERN, "g"))) {
+    const token = match[0];
+    const extracted = extractKeys([token], grammar);
+    if (extracted.testKeys.length > 0 || extracted.reqKeys.length > 0) {
+      continue;
+    }
+    const body = token.startsWith("@") ? token.slice(1) : token;
+    if (!keyShape.test(body)) {
+      continue;
+    }
+    const startCol = match.index ?? 0;
+    tags.push({ key: grammar.canonicalizeKey(body), line: lineIdx, startCol, endCol: startCol + token.length });
+  }
+  return tags;
+}
+
 // Feature-level test tags inherit to every scenario (mirrors the parser's `[...featureTags, ...]`
 // merge); Rule-/Background-level tags do not (the parser drops them). Examples-block test tags split
 // that block into its own executable unit per §2.
-function scanUnits(text: string, grammar: KeyGrammar): { featureTestTags: TagRef[]; units: ExecutableUnit[] } {
+function scanUnits(
+  text: string,
+  grammar: KeyGrammar
+): { featureTestTags: TagRef[]; units: ExecutableUnit[]; suggestions: TagRef[] } {
   const lines = text.replaceAll("\r\n", "\n").split("\n");
   let pending: TagRef[] = [];
+  let pendingSuggestions: TagRef[] = [];
   let featureTestTags: TagRef[] = [];
   const units: ExecutableUnit[] = [];
+  // Bare key-shaped tags that attached to a Feature/Scenario/Outline/Examples block (same scope the
+  // test tags inherit through — Rule-/Background-level tags are dropped by the parser and here too).
+  const suggestions: TagRef[] = [];
   let nextId = 0;
   let inOutline = false;
   let docString: string | undefined;
@@ -76,15 +107,19 @@ function scanUnits(text: string, grammar: KeyGrammar): { featureTestTags: TagRef
     }
     if (trimmed.startsWith("@")) {
       pending.push(...collectTestTags(raw, i, grammar));
+      pendingSuggestions.push(...collectSuggestionTags(raw, i, grammar));
       continue;
     }
     if (trimmed.startsWith("Feature:")) {
       featureTestTags = pending;
+      suggestions.push(...pendingSuggestions);
       pending = [];
+      pendingSuggestions = [];
       continue;
     }
     if (trimmed.startsWith("Rule:") || trimmed.startsWith("Background:")) {
       pending = [];
+      pendingSuggestions = [];
       inOutline = false;
       continue;
     }
@@ -92,7 +127,9 @@ function scanUnits(text: string, grammar: KeyGrammar): { featureTestTags: TagRef
     if (scenarioKeyword) {
       const isOutline = scenarioKeyword === "Scenario Outline:" || scenarioKeyword === "Scenario Template:";
       units.push({ id: nextId++, kind: isOutline ? "outline" : "scenario", ownTestTags: pending });
+      suggestions.push(...pendingSuggestions);
       pending = [];
+      pendingSuggestions = [];
       inOutline = isOutline;
       continue;
     }
@@ -100,12 +137,14 @@ function scanUnits(text: string, grammar: KeyGrammar): { featureTestTags: TagRef
       if (pending.length > 0) {
         units.push({ id: nextId++, kind: "examplesBlock", ownTestTags: pending });
       }
+      suggestions.push(...pendingSuggestions);
       pending = [];
+      pendingSuggestions = [];
       continue;
     }
   }
 
-  return { featureTestTags, units };
+  return { featureTestTags, units, suggestions };
 }
 
 function tooManyTagsMessage(kind: ExecutableUnit["kind"]): string {
@@ -122,13 +161,13 @@ export function computeTagDiagnostics(text: string, grammar: KeyGrammar): TagDia
   if (prefixesOverlap(grammar)) {
     return [];
   }
-  const { featureTestTags, units } = scanUnits(text, grammar);
+  const { featureTestTags, units, suggestions } = scanUnits(text, grammar);
   const diagnostics: TagDiagnostic[] = [];
 
   for (const unit of units) {
     if (unit.ownTestTags.length > 1) {
       for (const tag of unit.ownTestTags) {
-        diagnostics.push({ ...toRange(tag), message: tooManyTagsMessage(unit.kind) });
+        diagnostics.push({ ...toRange(tag), message: tooManyTagsMessage(unit.kind), severity: "warning" });
       }
     }
   }
@@ -157,6 +196,7 @@ export function computeTagDiagnostics(text: string, grammar: KeyGrammar): TagDia
         diagnostics.push({
           ...toRange(tag),
           message: `Test ${tag.key} is mapped on more than one scenario; no provider supports fanning one test across scenarios.`,
+          severity: "warning",
         });
       }
     }
@@ -166,8 +206,19 @@ export function computeTagDiagnostics(text: string, grammar: KeyGrammar): TagDia
       diagnostics.push({
         ...toRange(tag),
         message: `Feature-level test ${tag.key} is inherited by multiple scenarios; a test maps to exactly one scenario.`,
+        severity: "warning",
       });
     }
+  }
+
+  // A key-shaped tag missing the test prefix links to nothing; suggest the prefixed form. Information,
+  // not a warning: a bare key-shaped tag can be a legitimate team convention.
+  for (const tag of suggestions) {
+    diagnostics.push({
+      ...toRange(tag),
+      message: `Did you mean @${grammar.testPrefix}${tag.key}? Tags link to tests only with the ${grammar.testPrefix} prefix.`,
+      severity: "information",
+    });
   }
 
   return diagnostics.sort((a, b) => a.line - b.line || a.startCol - b.startCol);
@@ -175,6 +226,12 @@ export function computeTagDiagnostics(text: string, grammar: KeyGrammar): TagDia
 
 function toRange(tag: TagRef): { line: number; startCol: number; endCol: number } {
   return { line: tag.line, startCol: tag.startCol, endCol: tag.endCol };
+}
+
+function toVscodeSeverity(severity: TagDiagnosticSeverity): vscode.DiagnosticSeverity {
+  return severity === "information"
+    ? vscode.DiagnosticSeverity.Information
+    : vscode.DiagnosticSeverity.Warning;
 }
 
 function isFeatureDoc(doc: vscode.TextDocument): boolean {
@@ -233,7 +290,7 @@ export class TagDiagnosticsProvider implements vscode.Disposable {
       const diag = new vscode.Diagnostic(
         new vscode.Range(d.line, d.startCol, d.line, d.endCol),
         d.message,
-        vscode.DiagnosticSeverity.Warning
+        toVscodeSeverity(d.severity)
       );
       diag.source = TagDiagnosticsProvider.DIAGNOSTIC_SOURCE;
       diag.code = TagDiagnosticsProvider.DIAGNOSTIC_CODE;

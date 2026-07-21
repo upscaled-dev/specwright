@@ -12,7 +12,7 @@ export interface KeyExtractionGrammar {
 
 // A `g`/`y` flag makes `RegExp.test` stateful via `lastIndex`, so repeated one-shot matches on the
 // same instance would flip between hit and miss. Recreate the pattern without those flags before use.
-function stateless(keyShape: RegExp): RegExp {
+export function stateless(keyShape: RegExp): RegExp {
   if (!keyShape.global && !keyShape.sticky) {return keyShape;}
   const flags = keyShape.flags.replaceAll("g", "").replaceAll("y", "");
   return new RegExp(keyShape.source, flags);

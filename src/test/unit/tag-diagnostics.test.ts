@@ -116,6 +116,60 @@ describe("computeTagDiagnostics — doc-string fences", () => {
   });
 });
 
+describe("computeTagDiagnostics — prefix suggestion (F5 finding #4)", () => {
+  it("suggests the prefixed form for a key-shaped tag missing the test prefix", () => {
+    const feature = "Feature: F\n\n@APEX-5\nScenario: A\n  Given x\n";
+    const diags = computeTagDiagnostics(feature, GRAMMAR);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]!.message).toBe("Did you mean @TEST_APEX-5? Tags link to tests only with the TEST_ prefix.");
+    expect(diags[0]).toMatchObject({ line: 2, startCol: 0, endCol: 7 });
+  });
+
+  it("marks the prefix suggestion Information while rule violations stay Warning", () => {
+    const suggestion = computeTagDiagnostics("Feature: F\n\n@APEX-5\nScenario: A\n  Given x\n", GRAMMAR);
+    expect(suggestion[0]!.severity).toBe("information");
+    const violations = computeTagDiagnostics("Feature: F\n\n@TEST_CALC-1 @TEST_CALC-2\nScenario: A\n  Given x\n", GRAMMAR);
+    expect(violations).toHaveLength(2);
+    expect(violations.every((d) => d.severity === "warning")).toBe(true);
+  });
+
+  it("does not suggest for a tag already carrying the test or req prefix", () => {
+    expect(computeTagDiagnostics("Feature: F\n\n@TEST_APEX-5\nScenario: A\n  Given x\n", GRAMMAR)).toEqual([]);
+    expect(computeTagDiagnostics("Feature: F\n\n@REQ_APEX-5\nScenario: A\n  Given x\n", GRAMMAR)).toEqual([]);
+  });
+
+  it("does not suggest for a non-key-shaped tag", () => {
+    expect(computeTagDiagnostics("Feature: F\n\n@smoke\nScenario: A\n  Given x\n", GRAMMAR)).toEqual([]);
+    expect(computeTagDiagnostics("Feature: F\n\n@ui\nScenario: A\n  Given x\n", GRAMMAR)).toEqual([]);
+  });
+
+  it("canonicalizes the key in the suggestion (JIRA_KEY_SHAPE is case-insensitive, so @apex-5 fires)", () => {
+    const diags = computeTagDiagnostics("Feature: F\n\n@apex-5\nScenario: A\n  Given x\n", GRAMMAR);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]!.message).toContain("@TEST_APEX-5");
+  });
+
+  it("suggests for feature-level and outline tags too", () => {
+    const featureLevel = computeTagDiagnostics("@APEX-5\nFeature: F\n\nScenario: A\n  Given x\n", GRAMMAR);
+    expect(featureLevel).toHaveLength(1);
+    expect(featureLevel[0]).toMatchObject({ line: 0 });
+    expect(featureLevel[0]!.message).toContain("@TEST_APEX-5");
+    const outline = computeTagDiagnostics(
+      "Feature: F\n\n@APEX-5\nScenario Outline: O\n  When step <a>\n\n  Examples:\n    | a |\n    | 1 |\n",
+      GRAMMAR
+    );
+    expect(outline).toHaveLength(1);
+    expect(outline[0]!.message).toContain("@TEST_APEX-5");
+  });
+
+  it("interpolates the active grammar's prefix rather than a hard-coded TEST_", () => {
+    const grammar: KeyGrammar = { ...GRAMMAR, testPrefix: "xt-" };
+    const diags = computeTagDiagnostics("Feature: F\n\n@APEX-5\nScenario: A\n  Given x\n", grammar);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]!.message).toBe("Did you mean @xt-APEX-5? Tags link to tests only with the xt- prefix.");
+  });
+});
+
 describe("prefixesOverlap — rule 4 config-level guard", () => {
   it("detects equal, forward-overlapping, and reverse-overlapping prefixes; clean prefixes pass", () => {
     expect(prefixesOverlap(GRAMMAR)).toBe(false);
