@@ -243,7 +243,7 @@ describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
     expect(emitted).not.toContain(FAKE_SECRET.slice(0, 12));
     expect(emitted).toContain("JWT received");
     expect(emitted).toContain("quote-wrapped (JSON string)");
-    // authenticate + two shape probes + malformed-JQL error-shape probe + one project-count probe.
+    // authenticate + two shape probes + invalid-field error-shape probe + one project-count probe.
     expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
@@ -397,7 +397,7 @@ describe("probeXrayConnection — structured outcome", () => {
     expect(outcome.message).toBe(
       `Connected to ${SITE} — project CALC: 42 Xray tests, project MATH: 7 Xray tests`
     );
-    // authenticate + two shape probes + malformed-JQL probe + one probe per project.
+    // authenticate + two shape probes + invalid-field probe + one probe per project.
     expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
@@ -409,7 +409,7 @@ describe("probeXrayConnection — structured outcome", () => {
     const outcome = await probeXrayConnection(deps);
 
     expect(outcome.projects).toHaveLength(3);
-    // authenticate + two shape probes + malformed-JQL probe + three project probes (D dropped by cap).
+    // authenticate + two shape probes + invalid-field probe + three project probes (D dropped by cap).
     expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 
@@ -496,11 +496,20 @@ describe("probeXrayConnection — structured outcome", () => {
     expect(capturedJql).not.toContain("CALC-21");
   });
 
-  it("fires the deliberate malformed-JQL probe and logs its error shape without flipping ok", async () => {
+  it("fires the deliberate invalid-field probe and logs its error shape without flipping ok", async () => {
     const deps = await seededDeps(() => ["CALC-1"]);
+    // A GraphQL validation error carries no `data`, and its message (not extensions.classification) is
+    // what graphqlErrorSummaries surfaces.
     const fetchMock = jwtThenGraphql((query) => {
       if (query.includes("__specwright_probe")) {
-        return { errors: [{ message: "Field '__specwright_probe' does not exist", extensions: { code: "BAD_JQL" } }], data: null };
+        return {
+          errors: [
+            {
+              message: "Validation error of type FieldUndefined: Field '__specwright_probe' in type 'Test' is undefined",
+              extensions: { classification: "ValidationError" },
+            },
+          ],
+        };
       }
       return { data: { getTests: { total: 4, results: [] } } };
     });
@@ -511,8 +520,8 @@ describe("probeXrayConnection — structured outcome", () => {
     expect(outcome.ok).toBe(true);
     expect(outcome.stage).toBe("ok");
     const emitted = deps.lines.join("\n");
-    expect(emitted).toContain("malformed-JQL error-shape probe");
-    expect(emitted).toContain("BAD_JQL");
+    expect(emitted).toContain("invalid-field error-shape probe");
+    expect(emitted).toContain("FieldUndefined");
   });
 });
 

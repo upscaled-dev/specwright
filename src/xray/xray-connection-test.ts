@@ -12,9 +12,6 @@ const DEPTH_CAP = 6;
 const ERROR_MESSAGE_CLIP = 160;
 const MAX_PROBE_KEYS = 20;
 const MAX_PROJECT_PROBES = 3;
-// An unknown JQL field is rejected deterministically, so the full probe can capture the still-live
-// GraphQL error shape without depending on remote data (§5 marks the error shape unverified).
-const MALFORMED_JQL = "__specwright_probe = 1";
 
 // Connection diagnostics log allowlisted information only: status, field names, value types,
 // lengths/counts, and rate-limit headers (docs/requirements/traceability-integration-recommendations.md
@@ -212,8 +209,11 @@ function projectCountQuery(project: string): string {
   return `{ getTests(jql: ${JSON.stringify(jql)}, limit: 1) { total } }`;
 }
 
-function malformedJqlQuery(): string {
-  return `{ getTests(jql: ${JSON.stringify(MALFORMED_JQL)}, limit: 1) { total } }`;
+// `__specwright_probe` is a bogus selection field: the GraphQL spec forces the server to reject it
+// during pre-execution validation, so the JQL string is never evaluated and only needs to be
+// syntactically valid.
+function errorShapeQuery(): string {
+  return `{ getTests(jql: "project is not empty", limit: 1) { total __specwright_probe } }`;
 }
 
 interface GraphqlResult {
@@ -302,14 +302,16 @@ async function probeProjects(
   return { summaries, failed };
 }
 
-// Purely diagnostic: fires a deliberately invalid JQL so the GraphQL error shape lands in the output
-// channel deterministically. Never returns anything the outcome depends on — a bad JQL is expected to
-// fail, and graphqlRequest already logs the response shape + scrubbed error summaries.
-async function probeMalformedJql(base: string, logger: Logger, jwt: string): Promise<void> {
+// Purely diagnostic: fires a query with a deliberately invalid GraphQL selection field so the error
+// envelope lands in the output channel deterministically — the GraphQL spec forces pre-execution
+// validation to reject an unknown field. A bad JQL clause can't be used here: Xray tolerates an
+// unknown JQL field (returns 200 with a total, no errors) and so never forces an error. Never returns
+// anything the outcome depends on; graphqlRequest already logs the response shape + scrubbed summaries.
+async function probeErrorShape(base: string, logger: Logger, jwt: string): Promise<void> {
   try {
-    await graphqlRequest(base, logger, jwt, "malformed-JQL error-shape probe", malformedJqlQuery());
+    await graphqlRequest(base, logger, jwt, "invalid-field error-shape probe", errorShapeQuery());
   } catch (error) {
-    logger.error(`malformed-JQL error-shape probe request error: ${scrubJwtLike(errorMessage(error))}`);
+    logger.error(`invalid-field error-shape probe request error: ${scrubJwtLike(errorMessage(error))}`);
   }
 }
 
@@ -496,7 +498,7 @@ export async function probeXrayConnection(
         message: "Xray GraphQL probe failed (non-OK status or GraphQL errors) — see output for details.",
       });
     }
-    await probeMalformedJql(base, logger, jwt);
+    await probeErrorShape(base, logger, jwt);
     const probed = await probeProjects(base, logger, jwt, keys, jiraKeys, jiraTruncated);
     projects = probed.summaries;
     projectFailures = probed.failed;
