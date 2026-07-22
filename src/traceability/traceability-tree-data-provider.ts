@@ -83,7 +83,7 @@ function connectionIcon(state: ConnectionIndicator["state"]): vscode.ThemeIcon {
     case "checking":
       return new vscode.ThemeIcon("loading~spin");
     case "ok":
-      return new vscode.ThemeIcon("circle-filled", new vscode.ThemeColor("charts.green"));
+      return new vscode.ThemeIcon("cloud");
     case "auth-failed":
       return new vscode.ThemeIcon("circle-filled", new vscode.ThemeColor("charts.red"));
     case "unreachable":
@@ -156,10 +156,12 @@ function connectionText(node: ConnectionNode, nowMs: number): { description: str
 // The description stays provider-neutral; the provider-specific detail lives in the tooltip. The
 // row's command opens the setup panel so a click resolves the connection in place.
 function connectionTreeItem(node: ConnectionNode): vscode.TreeItem {
-  const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
+  // No provider-display-name lives in the adapter registry (factories carry an `id` only), so the
+  // row's label is the literal product name; the provider-specific site host rides the tooltip.
+  const item = new vscode.TreeItem("Xray Cloud", vscode.TreeItemCollapsibleState.None);
   const { description, tooltip } = connectionText(node, Date.now());
   item.description = description;
-  item.tooltip = tooltip;
+  item.tooltip = `${node.label}\n${tooltip}`;
   item.contextValue = "traceabilityConnection";
   item.iconPath = connectionIcon(node.state);
   item.command = { command: "playwrightBddRunner.traceability.connect", title: "Set Up Connection" };
@@ -331,9 +333,15 @@ export class TraceabilityTreeDataProvider
         return item;
       }
       case "untraced": {
-        const { scenario, reqKeys } = node.item;
+        const { scenario, reqKeys, examples } = node.item;
         const item = new vscode.TreeItem(scenario.name, vscode.TreeItemCollapsibleState.None);
-        item.description = reqDescription(reqKeys);
+        const parts: string[] = [];
+        if (scenario.kind === "outline" && examples !== undefined) {
+          parts.push(examples === 1 ? "1 example" : `${examples} examples`);
+        }
+        const req = reqDescription(reqKeys);
+        if (req !== "") {parts.push(req);}
+        item.description = parts.join(" · ");
         item.contextValue = "traceabilityUntraced";
         item.iconPath = new vscode.ThemeIcon("warning");
         item.command = revealCommand(scenario);
@@ -343,7 +351,7 @@ export class TraceabilityTreeDataProvider
         const item = new vscode.TreeItem(node.testKey, vscode.TreeItemCollapsibleState.None);
         if (node.summary) {item.description = node.summary;}
         item.contextValue = "traceabilityOrphan";
-        item.iconPath = new vscode.ThemeIcon("link-external");
+        item.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("problemsWarningIcon.foreground"));
         item.tooltip = node.summary ? `${node.testKey} · ${node.summary}` : node.testKey;
         // A click opens the remote issue; the same key rides the node for openIssue/copyKey.
         item.command = {

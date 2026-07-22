@@ -55,6 +55,9 @@ export interface UntracedScenario {
   // classify `invalid-key` rather than `unmapped`. Always populated by the model; optional only so a
   // hand-built snapshot fixture need not spell out an empty list.
   malformedTags?: string[] | undefined;
+  // Number of Examples rows when the untraced scenario is a fully-untagged Scenario Outline; drives
+  // the "N examples ·" description prefix in the tree. Absent for plain scenarios and zero-row stubs.
+  examples?: number | undefined;
 }
 
 export interface OrphanTest {
@@ -341,7 +344,7 @@ export function buildTraceabilitySnapshot(
           if (!malformed.includes(tag)) {malformed.push(tag);}
         }
       }
-      untraced.push({ scenario: outlineRef, reqKeys: unionReq(untracedRows), malformedTags: malformed });
+      untraced.push({ scenario: outlineRef, reqKeys: unionReq(untracedRows), malformedTags: malformed, examples: untracedRows.length });
     }
   };
 

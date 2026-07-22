@@ -176,6 +176,54 @@ describe("TraceabilityTreeDataProvider", () => {
     expect(item.contextValue).toBe("traceabilityUntraced");
   });
 
+  const untracedOutline = (examples: number, reqKeys: string[]): TraceabilitySnapshot => ({
+    links: [],
+    untraced: [
+      {
+        scenario: { filePath: "/ws/round.feature", line: 9, name: "Round", kind: "outline", outlineName: "Round" },
+        reqKeys,
+        examples,
+      },
+    ],
+    orphans: [],
+    stale: false,
+    completeness: "unknown",
+    errors: [],
+  });
+
+  it("prefixes an untraced outline row with its example count", () => {
+    const p = provider(untracedOutline(4, []));
+    const untraced = p.getChildren(p.getChildren()[0]);
+    expect(p.getTreeItem(untraced[0]!).description).toBe("4 examples");
+  });
+
+  it("singularizes a one-example count and keeps REQ keys after the prefix", () => {
+    const p = provider(untracedOutline(1, ["CALC-900"]));
+    const untraced = p.getChildren(p.getChildren()[0]);
+    expect(p.getTreeItem(untraced[0]!).description).toBe("1 example · REQ CALC-900");
+  });
+
+  it("omits the example prefix on an outline that carries no count", () => {
+    const p = provider({
+      links: [],
+      untraced: [
+        { scenario: { filePath: "/ws/round.feature", line: 9, name: "Round", kind: "outline", outlineName: "Round" }, reqKeys: [] },
+      ],
+      orphans: [],
+      stale: false,
+      completeness: "unknown",
+      errors: [],
+    });
+    const untraced = p.getChildren(p.getChildren()[0]);
+    expect(p.getTreeItem(untraced[0]!).description).toBe("");
+  });
+
+  it("leaves a non-outline untraced row's description free of an example prefix", () => {
+    const p = provider(SNAPSHOT);
+    const untraced = p.getChildren(p.getChildren()[0]);
+    expect(p.getTreeItem(untraced[0]!).description).toBe("");
+  });
+
   it("templates the empty-section message with the provider label", () => {
     const p = provider({ links: [], untraced: SNAPSHOT.untraced, orphans: [], stale: false, completeness: "unknown", errors: [] }, "Azure DevOps");
     const covered = p.getChildren(p.getChildren()[1]);
@@ -358,8 +406,8 @@ describe("TraceabilityTreeDataProvider", () => {
     expect(checking.description).toBe("Checking…");
 
     const ok = rowFor("ok");
-    expect((ok.iconPath as vscode.ThemeIcon).id).toBe("circle-filled");
-    expect(((ok.iconPath as vscode.ThemeIcon).color as vscode.ThemeColor).id).toBe("charts.green");
+    expect((ok.iconPath as vscode.ThemeIcon).id).toBe("cloud");
+    expect((ok.iconPath as vscode.ThemeIcon).color).toBeUndefined();
     expect(ok.description).toBe("Connected");
 
     const authFailed = rowFor("auth-failed");
@@ -373,12 +421,12 @@ describe("TraceabilityTreeDataProvider", () => {
     expect(unreachable.description).toBe("Unreachable");
   });
 
-  it("carries the site host as label, the provider detail in the tooltip, and the setup command on the row", () => {
+  it("labels the row with the product name, keeps the site host and provider detail in the tooltip, and carries the setup command", () => {
     const p = provider(SNAPSHOT);
     p.setConnectionIndicator({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme — project CALC" });
     const item = p.getTreeItem(p.getChildren()[0]!);
-    expect(item.label).toBe("acme.atlassian.net");
-    expect(item.tooltip).toBe("Connected to acme — project CALC");
+    expect(item.label).toBe("Xray Cloud");
+    expect(item.tooltip).toBe("acme.atlassian.net\nConnected to acme — project CALC");
     expect(item.contextValue).toBe("traceabilityConnection");
     expect((item.command as { command: string }).command).toBe("playwrightBddRunner.traceability.connect");
   });
@@ -555,6 +603,14 @@ describe("TraceabilityTreeDataProvider orphan section", () => {
     expect((command.arguments[0] as { testKey: string }).testKey).toBe("CALC-9999");
   });
 
+  it("renders orphan rows with the amber warning-triangle icon", () => {
+    const p = provider(withOrphans("complete"));
+    const rows = p.getChildren(p.getChildren()[2]);
+    const icon = p.getTreeItem(rows[0]!).iconPath as vscode.ThemeIcon;
+    expect(icon.id).toBe("warning");
+    expect((icon.color as vscode.ThemeColor).id).toBe("problemsWarningIcon.foreground");
+  });
+
   it("never renders orphans from a partial fetch, even when orphan data is present", () => {
     const p = provider(withOrphans("partial"));
     expect(p.getChildren().map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
@@ -602,7 +658,7 @@ describe("TraceabilityTreeDataProvider connection staleness row", () => {
       sync: { syncedAt: Date.now() - 12 * 60_000, stale: false },
     });
     expect(item.description).toBe("Connected · synced 12m ago");
-    expect(String(item.tooltip)).toBe("Connected to acme · synced 12m ago");
+    expect(String(item.tooltip)).toBe("acme.atlassian.net\nConnected to acme · synced 12m ago");
   });
 
   it("marks a past-TTL sync as stale in the description", () => {
@@ -623,7 +679,7 @@ describe("TraceabilityTreeDataProvider connection staleness row", () => {
       sync: { syncedAt: Date.now() - 2 * 3_600_000, stale: true },
     });
     expect(item.description).toBe("Unreachable · showing data synced 2h ago");
-    expect(String(item.tooltip)).toBe("Could not reach Xray · showing cached data synced 2h ago");
+    expect(String(item.tooltip)).toBe("acme.atlassian.net\nCould not reach Xray · showing cached data synced 2h ago");
   });
 
   it("re-renders when only the sync freshness changes", () => {
