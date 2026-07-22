@@ -62,6 +62,12 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   private disposed = false;
   private warnedUnknownProvider = false;
 
+  // Forwards the active model's rebuilds (and teardown) to the Coverage Board, which — unlike the
+  // tree's data provider — outlives model swaps, so it subscribes to the subsystem rather than to a
+  // model instance it would otherwise pin.
+  private readonly _onDidChangeSnapshot = new vscode.EventEmitter<void>();
+  public readonly onDidChangeSnapshot = this._onDidChangeSnapshot.event;
+
   /** Debounce window for coalescing bursts of watcher events (overridable in tests). */
   public rebuildDebounceMs = 300;
 
@@ -181,6 +187,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.model = model;
     const provider = new TraceabilityTreeDataProvider(model, adapter.label);
     this.treeProvider = provider;
+    this.adapterSubscriptions.push(model.onDidChange(() => this._onDidChangeSnapshot.fire()));
     this.treeView = vscode.window.createTreeView("playwrightBddRunner.traceability", {
       treeDataProvider: provider,
     });
@@ -373,6 +380,9 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     // this false with a stale true when it later resolves.
     this.connectionEpoch += 1;
     this.commitConnectedContext(false);
+    // An open board reads getSnapshot() (now undefined) — signal it so it clears rather than holding
+    // the torn-down model's last view.
+    this._onDidChangeSnapshot.fire();
   }
 
   public dispose(): void {
@@ -380,6 +390,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.configChangeDisposable.dispose();
     this.runResultSubscription.dispose();
     this.teardown();
+    this._onDidChangeSnapshot.dispose();
     // The discovery manager is handed to this subsystem for its exclusive use.
     this.discoveryManager.dispose();
   }

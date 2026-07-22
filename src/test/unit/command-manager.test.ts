@@ -874,3 +874,93 @@ describe("traceability runAndPublish — preflight batch flow", () => {
     expect(store.latest()?.state).toBe("cancelled");
   });
 });
+
+describe("traceability openBoard command handler", () => {
+  const win = vscode.window as unknown as {
+    __webviewPanels: Array<{ title: string; __revealCount: number; dispose: () => void }>;
+    __resetWebviewPanels: () => void;
+  };
+
+  afterEach(() => {
+    win.__resetWebviewPanels();
+    vi.restoreAllMocks();
+  });
+
+  function fakeSubsystem(panelActive = true): TraceabilitySubsystem {
+    return {
+      traceabilityPanelActive: panelActive,
+      getSnapshot: () => ({ links: [], untraced: [], orphans: [], stale: false, completeness: "complete", errors: [] }),
+      getActiveAdapter: () => ({ label: "Xray" }),
+      onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
+    } as unknown as TraceabilitySubsystem;
+  }
+
+  const openBoard = (mgr: CommandManager): void =>
+    (mgr as unknown as { openBoard: () => void }).openBoard();
+
+  it("opens the Coverage Board webview when the panel is active", () => {
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(fakeSubsystem());
+    openBoard(mgr);
+    expect(win.__webviewPanels).toHaveLength(1);
+    expect(win.__webviewPanels[0]!.title).toBe("Coverage Board");
+  });
+
+  it("reveals the existing board instead of opening a second (singleton surface)", () => {
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(fakeSubsystem());
+    openBoard(mgr);
+    openBoard(mgr);
+    expect(win.__webviewPanels).toHaveLength(1);
+    expect(win.__webviewPanels[0]!.__revealCount).toBe(1);
+  });
+
+  it("guides the user and opens nothing when the traceability subsystem is not wired", () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const mgr = CommandManager.create(makeContext());
+    openBoard(mgr);
+    expect(win.__webviewPanels).toHaveLength(0);
+    expect(String(info.mock.calls[0]?.[0])).toContain("Coverage Board");
+  });
+
+  it("guides the user and opens nothing when the panel is disabled (no live model)", () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(fakeSubsystem(false));
+    openBoard(mgr);
+    expect(win.__webviewPanels).toHaveLength(0);
+    expect(String(info.mock.calls[0]?.[0])).toContain("Enable the Traceability panel");
+  });
+});
+
+describe("traceability coverage board contributions", () => {
+  interface Pkg {
+    contributes: {
+      commands: Array<{ command: string; category?: string; icon?: string }>;
+      menus: Record<string, Array<{ command?: string; when?: string; group?: string }>>;
+    };
+  }
+  const pkg = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf-8")
+  ) as Pkg;
+  const CMD = "playwrightBddRunner.traceability.openBoard";
+
+  it("declares the open-board command with a table icon under Specwright", () => {
+    const command = pkg.contributes.commands.find((c) => c.command === CMD);
+    expect(command?.category).toBe("Specwright");
+    expect(command?.icon).toBe("$(table)");
+  });
+
+  it("slots an ungated open-board button right after sync in the traceability title bar", () => {
+    const button = pkg.contributes.menus["view/title"]!.find((e) => e.command === CMD);
+    expect(button?.when).toBe("view == playwrightBddRunner.traceability");
+    expect(button?.group).toBe("navigation@1");
+  });
+
+  it("gates the palette entry on the traceability panel being enabled", () => {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    expect(palette.find((e) => e.command === CMD)?.when).toBe(
+      "config.playwrightBddRunner.traceability.enablePanel"
+    );
+  });
+});

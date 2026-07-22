@@ -10,6 +10,7 @@ import {
   ConnectionIndicator,
   TraceabilityTreeDataProvider,
 } from "../../traceability/traceability-tree-data-provider";
+import { TraceabilityModel } from "../../traceability/traceability-model";
 import { TraceabilityAdapterRegistry } from "../../traceability/adapter-registry";
 import { RunResultStore } from "../../traceability/run-result-store";
 import { FeatureParser } from "../../parsers/feature-parser";
@@ -715,5 +716,101 @@ describe("TraceabilitySubsystem sync staleness row", () => {
     expect(last?.state).toBe("ok");
     expect(last?.sync).toEqual({ syncedAt, stale: false });
     subsystem.dispose();
+  });
+});
+
+describe("TraceabilitySubsystem snapshot change event", () => {
+  beforeEach(() => {
+    treeViews.__resetTreeViewCounters();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("forwards a model rebuild to onDidChangeSnapshot (what the Coverage Board subscribes to)", async () => {
+    const { config } = makeConfig();
+    const { subsystem, store, discovery } = build(config);
+    vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    let fired = 0;
+    subsystem.onDidChangeSnapshot(() => { fired += 1; });
+    store.ingest({ "/ws/a.feature:4": "passed" });
+    await flush();
+
+    expect(fired).toBeGreaterThan(0);
+    subsystem.dispose();
+  });
+
+  it("fires on teardown, by which point getSnapshot() already reads empty", async () => {
+    const { config, set, fireChange } = makeConfig();
+    const { subsystem, discovery } = build(config);
+    vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    let fired = false;
+    let emptyAtFire = false;
+    subsystem.onDidChangeSnapshot(() => {
+      fired = true;
+      emptyAtFire = subsystem.getSnapshot() === undefined;
+    });
+
+    set({ enableTraceabilityPanel: false });
+    fireChange();
+
+    expect(fired).toBe(true);
+    expect(emptyAtFire).toBe(true);
+    subsystem.dispose();
+  });
+
+  it("disposes the swapped-out model on a provider change and re-points forwarding at the new one", async () => {
+    const { config, set, fireChange } = makeConfig({ traceabilityProvider: "xray" });
+    const { subsystem, store, discovery } = build(config, { xray: fakeAdapter("xray"), azure: fakeAdapter("azure") });
+    vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
+    const disposeModel = vi.spyOn(TraceabilityModel.prototype, "dispose");
+
+    subsystem.applyCurrent();
+    await flush();
+
+    set({ traceabilityProvider: "azure" });
+    fireChange();
+    await flush();
+
+    // The xray model is torn down (its emitter with it), so the old forwarding subscription can never
+    // fire again — no leak, no double-fire from the dead model.
+    expect(disposeModel).toHaveBeenCalledTimes(1);
+
+    // A rebuild on the new (azure) model drives the event exactly once.
+    let fired = 0;
+    subsystem.onDidChangeSnapshot(() => { fired += 1; });
+    store.ingest({ "/ws/a.feature:4": "passed" });
+    await flush();
+
+    expect(fired).toBe(1);
+    subsystem.dispose();
+  });
+
+  it("severs forwarding on dispose so later store activity fires nothing", async () => {
+    const { config } = makeConfig();
+    const { subsystem, store, discovery } = build(config);
+    vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    let fired = 0;
+    subsystem.onDidChangeSnapshot(() => { fired += 1; });
+    subsystem.dispose();
+    const afterDispose = fired;
+
+    store.ingest({ "/ws/x.feature:1": "passed" });
+    await flush();
+
+    expect(fired).toBe(afterDispose);
   });
 });

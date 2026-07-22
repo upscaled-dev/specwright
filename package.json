@@ -578,6 +578,12 @@
         "icon": "$(sync)"
       },
       {
+        "command": "playwrightBddRunner.traceability.openBoard",
+        "title": "Open Coverage Board",
+        "category": "Specwright",
+        "icon": "$(table)"
+      },
+      {
         "command": "playwrightBddRunner.traceability.manageConnection",
         "title": "Manage Xray Connection",
         "category": "Specwright",
@@ -721,6 +727,10 @@
           "when": "playwrightBddRunner.traceability.connected"
         },
         {
+          "command": "playwrightBddRunner.traceability.openBoard",
+          "when": "config.playwrightBddRunner.traceability.enablePanel"
+        },
+        {
           "command": "playwrightBddRunner.traceability.hidePanel",
           "when": "false"
         }
@@ -758,6 +768,11 @@
         },
         {
           "command": "playwrightBddRunner.traceability.manageConnection",
+          "when": "view == playwrightBddRunner.traceability",
+          "group": "navigation@1"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.openBoard",
           "when": "view == playwrightBddRunner.traceability",
           "group": "navigation@1"
         }

@@ -23,6 +23,8 @@ import {
 } from "../traceability/link-scenario";
 import { runLinkPickerFlow } from "../traceability/link-picker-flow";
 import { LinkPickerPanel } from "../traceability/link-picker-panel";
+import { buildBoardViewModel } from "../traceability/board-data";
+import { BoardPanel } from "../traceability/board-panel";
 import { ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
 import {
@@ -228,6 +230,7 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.runAndPublish", title: "Run Locally and Publish…", category: CATEGORY, handler: this.runAndPublish.bind(this) },
         { command: "playwrightBddRunner.traceability.publishLastRun", title: "Publish Last Run…", category: CATEGORY, handler: this.publishLastRun.bind(this) },
         { command: "playwrightBddRunner.traceability.sync", title: "Sync Traceability", category: CATEGORY, handler: this.syncTraceability.bind(this) },
+        { command: "playwrightBddRunner.traceability.openBoard", title: "Open Coverage Board", category: CATEGORY, handler: this.openBoard.bind(this) },
         { command: "playwrightBddRunner.traceability.manageConnection", title: "Manage Xray Connection", category: CATEGORY, handler: () => this.getXrayConnectionCommands().manageConnection() },
         { command: "playwrightBddRunner.traceability.connect", title: "Connect to Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().connect() },
         { command: "playwrightBddRunner.traceability.disconnect", title: "Disconnect from Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().disconnect() },
@@ -1121,6 +1124,25 @@ export class CommandManager {
       options.lineNumber = ref.line;
     }
     await executor.runScenarioWithOutput(options);
+  }
+
+  // Open the Coverage Board — a singleton, document-like webview that renders offline from tags (no
+  // connected-state gate). It reads snapshots from and re-renders on the subsystem, so it survives
+  // syncs and provider swaps while open.
+  private openBoard(): void {
+    const subsystem = this.traceabilitySubsystem;
+    // The subsystem is always wired, but its panel is off when the setting is disabled — with no live
+    // model the board would render permanently empty, so guide the user to enable it instead.
+    if (!subsystem?.traceabilityPanelActive) {
+      vscode.window.showInformationMessage("Enable the Traceability panel to open the Coverage Board.");
+      return;
+    }
+    const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    BoardPanel.open({
+      providerLabel: subsystem.getActiveAdapter()?.label ?? "Xray",
+      buildModel: () => buildBoardViewModel(subsystem.getSnapshot(), roots),
+      onDidChange: subsystem.onDidChangeSnapshot,
+    });
   }
 
   // Serialize sync: the palette entry and the view-title button can both fire; a second invoke while
