@@ -146,6 +146,27 @@ describe("TraceabilityTreeDataProvider", () => {
     expect(p.getTreeItem(testKeys[0]!).description).toBe("1 scenario");
   });
 
+  it("renders the no-run dash on a mapped key with no status or result", () => {
+    const p = provider({
+      links: [
+        {
+          testKey: "T-1",
+          scenario: { filePath: "/ws/a.feature", line: 2, name: "A", kind: "scenario" },
+          reqKeys: [],
+        },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "unknown",
+      errors: [],
+    });
+    const testKeys = p.getChildren(p.getChildren()[1]);
+    const icon = p.getTreeItem(testKeys[0]!).iconPath as vscode.ThemeIcon;
+    expect(icon.id).toBe("do-not-disturb");
+    expect((icon.color as vscode.ThemeColor).id).toBe("problemsWarningIcon.foreground");
+  });
+
   it("lists untraced scenarios in the gap bucket", () => {
     const p = provider(SNAPSHOT);
     const roots = p.getChildren();

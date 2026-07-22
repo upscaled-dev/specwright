@@ -309,7 +309,9 @@ export class TraceabilityTreeDataProvider
           item.tooltip = `${node.testKey} · ${status.providerValue}`;
         } else {
           const aggregate = worstStatus(node.links.map((l) => l.lastResult));
-          item.iconPath = aggregate ? outcomeIcon(aggregate) : new vscode.ThemeIcon("key");
+          // A mapped test with no result anywhere renders the amber "no run" dash; outcome icons
+          // take precedence once a run lands.
+          item.iconPath = aggregate ? outcomeIcon(aggregate) : new vscode.ThemeIcon("do-not-disturb", new vscode.ThemeColor("problemsWarningIcon.foreground"));
           item.tooltip = node.testKey;
         }
         return item;
