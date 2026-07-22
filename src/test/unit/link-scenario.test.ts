@@ -4,9 +4,11 @@ import {
   authorScenarioTest,
   buildTestTag,
   computeLinkEdit,
+  computeUnlinkEdit,
   LinkEdit,
   linkScenarioPicks,
   scenarioGherkinSlice,
+  UnlinkEdit,
 } from "../../traceability/link-scenario";
 import { AuthoredTest } from "../../traceability/contracts";
 import { buildTraceabilitySnapshot } from "../../traceability/traceability-model";
@@ -36,6 +38,17 @@ function applyLinkEditExact(text: string, edit: LinkEdit): string {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const parts = text.split(eol);
   if (edit.kind === "insertLine") {parts.splice(edit.line, 0, edit.text);}
+  else {parts[edit.line] = edit.text;}
+  return parts.join(eol);
+}
+
+// The removal twin: a deleteLine drops the whole line and its terminator, a replaceLine swaps the
+// EOL-free line content in place.
+function applyUnlinkEditExact(text: string, edit: UnlinkEdit): string {
+  if (edit.kind === "unchanged") {return text;}
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const parts = text.split(eol);
+  if (edit.kind === "deleteLine") {parts.splice(edit.line, 1);}
   else {parts[edit.line] = edit.text;}
   return parts.join(eol);
 }
@@ -150,6 +163,99 @@ describe("computeLinkEdit", () => {
   it("is idempotent on a CRLF document", () => {
     const feature = "Feature: F\r\n\r\n@TEST_CALC-1\r\nScenario: A\r\n  Given x\r\n";
     expect(computeLinkEdit(feature.split("\n"), 4, "CALC-1", JIRA_GRAMMAR)).toEqual({ kind: "unchanged" });
+  });
+});
+
+describe("computeUnlinkEdit", () => {
+  const lines = (feature: string): string[] => feature.split("\n");
+
+  it("removes the tag token and its adjoining space when other tags share the line", () => {
+    const feature = "Feature: F\n\n@REQ_CALC-9 @TEST_CALC-1\nScenario: A\n  Given x\n";
+    const edit = computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR);
+    expect(edit).toEqual({ kind: "replaceLine", line: 2, text: "@REQ_CALC-9" });
+    expect(applyUnlinkEditExact(feature, edit)).toBe("Feature: F\n\n@REQ_CALC-9\nScenario: A\n  Given x\n");
+  });
+
+  it("closes up the surrounding tags when the removed tag sits between them", () => {
+    const feature = "Feature: F\n\n@smoke @TEST_CALC-1 @wip\nScenario: A\n  Given x\n";
+    const edit = computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR);
+    expect(edit).toEqual({ kind: "replaceLine", line: 2, text: "@smoke @wip" });
+  });
+
+  it("removes a leading tag with its trailing space, keeping the following tags", () => {
+    const feature = "Feature: F\n\n@TEST_CALC-1 @REQ_CALC-9\nScenario: A\n  Given x\n";
+    const edit = computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR);
+    expect(edit).toEqual({ kind: "replaceLine", line: 2, text: "@REQ_CALC-9" });
+  });
+
+  it("removes only the named test tag when a line carries several", () => {
+    const feature = "Feature: F\n\n@TEST_CALC-1 @TEST_CALC-2\nScenario: A\n  Given x\n";
+    expect(computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR)).toEqual({
+      kind: "replaceLine",
+      line: 2,
+      text: "@TEST_CALC-2",
+    });
+    expect(computeUnlinkEdit(lines(feature), 4, "CALC-2", JIRA_GRAMMAR)).toEqual({
+      kind: "replaceLine",
+      line: 2,
+      text: "@TEST_CALC-1",
+    });
+  });
+
+  it("deletes the whole line including its line ending when the tag is alone", () => {
+    const feature = "Feature: F\n\n@TEST_CALC-1\nScenario: A\n  Given x\n";
+    const edit = computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR);
+    expect(edit).toEqual({ kind: "deleteLine", line: 2 });
+    expect(applyUnlinkEditExact(feature, edit)).toBe("Feature: F\n\nScenario: A\n  Given x\n");
+  });
+
+  it("deletes a lone indented tag line, leaving the scenario's indentation intact", () => {
+    const feature = "Feature: F\n\n  @TEST_CALC-1\n  Scenario: A\n    Given x\n";
+    const edit = computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR);
+    expect(edit).toEqual({ kind: "deleteLine", line: 2 });
+    expect(applyUnlinkEditExact(feature, edit)).toBe("Feature: F\n\n  Scenario: A\n    Given x\n");
+  });
+
+  it("removes an outline-level tag from the outline keyword line's tags", () => {
+    const feature =
+      "Feature: F\n\n@TEST_CALC-1\nScenario Outline: O\n  When step <a>\n\n  Examples:\n    | a |\n    | 1 |\n";
+    const edit = computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR);
+    expect(edit).toEqual({ kind: "deleteLine", line: 2 });
+  });
+
+  it("removes the test tag on a split Examples block, not the outline tag", () => {
+    const feature =
+      "Feature: F\n\n@TEST_CALC-1\nScenario Outline: O\n  When step <a>\n\n  @TEST_CALC-2\n  Examples: edge\n    | a |\n    | 1 |\n";
+    const edit = computeUnlinkEdit(lines(feature), 8, "CALC-2", JIRA_GRAMMAR);
+    expect(edit).toEqual({ kind: "deleteLine", line: 6 });
+  });
+
+  it("treats a case-variant tag as the same key when removing", () => {
+    const feature = "Feature: F\n\n@test_calc-1\nScenario: A\n  Given x\n";
+    expect(computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR)).toEqual({ kind: "deleteLine", line: 2 });
+  });
+
+  it("is a no-op when the key is not tagged on the scenario", () => {
+    const feature = "Feature: F\n\n@REQ_CALC-9\nScenario: A\n  Given x\n";
+    expect(computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR)).toEqual({ kind: "unchanged" });
+  });
+
+  it("deletes a lone CRLF tag line without leaving a doubled carriage return", () => {
+    const feature = "Feature: F\r\n\r\n@TEST_CALC-1\r\nScenario: A\r\n  Given x\r\n";
+    const edit = computeUnlinkEdit(feature.split("\n"), 4, "CALC-1", JIRA_GRAMMAR);
+    expect(edit).toEqual({ kind: "deleteLine", line: 2 });
+    const result = applyUnlinkEditExact(feature, edit);
+    expect(result).toBe("Feature: F\r\n\r\nScenario: A\r\n  Given x\r\n");
+    expect(result).not.toContain("\r\r");
+  });
+
+  it("removes a shared tag on a CRLF line byte-exact, keeping the remaining tag and its EOL", () => {
+    const feature = "Feature: F\r\n\r\n@REQ_CALC-9 @TEST_CALC-1\r\nScenario: A\r\n  Given x\r\n";
+    const edit = computeUnlinkEdit(feature.split("\n"), 4, "CALC-1", JIRA_GRAMMAR);
+    expect(edit).toEqual({ kind: "replaceLine", line: 2, text: "@REQ_CALC-9" });
+    const result = applyUnlinkEditExact(feature, edit);
+    expect(result).toBe("Feature: F\r\n\r\n@REQ_CALC-9\r\nScenario: A\r\n  Given x\r\n");
+    expect(result).not.toContain("\r\r");
   });
 });
 

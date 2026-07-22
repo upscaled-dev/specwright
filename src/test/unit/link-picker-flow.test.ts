@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  LinkedRow,
   LinkPickerDeps,
   LinkPickerRow,
   LinkPickerUi,
@@ -8,21 +9,29 @@ import {
 import { RemoteSearchCapability, RemoteSearchResult } from "../../traceability/contracts";
 import { LinkScenarioPick } from "../../traceability/link-scenario";
 
-// A fake port standing in for the webview panel: it records what the flow paints (rows/busy/close)
-// and lets the test drive user intent (type/confirm/cancel) — the whole point of keeping the flow
-// vscode-free.
+// A fake port standing in for the webview panel: it records what the flow paints (rows/linked/busy/
+// close) and lets the test drive user intent (type/confirm/cancel/open/unlink) — the whole point of
+// keeping the flow vscode-free.
 class FakeUi implements LinkPickerUi {
   public rows: LinkPickerRow[] = [];
+  public linked: LinkedRow[] = [];
   public busy = false;
   public closed = false;
   public setRowsCalls = 0;
+  public setLinkedCalls = 0;
   private search: ((value: string) => void) | undefined;
   private confirm: ((id: string) => void) | undefined;
   private cancel: (() => void) | undefined;
+  private openLinked: ((key: string) => void) | undefined;
+  private unlink: ((key: string) => void) | undefined;
 
   public setRows(rows: readonly LinkPickerRow[]): void {
     this.rows = [...rows];
     this.setRowsCalls += 1;
+  }
+  public setLinked(rows: readonly LinkedRow[]): void {
+    this.linked = [...rows];
+    this.setLinkedCalls += 1;
   }
   public setBusy(busy: boolean): void {
     this.busy = busy;
@@ -35,6 +44,12 @@ class FakeUi implements LinkPickerUi {
   }
   public onCancel(handler: () => void): void {
     this.cancel = handler;
+  }
+  public onOpenLinked(handler: (key: string) => void): void {
+    this.openLinked = handler;
+  }
+  public onUnlink(handler: (key: string) => void): void {
+    this.unlink = handler;
   }
   public close(): void {
     this.closed = true;
@@ -49,11 +64,20 @@ class FakeUi implements LinkPickerUi {
   public clickCancel(): void {
     this.cancel?.();
   }
+  public clickOpenLinked(key: string): void {
+    this.openLinked?.(key);
+  }
+  public clickUnlink(key: string): void {
+    this.unlink?.(key);
+  }
   public keys(): string[] {
     return this.rows.map((row) => row.key);
   }
   public kinds(): string[] {
     return this.rows.map((row) => row.kind);
+  }
+  public linkedKeys(): string[] {
+    return this.linked.map((row) => row.key);
   }
 }
 
@@ -78,7 +102,10 @@ interface Harness {
   ui: FakeUi;
   linked: Array<{ key: string; synced: boolean }>;
   created: { count: number };
+  opened: string[];
+  unlinked: string[];
   searchErrors: unknown[];
+  unlinkErrors: unknown[];
   deps: LinkPickerDeps;
 }
 
@@ -86,9 +113,13 @@ function harness(over: Partial<LinkPickerDeps> = {}): Harness {
   const ui = new FakeUi();
   const linked: Array<{ key: string; synced: boolean }> = [];
   const created = { count: 0 };
+  const opened: string[] = [];
+  const unlinked: string[] = [];
   const searchErrors: unknown[] = [];
+  const unlinkErrors: unknown[] = [];
   const base: LinkPickerDeps = {
     ui,
+    linkedTests: [],
     orphanSuggestions: [],
     localCandidates: [],
     syncedKeys: new Set<string>(),
@@ -100,9 +131,15 @@ function harness(over: Partial<LinkPickerDeps> = {}): Harness {
       created.count += 1;
       return Promise.resolve();
     },
+    openLinked: (key) => opened.push(key),
+    unlink: (key) => {
+      unlinked.push(key);
+      return Promise.resolve();
+    },
     logSearchError: (error) => searchErrors.push(error),
+    logUnlinkError: (error) => unlinkErrors.push(error),
   };
-  return { ui, linked, created, searchErrors, deps: { ...base, ...over, ui } };
+  return { ui, linked, created, opened, unlinked, searchErrors, unlinkErrors, deps: { ...base, ...over, ui } };
 }
 
 // A resolved search promise's then→setRows→finally chain settles over a few microtask turns.
@@ -382,5 +419,129 @@ describe("runLinkPickerFlow", () => {
     h.ui.clickCancel();
 
     expect(h.linked).toEqual([{ key: "CALC-9", synced: true }]);
+  });
+
+  const LINKED: LinkedRow[] = [
+    { key: "CALC-1", summary: "Login works" },
+    { key: "CALC-2", remoteMissing: true },
+  ];
+
+  it("renders the scenario's already-linked tests above the search, with summaries and remote-missing warnings", async () => {
+    const h = harness({ linkedTests: LINKED });
+    const flow = runLinkPickerFlow(h.deps);
+
+    expect(h.ui.linked).toEqual([
+      { key: "CALC-1", summary: "Login works" },
+      { key: "CALC-2", remoteMissing: true },
+    ]);
+
+    h.ui.clickCancel();
+    await flow;
+  });
+
+  it("opens a linked test in the tracker without settling the picker", async () => {
+    const h = harness({ linkedTests: [{ key: "CALC-1" }] });
+    const flow = runLinkPickerFlow(h.deps);
+
+    h.ui.clickOpenLinked("CALC-1");
+
+    expect(h.opened).toEqual(["CALC-1"]);
+    expect(h.ui.closed).toBe(false);
+
+    // The picker is still live, so a later cancel still settles it.
+    h.ui.clickCancel();
+    await flow;
+    expect(h.ui.closed).toBe(true);
+  });
+
+  it("unlinks a test, drops its linked row, and re-derives candidates from the now-untraced scenario", async () => {
+    const h = harness({
+      linkedTests: [{ key: "CALC-1", summary: "Login works" }],
+      localCandidates: [{ key: "CALC-1", summary: "Login works" }],
+      syncedKeys: new Set(["CALC-1"]),
+    });
+    const flow = runLinkPickerFlow(h.deps);
+    expect(h.ui.linkedKeys()).toEqual(["CALC-1"]);
+    const rowsBefore = h.ui.setRowsCalls;
+
+    h.ui.clickUnlink("CALC-1");
+    await flush();
+
+    expect(h.unlinked).toEqual(["CALC-1"]);
+    expect(h.ui.linkedKeys()).toEqual([]);
+    // Candidates re-derived: the picker repainted, and the freed test is now re-linkable via search.
+    expect(h.ui.setRowsCalls).toBeGreaterThan(rowsBefore);
+    h.ui.type("CALC-1");
+    expect(h.ui.keys()).toEqual(["CALC-1"]);
+
+    h.ui.clickCancel();
+    await flow;
+  });
+
+  it("ignores a second Unlink click for the same key while the first edit is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const unlinkCalls: string[] = [];
+    const h = harness({
+      linkedTests: [{ key: "CALC-1", summary: "Login works" }],
+      unlink: (key) => {
+        unlinkCalls.push(key);
+        return gate;
+      },
+    });
+    const flow = runLinkPickerFlow(h.deps);
+
+    h.ui.clickUnlink("CALC-1");
+    h.ui.clickUnlink("CALC-1");
+    expect(unlinkCalls).toEqual(["CALC-1"]);
+
+    release();
+    await flush();
+    expect(h.ui.linkedKeys()).toEqual([]);
+
+    h.ui.clickCancel();
+    await flow;
+  });
+
+  it("keeps the row and the session alive when an unlink edit fails, logging the error", async () => {
+    const boom = new Error("edit failed");
+    const h = harness({
+      linkedTests: [{ key: "CALC-1", summary: "Login works" }],
+      unlink: () => Promise.reject(boom),
+    });
+    const flow = runLinkPickerFlow(h.deps);
+
+    h.ui.clickUnlink("CALC-1");
+    await flush();
+
+    expect(h.unlinkErrors).toEqual([boom]);
+    expect(h.ui.linkedKeys()).toEqual(["CALC-1"]);
+    expect(h.ui.closed).toBe(false);
+
+    // The session is still live: the in-flight guard cleared on failure, so a retry re-fires the edit
+    // (and logs again), and cancel still settles the flow.
+    h.ui.clickUnlink("CALC-1");
+    await flush();
+    expect(h.unlinkErrors).toEqual([boom, boom]);
+    h.ui.clickCancel();
+    await flow;
+    expect(h.ui.closed).toBe(true);
+  });
+
+  it("confirms another test while one stays linked, adding a second tag through the insert path", async () => {
+    const h = harness({
+      linkedTests: [{ key: "CALC-1", summary: "Login works" }],
+      localCandidates: [{ key: "CALC-2", summary: "Logout works" }],
+      syncedKeys: new Set(["CALC-2"]),
+    });
+    const flow = runLinkPickerFlow(h.deps);
+
+    h.ui.type("CALC-2");
+    h.ui.clickConfirm("CALC-2");
+    await flow;
+
+    expect(h.linked).toEqual([{ key: "CALC-2", synced: true }]);
+    expect(h.unlinked).toEqual([]);
+    expect(h.ui.linkedKeys()).toEqual(["CALC-1"]);
   });
 });

@@ -87,6 +87,73 @@ export function computeLinkEdit(
   return { kind: "insertLine", line: scenIdx, text: `${leadingWhitespace(lines[scenIdx] ?? "")}${newTag}` };
 }
 
+export type UnlinkEdit =
+  | { kind: "unchanged" }
+  | { kind: "replaceLine"; line: number; text: string }
+  | { kind: "deleteLine"; line: number };
+
+function testTagForKey(
+  line: string,
+  key: string,
+  grammar: KeyGrammar
+): { token: string; at: number } | undefined {
+  const target = grammar.canonicalizeKey(key);
+  for (const match of line.matchAll(new RegExp(TAG_TOKEN_PATTERN, "g"))) {
+    const token = match[0];
+    if (extractKeys([token], grammar).testKeys[0] === target && match.index !== undefined) {
+      return { token, at: match.index };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The removal twin of `computeLinkEdit`: strips the `@TEST_<key>` tag from a scenario's tag lines.
+ * When the tag shares its line with other tags the token and one adjoining space go; when it is the
+ * only tag on the line the whole line (and its terminator) goes; a key that isn't tagged is a no-op.
+ * `scenarioLine` is 1-based (the tree's `ScenarioRef.line`).
+ */
+export function computeUnlinkEdit(
+  lines: readonly string[],
+  scenarioLine: number,
+  key: string,
+  grammar: KeyGrammar
+): UnlinkEdit {
+  const scenIdx = scenarioLine - 1;
+
+  const tagLineIndices: number[] = [];
+  for (let i = scenIdx - 1; i >= 0 && (lines[i] ?? "").trim().startsWith("@"); i--) {
+    tagLineIndices.unshift(i);
+  }
+
+  for (const idx of tagLineIndices) {
+    // The caller splits on "\n", so a CRLF line keeps a trailing "\r"; strip it here so replaceLine
+    // text is EOL-free and the caller writes it in front of the document's own "\r\n".
+    const raw = lines[idx] ?? "";
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    const found = testTagForKey(line, key, grammar);
+    if (found === undefined) {
+      continue;
+    }
+    const after = found.at + found.token.length;
+    if ((line.slice(0, found.at) + line.slice(after)).trim() === "") {
+      return { kind: "deleteLine", line: idx };
+    }
+    // Take one adjoining space with the token: the following space when there is one (so a leading or
+    // interior tag closes up), otherwise the preceding space (a trailing tag).
+    let start = found.at;
+    let end = after;
+    if (line[end] === " ") {
+      end += 1;
+    } else if (found.at > 0 && line[found.at - 1] === " ") {
+      start -= 1;
+    }
+    return { kind: "replaceLine", line: idx, text: line.slice(0, start) + line.slice(end) };
+  }
+
+  return { kind: "unchanged" };
+}
+
 const NEXT_SCENARIO_BLOCK = /^(Feature|Rule|Background|Scenario Outline|Scenario Template|Scenario)\b/;
 const EXAMPLES_BLOCK = /^(Examples|Scenarios)\b/;
 

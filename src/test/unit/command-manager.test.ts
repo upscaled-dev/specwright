@@ -582,18 +582,22 @@ describe("traceability linkScenario command", () => {
 
   interface EditEntry {
     op: string;
-    range?: { start: { line: number } };
+    range?: { start: { line: number }; end?: { line: number } };
     position?: { line: number };
     text: string;
   }
 
   function fakeDoc(text: string): vscode.TextDocument {
     const sep = text.includes("\r\n") ? "\r\n" : "\n";
+    const lines = text.split(sep);
     return {
       uri: vscode.Uri.file("/ws/a.feature"),
       eol: sep === "\r\n" ? vscode.EndOfLine.CRLF : vscode.EndOfLine.LF,
       getText: () => text,
-      lineAt: (n: number) => ({ text: text.split(sep)[n] ?? "" }),
+      lineAt: (n: number) => ({
+        text: lines[n] ?? "",
+        rangeIncludingLineBreak: new vscode.Range(n, 0, n + 1, 0),
+      }),
       save: () => Promise.resolve(true),
     } as unknown as vscode.TextDocument;
   }
@@ -607,10 +611,43 @@ describe("traceability linkScenario command", () => {
         parts.splice(e.position.line, 0, content);
       } else if (e.op === "replace" && e.range) {
         parts[e.range.start.line] = e.text;
+      } else if (e.op === "delete" && e.range?.end) {
+        parts.splice(e.range.start.line, e.range.end.line - e.range.start.line);
       }
     }
     return parts.join(eol);
   }
+
+  async function unlinkTag(feature: string, key: string, line: number): Promise<{ op: string; result: string }> {
+    const adapter = new InMemoryTraceabilityAdapter();
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(fakeDoc(feature));
+    const applied: EditEntry[][] = [];
+    vi.spyOn(vscode.workspace, "applyEdit").mockImplementation((edit) => {
+      applied.push((edit as unknown as { __entries: EditEntry[] }).__entries);
+      return Promise.resolve(true);
+    });
+    const mgr = CommandManager.create(makeContext({ traceabilityAdapter: adapter }));
+    const scenario: ScenarioRef = { filePath: "/ws/a.feature", line, name: "A", kind: "scenario" };
+    await (mgr as unknown as {
+      applyTagRemove: (s: ScenarioRef, k: string, g: unknown) => Promise<string>;
+    }).applyTagRemove(scenario, key, adapter.keyGrammar);
+    expect(applied).toHaveLength(1);
+    expect(applied[0]!).toHaveLength(1);
+    return { op: applied[0]![0]!.op, result: applyWsEdit(feature, applied[0]!) };
+  }
+
+  it("deletes a lone tag line via a WorkspaceEdit when unlinking removes the scenario's only tag", async () => {
+    const out = await unlinkTag("Feature: F\n\n@TC-9\nScenario: A\n  Given x\n", "9", 4);
+    expect(out.op).toBe("delete");
+    expect(out.result).toBe("Feature: F\n\nScenario: A\n  Given x\n");
+  });
+
+  it("replaces the line to drop just the test tag when other tags remain, keeping the EOL", async () => {
+    const out = await unlinkTag("Feature: F\r\n\r\n@smoke @TC-9\r\nScenario: A\r\n  Given x\r\n", "9", 4);
+    expect(out.op).toBe("replace");
+    expect(out.result).toBe("Feature: F\r\n\r\n@smoke\r\nScenario: A\r\n  Given x\r\n");
+    expect(out.result).not.toContain("\r\r");
+  });
 
   async function reMap(feature: string): Promise<string> {
     const adapter = new InMemoryTraceabilityAdapter();

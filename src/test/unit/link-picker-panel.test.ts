@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import * as vscode from "vscode";
 import { LinkPickerPanel } from "../../traceability/link-picker-panel";
-import { LinkPickerRow } from "../../traceability/link-picker-flow";
+import { LinkedRow, LinkPickerRow } from "../../traceability/link-picker-flow";
 
 // The panel drives the real `vscode.window.createWebviewPanel` stub: `__receive` delivers an inbound
 // webview message, `webview.__posted` records outbound ones, and `dispose()` fires the onDidDispose
@@ -22,6 +22,7 @@ afterEach(() => win.__resetWebviewPanels());
 
 const OPTS = { title: "Link scenario to Xray test", searchPlaceholder: "Search Xray tests" };
 const ROW: LinkPickerRow = { id: "CALC-1", key: "CALC-1", summary: "Login", kind: "test" };
+const LINKED: LinkedRow[] = [{ key: "CALC-1", summary: "Login" }, { key: "CALC-2", remoteMissing: true }];
 
 describe("LinkPickerPanel", () => {
   it("forwards search/confirm/cancel webview messages to the registered handlers", async () => {
@@ -110,5 +111,63 @@ describe("LinkPickerPanel", () => {
     expect(panel.webview.html).toContain("Search Xray tests");
     expect(panel.webview.html).toContain("Enter to confirm");
     expect(panel.webview.html).toContain("Esc to cancel");
+  });
+
+  it("carries the Linked and Link another test section scaffolding in the html", () => {
+    LinkPickerPanel.open(OPTS);
+    const panel = win.__webviewPanels[0]!;
+
+    expect(panel.webview.html).toContain("Linked");
+    expect(panel.webview.html).toContain("Link another test");
+    expect(panel.webview.html).toContain('id="linkedSection"');
+  });
+
+  it("posts linked-row updates to the webview", () => {
+    const ui = LinkPickerPanel.open(OPTS);
+    ui.setLinked(LINKED);
+    const panel = win.__webviewPanels[0]!;
+
+    expect(panel.webview.__posted).toContainEqual({ type: "linked", rows: LINKED });
+  });
+
+  it("replays the last linked rows when the webview signals it is ready", async () => {
+    const ui = LinkPickerPanel.open(OPTS);
+    ui.setLinked(LINKED);
+    const panel = win.__webviewPanels[0]!;
+    panel.webview.__posted.length = 0;
+
+    await panel.__receive({ type: "ready" });
+
+    expect(panel.webview.__posted).toContainEqual({ type: "linked", rows: LINKED });
+  });
+
+  it("forwards openLinked and unlink webview messages to their handlers", async () => {
+    const ui = LinkPickerPanel.open(OPTS);
+    const opened: string[] = [];
+    const unlinked: string[] = [];
+    ui.onOpenLinked((key) => opened.push(key));
+    ui.onUnlink((key) => unlinked.push(key));
+    const panel = win.__webviewPanels[0]!;
+
+    await panel.__receive({ type: "openLinked", key: "CALC-1" });
+    await panel.__receive({ type: "unlink", key: "CALC-2" });
+
+    expect(opened).toEqual(["CALC-1"]);
+    expect(unlinked).toEqual(["CALC-2"]);
+  });
+
+  it("keeps the picker live after a linked-row action (open/unlink never settle it)", async () => {
+    const ui = LinkPickerPanel.open(OPTS);
+    const searches: string[] = [];
+    ui.onSearch((value) => searches.push(value));
+    ui.onOpenLinked(() => { /* informational */ });
+    ui.onUnlink(() => { /* informational */ });
+    const panel = win.__webviewPanels[0]!;
+
+    await panel.__receive({ type: "openLinked", key: "CALC-1" });
+    await panel.__receive({ type: "unlink", key: "CALC-2" });
+    await panel.__receive({ type: "search", value: "still typing" });
+
+    expect(searches).toEqual(["still typing"]);
   });
 });

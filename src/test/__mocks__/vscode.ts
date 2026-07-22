@@ -766,7 +766,7 @@ export class Hover {
 }
 
 export interface RecordedWorkspaceEditEntry {
-  op: "insert" | "replace";
+  op: "insert" | "replace" | "delete";
   uri: unknown;
   range?: Range;
   position?: Position;
@@ -793,6 +793,9 @@ export class WorkspaceEdit {
   }
   public replace(uri: unknown, range: Range, text: string): void {
     this.__entries.push({ op: "replace", uri, range, text });
+  }
+  public delete(uri: unknown, range: Range): void {
+    this.__entries.push({ op: "delete", uri, range, text: "" });
   }
 }
 

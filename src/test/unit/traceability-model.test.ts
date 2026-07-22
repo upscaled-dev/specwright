@@ -11,7 +11,9 @@ import {
   buildTraceabilitySnapshot,
   findPlaywrightReport,
   hasGherkinDrift,
+  linkedTestsForScenario,
   ParsedFeatureInput,
+  ScenarioRef,
   TraceabilityModel,
   TraceLink,
 } from "../../traceability/traceability-model";
@@ -606,5 +608,27 @@ describe("findPlaywrightReport", () => {
     const results = parser.parseFromFile(found!.path);
     expect(results).toEqual([]);
     expect(parser.toStatusMap(results, found!.root)).toEqual({});
+  });
+});
+
+describe("linkedTestsForScenario", () => {
+  const ref = (line: number, name: string): ScenarioRef => ({ filePath: "/ws/a.feature", line, name, kind: "scenario" });
+  const linkAt = (testKey: string, scenario: ScenarioRef): TraceLink => ({ testKey, scenario, reqKeys: [] });
+
+  it("returns the links whose scenario shares the ref's file and 1-based line", () => {
+    const links = [linkAt("CALC-1", ref(4, "Create product")), linkAt("CALC-2", ref(20, "Delete product"))];
+    expect(linkedTestsForScenario(links, ref(4, "Create product")).map((l) => l.testKey)).toEqual(["CALC-1"]);
+  });
+
+  it("does not claim an untagged twin is linked when an identically named sibling is tagged in the same file", () => {
+    // The tagged sibling is at line 4; the dialog target is its untagged twin at line 15, same name.
+    const links = [linkAt("CALC-1", ref(4, "Create product"))];
+    expect(linkedTestsForScenario(links, ref(15, "Create product"))).toEqual([]);
+  });
+
+  it("keeps sameScenario's title fallback for a line-less ref (outline-row reunification)", () => {
+    const links = [linkAt("CALC-1", ref(4, "Adding"))];
+    const outlineRowRef: ScenarioRef = { filePath: "/ws/a.feature", line: 0, name: "Adding", kind: "outline" };
+    expect(linkedTestsForScenario(links, outlineRowRef).map((l) => l.testKey)).toEqual(["CALC-1"]);
   });
 });

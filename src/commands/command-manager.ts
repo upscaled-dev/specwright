@@ -18,14 +18,15 @@ import {
   authorScenarioTest,
   AuthorScenarioTestUi,
   computeLinkEdit,
+  computeUnlinkEdit,
   linkScenarioPicks,
   scenarioGherkinSlice,
 } from "../traceability/link-scenario";
-import { runLinkPickerFlow } from "../traceability/link-picker-flow";
+import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
 import { LinkPickerPanel } from "../traceability/link-picker-panel";
 import { buildBoardViewModel } from "../traceability/board-data";
 import { BoardPanel } from "../traceability/board-panel";
-import { ScenarioRef } from "../traceability/traceability-model";
+import { linkedTestsForScenario, ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
 import {
   BatchSelection,
@@ -530,7 +531,11 @@ export class CommandManager {
       this.showErrorMessage("Open in tracker: no issue key on this item.");
       return;
     }
-    const url = this.context.traceabilityAdapter.browseUrl({ key });
+    await this.browseIssue(this.context.traceabilityAdapter, key);
+  }
+
+  private async browseIssue(adapter: TraceabilityAdapter, key: string): Promise<void> {
+    const url = adapter.browseUrl({ key });
     if (!url) {
       vscode.window.showWarningMessage(
         "Set playwrightBddRunner.xray.siteUrl to open issues in the browser."
@@ -584,13 +589,20 @@ export class CommandManager {
       return;
     }
 
-    const orphans = this.traceabilitySubsystem?.getSnapshot()?.orphans ?? [];
+    const snapshot = this.traceabilitySubsystem?.getSnapshot();
+    const orphans = snapshot?.orphans ?? [];
+    const linkedTests: LinkedRow[] = linkedTestsForScenario(snapshot?.links ?? [], scenario).map((link) => ({
+      key: link.testKey,
+      ...(link.meta?.summary !== undefined ? { summary: link.meta.summary } : {}),
+      ...(link.remoteMissing ? { remoteMissing: true } : {}),
+    }));
     const ui = LinkPickerPanel.open({
       title: `Link scenario to ${adapter.label} test`,
       searchPlaceholder: `Search ${adapter.label} tests`,
     });
     await runLinkPickerFlow({
       ui,
+      linkedTests,
       orphanSuggestions: orphans.map((orphan) => ({ key: orphan.testKey, summary: orphan.meta.summary })),
       localCandidates: picks,
       syncedKeys: new Set(picks.map((pick) => pick.key)),
@@ -598,7 +610,16 @@ export class CommandManager {
       ...(adapter.remoteSearch ? { remoteSearch: adapter.remoteSearch } : {}),
       linkExisting: (key, synced) => this.linkExisting(scenario, key, synced, adapter),
       createNew: () => this.createTestFromScenario(adapter, scenario),
+      openLinked: (key) => {
+        this.browseIssue(adapter, key).catch((error) => {
+          this.logger.warn("Opening the linked issue failed", { error: errMsg(error) });
+        });
+      },
+      unlink: async (key) => {
+        await this.applyTagRemove(scenario, key, adapter.keyGrammar);
+      },
       logSearchError: (error) => this.logger.warn("Xray remote search failed", { error: errMsg(error) }),
+      logUnlinkError: (error) => this.logger.warn("Unlinking the scenario's test tag failed", { error: errMsg(error) }),
     });
   }
 
@@ -649,6 +670,31 @@ export class CommandManager {
     await vscode.workspace.applyEdit(wsEdit);
     await doc.save();
     return "inserted";
+  }
+
+  // The removal twin of applyTagInsert: drops the `@TEST_<key>` tag from the scenario's tag lines as
+  // an undoable, git-visible WorkspaceEdit. A lone tag takes its whole line and terminator with it.
+  private async applyTagRemove(
+    scenario: ScenarioRef,
+    key: string,
+    grammar: KeyGrammar
+  ): Promise<"removed" | "unchanged"> {
+    const uri = vscode.Uri.file(scenario.filePath);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const edit = computeUnlinkEdit(doc.getText().split("\n"), scenario.line, key, grammar);
+    if (edit.kind === "unchanged") {
+      return "unchanged";
+    }
+    const wsEdit = new vscode.WorkspaceEdit();
+    if (edit.kind === "deleteLine") {
+      wsEdit.delete(uri, doc.lineAt(edit.line).rangeIncludingLineBreak);
+    } else {
+      const lineLength = doc.lineAt(edit.line).text.length;
+      wsEdit.replace(uri, new vscode.Range(edit.line, 0, edit.line, lineLength), edit.text);
+    }
+    await vscode.workspace.applyEdit(wsEdit);
+    await doc.save();
+    return "removed";
   }
 
   // The capability-gated "Create new <provider> test from this scenario…" flow. Project comes from

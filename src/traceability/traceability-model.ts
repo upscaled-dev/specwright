@@ -97,6 +97,24 @@ export function findLinkForScenario(
   return links.find((link) => sameScenario(link.scenario, ref));
 }
 
+// The link dialog's "Linked" section: the links a scenario already carries `@TEST_` tags for.
+// Stricter than `sameScenario` on purpose — two scenarios with the same name in one file (a tagged
+// scenario and its untagged twin) must never be conflated, or the dialog would claim the untagged
+// twin is linked to the sibling's test. A real 1-based line on both sides is decisive; only a
+// line-less ref keeps `sameScenario`'s title fallback (the outline-row reunification the snapshot
+// relies on elsewhere).
+export function linkedTestsForScenario(
+  links: readonly TraceLink[],
+  ref: ScenarioRef
+): TraceLink[] {
+  return links.filter((link) => {
+    if (link.scenario.line > 0 && ref.line > 0) {
+      return sameScenario(link.scenario, ref) && link.scenario.line === ref.line;
+    }
+    return sameScenario(link.scenario, ref);
+  });
+}
+
 export const OUTCOME_SEVERITY: Record<ScenarioStatus, number> = {
   passed: 0,
   skipped: 1,
