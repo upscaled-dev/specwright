@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import * as path from "node:path";
 import { createXrayResultPublishing, IssueSearcher, XrayResultPublishingDeps } from "../../xray/xray-result-publishing";
 import { ImportResponse, ImportTransport, StepResolver } from "../../xray/execution-importers";
-import { NotSupportedError, PreflightDecision, RunArtifact, RunArtifactResult } from "../../traceability/contracts";
+import { NotSupportedError, PreflightDecision, RunArtifact, RunArtifactResult, ShardInfo } from "../../traceability/contracts";
+import { EvidenceFs } from "../../traceability/evidence-resolution";
 import { ScenarioRef } from "../../traceability/scenario-ref";
 import { Logger, LogLevel } from "../../utils/logger";
 
@@ -47,6 +49,7 @@ function makeDeps(over: Partial<XrayResultPublishingDeps>): XrayResultPublishing
     jiraCredentials: () => Promise.resolve(undefined),
     resolveSteps: RESOLVE_ALL,
     workspaceRootFor: () => undefined,
+    attachTo: () => "evidence",
     logger: Logger.create(undefined, LogLevel.ERROR),
     ...over,
   };
@@ -125,6 +128,148 @@ describe("createXrayResultPublishing — reconcile filter (cross-seam)", () => {
     expect(outcome.warnings).toEqual(["1 scenario(s) changed since the run and were not published."]);
     const parts = t.postMultipart.mock.calls[0]![1] as { results: string };
     expect(parts.results).not.toContain("@TEST_CALC-9");
+  });
+});
+
+// ---- Evidence resolution + attachTo routing ----
+
+const shard = (workingDir: string): ShardInfo => ({ workingDir, command: "run", exitCode: 0, success: true });
+
+function evidenceArtifact(results: RunArtifactResult[], shards: ShardInfo[]): RunArtifact {
+  return {
+    id: "run-1",
+    createdAt: Date.UTC(2026, 6, 22, 12, 0, 0),
+    results,
+    shards,
+    selection: { kind: "all-mapped" },
+    preflight: [],
+    state: "complete",
+  };
+}
+
+function fakeFs(files: Record<string, Buffer>): EvidenceFs {
+  return {
+    exists: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    read: (p) => files[p] ?? Buffer.alloc(0),
+  };
+}
+
+const APPEND = { mode: "append", executionKey: "XNP-1" } as const;
+
+describe("createXrayResultPublishing — evidence resolution + attachTo", () => {
+  const shotAbs = path.join("/ws", "test-results/shot.png");
+  const fs = fakeFs({ [shotAbs]: Buffer.from("PNG") });
+  const JIRA = { email: "a@b.c", token: "t" };
+  const withShot = (): RunArtifactResult => mapped("a", "CALC-1", { evidenceRefs: ["test-results/shot.png"] });
+  // Jira creds present — the issue stream needs a real upload destination.
+  const deps = (attachTo: XrayResultPublishingDeps["attachTo"], t: ImportTransport): XrayResultPublishingDeps =>
+    makeDeps({
+      transport: t,
+      evidenceFs: fs,
+      workspaceRootFor: () => "/ws",
+      attachTo,
+      jiraCredentials: () => Promise.resolve(JIRA),
+    });
+
+  it("evidence mode embeds the file in the payload and routes nothing to the issue", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(deps(() => "evidence", t.transport));
+    const outcome = await publishing.publish(evidenceArtifact([withShot()], [shard("/ws")]), APPEND);
+    const body = t.postJson.mock.calls[0]![1] as { tests: Array<{ evidence?: unknown }> };
+    expect(body.tests[0]!.evidence).toEqual([{ data: Buffer.from("PNG").toString("base64"), filename: "shot.png", contentType: "image/png" }]);
+    expect(outcome.issueEvidenceFiles).toEqual([]);
+  });
+
+  it("issue mode keeps evidence out of the payload and routes the file to the issue", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(deps(() => "issue", t.transport));
+    const outcome = await publishing.publish(evidenceArtifact([withShot()], [shard("/ws")]), APPEND);
+    const body = t.postJson.mock.calls[0]![1] as { tests: Array<{ evidence?: unknown }> };
+    expect(body.tests[0]!.evidence).toBeUndefined();
+    expect(outcome.issueEvidenceFiles).toEqual([shotAbs]);
+  });
+
+  it("both mode embeds AND routes to the issue", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(deps(() => "both", t.transport));
+    const outcome = await publishing.publish(evidenceArtifact([withShot()], [shard("/ws")]), APPEND);
+    const body = t.postJson.mock.calls[0]![1] as { tests: Array<{ evidence?: unknown[] }> };
+    expect(body.tests[0]!.evidence).toHaveLength(1);
+    expect(outcome.issueEvidenceFiles).toEqual([shotAbs]);
+  });
+
+  it("resolves an evidence ref against the shard's owning root in a multi-root batch (first existing wins)", async () => {
+    const rootBShot = path.join("/roots/b", "test-results/shot.png");
+    const multiFs = fakeFs({ [rootBShot]: Buffer.from("PNG") });
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(
+      makeDeps({
+        transport: t.transport,
+        evidenceFs: multiFs,
+        workspaceRootFor: (dir) => (dir.startsWith("/roots/a") ? "/roots/a" : "/roots/b"),
+        attachTo: () => "issue",
+        jiraCredentials: () => Promise.resolve(JIRA),
+      })
+    );
+    const outcome = await publishing.publish(
+      evidenceArtifact([mapped("a", "CALC-1", { evidenceRefs: ["test-results/shot.png"] })], [shard("/roots/a/pkg"), shard("/roots/b/pkg")]),
+      APPEND
+    );
+    expect(outcome.issueEvidenceFiles).toEqual([rootBShot]);
+  });
+
+  it("skips a missing evidence file with a surfaced warning and no crash", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(
+      makeDeps({
+        transport: t.transport,
+        evidenceFs: fakeFs({}),
+        workspaceRootFor: () => "/ws",
+        attachTo: () => "both",
+        jiraCredentials: () => Promise.resolve(JIRA),
+      })
+    );
+    const outcome = await publishing.publish(
+      evidenceArtifact([mapped("a", "CALC-1", { evidenceRefs: ["test-results/gone.png"] })], [shard("/ws")]),
+      APPEND
+    );
+    expect(outcome.issueEvidenceFiles).toEqual([]);
+    expect(outcome.warnings).toContain("Skipped 1 evidence file not found.");
+  });
+
+  it("issue mode WITHOUT Jira creds embeds in the payload instead and routes nothing (with a note)", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(
+      makeDeps({
+        transport: t.transport,
+        evidenceFs: fs,
+        workspaceRootFor: () => "/ws",
+        attachTo: () => "issue",
+        jiraCredentials: () => Promise.resolve(undefined),
+      })
+    );
+    const outcome = await publishing.publish(evidenceArtifact([withShot()], [shard("/ws")]), APPEND);
+    const body = t.postJson.mock.calls[0]![1] as { tests: Array<{ evidence?: unknown[] }> };
+    expect(body.tests[0]!.evidence).toHaveLength(1);
+    expect(outcome.issueEvidenceFiles).toEqual([]);
+    expect(outcome.warnings).toContain("Jira credentials missing — evidence embedded in the payload instead.");
+  });
+
+  it("both mode WITHOUT Jira creds embeds once and leaves no un-clearable pending upload", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(
+      makeDeps({
+        transport: t.transport,
+        evidenceFs: fs,
+        workspaceRootFor: () => "/ws",
+        attachTo: () => "both",
+        jiraCredentials: () => Promise.resolve(undefined),
+      })
+    );
+    const outcome = await publishing.publish(evidenceArtifact([withShot()], [shard("/ws")]), APPEND);
+    const body = t.postJson.mock.calls[0]![1] as { tests: Array<{ evidence?: unknown[] }> };
+    expect(body.tests[0]!.evidence).toHaveLength(1);
+    expect(outcome.issueEvidenceFiles).toEqual([]);
   });
 });
 

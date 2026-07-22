@@ -207,6 +207,22 @@ export class ExtensionConfig {
     return this.config.get<string>("xray.defaultProjectKey", "").trim();
   }
 
+  private static readonly REPORT_GLOB_DEFAULT = ["playwright-report/**", "test-results/**/*.zip"];
+
+  public get xrayReportGlob(): string[] {
+    const raw = this.config.get<unknown>("xray.reportGlob", ExtensionConfig.REPORT_GLOB_DEFAULT);
+    if (!Array.isArray(raw)) {
+      return [...ExtensionConfig.REPORT_GLOB_DEFAULT];
+    }
+    const globs = raw.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+    return globs.length > 0 ? globs : [...ExtensionConfig.REPORT_GLOB_DEFAULT];
+  }
+
+  public get xrayAttachTo(): "evidence" | "issue" | "both" {
+    const raw = this.config.get<string>("xray.attachTo", "evidence");
+    return raw === "issue" || raw === "both" ? raw : "evidence";
+  }
+
   public validate(): void {
     const errors: string[] = [];
     if (!this.testFilePattern || this.testFilePattern.trim() === "") {

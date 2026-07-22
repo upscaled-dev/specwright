@@ -3,8 +3,9 @@ import { Logger } from "../utils/logger";
 
 // One recorded publish. `account` is the non-secret clientId (§7 — never derived from a secret);
 // `site` scopes the entry so a stale-site key never confuses the current connection. `executionRef`
-// is the created/appended execution KEY (the browse-link identity). `pendingAttachments` is empty in
-// 3b — the 3c evidence/attachment slice fills it on a partial upload failure.
+// is the created/appended execution KEY (the browse-link identity). `pendingAttachments` are the
+// absolute file paths that failed to upload after a successful import — the resume/retry routine
+// replays them WITHOUT re-importing, and clears the ones that then succeed.
 export interface LedgerEntry {
   readonly artifactId: string;
   readonly executionRef: string;
@@ -29,6 +30,22 @@ export function findLedgerEntry(
   site: string
 ): LedgerEntry | undefined {
   return entries.find((entry) => entry.artifactId === artifactId && entry.site === site);
+}
+
+// Replaces the matching entry's `pendingAttachments` in place (order preserved) — the resume/retry
+// routine records which files are still pending after a replay. A no-op when nothing matches.
+export function withUpdatedPending(
+  entries: readonly LedgerEntry[],
+  artifactId: string,
+  site: string,
+  pendingAttachments: readonly string[]
+): LedgerEntry[] {
+  return entries.map((entry) => {
+    if (entry.artifactId === artifactId && entry.site === site) {
+      return { ...entry, pendingAttachments };
+    }
+    return entry;
+  });
 }
 
 function isValidEntry(value: unknown): value is LedgerEntry {
@@ -73,6 +90,17 @@ export class PublishLedger {
 
   public record(entry: LedgerEntry): void {
     this.entries = withLedgerEntry(this.entries, entry);
+    this.persist();
+  }
+
+  // Replay result for the resume/retry routine: the still-pending files replace the entry's list, so a
+  // fully-cleared upload leaves an empty `pendingAttachments` and a reload shows no outstanding work.
+  public setPendingAttachments(artifactId: string, site: string, pendingAttachments: readonly string[]): void {
+    this.entries = withUpdatedPending(this.entries, artifactId, site, pendingAttachments);
+    this.persist();
+  }
+
+  private persist(): void {
     Promise.resolve(this.memento.update(PublishLedger.STORAGE_KEY, this.entries)).catch((error: unknown) => {
       this.logger.warn("Failed to persist the publish ledger", { error: String(error) });
     });

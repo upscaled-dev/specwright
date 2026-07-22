@@ -1,7 +1,14 @@
 import * as path from "node:path";
 import type { PublishRequest, RunArtifact, RunArtifactIteration, RunArtifactOutcome } from "../traceability/contracts";
 import type { PublishableResult } from "../traceability/publish-core";
+import type { EmbeddedEvidence } from "../traceability/evidence-resolution";
 import { normalizePath, type ScenarioRef } from "../traceability/scenario-ref";
+
+// Resolves a publishable result's evidence to base64-embeddable blobs (empty when none applies for the
+// active `xray.attachTo` mode). The Xray capability supplies it; `buildPayload` never touches disk.
+export type EvidenceForResult = (result: PublishableResult) => readonly EmbeddedEvidence[];
+
+const NO_EVIDENCE: EvidenceForResult = () => [];
 
 const IMPORT_EXECUTION_PATH = "/import/execution";
 const CUCUMBER_MULTIPART_PATH = "/import/execution/cucumber/multipart";
@@ -148,10 +155,12 @@ export interface XrayJsonInput {
   readonly artifact: RunArtifact;
   readonly results: readonly PublishableResult[];
   readonly request: Extract<PublishRequest, { mode: "append" }>;
+  readonly evidenceFor?: EvidenceForResult | undefined;
 }
 
 export function buildXrayJsonPayload(input: XrayJsonInput): XrayJsonPayload {
   const { artifact, results, request } = input;
+  const evidenceFor = input.evidenceFor ?? NO_EVIDENCE;
   const totalMs = results.reduce((sum, result) => sum + result.durationMs, 0);
   return {
     testExecutionKey: request.executionKey,
@@ -161,12 +170,18 @@ export function buildXrayJsonPayload(input: XrayJsonInput): XrayJsonPayload {
       startDate: new Date(artifact.createdAt).toISOString(),
       finishDate: new Date(artifact.createdAt + totalMs).toISOString(),
     },
-    tests: results.map(toXrayJsonTest),
+    tests: results.map((result) => toXrayJsonTest(result, evidenceFor(result))),
   };
 }
 
-function toXrayJsonTest(result: PublishableResult): XrayJsonTest {
-  const test: { testKey: string; status: string; comment?: string; iterations?: XrayJsonIteration[] } = {
+function toXrayJsonTest(result: PublishableResult, evidence: readonly EmbeddedEvidence[]): XrayJsonTest {
+  const test: {
+    testKey: string;
+    status: string;
+    comment?: string;
+    iterations?: XrayJsonIteration[];
+    evidence?: readonly XrayJsonEvidence[];
+  } = {
     testKey: result.testKey,
     status: XRAY_STATUS[result.outcome],
   };
@@ -177,6 +192,9 @@ function toXrayJsonTest(result: PublishableResult): XrayJsonTest {
   // ONLY for outline results, a plain top-level status otherwise.
   if (result.iterations && result.iterations.length > 0) {
     test.iterations = result.iterations.map(toXrayJsonIteration);
+  }
+  if (evidence.length > 0) {
+    test.evidence = evidence.map((item) => ({ data: item.data, filename: item.filename, contentType: item.contentType }));
   }
   return test;
 }
@@ -212,10 +230,18 @@ export interface CucumberStepResult {
   readonly duration?: number | undefined;
 }
 
+// Cucumber's evidence shape (`data` = base64, `mime_type` = content type) — Xray turns per-step
+// embeddings into test-run evidence.
+export interface CucumberEmbedding {
+  readonly data: string;
+  readonly mime_type: string;
+}
+
 export interface CucumberStep {
   readonly keyword: string;
   readonly name: string;
   readonly result: CucumberStepResult;
+  readonly embeddings?: readonly CucumberEmbedding[] | undefined;
 }
 
 export interface CucumberElement {
@@ -257,9 +283,11 @@ export interface CucumberMultipartInput {
   readonly request: Extract<PublishRequest, { mode: "create-new" }>;
   readonly resolveSteps: StepResolver;
   // The captured `scenario.filePath` is absolute (the P2 ArtifactBuilder stores it un-relativized —
-  // run-artifact-store.ts); 3b's flow supplies the owning workspace root so the cucumber `uri` is
-  // workspace-relative. Absent → the path is forward-slashed but left as-is.
-  readonly workspaceRoot?: string | undefined;
+  // run-artifact-store.ts); the publish flow supplies the owning workspace root PER feature so the
+  // cucumber `uri` is workspace-relative even when a multi-root batch straddles folders. Undefined for
+  // a given path → that path is forward-slashed but left as-is.
+  readonly workspaceRootFor?: ((filePath: string) => string | undefined) | undefined;
+  readonly evidenceFor?: EvidenceForResult | undefined;
 }
 
 interface FeatureDraft {
@@ -269,7 +297,9 @@ interface FeatureDraft {
 }
 
 export function buildCucumberMultipartPayload(input: CucumberMultipartInput): CucumberMultipartPayload {
-  const { results, request, resolveSteps, workspaceRoot } = input;
+  const { results, request, resolveSteps } = input;
+  const workspaceRootFor = input.workspaceRootFor ?? (() => undefined);
+  const evidenceFor = input.evidenceFor ?? NO_EVIDENCE;
   const drafts: FeatureDraft[] = [];
   const byUri = new Map<string, FeatureDraft>();
   let droppedChangedCount = 0;
@@ -280,7 +310,7 @@ export function buildCucumberMultipartPayload(input: CucumberMultipartInput): Cu
       droppedChangedCount += 1;
       continue;
     }
-    const uri = featureUri(result.scenario.filePath, workspaceRoot);
+    const uri = featureUri(result.scenario.filePath, workspaceRootFor(result.scenario.filePath));
     let draft = byUri.get(uri);
     if (draft === undefined) {
       draft = { uri, name: resolution.featureName ?? "", elements: [] };
@@ -289,7 +319,7 @@ export function buildCucumberMultipartPayload(input: CucumberMultipartInput): Cu
     } else if (draft.name === "" && resolution.featureName !== undefined) {
       draft.name = resolution.featureName;
     }
-    draft.elements.push(...toElements(result, resolution.steps));
+    draft.elements.push(...toElements(result, resolution.steps, evidenceFor(result)));
   }
 
   return {
@@ -299,27 +329,48 @@ export function buildCucumberMultipartPayload(input: CucumberMultipartInput): Cu
   };
 }
 
-function toElements(result: PublishableResult, steps: readonly string[]): CucumberElement[] {
+function toElements(
+  result: PublishableResult,
+  steps: readonly string[],
+  evidence: readonly EmbeddedEvidence[]
+): CucumberElement[] {
   const tags: readonly CucumberTag[] = [{ name: `${XRAY_TEST_TAG_PREFIX}${result.testKey}` }];
+  let elements: CucumberElement[];
   if (result.iterations && result.iterations.length > 0) {
     // Outline: one element per example row, iteration name suffixed, same tags.
-    return result.iterations.map((iteration) => ({
+    elements = result.iterations.map((iteration) => ({
       keyword: "Scenario",
       type: "scenario",
       name: `${result.scenario.name} — ${iteration.name}`,
       tags,
       steps: toCucumberSteps(iteration.outcome, iteration.durationMs, steps),
     }));
+  } else {
+    elements = [
+      {
+        keyword: "Scenario",
+        type: "scenario",
+        name: result.scenario.name,
+        tags,
+        steps: toCucumberSteps(result.outcome, result.durationMs, steps),
+      },
+    ];
   }
-  return [
-    {
-      keyword: "Scenario",
-      type: "scenario",
-      name: result.scenario.name,
-      tags,
-      steps: toCucumberSteps(result.outcome, result.durationMs, steps),
-    },
-  ];
+  // The result's evidence rides the first element's failing step (or its first step) — the artifact
+  // carries scenario-level refs, not per-iteration ones, so a data-driven result attaches to one row.
+  const first = elements[0];
+  if (evidence.length > 0 && first !== undefined && first.steps.length > 0) {
+    elements[0] = withEmbeddings(first, evidence);
+  }
+  return elements;
+}
+
+function withEmbeddings(element: CucumberElement, evidence: readonly EmbeddedEvidence[]): CucumberElement {
+  const failing = element.steps.findIndex((step) => step.result.status === "failed");
+  const target = failing >= 0 ? failing : 0;
+  const embeddings = evidence.map((item) => ({ data: item.data, mime_type: item.contentType }));
+  const steps = element.steps.map((step, index) => (index === target ? { ...step, embeddings } : step));
+  return { ...element, steps };
 }
 
 function toCucumberSteps(outcome: RunArtifactOutcome, durationMs: number, steps: readonly string[]): CucumberStep[] {

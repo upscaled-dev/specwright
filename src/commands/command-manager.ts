@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { Logger } from "../utils/logger";
 import { CommandArguments, CommandHandler, ParsedFeature, PlaywrightBddExtensionContext, TestExecutionOptions } from "../types";
 import { RunOutputResult } from "../core/test-executor";
@@ -31,11 +32,13 @@ import {
 import { BatchInvocation, resolveBatchSelection } from "../traceability/batch-selection";
 import { PreflightChoice, runPreflightFlow } from "../traceability/preflight-flow";
 import { summarizeArtifact } from "../traceability/publish-core";
-import { runPublishFlow } from "../traceability/publish-flow";
+import { AttachmentSuggestion, PublishAttachmentsModel, runPublishFlow } from "../traceability/publish-flow";
 import { PublishDialogPanel } from "../traceability/publish-dialog-panel";
 import { LedgerEntry, PublishLedger } from "../traceability/publish-ledger";
 import { makeFeatureStepResolver } from "../xray/feature-step-resolver";
 import { XrayImportError } from "../xray/execution-importers";
+import { fetchJiraAttachmentMeta, uploadJiraAttachments } from "../xray/jira-attachments";
+import { buildAttachmentsModel } from "../xray/publish-attachment-support";
 import { normalizeSiteUrl } from "../xray/xray-adapter";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
 
@@ -98,6 +101,10 @@ const CATEGORY = "Specwright";
 
 function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
+}
+
+function plural(count: number, word: string): string {
+  return count === 1 ? word : `${word}s`;
 }
 
 export class CommandManager {
@@ -778,12 +785,33 @@ export class CommandManager {
     });
     const picked = await vscode.window.showQuickPick(items, { placeHolder: "Select a run to publish" });
     if (!picked) {return;}
+
+    // A ledgered run with unfinished attachment uploads offers a resume that skips the import entirely —
+    // re-importing would duplicate results, so "attach pending files" replays only the failed uploads.
+    const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
+    const entry = this.publishLedger?.find(picked.artifact.id, site);
+    if (entry !== undefined && entry.pendingAttachments.length > 0) {
+      const choice = await vscode.window.showWarningMessage(
+        `This run was published to ${entry.executionRef} with ${entry.pendingAttachments.length} attachment(s) still pending.`,
+        { modal: true },
+        "Attach pending files",
+        "Publish again"
+      );
+      if (choice === "Attach pending files") {
+        await this.retryAttachments(picked.artifact.id, site, entry.executionRef, entry.pendingAttachments);
+        return;
+      }
+      if (choice !== "Publish again") {
+        return;
+      }
+    }
     await this.runPublish(picked.artifact);
   }
 
   // Wire the vscode-free publish flow to the UI: the View 3 webview dialog, the idempotency
-  // re-confirm modal, the success/failure toasts, and the persistent ledger. Nothing here runs a
-  // remote test — the flow's only write is the capability's single import POST.
+  // re-confirm modal, the success/failure/partial toasts, attachment uploads, and the persistent
+  // ledger. Nothing here runs a remote test — the flow's only write is the capability's single import
+  // POST; attachments upload only AFTER that import succeeds.
   private async runPublish(artifact: RunArtifact): Promise<void> {
     const publishing = this.traceabilitySubsystem?.getActiveAdapter()?.resultPublishing;
     if (!publishing) {
@@ -800,22 +828,111 @@ export class CommandManager {
       changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
       defaultProjectKey: this.context.config.xrayDefaultProjectKey,
       jiraSearchAvailable,
+      // Lazy — the flow calls this only after its gates pass, so a blocked/empty run never fires the
+      // one allowed pre-confirm call (the attachment/meta probe).
+      attachments: () => this.buildPublishAttachments(rawSite),
       priorEntry: this.publishLedger?.find(artifact.id, site),
       presentDialog: (model) =>
         PublishDialogPanel.show(model, {
           searchTargets: (kind, query, signal) => publishing.searchTargets(kind, query, signal),
+          browseFiles: () => this.browsePublishFiles(),
         }),
       confirmRepublish: (entry) => this.confirmRepublish(entry),
+      attachFiles: (executionKey, files) => this.attachFiles(executionKey, files),
       recordPublish: (entry) => this.publishLedger?.record(entry),
       reportBlocked: (reason) => {
         vscode.window.showWarningMessage(reason);
       },
-      reportSuccess: (outcome, request) => this.reportPublishSuccess(outcome, request),
+      reportSuccess: (outcome, request, attachedCount) => this.reportPublishSuccess(outcome, request, attachedCount),
+      reportPartialAttachments: (outcome, request, attachedCount, failed) =>
+        this.reportPartialAttachments(artifact.id, site, outcome, request, attachedCount, failed),
       reportFailure: (error) => this.reportPublishFailure(error),
       site,
       account: credentials?.clientId ?? "",
       now: () => Date.now(),
     });
+  }
+
+  // The Publish dialog's run-level attachments section — the vscode-free build + probe logic lives in
+  // `buildAttachmentsModel`; this only wires the seams (glob discovery, file sizing, and the site's
+  // attachment/meta, which is fetched only when Jira creds exist).
+  private async buildPublishAttachments(rawSite: string): Promise<PublishAttachmentsModel> {
+    const credentials = await this.credentialStore?.getJiraCredentials(rawSite);
+    return buildAttachmentsModel({
+      reportGlobs: this.context.config.xrayReportGlob,
+      attachTo: this.context.config.xrayAttachTo,
+      jiraAvailable: credentials !== undefined,
+      findFiles: async (glob) => (await vscode.workspace.findFiles(glob, undefined, 50)).map((uri) => uri.fsPath),
+      fileSize: (filePath) => this.fileSizeOrUndefined(filePath),
+      baseName: (filePath) => path.basename(filePath),
+      attachmentMeta: () => {
+        if (credentials === undefined) {
+          return Promise.resolve({ enabled: true });
+        }
+        return fetchJiraAttachmentMeta({ site: normalizeSiteUrl(rawSite), credentials, logger: this.logger });
+      },
+    });
+  }
+
+  private fileSizeOrUndefined(filePath: string): number | undefined {
+    try {
+      return fs.statSync(filePath).size;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async browsePublishFiles(): Promise<readonly AttachmentSuggestion[]> {
+    const picked = await vscode.window.showOpenDialog({ canSelectMany: true, openLabel: "Attach" });
+    if (!picked) {
+      return [];
+    }
+    return picked.map((uri) => ({
+      path: uri.fsPath,
+      name: path.basename(uri.fsPath),
+      size: this.fileSizeOrUndefined(uri.fsPath) ?? 0,
+    }));
+  }
+
+  // The shared upload routine behind the flow, the partial-toast Retry, and publishLastRun resume —
+  // uploads to the execution's Jira issue and reports which files still failed. No Jira creds ⇒ every
+  // file is pending (the section is disabled, so this only guards a race).
+  private async attachFiles(executionKey: string, files: readonly string[]): Promise<{ readonly failed: readonly string[] }> {
+    const rawSite = this.context.config.xraySiteUrl;
+    const credentials = await this.credentialStore?.getJiraCredentials(rawSite);
+    if (credentials === undefined) {
+      return { failed: files };
+    }
+    const result = await uploadJiraAttachments({
+      site: normalizeSiteUrl(rawSite),
+      credentials,
+      issueKey: executionKey,
+      files,
+      logger: this.logger,
+    });
+    return { failed: result.failed };
+  }
+
+  // Replay the ledgered pending files (toast-Retry or resume). Clears the ones that upload; a still-
+  // partial replay re-offers Retry. Never re-imports — the execution already carries its results.
+  private async retryAttachments(
+    artifactId: string,
+    site: string,
+    executionKey: string,
+    files: readonly string[]
+  ): Promise<void> {
+    const { failed } = await this.attachFiles(executionKey, files);
+    this.publishLedger?.setPendingAttachments(artifactId, site, failed);
+    const attached = files.length - failed.length;
+    if (failed.length === 0) {
+      vscode.window.showInformationMessage(`${executionKey} — ${attached} pending attachment(s) uploaded.`);
+      return;
+    }
+    Promise.resolve(
+      vscode.window.showWarningMessage(`${executionKey} — ${failed.length} attachment(s) still failed.`, "Retry")
+    )
+      .then((choice) => (choice === "Retry" ? this.retryAttachments(artifactId, site, executionKey, failed) : undefined))
+      .catch(() => undefined);
   }
 
   private async confirmRepublish(entry: LedgerEntry): Promise<boolean> {
@@ -828,16 +945,55 @@ export class CommandManager {
     return choice === "Publish again";
   }
 
-  private reportPublishSuccess(outcome: PublishOutcome, request: PublishRequest): void {
+  private reportPublishSuccess(outcome: PublishOutcome, request: PublishRequest, attachedCount: number): void {
     const base =
       request.mode === "create-new"
         ? `${outcome.ref.key} created — ${outcome.imported} results imported`
         : `appended to ${outcome.ref.key} — ${outcome.imported} results`;
-    const message = outcome.warnings.length > 0 ? `${base} · ${outcome.warnings.join(" ")}` : base;
+    const notes = [...outcome.warnings];
+    if (attachedCount > 0) {
+      notes.unshift(`${attachedCount} ${plural(attachedCount, "file")} attached`);
+    }
+    const message = notes.length > 0 ? `${base} · ${notes.join(" · ")}` : base;
+    this.showBrowseToast(message, outcome, "info");
+  }
+
+  // Import succeeded, some attachment uploads failed (§8-P3 partial recovery): report the count and
+  // offer Retry off the ledgered pending files — the import is never rolled back.
+  private reportPartialAttachments(
+    artifactId: string,
+    site: string,
+    outcome: PublishOutcome,
+    request: PublishRequest,
+    attachedCount: number,
+    failed: readonly string[]
+  ): void {
+    const base =
+      request.mode === "create-new"
+        ? `${outcome.ref.key} created — ${outcome.imported} results imported`
+        : `appended to ${outcome.ref.key} — ${outcome.imported} results`;
+    const attachedNote = attachedCount > 0 ? ` · ${attachedCount} ${plural(attachedCount, "file")} attached` : "";
+    const message = `${base}${attachedNote} · ${failed.length} ${plural(failed.length, "attachment")} failed`;
+    const adapter = this.traceabilitySubsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
+    const url = adapter.browseUrl(outcome.ref);
+    const buttons = url ? ["Retry", "Open in Jira"] : ["Retry"];
+    Promise.resolve(vscode.window.showWarningMessage(message, ...buttons))
+      .then(async (choice) => {
+        if (choice === "Retry") {
+          await this.retryAttachments(artifactId, site, outcome.ref.key, failed);
+        } else if (choice === "Open in Jira" && url) {
+          await vscode.env.openExternal(vscode.Uri.parse(url));
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  private showBrowseToast(message: string, outcome: PublishOutcome, level: "info" | "warn"): void {
     const adapter = this.traceabilitySubsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
     const url = adapter.browseUrl(outcome.ref);
     const buttons = url ? ["Open in Jira"] : [];
-    Promise.resolve(vscode.window.showInformationMessage(message, ...buttons))
+    const show = level === "info" ? vscode.window.showInformationMessage : vscode.window.showWarningMessage;
+    Promise.resolve(show(message, ...buttons))
       .then((choice) => {
         if (choice === "Open in Jira" && url) {
           return vscode.env.openExternal(vscode.Uri.parse(url));

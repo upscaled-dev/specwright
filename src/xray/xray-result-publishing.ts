@@ -8,16 +8,29 @@ import {
   RunArtifact,
 } from "../traceability/contracts";
 import { publishableResults, PublishableResult } from "../traceability/publish-core";
+import {
+  EmbeddedEvidence,
+  EvidenceEmbedder,
+  EvidenceFs,
+  EvidenceSkip,
+  evidenceRoots,
+  nodeEvidenceFs,
+  resolveEvidencePath,
+  summarizeEvidenceSkips,
+} from "../traceability/evidence-resolution";
 import { Logger } from "../utils/logger";
 import { XrayJiraCredentials } from "./xray-credential-store";
 import {
   CucumberMultipartImporter,
+  EvidenceForResult,
   ExecutionImportResponse,
   ImportTransport,
   StepResolver,
   XrayJsonImporter,
 } from "./execution-importers";
 import { JiraIssueKind, searchJiraIssues, JiraIssueSearchResult } from "./jira-issue-search";
+
+export type AttachTo = "evidence" | "issue" | "both";
 
 export type IssueSearcher = (deps: {
   site: string;
@@ -33,11 +46,16 @@ export interface XrayResultPublishingDeps {
   // Read fresh each call (never snapshotted): the normalized site host and its optional Jira creds.
   site: () => string;
   jiraCredentials: () => Promise<XrayJiraCredentials | undefined>;
-  // Create-mode source resolution + the owning workspace root for the cucumber `uri` relativization.
+  // Create-mode source resolution + the owning workspace root (per feature, multi-root aware) for the
+  // cucumber `uri` relativization AND for resolving evidence refs against their shard's run folder.
   resolveSteps: StepResolver;
   workspaceRootFor: (filePath: string) => string | undefined;
+  // Where per-result evidence goes: `evidence` = in the payload, `issue` = uploaded to the execution
+  // issue, `both`. Read fresh each publish so a settings change mid-session is honored.
+  attachTo: () => AttachTo;
   logger: Logger;
-  // Injectable for tests; defaults to the live Jira issue search.
+  // Injectable for tests; default to the live fs / Jira issue search.
+  evidenceFs?: EvidenceFs | undefined;
   searchIssues?: IssueSearcher | undefined;
 }
 
@@ -58,29 +76,99 @@ function toPublishTarget(issue: { key: string; summary: string }): PublishTarget
   return { id: issue.key, label: `${issue.key} — ${issue.summary}`, ref: { key: issue.key } };
 }
 
+interface EvidencePlan {
+  readonly evidenceFor: EvidenceForResult;
+  readonly issueFiles: readonly string[];
+  readonly notes: readonly string[];
+}
+
+// One resolution pass over the publishable set, split by the `attachTo` mode: `evidence`/`both` reads
+// + base64-embeds under the shared size budget; `issue`/`both` resolves refs to absolute paths for the
+// post-import Jira upload. Missing files are noted once regardless of stream — never a crash.
+//
+// `jiraAvailable` guards the issue stream: without Jira credentials there is no destination for the
+// upload, so an `issue`/`both` mode FALLS BACK to embedding in the payload (never silently loses the
+// evidence and never leaves un-clearable `pendingAttachments`), with an honest surfaced note.
+function planEvidence(
+  artifact: RunArtifact,
+  results: readonly PublishableResult[],
+  deps: XrayResultPublishingDeps,
+  jiraAvailable: boolean
+): EvidencePlan {
+  const mode = deps.attachTo();
+  const fsImpl = deps.evidenceFs ?? nodeEvidenceFs;
+  const roots = evidenceRoots(
+    artifact.shards.map((shard) => shard.workingDir),
+    deps.workspaceRootFor
+  );
+  const wantsIssue = mode === "issue" || mode === "both";
+  const issueFallback = wantsIssue && !jiraAvailable;
+  const wantEmbed = mode === "evidence" || mode === "both" || issueFallback;
+  const wantIssue = wantsIssue && jiraAvailable;
+  const embedder = new EvidenceEmbedder(fsImpl);
+  const perResult = new Map<PublishableResult, EmbeddedEvidence[]>();
+  const issueFiles: string[] = [];
+  const missing: EvidenceSkip[] = [];
+
+  for (const result of results) {
+    const embeds: EmbeddedEvidence[] = [];
+    for (const ref of result.evidenceRefs) {
+      const abs = resolveEvidencePath(ref, roots, fsImpl.exists);
+      if (abs === undefined) {
+        missing.push({ ref, reason: "missing" });
+        continue;
+      }
+      if (wantEmbed) {
+        const embedded = embedder.embed(ref, abs);
+        if (embedded !== undefined) {
+          embeds.push(embedded);
+        }
+      }
+      if (wantIssue) {
+        issueFiles.push(abs);
+      }
+    }
+    if (embeds.length > 0) {
+      perResult.set(result, embeds);
+    }
+  }
+
+  const notes: string[] = [];
+  if (issueFallback) {
+    notes.push("Jira credentials missing — evidence embedded in the payload instead.");
+  }
+  const skipNote = summarizeEvidenceSkips([...embedder.skips, ...missing]);
+  if (skipNote !== undefined) {
+    notes.push(skipNote);
+  }
+  return { evidenceFor: (result) => perResult.get(result) ?? [], issueFiles, notes };
+}
+
 async function publishCreate(
   deps: XrayResultPublishingDeps,
   artifact: RunArtifact,
   results: readonly PublishableResult[],
   request: Extract<PublishRequest, { mode: "create-new" }>,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  jiraAvailable: boolean
 ): Promise<PublishOutcome> {
-  const first = results[0]?.scenario.filePath;
-  const workspaceRoot = first !== undefined ? deps.workspaceRootFor(first) : undefined;
+  const plan = planEvidence(artifact, results, deps, jiraAvailable);
   const payload = cucumberImporter.buildPayload({
     artifact,
     results,
     request,
     resolveSteps: deps.resolveSteps,
-    ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+    workspaceRootFor: deps.workspaceRootFor,
+    evidenceFor: plan.evidenceFor,
   });
   const response = await cucumberImporter.import(deps.transport, payload, signal);
   const ref: ExecutionRef = { kind: "execution", key: executionKeyOf(response, request) };
-  const warnings =
-    payload.droppedChangedCount > 0
-      ? [`${payload.droppedChangedCount} scenario(s) changed since the run and were not published.`]
-      : [];
-  return { ref, imported: results.length - payload.droppedChangedCount, warnings };
+  const warnings: string[] = [];
+  if (payload.droppedChangedCount > 0) {
+    warnings.push(`${payload.droppedChangedCount} scenario(s) changed since the run and were not published.`);
+  }
+  warnings.push(...plan.notes);
+  return { ref, imported: results.length - payload.droppedChangedCount, warnings, issueEvidenceFiles: plan.issueFiles };
 }
 
 async function publishAppend(
@@ -88,11 +176,18 @@ async function publishAppend(
   artifact: RunArtifact,
   results: readonly PublishableResult[],
   request: Extract<PublishRequest, { mode: "append" }>,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  jiraAvailable: boolean
 ): Promise<PublishOutcome> {
-  const payload = xrayJsonImporter.buildPayload({ artifact, results, request });
+  const plan = planEvidence(artifact, results, deps, jiraAvailable);
+  const payload = xrayJsonImporter.buildPayload({ artifact, results, request, evidenceFor: plan.evidenceFor });
   const response = await xrayJsonImporter.import(deps.transport, payload, signal);
-  return { ref: { kind: "execution", key: executionKeyOf(response, request) }, imported: results.length, warnings: [] };
+  return {
+    ref: { kind: "execution", key: executionKeyOf(response, request) },
+    imported: results.length,
+    warnings: [...plan.notes],
+    issueEvidenceFiles: plan.issueFiles,
+  };
 }
 
 /**
@@ -122,11 +217,14 @@ export function createXrayResultPublishing(deps: XrayResultPublishingDeps): Resu
       });
       return result.issues.map(toPublishTarget);
     },
-    publish(artifact, request, signal): Promise<PublishOutcome> {
+    async publish(artifact, request, signal): Promise<PublishOutcome> {
       const results = publishableResults(artifact).publishable;
+      // Jira creds are the issue-attachment destination's only key — read once here so `planEvidence`
+      // can fall the issue stream back to payload embedding when they are absent (never a lost blob).
+      const jiraAvailable = (await deps.jiraCredentials()) !== undefined;
       return request.mode === "create-new"
-        ? publishCreate(deps, artifact, results, request, signal)
-        : publishAppend(deps, artifact, results, request, signal);
+        ? publishCreate(deps, artifact, results, request, signal, jiraAvailable)
+        : publishAppend(deps, artifact, results, request, signal, jiraAvailable);
     },
   };
 }

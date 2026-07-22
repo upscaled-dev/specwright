@@ -218,11 +218,15 @@ export type PublishRequest =
   | { readonly mode: "append"; readonly executionKey: string };
 
 // The result of a successful publish: the created/appended execution, how many results the import
-// carried, and any honest notes (e.g. scenarios dropped because their source changed since the run).
+// carried, and any honest notes (e.g. scenarios dropped because their source changed since the run,
+// or evidence files skipped for size). `issueEvidenceFiles` are per-result evidence paths the
+// `xray.attachTo` mode routes to the Jira issue rather than the payload — the flow uploads them
+// (alongside the dialog's run-level picks) after a successful import.
 export interface PublishOutcome {
   readonly ref: ExecutionRef;
   readonly imported: number;
   readonly warnings: readonly string[];
+  readonly issueEvidenceFiles?: readonly string[] | undefined;
 }
 
 export type ConnectionVerifyStatus = "ok" | "auth-failed" | "unreachable";

@@ -1,15 +1,18 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import { PublishRequest, PublishTarget } from "./contracts";
-import { PublishDialogModel } from "./publish-flow";
+import { AttachmentSuggestion, PublishDialogModel, PublishDialogResult } from "./publish-flow";
 
 const VIEW_TYPE = "playwrightBddRunner.publishResults";
 const IMPORT_HINT = "Create → POST /import/execution/cucumber/multipart · Append → POST /import/execution";
 
-// The delegate the dialog calls back into for the execution/test-plan pickers. `searchTargets`
-// rejects (NotSupportedError) without Jira creds — the dialog only calls it when `jiraSearchAvailable`.
+// The delegate the dialog calls back into. `searchTargets` rejects (NotSupportedError) without Jira
+// creds — the dialog only calls it when `jiraSearchAvailable`. `browseFiles` opens the native file
+// picker behind a mockable seam (the panel never imports `showOpenDialog` directly, so the unit rig
+// can drive it) and returns the picked files with their sizes.
 export interface PublishDialogDelegate {
   searchTargets(kind: "execution" | "test-plan", query: string, signal?: AbortSignal): Promise<readonly PublishTarget[]>;
+  browseFiles(): Promise<readonly AttachmentSuggestion[]>;
 }
 
 interface SearchMessage {
@@ -18,22 +21,31 @@ interface SearchMessage {
   kind: "execution" | "test-plan";
   query: string;
 }
+interface BrowseMessage {
+  type: "browse";
+}
 interface ConfirmMessage {
   type: "confirm";
   request: PublishRequest;
+  attachments: string[];
 }
 interface CancelMessage {
   type: "cancel";
 }
-type IncomingMessage = SearchMessage | ConfirmMessage | CancelMessage;
+type IncomingMessage = SearchMessage | BrowseMessage | ConfirmMessage | CancelMessage;
 
-type OutgoingMessage = {
-  type: "search-result";
-  token: number;
-  kind: "execution" | "test-plan";
-  items: ReadonlyArray<{ readonly key: string; readonly label: string }>;
-  error?: string | undefined;
-};
+type OutgoingMessage =
+  | {
+      type: "search-result";
+      token: number;
+      kind: "execution" | "test-plan";
+      items: ReadonlyArray<{ readonly key: string; readonly label: string }>;
+      error?: string | undefined;
+    }
+  | {
+      type: "browse-result";
+      items: ReadonlyArray<{ readonly path: string; readonly name: string; readonly size: number }>;
+    };
 
 function escapeHtml(value: string): string {
   return value
@@ -42,6 +54,11 @@ function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+// Serialize a value for embedding inside a nonce'd <script> block — only `<` can break out (`</script>`).
+function embedJson(value: unknown): string {
+  return JSON.stringify(value).replaceAll("<", "\\u003c");
 }
 
 function bannerHtml(model: PublishDialogModel): string {
@@ -53,9 +70,24 @@ function bannerHtml(model: PublishDialogModel): string {
   return `<div class="banner">${escapeHtml(text)}</div>`;
 }
 
+function evidenceStreamLine(stream: PublishDialogModel["attachments"]["evidenceStream"]): string {
+  if (stream === "issue") {
+    return "Per-test evidence uploads to the execution's Jira issue (xray.attachTo).";
+  }
+  if (stream === "both") {
+    return "Per-test evidence rides the result payload and the Jira issue (xray.attachTo).";
+  }
+  return "Per-test evidence rides the result payload (xray.attachTo).";
+}
+
+function attachmentsHint(stream: PublishDialogModel["attachments"]["evidenceStream"]): string {
+  return `${evidenceStreamLine(stream)} These run-level files always attach to the execution's Jira issue.`;
+}
+
 function renderHtml(model: PublishDialogModel): string {
   const nonce = randomBytes(16).toString("hex");
   const planValue = escapeHtml(model.prefillPlanKey ?? "");
+  const attachModel = { ...model.attachments, hint: attachmentsHint(model.attachments.evidenceStream) };
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -102,12 +134,19 @@ function renderHtml(model: PublishDialogModel): string {
   .results:empty { display: none; border: none; }
   .results li { padding: 0.35rem 0.5rem; cursor: pointer; }
   .results li:hover { background: var(--vscode-list-hoverBackground); }
+  .attach-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+  .attach-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; }
+  .attach-row .name { flex: 1; }
+  .attach-row .size { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  .attach-row .over { color: var(--vscode-errorForeground); font-size: 0.85em; }
+  .disabled-note { color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-top: 0.5rem; font-style: italic; }
   [hidden] { display: none !important; }
   .actions { display: flex; gap: 0.6rem; margin-top: 1.5rem; }
   button { padding: 0.45rem 0.9rem; border: none; border-radius: 2px; cursor: pointer; font-family: inherit; }
   button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
   button.primary:hover { background: var(--vscode-button-hoverBackground); }
   button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+  button.link { background: none; color: var(--vscode-textLink-foreground); padding: 0.35rem 0; text-align: left; }
   .footer { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 1.25rem; }
 </style>
 </head>
@@ -151,6 +190,12 @@ function renderHtml(model: PublishDialogModel): string {
     <div id="err-execution" class="field-error"></div>
   </div>
 
+  <label>Run-level attachments</label>
+  <p class="hint" id="attach-hint"></p>
+  <ul id="attach-list" class="attach-list"></ul>
+  <button id="browse" class="link" type="button" hidden>Add files…</button>
+  <p class="disabled-note" id="attach-disabled" hidden></p>
+
   <div class="actions">
     <button id="publish" class="primary" type="button">Publish</button>
     <button id="cancel" class="secondary" type="button">Cancel</button>
@@ -160,6 +205,7 @@ function renderHtml(model: PublishDialogModel): string {
 <script nonce="${nonce}">
   const vscodeApi = acquireVsCodeApi();
   const searchable = ${model.jiraSearchAvailable ? "true" : "false"};
+  const attachModel = ${embedJson(attachModel)};
   const createFields = document.getElementById('create-fields');
   const appendFields = document.getElementById('append-fields');
   const projectInput = document.getElementById('project');
@@ -172,9 +218,72 @@ function renderHtml(model: PublishDialogModel): string {
   const errProject = document.getElementById('err-project');
   const errExecution = document.getElementById('err-execution');
   const execHint = document.getElementById('exec-hint');
+  const attachHint = document.getElementById('attach-hint');
+  const attachList = document.getElementById('attach-list');
+  const browseButton = document.getElementById('browse');
+  const attachDisabled = document.getElementById('attach-disabled');
   execHint.textContent = searchable
     ? 'Type a project key to search its Test Executions, or type an execution key directly.'
     : 'Type the execution key to append to. Add Jira access in Xray setup to search instead.';
+
+  function formatSize(bytes) {
+    if (bytes >= 1024 * 1024) { return (bytes / (1024 * 1024)).toFixed(1) + ' MB'; }
+    if (bytes >= 1024) { return Math.round(bytes / 1024) + ' KB'; }
+    return bytes + ' B';
+  }
+
+  const seenPaths = new Set();
+
+  function addAttachmentRow(file) {
+    if (seenPaths.has(file.path)) { return; }
+    seenPaths.add(file.path);
+    const over = file.size > attachModel.uploadLimitBytes;
+    const row = document.createElement('li');
+    row.className = 'attach-row';
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.className = 'attach-check';
+    check.checked = !over;
+    check.disabled = over;
+    check.dataset.path = file.path;
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = file.name;
+    const size = document.createElement('span');
+    size.className = 'size';
+    size.textContent = formatSize(file.size);
+    row.appendChild(check);
+    row.appendChild(name);
+    row.appendChild(size);
+    if (over) {
+      const warn = document.createElement('span');
+      warn.className = 'over';
+      warn.textContent = 'over limit';
+      row.appendChild(warn);
+    }
+    attachList.appendChild(row);
+  }
+
+  if (attachModel.available) {
+    attachHint.textContent = attachModel.hint;
+    browseButton.hidden = false;
+    for (const file of attachModel.suggestions) { addAttachmentRow(file); }
+    browseButton.addEventListener('click', function () { vscodeApi.postMessage({ type: 'browse' }); });
+  } else {
+    attachHint.hidden = true;
+    attachDisabled.hidden = false;
+    attachDisabled.textContent = attachModel.reason || 'Add Jira access in Xray setup to attach run-level files.';
+  }
+
+  function selectedAttachments() {
+    const paths = [];
+    if (attachModel.available) {
+      for (const cb of document.querySelectorAll('.attach-check')) {
+        if (cb.checked && !cb.disabled) { paths.push(cb.dataset.path); }
+      }
+    }
+    return paths;
+  }
 
   let token = 0;
   const timers = {};
@@ -227,6 +336,8 @@ function renderHtml(model: PublishDialogModel): string {
       const listEl = msg.kind === 'execution' ? execResults : planResults;
       if (listEl.__token !== msg.token) { return; }
       renderResults(listEl, msg.error ? [] : msg.items);
+    } else if (msg.type === 'browse-result') {
+      for (const file of msg.items) { addAttachmentRow(file); }
     }
   });
 
@@ -237,10 +348,11 @@ function renderHtml(model: PublishDialogModel): string {
   document.getElementById('publish').addEventListener('click', function () {
     errProject.textContent = '';
     errExecution.textContent = '';
+    const attachments = selectedAttachments();
     if (currentMode() === 'append') {
       const executionKey = execInput.value.trim();
       if (executionKey === '') { errExecution.textContent = 'Enter the execution key to append to.'; return; }
-      vscodeApi.postMessage({ type: 'confirm', request: { mode: 'append', executionKey: executionKey } });
+      vscodeApi.postMessage({ type: 'confirm', request: { mode: 'append', executionKey: executionKey }, attachments: attachments });
       return;
     }
     const project = projectInput.value.trim();
@@ -250,7 +362,7 @@ function renderHtml(model: PublishDialogModel): string {
     const plan = planInput.value.trim();
     if (plan !== '') { request.testPlanKey = plan; }
     if (environments.length > 0) { request.environments = environments; }
-    vscodeApi.postMessage({ type: 'confirm', request: request });
+    vscodeApi.postMessage({ type: 'confirm', request: request, attachments: attachments });
   });
 </script>
 </body>
@@ -258,8 +370,8 @@ function renderHtml(model: PublishDialogModel): string {
 }
 
 // The View 3 publish dialog. Reuses the setup-panel plumbing (CSP, theme-aware, nonce'd script, no
-// secrets → no MASK). Resolves to the user's `PublishRequest`, or `undefined` on cancel/close — the
-// flow makes zero transport calls for an undefined result.
+// secrets → no MASK). Resolves to the user's `PublishDialogResult` (request + kept attachments), or
+// `undefined` on cancel/close — the flow makes zero transport calls for an undefined result.
 export class PublishDialogPanel {
   private readonly disposables: vscode.Disposable[] = [];
   private searchController: AbortController | undefined;
@@ -268,7 +380,7 @@ export class PublishDialogPanel {
   private constructor(
     private readonly panel: vscode.WebviewPanel,
     private readonly delegate: PublishDialogDelegate,
-    private readonly resolve: (request: PublishRequest | undefined) => void
+    private readonly resolve: (result: PublishDialogResult | undefined) => void
   ) {
     this.disposables.push(
       this.panel.onDidDispose(() => this.finish(undefined)),
@@ -276,13 +388,13 @@ export class PublishDialogPanel {
     );
   }
 
-  public static show(model: PublishDialogModel, delegate: PublishDialogDelegate): Promise<PublishRequest | undefined> {
+  public static show(model: PublishDialogModel, delegate: PublishDialogDelegate): Promise<PublishDialogResult | undefined> {
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Publish run results", vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [],
     });
-    return new Promise<PublishRequest | undefined>((resolve) => {
+    return new Promise<PublishDialogResult | undefined>((resolve) => {
       const instance = new PublishDialogPanel(panel, delegate, resolve);
       instance.render(model);
     });
@@ -296,10 +408,20 @@ export class PublishDialogPanel {
     if (message.type === "cancel") {
       this.finish(undefined);
     } else if (message.type === "confirm") {
-      this.finish(message.request);
+      this.finish({ request: message.request, attachments: message.attachments });
     } else if (message.type === "search") {
       this.runSearch(message).catch(() => undefined);
+    } else if (message.type === "browse") {
+      this.runBrowse().catch(() => undefined);
     }
+  }
+
+  private async runBrowse(): Promise<void> {
+    const files = await this.delegate.browseFiles();
+    if (this.settled) {
+      return;
+    }
+    await this.post({ type: "browse-result", items: files.map((f) => ({ path: f.path, name: f.name, size: f.size })) });
   }
 
   private async runSearch(message: SearchMessage): Promise<void> {
@@ -333,13 +455,13 @@ export class PublishDialogPanel {
     await this.panel.webview.postMessage(message);
   }
 
-  private finish(request: PublishRequest | undefined): void {
+  private finish(result: PublishDialogResult | undefined): void {
     if (this.settled) {
       return;
     }
     this.settled = true;
     this.searchController?.abort();
-    this.resolve(request);
+    this.resolve(result);
     while (this.disposables.length > 0) {
       this.disposables.pop()?.dispose();
     }

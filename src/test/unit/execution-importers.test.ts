@@ -17,7 +17,10 @@ import type {
   RunArtifactOutcome,
   RunArtifactResult,
 } from "../../traceability/contracts";
+import type { EmbeddedEvidence } from "../../traceability/evidence-resolution";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
+
+const SHOT: EmbeddedEvidence = { filename: "shot.png", contentType: "image/png", data: "UE5H" };
 
 const CREATED_AT = Date.UTC(2026, 6, 22, 12, 0, 0);
 
@@ -375,6 +378,51 @@ describe("buildCucumberMultipartPayload", () => {
   });
 });
 
+// ---- Evidence embedding ----
+
+describe("evidence embedding", () => {
+  it("attaches Xray JSON evidence {data, filename, contentType} to the matching test only", () => {
+    const withEvidence = pub(ref("f", 1, "a"), "C-1");
+    const bare = pub(ref("f", 2, "b"), "C-2");
+    const payload = buildXrayJsonPayload({
+      artifact: refArtifact(),
+      results: [withEvidence, bare],
+      request: { mode: "append", executionKey: "X-1" },
+      evidenceFor: (result) => (result === withEvidence ? [SHOT] : []),
+    });
+    expect(payload.tests[0]!.evidence).toEqual([{ data: "UE5H", filename: "shot.png", contentType: "image/png" }]);
+    expect(payload.tests[1]!.evidence).toBeUndefined();
+  });
+
+  it("puts cucumber embeddings {data, mime_type} on the first failing step", () => {
+    const failing = pub(ref("features/x.feature", 3, "Boom"), "C-1", { outcome: "failed" });
+    const payload = buildCucumberMultipartPayload({
+      artifact: refArtifact(),
+      results: [failing],
+      request: CREATE_REQUEST,
+      resolveSteps: () => ({ steps: ["Given a", "When b", "Then c"] }),
+      evidenceFor: () => [SHOT],
+    });
+    const steps = payload.results[0]!.elements[0]!.steps;
+    expect(steps[0]!.embeddings).toEqual([{ data: "UE5H", mime_type: "image/png" }]);
+    expect(steps[1]!.embeddings).toBeUndefined();
+    expect(steps[2]!.embeddings).toBeUndefined();
+  });
+
+  it("falls back to the first step when a passing scenario carries evidence", () => {
+    const passing = pub(ref("features/x.feature", 3, "Ok"), "C-1", { outcome: "passed" });
+    const payload = buildCucumberMultipartPayload({
+      artifact: refArtifact(),
+      results: [passing],
+      request: CREATE_REQUEST,
+      resolveSteps: () => ({ steps: ["Given a", "When b"] }),
+      evidenceFor: () => [SHOT],
+    });
+    const steps = payload.results[0]!.elements[0]!.steps;
+    expect(steps[0]!.embeddings).toEqual([{ data: "UE5H", mime_type: "image/png" }]);
+  });
+});
+
 // ---- Importer.import() over a fake transport ----
 
 interface JsonCall {
@@ -557,7 +605,7 @@ describe("buildCucumberMultipartPayload uri", () => {
       results: [pub(ref("/home/me/proj/features/calc.feature", 3, "Add"), "C-1")],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
-      workspaceRoot: "/home/me/proj",
+      workspaceRootFor: () => "/home/me/proj",
     });
     expect(payload.results[0]!.uri).toBe("features/calc.feature");
   });
@@ -568,9 +616,23 @@ describe("buildCucumberMultipartPayload uri", () => {
       results: [pub(ref("/elsewhere/features/x.feature", 3, "Add"), "C-1")],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
-      workspaceRoot: "/home/me/proj",
+      workspaceRootFor: () => "/home/me/proj",
     });
     expect(payload.results[0]!.uri).toBe("/elsewhere/features/x.feature");
+  });
+
+  it("relativizes each feature against its own owning root in a multi-root batch", () => {
+    const payload = buildCucumberMultipartPayload({
+      artifact: refArtifact(),
+      results: [
+        pub(ref("/roots/a/features/calc.feature", 3, "Add"), "C-1"),
+        pub(ref("/roots/b/features/math.feature", 3, "Div"), "C-2"),
+      ],
+      request: CREATE_REQUEST,
+      resolveSteps: () => ({ steps: ["Given x"] }),
+      workspaceRootFor: (filePath) => (filePath.startsWith("/roots/a/") ? "/roots/a" : "/roots/b"),
+    });
+    expect(payload.results.map((f) => f.uri)).toEqual(["features/calc.feature", "features/math.feature"]);
   });
 
   it("forward-slashes but does not relativize when no workspaceRoot is supplied", () => {

@@ -5,6 +5,7 @@ import {
   LedgerEntry,
   PublishLedger,
   withLedgerEntry,
+  withUpdatedPending,
 } from "../../traceability/publish-ledger";
 import { Logger, LogLevel } from "../../utils/logger";
 
@@ -74,6 +75,23 @@ describe("findLedgerEntry", () => {
   });
 });
 
+describe("withUpdatedPending", () => {
+  const entries = [
+    entry({ artifactId: "run-1", site: "acme.atlassian.net", pendingAttachments: ["/a", "/b"] }),
+    entry({ artifactId: "run-1", site: "other.atlassian.net", pendingAttachments: ["/c"] }),
+  ];
+
+  it("replaces the matching entry's pending list, leaving other-site entries untouched", () => {
+    const updated = withUpdatedPending(entries, "run-1", "acme.atlassian.net", ["/b"]);
+    expect(updated[0]!.pendingAttachments).toEqual(["/b"]);
+    expect(updated[1]!.pendingAttachments).toEqual(["/c"]);
+  });
+
+  it("is a no-op when nothing matches", () => {
+    expect(withUpdatedPending(entries, "run-9", "acme.atlassian.net", [])).toEqual(entries);
+  });
+});
+
 describe("PublishLedger", () => {
   it("records, persists, and finds an entry", () => {
     const memento = fakeMemento();
@@ -101,5 +119,19 @@ describe("PublishLedger", () => {
     ]);
     const ledger = new PublishLedger(memento, logger);
     expect(ledger.entriesForSite("acme.atlassian.net").map((e) => e.artifactId)).toEqual(["a"]);
+  });
+
+  it("updates pending attachments and persists (resume/retry clears cleared files)", () => {
+    const memento = fakeMemento();
+    const ledger = new PublishLedger(memento, logger);
+    ledger.record(entry({ artifactId: "run-1", pendingAttachments: ["/a", "/b"] }));
+
+    ledger.setPendingAttachments("run-1", "acme.atlassian.net", ["/b"]);
+    expect(ledger.find("run-1", "acme.atlassian.net")?.pendingAttachments).toEqual(["/b"]);
+
+    ledger.setPendingAttachments("run-1", "acme.atlassian.net", []);
+    expect(ledger.find("run-1", "acme.atlassian.net")?.pendingAttachments).toEqual([]);
+    const persisted = memento.store.get("specwright.publishLedger") as LedgerEntry[];
+    expect(persisted[0]!.pendingAttachments).toEqual([]);
   });
 });

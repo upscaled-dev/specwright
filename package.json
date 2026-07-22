@@ -360,6 +360,27 @@
           "type": "string",
           "default": "",
           "description": "Jira project key (e.g. 'CALC') that prefills the Project field when publishing a new Test Execution. Create-time only — it never defines orphan sync scope, and appending to an existing execution derives its project from the execution key."
+        },
+        "playwrightBddRunner.xray.reportGlob": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "playwright-report/**",
+            "test-results/**/*.zip"
+          ],
+          "description": "Workspace globs used to suggest run-level report bundles to attach when publishing (e.g. the HTML report folder, trace zips). Discovered files appear as removable chips in the Publish dialog and upload to the execution's Jira issue after a successful import."
+        },
+        "playwrightBddRunner.xray.attachTo": {
+          "type": "string",
+          "enum": [
+            "evidence",
+            "issue",
+            "both"
+          ],
+          "default": "evidence",
+          "description": "Where per-test-run evidence (screenshots, traces, videos) is published: 'evidence' embeds it in the Xray result payload, 'issue' uploads it as attachments on the execution's Jira issue instead, 'both' does both. Run-level report bundles you pick always go to the Jira issue regardless of this setting."
         }
       }
     },

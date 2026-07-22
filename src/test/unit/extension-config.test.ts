@@ -67,6 +67,8 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   "xray.syncProjectKeys": (c) => c.xraySyncProjectKeys,
   "xray.cacheTtlMinutes": (c) => c.xrayCacheTtlMinutes,
   "xray.defaultProjectKey": (c) => c.xrayDefaultProjectKey,
+  "xray.reportGlob": (c) => c.xrayReportGlob,
+  "xray.attachTo": (c) => c.xrayAttachTo,
 };
 
 describe("ExtensionConfig defaults vs package.json", () => {
@@ -140,6 +142,40 @@ describe("ExtensionConfig.validate", () => {
     expect(() =>
       ExtensionConfig.create(configReturning({ reporter: "list,tap" }), false).validate()
     ).toThrow(/reporter/);
+  });
+});
+
+describe("ExtensionConfig xray attachment settings", () => {
+  function configReturning(values: Record<string, unknown>): vscode.WorkspaceConfiguration {
+    return {
+      get: <T>(key: string, defaultValue?: T): T | undefined => (key in values ? (values[key] as T) : defaultValue),
+      update: (): Promise<void> => Promise.resolve(),
+      inspect: (key: string): { key: string } => ({ key }),
+    } as unknown as vscode.WorkspaceConfiguration;
+  }
+
+  it("keeps a valid reportGlob and attachTo", () => {
+    const config = ExtensionConfig.create(
+      configReturning({ "xray.reportGlob": ["reports/**"], "xray.attachTo": "both" }),
+      false
+    );
+    expect(config.xrayReportGlob).toEqual(["reports/**"]);
+    expect(config.xrayAttachTo).toBe("both");
+  });
+
+  it("falls back to the default reportGlob for a non-array or all-empty value", () => {
+    const dflt = ["playwright-report/**", "test-results/**/*.zip"];
+    expect(ExtensionConfig.create(configReturning({ "xray.reportGlob": "nope" }), false).xrayReportGlob).toEqual(dflt);
+    expect(ExtensionConfig.create(configReturning({ "xray.reportGlob": ["", "  "] }), false).xrayReportGlob).toEqual(dflt);
+  });
+
+  it("drops non-string reportGlob entries", () => {
+    const config = ExtensionConfig.create(configReturning({ "xray.reportGlob": ["ok/**", 42, null] }), false);
+    expect(config.xrayReportGlob).toEqual(["ok/**"]);
+  });
+
+  it("falls back to 'evidence' for an unknown attachTo value", () => {
+    expect(ExtensionConfig.create(configReturning({ "xray.attachTo": "elsewhere" }), false).xrayAttachTo).toBe("evidence");
   });
 });
 

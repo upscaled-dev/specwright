@@ -87,6 +87,7 @@ export function createXrayAdapterFactory(
         jiraCredentials: () => credentialStore.getJiraCredentials(ctx.config.xraySiteUrl),
         resolveSteps: publishSupport.resolveSteps,
         workspaceRootFor: publishSupport.workspaceRootFor,
+        attachTo: () => ctx.config.xrayAttachTo,
         logger: ctx.logger,
       });
       // The capability implements both metadata and remote search over the same client/state, so it

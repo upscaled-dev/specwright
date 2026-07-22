@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import * as vscode from "vscode";
 import { PublishDialogDelegate, PublishDialogPanel } from "../../traceability/publish-dialog-panel";
-import { PublishDialogModel } from "../../traceability/publish-flow";
+import { AttachmentSuggestion, PublishAttachmentsModel, PublishDialogModel } from "../../traceability/publish-flow";
 import { PublishRequest, PublishTarget } from "../../traceability/contracts";
 
 // The panel drives the real `vscode.window.createWebviewPanel` stub (src/test/__mocks__/vscode.ts):
@@ -24,6 +24,10 @@ const win = vscode.window as unknown as {
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
+function attachmentsModel(over: Partial<PublishAttachmentsModel> = {}): PublishAttachmentsModel {
+  return { available: true, suggestions: [], uploadLimitBytes: 5 * 1024 * 1024, evidenceStream: "evidence", ...over };
+}
+
 function makeModel(overrides: Partial<PublishDialogModel> = {}): PublishDialogModel {
   return {
     title: "Publish run results",
@@ -31,6 +35,7 @@ function makeModel(overrides: Partial<PublishDialogModel> = {}): PublishDialogMo
     defaultProjectKey: "CALC",
     defaultSummary: "Local run 2026-07-22 (3 results)",
     jiraSearchAvailable: true,
+    attachments: attachmentsModel(),
     ...overrides,
   };
 }
@@ -45,15 +50,27 @@ interface DeferredCall {
 
 // A delegate whose searchTargets never settles on its own — the test drives each call's resolution,
 // letting it exercise superseded/aborted responses. `calls` is also the transport-call ledger.
-function deferredDelegate(): { delegate: PublishDialogDelegate; calls: DeferredCall[] } {
+// `browseFiles` returns whatever `browseResult` is set to (default: nothing picked).
+function deferredDelegate(): { delegate: PublishDialogDelegate; calls: DeferredCall[]; browseResult: AttachmentSuggestion[] } {
   const calls: DeferredCall[] = [];
+  const state = { browseResult: [] as AttachmentSuggestion[] };
   const delegate: PublishDialogDelegate = {
     searchTargets: (kind, query, signal) =>
       new Promise<readonly PublishTarget[]>((resolve, reject) => {
         calls.push({ kind, query, signal, resolve, reject });
       }),
+    browseFiles: () => Promise.resolve(state.browseResult),
   };
-  return { delegate, calls };
+  return {
+    delegate,
+    calls,
+    get browseResult() {
+      return state.browseResult;
+    },
+    set browseResult(files: AttachmentSuggestion[]) {
+      state.browseResult = files;
+    },
+  };
 }
 
 function target(key: string, label: string): PublishTarget {
@@ -88,7 +105,7 @@ describe("PublishDialogPanel", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("resolves the confirmed PublishRequest untouched", async () => {
+  it("resolves the confirmed PublishRequest with its picked attachments untouched", async () => {
     const { delegate } = deferredDelegate();
     const request: PublishRequest = {
       mode: "create-new",
@@ -100,9 +117,9 @@ describe("PublishDialogPanel", () => {
     const promise = PublishDialogPanel.show(makeModel(), delegate);
     const panel = win.__webviewPanels[0]!;
 
-    await panel.__receive({ type: "confirm", request });
+    await panel.__receive({ type: "confirm", request, attachments: ["/ws/playwright-report/index.html"] });
 
-    await expect(promise).resolves.toEqual(request);
+    await expect(promise).resolves.toEqual({ request, attachments: ["/ws/playwright-report/index.html"] });
   });
 
   it("guards double resolution: a dispose after a confirm neither re-resolves nor throws", async () => {
@@ -111,11 +128,11 @@ describe("PublishDialogPanel", () => {
     const promise = PublishDialogPanel.show(makeModel(), delegate);
     const panel = win.__webviewPanels[0]!;
 
-    await panel.__receive({ type: "confirm", request });
-    expect(await promise).toEqual(request);
+    await panel.__receive({ type: "confirm", request, attachments: [] });
+    expect(await promise).toEqual({ request, attachments: [] });
 
     expect(() => panel.dispose()).not.toThrow();
-    await expect(promise).resolves.toEqual(request);
+    await expect(promise).resolves.toEqual({ request, attachments: [] });
   });
 
   it("guards double resolution: a message arriving after the panel settled is dropped", async () => {
@@ -127,7 +144,7 @@ describe("PublishDialogPanel", () => {
     await expect(promise).resolves.toBeUndefined();
 
     // A late confirm must not flip the already-resolved undefined into a request.
-    await panel.__receive({ type: "confirm", request: { mode: "append", executionKey: "LATE-1" } });
+    await panel.__receive({ type: "confirm", request: { mode: "append", executionKey: "LATE-1" }, attachments: [] });
     await expect(promise).resolves.toBeUndefined();
   });
 
@@ -182,13 +199,54 @@ describe("PublishDialogPanel", () => {
     await panel.__receive({ type: "search", token: 1, kind: "test-plan", query: "CALC" });
     expect(calls).toHaveLength(1);
 
-    await panel.__receive({ type: "confirm", request });
-    await expect(promise).resolves.toEqual(request);
+    await panel.__receive({ type: "confirm", request, attachments: [] });
+    await expect(promise).resolves.toEqual({ request, attachments: [] });
 
     // finish() aborted the in-flight search's controller, so a late resolution posts nothing.
     calls[0]!.resolve([target("PLAN-1", "Some plan")]);
     await flush();
 
     expect(panel.webview.__posted).toHaveLength(0);
+  });
+
+  it("calls the browse seam on a browse message and posts the picked files back", async () => {
+    const rig = deferredDelegate();
+    rig.browseResult = [{ path: "/ws/trace.zip", name: "trace.zip", size: 2048 }];
+    const promise = PublishDialogPanel.show(makeModel(), rig.delegate);
+    const panel = win.__webviewPanels[0]!;
+
+    await panel.__receive({ type: "browse" });
+    await flush();
+
+    const posted = panel.webview.__posted as Array<{ type: string; items: unknown }>;
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toEqual({
+      type: "browse-result",
+      items: [{ path: "/ws/trace.zip", name: "trace.zip", size: 2048 }],
+    });
+
+    panel.dispose();
+    await promise;
+  });
+
+  it("renders the disabled attachments reason and the evidence-stream wording into the html", async () => {
+    const rig = deferredDelegate();
+    const model = makeModel({
+      attachments: {
+        available: false,
+        reason: "Add Jira access in Xray setup to attach files.",
+        suggestions: [],
+        uploadLimitBytes: 5 * 1024 * 1024,
+        evidenceStream: "issue",
+      },
+    });
+    const promise = PublishDialogPanel.show(model, rig.delegate);
+    const panel = win.__webviewPanels[0]!;
+
+    expect(panel.webview.html).toContain("Add Jira access in Xray setup to attach files.");
+    expect(panel.webview.html).toContain("uploads to the execution's Jira issue");
+
+    panel.dispose();
+    await promise;
   });
 });

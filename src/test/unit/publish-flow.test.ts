@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
-import { PublishDialogModel, PublishFlowDeps, runPublishFlow } from "../../traceability/publish-flow";
+import {
+  PublishAttachmentsModel,
+  PublishDialogModel,
+  PublishDialogResult,
+  PublishFlowDeps,
+  runPublishFlow,
+} from "../../traceability/publish-flow";
 import { LedgerEntry } from "../../traceability/publish-ledger";
 import {
   BatchSelection,
@@ -49,6 +55,18 @@ function spyPublishing(outcome: PublishOutcome = OUTCOME): {
 
 const CREATE_REQUEST: PublishRequest = { mode: "create-new", project: "CALC", summary: "s" };
 
+const ATTACHMENTS_MODEL: PublishAttachmentsModel = {
+  available: false,
+  suggestions: [],
+  uploadLimitBytes: 5 * 1024 * 1024,
+  evidenceStream: "evidence",
+};
+
+// Wrap a bare request as the dialog's confirmed result (no run-level attachments picked by default).
+function dialogResult(request: PublishRequest, attachments: readonly string[] = []): PublishDialogResult {
+  return { request, attachments };
+}
+
 function deps(over: Partial<PublishFlowDeps> = {}): PublishFlowDeps {
   const publishing = over.publishing ?? spyPublishing().capability;
   return {
@@ -56,12 +74,17 @@ function deps(over: Partial<PublishFlowDeps> = {}): PublishFlowDeps {
     changedSinceRun: () => 0,
     defaultProjectKey: "",
     jiraSearchAvailable: false,
+    attachments: () => Promise.resolve(ATTACHMENTS_MODEL),
     priorEntry: undefined,
-    presentDialog: vi.fn<(m: PublishDialogModel) => Promise<PublishRequest | undefined>>(() => Promise.resolve(undefined)),
+    presentDialog: vi.fn<(m: PublishDialogModel) => Promise<PublishDialogResult | undefined>>(() =>
+      Promise.resolve(undefined)
+    ),
     confirmRepublish: vi.fn(() => Promise.resolve(true)),
+    attachFiles: vi.fn(() => Promise.resolve({ failed: [] })),
     recordPublish: vi.fn(),
     reportBlocked: vi.fn(),
     reportSuccess: vi.fn(),
+    reportPartialAttachments: vi.fn(),
     reportFailure: vi.fn(),
     site: "acme.atlassian.net",
     account: "client-1",
@@ -100,6 +123,25 @@ describe("runPublishFlow — gating", () => {
     expect(presentDialog).not.toHaveBeenCalled();
     expect(publishing.publish).not.toHaveBeenCalled();
   });
+
+  it("never builds the attachments model (nor its attachment/meta probe) for a blocked run", async () => {
+    const attachmentsSpy = vi.fn(() => Promise.resolve(ATTACHMENTS_MODEL));
+    const presentDialog = vi.fn(() => Promise.resolve(undefined));
+    // A cancelled run is blocked before the dialog; the lazy attachments build must not fire.
+    await runPublishFlow(artifact("cancelled", [mapped("a", "CALC-1")]), deps({ attachments: attachmentsSpy, presentDialog }));
+    // The empty publishable set is also blocked pre-dialog.
+    await runPublishFlow(artifact("complete", [result("a")]), deps({ attachments: attachmentsSpy, presentDialog }));
+    expect(attachmentsSpy).not.toHaveBeenCalled();
+    expect(presentDialog).not.toHaveBeenCalled();
+  });
+
+  it("builds the attachments model exactly once, only when the dialog opens", async () => {
+    const attachmentsSpy = vi.fn(() => Promise.resolve(ATTACHMENTS_MODEL));
+    const presentDialog = vi.fn(() => Promise.resolve(undefined));
+    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), deps({ attachments: attachmentsSpy, presentDialog }));
+    expect(attachmentsSpy).toHaveBeenCalledTimes(1);
+    expect(presentDialog).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("runPublishFlow — cancelled/closed dialog", () => {
@@ -125,7 +167,7 @@ describe("runPublishFlow — publish", () => {
     const run = artifact("complete", [mapped("a", "CALC-1")]);
     const d = deps({
       publishing: publishing.capability,
-      presentDialog: vi.fn(() => Promise.resolve(CREATE_REQUEST)),
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
     });
 
     await runPublishFlow(run, d);
@@ -142,14 +184,16 @@ describe("runPublishFlow — publish", () => {
       publishedAt: 1_700_000_000_000,
       pendingAttachments: [],
     });
-    expect(d.reportSuccess).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST);
+    // No attachments picked and none issue-routed → attachedCount 0, no upload attempted.
+    expect(d.attachFiles).not.toHaveBeenCalled();
+    expect(d.reportSuccess).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 0);
   });
 
   it("reports failure and records nothing when the import rejects", async () => {
     const publish = vi.fn(() => Promise.reject(new Error("HTTP 400: no results")));
     const d = deps({
       publishing: { publish, searchTargets: vi.fn(() => Promise.resolve([])) },
-      presentDialog: vi.fn(() => Promise.resolve(CREATE_REQUEST)),
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
     });
 
     await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
@@ -204,6 +248,106 @@ describe("runPublishFlow — dialog model", () => {
   });
 });
 
+describe("runPublishFlow — attachments", () => {
+  it("uploads run-level picks after a successful import and reports the attached count", async () => {
+    const publishing = spyPublishing();
+    const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
+    const d = deps({
+      publishing: publishing.capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
+      attachFiles,
+    });
+
+    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+
+    expect(publishing.publish).toHaveBeenCalledTimes(1);
+    // Upload runs AFTER the import, keyed off the created execution.
+    expect(attachFiles).toHaveBeenCalledWith("XNP-100", ["/ws/report.zip"]);
+    expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ pendingAttachments: [] }));
+    expect(d.reportSuccess).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 1);
+    expect(d.reportPartialAttachments).not.toHaveBeenCalled();
+  });
+
+  it("merges issue-routed evidence files from the outcome with the dialog's run-level picks", async () => {
+    const outcome: PublishOutcome = { ...OUTCOME, issueEvidenceFiles: ["/ws/test-results/shot.png"] };
+    const publishing = spyPublishing(outcome);
+    const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
+    const d = deps({
+      publishing: publishing.capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
+      attachFiles,
+    });
+
+    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+
+    expect(attachFiles).toHaveBeenCalledWith("XNP-100", ["/ws/report.zip", "/ws/test-results/shot.png"]);
+  });
+
+  it("dedupes an overlapping run-level pick and issue-routed evidence file (uploads once)", async () => {
+    const shared = "/ws/test-results/shot.png";
+    const outcome: PublishOutcome = { ...OUTCOME, issueEvidenceFiles: [shared] };
+    const publishing = spyPublishing(outcome);
+    const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
+    const d = deps({
+      publishing: publishing.capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip", shared]))),
+      attachFiles,
+    });
+
+    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+
+    expect(attachFiles).toHaveBeenCalledWith("XNP-100", ["/ws/report.zip", shared]);
+    expect(d.reportSuccess).toHaveBeenCalledWith(outcome, CREATE_REQUEST, 2);
+  });
+
+  it("records failed uploads as pendingAttachments and reports a partial (never rolls back the import)", async () => {
+    const publishing = spyPublishing();
+    const attachFiles = vi.fn(() => Promise.resolve({ failed: ["/ws/report.zip"] }));
+    const d = deps({
+      publishing: publishing.capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip", "/ws/trace.zip"]))),
+      attachFiles,
+    });
+
+    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+
+    // The import stands — recordPublish still fires, carrying the pending files.
+    expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ pendingAttachments: ["/ws/report.zip"] }));
+    expect(d.reportPartialAttachments).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 1, ["/ws/report.zip"]);
+    expect(d.reportSuccess).not.toHaveBeenCalled();
+  });
+
+  it("treats a thrown attach routine as every file pending (import already landed)", async () => {
+    const publishing = spyPublishing();
+    const attachFiles = vi.fn(() => Promise.reject(new Error("Jira down")));
+    const d = deps({
+      publishing: publishing.capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/a.zip", "/ws/b.zip"]))),
+      attachFiles,
+    });
+
+    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+
+    expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ pendingAttachments: ["/ws/a.zip", "/ws/b.zip"] }));
+    expect(d.reportPartialAttachments).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 0, ["/ws/a.zip", "/ws/b.zip"]);
+  });
+
+  it("skips the upload entirely when there are no files (no attach call)", async () => {
+    const publishing = spyPublishing();
+    const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
+    const d = deps({
+      publishing: publishing.capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
+      attachFiles,
+    });
+
+    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+
+    expect(attachFiles).not.toHaveBeenCalled();
+    expect(d.reportSuccess).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 0);
+  });
+});
+
 describe("runPublishFlow — idempotency re-confirm", () => {
   const priorEntry: LedgerEntry = {
     artifactId: "run-1",
@@ -233,7 +377,7 @@ describe("runPublishFlow — idempotency re-confirm", () => {
     const d = deps({
       publishing: publishing.capability,
       priorEntry,
-      presentDialog: vi.fn(() => Promise.resolve(CREATE_REQUEST)),
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
       confirmRepublish,
     });
 
@@ -249,7 +393,7 @@ describe("runPublishFlow — idempotency re-confirm", () => {
     const d = deps({
       publishing: publishing.capability,
       priorEntry,
-      presentDialog: vi.fn(() => Promise.resolve(CREATE_REQUEST)),
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
       confirmRepublish: vi.fn(() => Promise.resolve(true)),
     });
 
