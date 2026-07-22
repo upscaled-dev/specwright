@@ -21,6 +21,8 @@ import {
   PreflightDecision,
   PreflightItem,
   PreflightState,
+  PublishOutcome,
+  PublishRequest,
   RemoteSearchCapability,
   RunArtifact,
   SyncScope,
@@ -28,7 +30,13 @@ import {
 } from "../traceability/contracts";
 import { BatchInvocation, resolveBatchSelection } from "../traceability/batch-selection";
 import { PreflightChoice, runPreflightFlow } from "../traceability/preflight-flow";
-import { PublishStubModal, runPublishStub, summarizeArtifact } from "../traceability/publish-stub";
+import { summarizeArtifact } from "../traceability/publish-core";
+import { runPublishFlow } from "../traceability/publish-flow";
+import { PublishDialogPanel } from "../traceability/publish-dialog-panel";
+import { LedgerEntry, PublishLedger } from "../traceability/publish-ledger";
+import { makeFeatureStepResolver } from "../xray/feature-step-resolver";
+import { XrayImportError } from "../xray/execution-importers";
+import { normalizeSiteUrl } from "../xray/xray-adapter";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
 
 const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
@@ -107,6 +115,7 @@ export class CommandManager {
   private xrayProbe: XrayProbe | undefined;
   private xrayConnectionCommands: XrayConnectionCommands | undefined;
   private traceabilitySubsystem: TraceabilitySubsystem | undefined;
+  private publishLedger: PublishLedger | undefined;
   private syncInFlight: Promise<void> | undefined;
 
   public static create(context: PlaywrightBddExtensionContext): CommandManager {
@@ -141,6 +150,10 @@ export class CommandManager {
 
   public setTraceabilitySubsystem(subsystem: TraceabilitySubsystem): void {
     this.traceabilitySubsystem = subsystem;
+  }
+
+  public setPublishLedger(ledger: PublishLedger): void {
+    this.publishLedger = ledger;
   }
 
   /**
@@ -701,11 +714,10 @@ export class CommandManager {
     });
   }
 
-  // Run Locally and Publish… — the P2 preflight batch flow. Resolves the scope, classifies every
+  // Run Locally and Publish… — the preflight batch flow. Resolves the scope, classifies every
   // scenario against the snapshot, collects an explicit decision for each flagged one, then runs the
-  // batch locally, seals one artifact carrying those decisions, and hands it to the publish stub.
-  // Publishing itself is a P3 write path (the stub performs no remote write). A scenario/link node
-  // scopes the batch to that scenario; otherwise the whole mapped set.
+  // batch locally, seals one artifact carrying those decisions, and hands it to the publish flow. A
+  // scenario/link node scopes the batch to that scenario; otherwise the whole mapped set.
   public async runAndPublish(...args: CommandArguments): Promise<void> {
     const subsystem = this.traceabilitySubsystem;
     const snapshot = subsystem?.getSnapshot();
@@ -741,15 +753,15 @@ export class CommandManager {
       vscode.window.showInformationMessage("Preflight cancelled — nothing was run.");
       return;
     }
-    // Hand the sealed artifact to the P2 publish stub. A cancelled or partial batch is gated there —
-    // it never renders the publishable modal, so an incomplete run can't be mistaken for one worth
-    // sending.
+    // A cancelled or partial batch is gated by the flow's `isPublishable` check — it reports the run
+    // as blocked rather than opening the dialog, so an incomplete run can't be mistaken for one worth
+    // publishing.
     if (sealed) {
-      await this.presentPublishStub(sealed);
+      await this.runPublish(sealed);
     }
   }
 
-  // Publish Last Run… — pick one of the recent sealed artifacts and hand it to the P2 publish stub.
+  // Publish Last Run… — pick one of the recent sealed artifacts and hand it to the publish flow.
   private async publishLastRun(): Promise<void> {
     const artifacts = this.context.runArtifactStore?.list() ?? [];
     if (artifacts.length === 0) {
@@ -766,28 +778,86 @@ export class CommandManager {
     });
     const picked = await vscode.window.showQuickPick(items, { placeHolder: "Select a run to publish" });
     if (!picked) {return;}
-    await this.presentPublishStub(picked.artifact);
+    await this.runPublish(picked.artifact);
   }
 
-  // Wire the transport-free publish stub to vscode UI: `publishing` is deliberately never passed, so
-  // the stub structurally cannot reach the remote write path in P2.
-  private async presentPublishStub(artifact: RunArtifact): Promise<void> {
-    await runPublishStub(artifact, {
-      presentModal: (modal) => this.showPublishModal(modal),
+  // Wire the vscode-free publish flow to the UI: the View 3 webview dialog, the idempotency
+  // re-confirm modal, the success/failure toasts, and the persistent ledger. Nothing here runs a
+  // remote test — the flow's only write is the capability's single import POST.
+  private async runPublish(artifact: RunArtifact): Promise<void> {
+    const publishing = this.traceabilitySubsystem?.getActiveAdapter()?.resultPublishing;
+    if (!publishing) {
+      vscode.window.showInformationMessage("Connect to your test tracker before publishing.");
+      return;
+    }
+    const rawSite = this.context.config.xraySiteUrl;
+    const site = normalizeSiteUrl(rawSite);
+    const credentials = await this.credentialStore?.getCredentials(rawSite);
+    const jiraSearchAvailable = (await this.credentialStore?.hasJiraCredentials(rawSite)) ?? false;
+    const resolveSteps = makeFeatureStepResolver(this.context.featureParser);
+    await runPublishFlow(artifact, {
+      publishing,
+      changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
+      defaultProjectKey: this.context.config.xrayDefaultProjectKey,
+      jiraSearchAvailable,
+      priorEntry: this.publishLedger?.find(artifact.id, site),
+      presentDialog: (model) =>
+        PublishDialogPanel.show(model, {
+          searchTargets: (kind, query, signal) => publishing.searchTargets(kind, query, signal),
+        }),
+      confirmRepublish: (entry) => this.confirmRepublish(entry),
+      recordPublish: (entry) => this.publishLedger?.record(entry),
       reportBlocked: (reason) => {
         vscode.window.showWarningMessage(reason);
       },
+      reportSuccess: (outcome, request) => this.reportPublishSuccess(outcome, request),
+      reportFailure: (error) => this.reportPublishFailure(error),
+      site,
+      account: credentials?.clientId ?? "",
+      now: () => Date.now(),
     });
   }
 
-  private showPublishModal(modal: PublishStubModal): Promise<string | undefined> {
-    return Promise.resolve(
-      vscode.window.showInformationMessage(
-        modal.title,
-        { modal: true, detail: `${modal.summary}\n\n${modal.notice}` },
-        ...modal.options
-      )
+  private async confirmRepublish(entry: LedgerEntry): Promise<boolean> {
+    const when = new Date(entry.publishedAt).toLocaleString();
+    const choice = await vscode.window.showWarningMessage(
+      `This run was already published to ${entry.executionRef} on ${when}. Publish a duplicate?`,
+      { modal: true },
+      "Publish again"
     );
+    return choice === "Publish again";
+  }
+
+  private reportPublishSuccess(outcome: PublishOutcome, request: PublishRequest): void {
+    const base =
+      request.mode === "create-new"
+        ? `${outcome.ref.key} created — ${outcome.imported} results imported`
+        : `appended to ${outcome.ref.key} — ${outcome.imported} results`;
+    const message = outcome.warnings.length > 0 ? `${base} · ${outcome.warnings.join(" ")}` : base;
+    const adapter = this.traceabilitySubsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
+    const url = adapter.browseUrl(outcome.ref);
+    const buttons = url ? ["Open in Jira"] : [];
+    Promise.resolve(vscode.window.showInformationMessage(message, ...buttons))
+      .then((choice) => {
+        if (choice === "Open in Jira" && url) {
+          return vscode.env.openExternal(vscode.Uri.parse(url));
+        }
+        return undefined;
+      })
+      .catch(() => undefined);
+  }
+
+  // The server error message goes to the toast verbatim (UI is not a log); the output channel keeps
+  // the allowlist (status only — never the request body or the server message text).
+  private reportPublishFailure(error: unknown): void {
+    if (error instanceof XrayImportError) {
+      this.logger.error("Publish failed", { status: error.status });
+      vscode.window.showErrorMessage(`Publish failed: ${error.serverMessage ?? `HTTP ${error.status}`}`);
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    this.logger.error("Publish failed");
+    vscode.window.showErrorMessage(`Publish failed: ${message}`);
   }
 
   // The quick-pick preflight surface (no webview in P2). Batch-level actions assign an explicit

@@ -1038,7 +1038,10 @@ describe("connection-probe single-flight across production seams", () => {
       probeXrayConnection
     );
     const config = configWith({ "xray.siteUrl": site, "xray.apiRegion": "global" });
-    const adapter = createXrayAdapterFactory(store, probe, fakeMemento()).create({
+    const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), {
+      resolveSteps: () => undefined,
+      workspaceRootFor: () => undefined,
+    }).create({
       config,
       logger: silentLogger(),
     });

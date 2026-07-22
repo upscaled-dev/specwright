@@ -1,13 +1,22 @@
 import type { Memento } from "vscode";
 import { ConnectionVerifyResult } from "../traceability/contracts";
 import { TraceabilityAdapterFactory } from "../traceability/adapter-registry";
-import { canonicalizeXrayKey, XrayAdapter } from "./xray-adapter";
+import { canonicalizeXrayKey, normalizeSiteUrl, XrayAdapter } from "./xray-adapter";
 import { XrayClient } from "./xray-client";
 import { XrayMetadataCapability } from "./xray-metadata";
 import { currentWorkspaceId, XrayMetadataCache } from "./xray-metadata-cache";
 import { parseXrayRegion, xrayBaseUrl } from "./xray-region";
 import { XrayCredentialStore } from "./xray-credential-store";
 import type { XrayConnectionOutcome, XrayProbe } from "./xray-connection-test";
+import { StepResolver } from "./execution-importers";
+import { createXrayResultPublishing } from "./xray-result-publishing";
+
+// The extension-side wiring the publish capability's create path needs: resolve a scenario's current
+// step text (FeatureParser) and the owning workspace root for the cucumber `uri` relativization.
+export interface XrayPublishSupport {
+  resolveSteps: StepResolver;
+  workspaceRootFor: (filePath: string) => string | undefined;
+}
 
 // An auth-only probe can only land in the ok/auth/network stages: ok is a verified handshake,
 // network means the site was unreachable, and every other stage is an authentication failure.
@@ -30,7 +39,8 @@ function toVerifyResult(outcome: XrayConnectionOutcome): ConnectionVerifyResult 
 export function createXrayAdapterFactory(
   credentialStore: XrayCredentialStore,
   probe: XrayProbe,
-  memento: Memento
+  memento: Memento,
+  publishSupport: XrayPublishSupport
 ): TraceabilityAdapterFactory {
   return {
     id: "xray",
@@ -71,10 +81,18 @@ export function createXrayAdapterFactory(
         onCredentialsChange: credentialStore.onDidChange,
         canonicalizeKey: canonicalizeXrayKey,
       });
+      const resultPublishing = createXrayResultPublishing({
+        transport: client,
+        site: () => normalizeSiteUrl(ctx.config.xraySiteUrl),
+        jiraCredentials: () => credentialStore.getJiraCredentials(ctx.config.xraySiteUrl),
+        resolveSteps: publishSupport.resolveSteps,
+        workspaceRootFor: publishSupport.workspaceRootFor,
+        logger: ctx.logger,
+      });
       // The capability implements both metadata and remote search over the same client/state, so it
       // fills both adapter slots — the linkScenario picker's remote-search section is thereby gated on
       // the live (synced) adapter, never the browse-only instance.
-      return new XrayAdapter(ctx.config, credentialStore, verify, metadata, metadata);
+      return new XrayAdapter(ctx.config, credentialStore, verify, metadata, metadata, resultPublishing);
     },
   };
 }

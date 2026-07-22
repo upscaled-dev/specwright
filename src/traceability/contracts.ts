@@ -196,14 +196,33 @@ export interface RunArtifactStore {
   append(artifact: RunArtifact): void;
 }
 
+// A remote container a batch can publish into: an existing Test Execution to append to, or a Test
+// Plan to associate a new execution with. `ref` carries the canonical key for browse links.
 export interface PublishTarget {
   readonly id: string;
   readonly label: string;
+  readonly ref: ExternalRef;
 }
 
-export interface PublishResult {
-  readonly targetId: string;
-  readonly ref?: ExecutionRef | undefined;
+// The user's resolved publish choice. Create-new drives the Cucumber multipart importer (project +
+// summary + optional plan/environments); append drives the Xray JSON importer (top-level execution
+// key, project derived from it). Always asked — never a remembered key (§2).
+export type PublishRequest =
+  | {
+      readonly mode: "create-new";
+      readonly project: string;
+      readonly summary: string;
+      readonly testPlanKey?: string | undefined;
+      readonly environments?: readonly string[] | undefined;
+    }
+  | { readonly mode: "append"; readonly executionKey: string };
+
+// The result of a successful publish: the created/appended execution, how many results the import
+// carried, and any honest notes (e.g. scenarios dropped because their source changed since the run).
+export interface PublishOutcome {
+  readonly ref: ExecutionRef;
+  readonly imported: number;
+  readonly warnings: readonly string[];
 }
 
 export type ConnectionVerifyStatus = "ok" | "auth-failed" | "unreachable";
@@ -274,8 +293,20 @@ export interface RemoteSearchCapability {
 }
 
 export interface ResultPublishingCapability {
-  listTargets(signal?: AbortSignal): Promise<readonly PublishTarget[]>;
-  publish(artifact: RunArtifact, target: PublishTarget): Promise<PublishResult>;
+  // Search the tracker for existing containers — executions to append to, test plans to associate a
+  // new execution with. Requires provider credentials for the query API; rejects with a
+  // `NotSupportedError` when they are absent, and the dialog falls back to a plain key input (the
+  // import response is then the only validator).
+  searchTargets(
+    kind: "execution" | "test-plan",
+    query: string,
+    signal?: AbortSignal
+  ): Promise<readonly PublishTarget[]>;
+  // One batch → one execution: create-new imports via the create path, append via the append path.
+  // The reconcile filter (`publishableResults`) runs INSIDE — a result being present in the artifact
+  // is not consent to publish it. Deferred creation: this single call creates the execution WITH its
+  // results; it never invokes a remote runner.
+  publish(artifact: RunArtifact, request: PublishRequest, signal?: AbortSignal): Promise<PublishOutcome>;
 }
 
 export interface AttachmentCapability {

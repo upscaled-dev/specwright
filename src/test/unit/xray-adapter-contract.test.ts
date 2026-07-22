@@ -130,7 +130,7 @@ function xrayHarness(): AdapterContractHarness {
       preflight: [],
       state: "complete",
     }),
-    publishTarget: { id: "EXEC-1", label: "Execution 1" },
+    publishRequest: { mode: "append", executionKey: "EXEC-1" },
   };
 }
 

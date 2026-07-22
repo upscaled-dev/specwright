@@ -53,7 +53,7 @@ function inMemoryHarness(): AdapterContractHarness {
       preflight: [],
       state: "complete",
     }),
-    publishTarget: { id: "EXEC-1", label: "Execution 1" },
+    publishRequest: { mode: "append", executionKey: "EXEC-1" },
   };
 }
 
@@ -87,11 +87,12 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
       preflight: [],
       state: "complete",
     };
-    await adapter.resultPublishing.publish(artifact, { id: "EXEC-9", label: "Nine" });
+    const outcome = await adapter.resultPublishing.publish(artifact, { mode: "append", executionKey: "EXEC-9" });
 
-    expect(adapter.publications).toEqual([{ artifact, targetId: "EXEC-9" }]);
-    const targets = await adapter.resultPublishing.listTargets();
-    expect(targets.map((t) => t.id)).toContain("EXEC-9");
+    expect(outcome.ref.key).toBe("EXEC-9");
+    expect(adapter.publications).toEqual([{ artifact, executionKey: "EXEC-9" }]);
+    const targets = await adapter.resultPublishing.searchTargets("execution", "");
+    expect(targets.map((t) => t.ref.key)).toContain("EXEC-9");
   });
 
   it("keeps last-known metadata but demotes completeness to unknown on a sync error", async () => {

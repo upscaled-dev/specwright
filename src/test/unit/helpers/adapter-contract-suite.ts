@@ -7,7 +7,7 @@ import {
 } from "../../../traceability/traceability-model";
 import { extractKeys } from "../../../traceability/tag-extraction";
 import {
-  PublishTarget,
+  PublishRequest,
   RunArtifact,
   SyncScope,
   TestCaseMetadata,
@@ -36,7 +36,7 @@ export interface AdapterContractHarness {
   // A catalogue key with no local scenario (an orphan on a complete fetch).
   readonly orphanKey: string;
   makeArtifact(): RunArtifact;
-  readonly publishTarget: PublishTarget;
+  readonly publishRequest: PublishRequest;
 }
 
 function mappedFeature(harness: AdapterContractHarness): ParsedFeatureInput {
@@ -139,17 +139,18 @@ export function runAdapterContractTests(makeHarness: () => AdapterContractHarnes
     // Publishing is an optional capability (P3 for Xray); gate the test on its presence so an
     // adapter that has yet to implement it still runs the connection/metadata contract cleanly.
     const supportsPublishing = makeHarness().adapter.resultPublishing !== undefined;
-    (supportsPublishing ? it : it.skip)("records a published artifact and keeps its target listed", async () => {
+    (supportsPublishing ? it : it.skip)("publishes an artifact and returns a listed execution ref", async () => {
       const harness = makeHarness();
       await harness.connect();
       const publishing = harness.adapter.resultPublishing;
       expect(publishing).toBeDefined();
 
-      const result = await publishing!.publish(harness.makeArtifact(), harness.publishTarget);
-      expect(result.ref?.key).toBe(harness.publishTarget.id);
+      const outcome = await publishing!.publish(harness.makeArtifact(), harness.publishRequest);
+      expect(outcome.ref.kind).toBe("execution");
+      expect(outcome.ref.key).toBeTruthy();
 
-      const targets = await publishing!.listTargets();
-      expect(targets.some((t) => t.id === harness.publishTarget.id)).toBe(true);
+      const targets = await publishing!.searchTargets("execution", "");
+      expect(targets.some((t) => t.ref.key === outcome.ref.key)).toBe(true);
     });
   });
 }

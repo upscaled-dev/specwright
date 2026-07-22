@@ -9,6 +9,7 @@ import {
   MetadataCapability,
   NotSupportedError,
   RemoteSearchCapability,
+  ResultPublishingCapability,
   TestCaseMetadata,
   TraceabilityAdapter,
 } from "../traceability/contracts";
@@ -100,6 +101,7 @@ export class XrayAdapter implements TraceabilityAdapter {
   public readonly connection: ConnectionCapability | undefined;
   public readonly metadata: MetadataCapability | undefined;
   public readonly remoteSearch: RemoteSearchCapability | undefined;
+  public readonly resultPublishing: ResultPublishingCapability | undefined;
   // Offline classification is always available (no network); it degrades to `unknown` on a partial
   // snapshot. Even the browse-only adapter instance carries it harmlessly.
   public readonly automationBinding: AutomationBindingCapability = xrayAutomationBinding;
@@ -112,11 +114,13 @@ export class XrayAdapter implements TraceabilityAdapter {
     credentialStore?: XrayCredentialStore,
     verify?: () => Promise<ConnectionVerifyResult>,
     metadata?: MetadataCapability,
-    remoteSearch?: RemoteSearchCapability
+    remoteSearch?: RemoteSearchCapability,
+    resultPublishing?: ResultPublishingCapability
   ) {
     this.connection = credentialStore ? xrayConnection(config, credentialStore, verify) : undefined;
     this.metadata = metadata;
     this.remoteSearch = remoteSearch;
+    this.resultPublishing = resultPublishing;
   }
 
   public get keyGrammar(): KeyGrammar {

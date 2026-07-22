@@ -4,7 +4,8 @@ import {
   ExternalRef,
   KeyGrammar,
   MetadataCapability,
-  PublishResult,
+  PublishOutcome,
+  PublishRequest,
   PublishTarget,
   RemoteMetadataSnapshot,
   ResultPublishingCapability,
@@ -29,7 +30,7 @@ const IN_MEMORY_GRAMMAR: KeyGrammar = {
 
 export interface PublishRecord {
   readonly artifact: RunArtifact;
-  readonly targetId: string;
+  readonly executionKey: string;
 }
 
 export interface InMemoryFixture {
@@ -91,8 +92,8 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
       sync: (scope, signal) => this.sync(scope, signal),
     };
     this.resultPublishing = {
-      listTargets: () => Promise.resolve([...this.targets]),
-      publish: (artifact, target) => this.publish(artifact, target),
+      searchTargets: (_kind, query) => Promise.resolve(this.searchTargets(query)),
+      publish: (artifact, request) => this.publish(artifact, request),
     };
   }
 
@@ -172,12 +173,23 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
     return Promise.resolve();
   }
 
-  private publish(artifact: RunArtifact, target: PublishTarget): Promise<PublishResult> {
-    this._publications.push({ artifact, targetId: target.id });
-    if (!this.targets.some((existing) => existing.id === target.id)) {
-      this.targets = [...this.targets, target];
+  private searchTargets(query: string): PublishTarget[] {
+    const needle = query.trim().toLowerCase();
+    return needle === ""
+      ? [...this.targets]
+      : this.targets.filter((t) => t.id.toLowerCase().includes(needle) || t.label.toLowerCase().includes(needle));
+  }
+
+  // Deferred creation: append reuses the picked execution key, create derives a synthetic one from
+  // the project. Records the publication and keeps the target listed so a later search finds it.
+  private publish(artifact: RunArtifact, request: PublishRequest): Promise<PublishOutcome> {
+    const key = request.mode === "append" ? request.executionKey : `${request.project}-1`;
+    this._publications.push({ artifact, executionKey: key });
+    if (!this.targets.some((existing) => existing.ref.key === key)) {
+      this.targets = [...this.targets, { id: key, label: key, ref: { key } }];
     }
-    return Promise.resolve({ targetId: target.id, ref: { kind: "execution", key: target.id } });
+    const imported = artifact.results.filter((r) => r.testKey !== undefined).length;
+    return Promise.resolve({ ref: { kind: "execution", key }, imported, warnings: [] });
   }
 
   public dispose(): void {

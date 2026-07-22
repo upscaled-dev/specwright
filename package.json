@@ -355,6 +355,11 @@
           "type": "number",
           "default": 15,
           "description": "How long a synced Xray snapshot is considered fresh, in minutes. Past this the panel dims the data and marks it stale — display only; nothing is re-fetched until you run Sync again."
+        },
+        "playwrightBddRunner.xray.defaultProjectKey": {
+          "type": "string",
+          "default": "",
+          "description": "Jira project key (e.g. 'CALC') that prefills the Project field when publishing a new Test Execution. Create-time only — it never defines orphan sync scope, and appending to an existing execution derives its project from the execution key."
         }
       }
     },

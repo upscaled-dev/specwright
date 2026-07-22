@@ -66,6 +66,7 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   "xray.apiRegion": (c) => c.xrayApiRegion,
   "xray.syncProjectKeys": (c) => c.xraySyncProjectKeys,
   "xray.cacheTtlMinutes": (c) => c.xrayCacheTtlMinutes,
+  "xray.defaultProjectKey": (c) => c.xrayDefaultProjectKey,
 };
 
 describe("ExtensionConfig defaults vs package.json", () => {

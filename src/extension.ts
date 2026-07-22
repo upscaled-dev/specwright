@@ -16,7 +16,9 @@ import { RunResultStore } from "./traceability/run-result-store";
 import { RunArtifactStore } from "./traceability/run-artifact-store";
 import { TraceabilityAdapterRegistry } from "./traceability/adapter-registry";
 import { createInMemoryAdapterFactory } from "./traceability/in-memory-adapter";
-import { createXrayAdapterFactory } from "./xray/xray-adapter-factory";
+import { createXrayAdapterFactory, XrayPublishSupport } from "./xray/xray-adapter-factory";
+import { makeFeatureStepResolver } from "./xray/feature-step-resolver";
+import { PublishLedger } from "./traceability/publish-ledger";
 import { probeXrayConnection, type XrayConnectionTestDeps, type XrayProbeOptions } from "./xray/xray-connection-test";
 import { XrayCredentialStore } from "./xray/xray-credential-store";
 import { singleFlight } from "./utils/single-flight";
@@ -175,6 +177,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   // The publishable sibling of the badge store, fed at the same seams and persisted to
   // workspaceState so the last few runs survive a reload.
   const runArtifactStore = new RunArtifactStore(context.workspaceState, logger);
+  // The publish idempotency ledger (last few publishes, current-site scoped) — persisted alongside
+  // the artifacts so the "already published" banner survives a reload.
+  const publishLedger = new PublishLedger(context.workspaceState, logger);
   const traceabilityRegistry = new TraceabilityAdapterRegistry();
   // One credential-save event fans out into the subsystem's connection-refresh verify and the setup
   // panel's post-save verify; keyed by (site, authOnly), coincident identical probes share a single
@@ -184,7 +189,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       `${deps.site} ${options?.authOnly ? "auth" : "full"}`,
     probeXrayConnection
   );
-  const xrayFactory = createXrayAdapterFactory(credentialStore, probe, context.globalState);
+  const publishSupport: XrayPublishSupport = {
+    resolveSteps: makeFeatureStepResolver(featureParser),
+    workspaceRootFor: (filePath) => vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath,
+  };
+  const xrayFactory = createXrayAdapterFactory(credentialStore, probe, context.globalState, publishSupport);
   traceabilityRegistry.register(xrayFactory);
   // Not in the public settings enum — resolved only from a hand-typed `traceability.provider`
   // value so the contract-test adapter can be driven in a dev window.
@@ -262,6 +271,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandManager.setUsageIndexHost(providerRegistry);
     commandManager.setCredentialStore(credentialStore);
     commandManager.setXrayProbe(probe);
+    commandManager.setPublishLedger(publishLedger);
     commandManager.setTraceabilitySubsystem(traceabilitySubsystem);
 
     providerRegistry.applyCurrent();

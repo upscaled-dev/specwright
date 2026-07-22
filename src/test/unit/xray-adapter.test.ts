@@ -16,7 +16,13 @@ import type {
   XrayProbeOptions,
 } from "../../xray/xray-connection-test";
 import { NotSupportedError, TraceabilityAdapter } from "../../traceability/contracts";
+import { XrayPublishSupport } from "../../xray/xray-adapter-factory";
 import { Logger } from "../../utils/logger";
+
+const NOOP_PUBLISH_SUPPORT: XrayPublishSupport = {
+  resolveSteps: () => undefined,
+  workspaceRootFor: () => undefined,
+};
 
 function mapSecretStorage(): vscode.SecretStorage {
   const map = new Map<string, string>();
@@ -188,7 +194,7 @@ describe("createXrayAdapterFactory verify", () => {
       site: "new.atlassian.net",
       message: "Connected to new.atlassian.net",
     });
-    const adapter = createXrayAdapterFactory(store, probe, fakeMemento()).create({ config, logger: Logger.create() });
+    const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), NOOP_PUBLISH_SUPPORT).create({ config, logger: Logger.create() });
 
     // The site is read at verify time, not captured at create time.
     values["xray.siteUrl"] = "new.atlassian.net";
@@ -210,7 +216,7 @@ describe("createXrayAdapterFactory verify", () => {
       site: "acme.atlassian.net",
       message: "Could not reach Xray — check your network connection.",
     });
-    const adapter = createXrayAdapterFactory(store, probe, fakeMemento()).create({ config, logger: Logger.create() });
+    const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), NOOP_PUBLISH_SUPPORT).create({ config, logger: Logger.create() });
 
     expect(await adapter.connection!.verify!()).toEqual({
       status: "unreachable",
@@ -227,7 +233,7 @@ describe("createXrayAdapterFactory verify", () => {
       site: "acme.atlassian.net",
       message: "Authentication failed — check your client ID and secret.",
     });
-    const adapter = createXrayAdapterFactory(store, probe, fakeMemento()).create({ config, logger: Logger.create() });
+    const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), NOOP_PUBLISH_SUPPORT).create({ config, logger: Logger.create() });
 
     expect(await adapter.connection!.verify!()).toEqual({
       status: "auth-failed",

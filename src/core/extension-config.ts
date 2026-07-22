@@ -203,6 +203,10 @@ export class ExtensionConfig {
     return this.config.get<number>("xray.cacheTtlMinutes", 15);
   }
 
+  public get xrayDefaultProjectKey(): string {
+    return this.config.get<string>("xray.defaultProjectKey", "").trim();
+  }
+
   public validate(): void {
     const errors: string[] = [];
     if (!this.testFilePattern || this.testFilePattern.trim() === "") {

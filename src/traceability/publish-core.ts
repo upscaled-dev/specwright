@@ -1,6 +1,12 @@
 import { RunArtifact, RunArtifactOutcome, RunArtifactResult } from "./contracts";
 import { sameScenario } from "./scenario-ref";
 
+// Only a `complete` run is publishable — a cancelled or partial run never reaches the publish dialog
+// as a publishable payload (§8-P2 exit criterion).
+export function isPublishable(artifact: RunArtifact): boolean {
+  return artifact.state === "complete";
+}
+
 // A run result cleared for publishing: it survived the preflight-exclusion reconcile and carries a
 // remote key. The narrowed `testKey` lets the importers map each result without a non-null assertion.
 export type PublishableResult = RunArtifactResult & { readonly testKey: string };
@@ -83,4 +89,82 @@ export function summarizePublishable(reconciled: PublishableResults): Publishabl
     excludedCount: reconciled.excludedCount,
     unmappedCount: reconciled.unmappedCount,
   };
+}
+
+export interface ArtifactSummary {
+  readonly total: number;
+  readonly passed: number;
+  readonly failed: number;
+  readonly skipped: number;
+  readonly timedOut: number;
+  readonly interrupted: number;
+  readonly flaky: number;
+}
+
+// A whole-artifact outcome tally (every result, before reconciliation) — the Publish Last Run picker
+// describes each candidate run with it.
+export function summarizeArtifact(artifact: RunArtifact): ArtifactSummary {
+  const tally: Record<RunArtifactOutcome, number> = {
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    "timed-out": 0,
+    interrupted: 0,
+  };
+  let flaky = 0;
+  for (const result of artifact.results) {
+    tally[result.outcome] += 1;
+    if (result.flaky) {
+      flaky += 1;
+    }
+  }
+  return {
+    total: artifact.results.length,
+    passed: tally.passed,
+    failed: tally.failed,
+    skipped: tally.skipped,
+    timedOut: tally["timed-out"],
+    interrupted: tally.interrupted,
+    flaky,
+  };
+}
+
+// The View 3 subtitle: the publishable-set outcome tally, then the honest not-publishable notes
+// ("N excluded by preflight · M unmapped not publishable · K changed since run (create mode)").
+// `changedSinceRun` is create-mode-only (scenarios whose source no longer resolves) — surfaced as a
+// note because the radio can still switch to append, which publishes everything.
+export function publishDialogSubtitle(summary: PublishableSummary, changedSinceRun: number): string {
+  const plural = summary.total === 1 ? "" : "s";
+  const head = [`${summary.total} scenario${plural}`, `${summary.passed} passed`, `${summary.failed} failed`];
+  if (summary.skipped > 0) {
+    head.push(`${summary.skipped} skipped`);
+  }
+  if (summary.timedOut > 0) {
+    head.push(`${summary.timedOut} timed out`);
+  }
+  if (summary.interrupted > 0) {
+    head.push(`${summary.interrupted} interrupted`);
+  }
+  if (summary.flaky > 0) {
+    head.push(`${summary.flaky} flaky`);
+  }
+  const notes: string[] = [];
+  if (summary.excludedCount > 0) {
+    notes.push(`${summary.excludedCount} excluded by preflight`);
+  }
+  if (summary.unmappedCount > 0) {
+    notes.push(`${summary.unmappedCount} unmapped not publishable`);
+  }
+  if (changedSinceRun > 0) {
+    notes.push(`${changedSinceRun} changed since run (create mode)`);
+  }
+  return [...head, ...notes].join(" · ");
+}
+
+// The editable Summary field's default: "Specwright run <date> — N scenarios" (date is the run's
+// creation day, ISO for determinism).
+export function defaultPublishSummary(createdAt: number, publishableCount: number): string {
+  const date = new Date(createdAt).toISOString().slice(0, 10);
+  const plural = publishableCount === 1 ? "" : "s";
+  return `Specwright run ${date} — ${publishableCount} scenario${plural}`;
 }

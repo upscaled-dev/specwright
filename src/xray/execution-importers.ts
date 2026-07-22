@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { RunArtifact, RunArtifactIteration, RunArtifactOutcome } from "../traceability/contracts";
+import type { PublishRequest, RunArtifact, RunArtifactIteration, RunArtifactOutcome } from "../traceability/contracts";
 import type { PublishableResult } from "../traceability/publish-core";
 import { normalizePath, type ScenarioRef } from "../traceability/scenario-ref";
 
@@ -52,18 +52,6 @@ export interface ExecutionImportResponse {
   readonly key?: string | undefined;
   readonly self?: string | undefined;
 }
-
-// The user's resolved publish choice: create-new drives the Cucumber multipart importer, append drives
-// the Xray JSON importer. 3b relocates this to the neutral capability contract.
-export type PublishRequest =
-  | {
-      readonly mode: "create-new";
-      readonly project: string;
-      readonly summary: string;
-      readonly testPlanKey?: string | undefined;
-      readonly environments?: readonly string[] | undefined;
-    }
-  | { readonly mode: "append"; readonly executionKey: string };
 
 // Resolves a scenario against CURRENT source at publish time (3b injects the real FeatureParser).
 // `undefined` = the scenario changed/vanished since the run → the Cucumber importer drops it rather than

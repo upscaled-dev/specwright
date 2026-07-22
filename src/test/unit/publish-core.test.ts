@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import * as vscode from "vscode";
-import { publishableResults, summarizePublishable } from "../../traceability/publish-core";
+import {
+  defaultPublishSummary,
+  isPublishable,
+  publishableResults,
+  publishDialogSubtitle,
+  summarizeArtifact,
+  summarizePublishable,
+  type PublishableSummary,
+} from "../../traceability/publish-core";
 import { buildArtifactResults } from "../../traceability/run-artifact-store";
 import { refIdentity, sameScenario, scenarioRefFromScenario } from "../../traceability/scenario-ref";
 import type {
@@ -172,5 +180,66 @@ describe("summarizePublishable", () => {
       excludedCount: 1,
       unmappedCount: 1,
     });
+  });
+});
+
+describe("isPublishable", () => {
+  it("is true only for a complete run", () => {
+    expect(isPublishable(artifact([]))).toBe(true);
+    expect(isPublishable({ ...artifact([]), state: "cancelled" })).toBe(false);
+    expect(isPublishable({ ...artifact([]), state: "partial" })).toBe(false);
+  });
+});
+
+describe("summarizeArtifact", () => {
+  it("tallies every outcome over the whole artifact (before reconciliation)", () => {
+    const summary = summarizeArtifact(
+      artifact([
+        makeResult(ref("f", 1, "a")),
+        makeResult(ref("f", 2, "b"), { flaky: true }),
+        makeResult(ref("f", 3, "c"), { outcome: "failed" }),
+        makeResult(ref("f", 4, "d"), { outcome: "timed-out" }),
+      ])
+    );
+    expect(summary).toEqual({ total: 4, passed: 2, failed: 1, skipped: 0, timedOut: 1, interrupted: 0, flaky: 1 });
+  });
+});
+
+describe("publishDialogSubtitle", () => {
+  const base: PublishableSummary = {
+    total: 3,
+    passed: 3,
+    failed: 0,
+    skipped: 0,
+    timedOut: 0,
+    interrupted: 0,
+    flaky: 0,
+    excludedCount: 0,
+    unmappedCount: 0,
+  };
+
+  it("shows the publishable headline and omits zero-count notes", () => {
+    expect(publishDialogSubtitle(base, 0)).toBe("3 scenarios · 3 passed · 0 failed");
+  });
+
+  it("appends the honest not-publishable notes when non-zero", () => {
+    const summary: PublishableSummary = {
+      ...base,
+      total: 1,
+      passed: 1,
+      skipped: 2,
+      excludedCount: 2,
+      unmappedCount: 1,
+    };
+    expect(publishDialogSubtitle(summary, 3)).toBe(
+      "1 scenario · 1 passed · 0 failed · 2 skipped · 2 excluded by preflight · 1 unmapped not publishable · 3 changed since run (create mode)"
+    );
+  });
+});
+
+describe("defaultPublishSummary", () => {
+  it("names the run date and the publishable count", () => {
+    expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 4)).toBe("Specwright run 2026-07-22 — 4 scenarios");
+    expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 1)).toBe("Specwright run 2026-07-22 — 1 scenario");
   });
 });
