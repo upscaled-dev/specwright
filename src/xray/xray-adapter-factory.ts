@@ -1,5 +1,5 @@
 import type { Memento } from "vscode";
-import { ConnectionVerifyResult } from "../traceability/contracts";
+import { ConnectionVerifyResult, TestAuthoringCapability } from "../traceability/contracts";
 import { TraceabilityAdapterFactory } from "../traceability/adapter-registry";
 import { canonicalizeXrayKey, normalizeSiteUrl, XrayAdapter } from "./xray-adapter";
 import { XrayClient } from "./xray-client";
@@ -90,10 +90,17 @@ export function createXrayAdapterFactory(
         attachTo: () => ctx.config.xrayAttachTo,
         logger: ctx.logger,
       });
+      // A thin wrapper over the client's create mutation — no cache/account state, since the create
+      // reads its key back inline and the subsequent `mergeKeys` (on the metadata capability) owns
+      // persistence and its account guards.
+      const testAuthoring: TestAuthoringCapability = {
+        createTest: (spec, signal) => client.createTest(spec, signal),
+      };
       // The capability implements both metadata and remote search over the same client/state, so it
       // fills both adapter slots — the linkScenario picker's remote-search section is thereby gated on
-      // the live (synced) adapter, never the browse-only instance.
-      return new XrayAdapter(ctx.config, credentialStore, verify, metadata, metadata, resultPublishing);
+      // the live (synced) adapter, never the browse-only instance. Authoring rides the same live
+      // client, so the "create a new test" entry is gated the same way.
+      return new XrayAdapter(ctx.config, credentialStore, verify, metadata, metadata, resultPublishing, testAuthoring);
     },
   };
 }

@@ -53,6 +53,10 @@ describe("metadataCacheStorageKey", () => {
       metadataCacheStorageKey({ endpoint: "eu.xray.cloud.getxray.app", account: "client-42", workspaceId: "wsh" })
     ).toBe(`traceability:xray:eu.xray.cloud.getxray.app:client-42:wsh:${CACHE_SCHEMA_VERSION}`);
   });
+
+  it("is at schema version 3 — the bump that orphans v2 entries stored before issueId was added", () => {
+    expect(CACHE_SCHEMA_VERSION).toBe(3);
+  });
 });
 
 describe("XrayMetadataCache", () => {

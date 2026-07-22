@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type * as vscode from "vscode";
 import { ExtensionConfig } from "../../core/extension-config";
 import {
@@ -263,5 +263,22 @@ describe("XrayAdapter.automationBinding", () => {
     expect(adapter.automationBinding.classify({ key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } })).toBe("compatible");
     await expect(adapter.automationBinding.bind({ kind: "testCase", key: "CALC-1" })).rejects.toThrow(/P3/);
     await expect(adapter.automationBinding.bind({ kind: "testCase", key: "CALC-1" })).rejects.toBeInstanceOf(NotSupportedError);
+  });
+});
+
+describe("XrayAdapter.testAuthoring", () => {
+  it("is absent on a browse-only adapter, so the link picker offers no create entry", () => {
+    expect(new XrayAdapter(configWith({})).testAuthoring).toBeUndefined();
+  });
+
+  it("delegates to the injected authoring capability when the live adapter carries one", async () => {
+    const created = { key: "CALC-9", warnings: [] };
+    const authoring = { createTest: vi.fn(() => Promise.resolve(created)) };
+    const adapter = new XrayAdapter(configWith({}), undefined, undefined, undefined, undefined, undefined, authoring);
+
+    await expect(
+      adapter.testAuthoring?.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" })
+    ).resolves.toBe(created);
+    expect(authoring.createTest).toHaveBeenCalledOnce();
   });
 });

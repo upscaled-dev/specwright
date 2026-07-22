@@ -38,6 +38,10 @@ export interface NormalizedStatus {
 
 export interface TestCaseMetadata {
   readonly key: string;
+  // The remote issue id (Xray addresses mutations by `issueId`, not the Jira key). Retained on the
+  // snapshot so a future push-text path can target `updateGherkinTestDefinition` without a re-fetch;
+  // absent on a partial snapshot that never read it.
+  readonly issueId?: string | undefined;
   readonly summary?: string | undefined;
   readonly status?: NormalizedStatus | undefined;
   // Stored Gherkin backing the P1 drift indicator; absent until the client slice populates it.
@@ -273,9 +277,37 @@ export interface AutomationBindingCapability {
   // logic lives here, never in the neutral preflight core. `undefined`/partial metadata → `unknown`.
   // This is the P2 deliverable — validation only.
   classify(meta: TestCaseMetadata | undefined): AutomationBindingClassification;
-  // Establishing the binding by writing to the remote is a P3 write path; it rejects with a
-  // `NotSupportedError` until then. P2 never binds — it only classifies.
+  // `bind` writes an automation binding to the remote. For Xray it stays `NotSupportedError` by
+  // adjudication, not for lack of an API: the mutation root DOES expose `updateTestType`, but the
+  // only "binding" that would mean is converting an existing remote test's type — a destructive
+  // change to an issue we don't own. An `incompatible-test-type` is repaired by linking a different
+  // test or authoring a new one (`TestAuthoringCapability`), never by mutating theirs.
   bind(ref: TestCaseRef, signal?: AbortSignal): Promise<void>;
+}
+
+// A brand-new remote test authored from a local scenario. `summary` is the scenario name; `gherkin`
+// is the verbatim source slice (never the lossy reconstruction).
+export interface NewTestSpec {
+  readonly project: string;
+  readonly summary: string;
+  readonly gherkin: string;
+}
+
+// The authored test, read back from the SAME create response — no follow-up fetch. `key` is absent
+// only when the response carried no readable key: the test still exists remotely (and `issueId` may
+// pin it), so the flow surfaces that rather than inserting a tag it could not read back.
+export interface AuthoredTest {
+  readonly key?: string | undefined;
+  readonly issueId?: string | undefined;
+  readonly warnings: readonly string[];
+}
+
+// Optional capability: author a brand-new remote test from a local scenario's Gherkin. Capability-
+// gated — the linkScenario picker only offers "create a new test" when the active adapter exposes it
+// (the live, credentialed adapter, never the browse-only instance). This is the only authoring write
+// the extension makes; converting an existing test's type stays out of scope (see `bind` above).
+export interface TestAuthoringCapability {
+  createTest(spec: NewTestSpec, signal?: AbortSignal): Promise<AuthoredTest>;
 }
 
 // The outcome of a remote search beyond the synced snapshot. An EMPTY `tests` with `complete: true`
@@ -330,6 +362,7 @@ export interface TraceabilityAdapter {
   readonly coverage?: CoverageCapability | undefined;
   readonly automationBinding?: AutomationBindingCapability | undefined;
   readonly remoteSearch?: RemoteSearchCapability | undefined;
+  readonly testAuthoring?: TestAuthoringCapability | undefined;
   readonly resultPublishing?: ResultPublishingCapability | undefined;
   readonly attachments?: AttachmentCapability | undefined;
 

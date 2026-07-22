@@ -5,7 +5,7 @@ import { XrayCachePage } from "./xray-client";
 
 // Bump to invalidate every persisted snapshot when the stored shape changes. It is the last segment
 // of the storage key, so old-schema entries become unreachable rather than mis-parsed.
-export const CACHE_SCHEMA_VERSION = 2;
+export const CACHE_SCHEMA_VERSION = 3;
 
 export interface CachedMetadata {
   schemaVersion: number;

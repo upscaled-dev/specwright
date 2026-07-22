@@ -39,6 +39,9 @@ export interface XrayCachePage {
 
 export interface XrayTestRecord {
   readonly key: string;
+  // The remote issue id — Xray addresses mutations by `issueId`, not the Jira key. Already requested
+  // in the getTests selection; retained for the authoring/push paths.
+  readonly issueId?: string | undefined;
   readonly summary?: string | undefined;
   readonly status?: NormalizedStatus | undefined;
   readonly gherkin?: string | undefined;
@@ -81,6 +84,15 @@ export class XrayAuthError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "XrayAuthError";
+  }
+}
+
+// A GraphQL mutation that came back 200 but with a non-empty `errors` array (e.g. a bad project key
+// or a permission denial). Carries the value-free, JWT-scrubbed error summaries for the toast.
+export class XrayMutationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "XrayMutationError";
   }
 }
 
@@ -172,6 +184,7 @@ function readString(value: unknown): string | undefined {
 }
 
 interface RawTest {
+  issueId?: unknown;
   gherkin?: unknown;
   status?: { name?: unknown; color?: unknown } | null;
   testType?: { name?: unknown; kind?: unknown } | null;
@@ -186,12 +199,17 @@ function toTestRecord(raw: RawTest | null): XrayTestRecord | undefined {
   }
   const record: {
     key: string;
+    issueId?: string;
     summary?: string;
     status?: NormalizedStatus;
     gherkin?: string;
     coverageKeys?: string[];
     testType?: { name: string; kind: string };
   } = { key };
+  const issueId = readString(raw?.issueId);
+  if (issueId !== undefined) {
+    record.issueId = issueId;
+  }
   const summary = readString(raw?.jira?.summary);
   if (summary !== undefined) {
     record.summary = summary;
@@ -258,6 +276,52 @@ function pageTermination(jql: string, start: number, page: TestPage): PageTermin
 
 function testsQuery(jql: string, start: number): string {
   return `{ getTests(jql: ${JSON.stringify(jql)}, limit: ${PAGE_LIMIT}, start: ${start}) { total results { issueId gherkin testType { name kind } status { name color final } jira(fields: ["key", "summary"]) coverableIssues(limit: ${COVERABLE_LIMIT}) { results { jira(fields: ["key"]) } } } } }`;
+}
+
+export interface XrayCreateTestSpec {
+  readonly project: string;
+  readonly summary: string;
+  readonly gherkin: string;
+}
+
+// The created test read back from the SAME mutation response (§ mutation extract): `CreateTestResult
+// { test { issueId jira(fields:["key"]) } warnings }`. `key` is absent when the response carried no
+// readable one — the create still happened remotely, so the caller must not silently drop it.
+export interface XrayCreatedTest {
+  readonly key?: string | undefined;
+  readonly issueId?: string | undefined;
+  readonly warnings: readonly string[];
+}
+
+// Cucumber test = `testType { name: "Cucumber" }` (UpdateTestTypeInput has no `kind`); only `jira` is
+// required, project + summary ride its `fields` object (Xray sets the Test issuetype). `jira` is a
+// JSON! scalar, passed as an inline object literal; every string is JSON-escaped.
+function createTestMutation(spec: XrayCreateTestSpec): string {
+  const gherkin = JSON.stringify(spec.gherkin);
+  const project = JSON.stringify(spec.project);
+  const summary = JSON.stringify(spec.summary);
+  return `mutation { createTest(testType: { name: "Cucumber" }, gherkin: ${gherkin}, jira: { fields: { project: { key: ${project} }, summary: ${summary} } }) { test { issueId jira(fields: ["key"]) } warnings } }`;
+}
+
+function parseCreatedTest(body: unknown): XrayCreatedTest {
+  const createTest =
+    body !== null && typeof body === "object"
+      ? (body as { data?: { createTest?: { test?: { issueId?: unknown; jira?: { key?: unknown } | null } | null; warnings?: unknown } | null } }).data?.createTest
+      : undefined;
+  const test = createTest?.test ?? undefined;
+  const key = readString(test?.jira?.key)?.toUpperCase();
+  const issueId = readString(test?.issueId);
+  const warnings = Array.isArray(createTest?.warnings)
+    ? createTest.warnings.filter((warning): warning is string => typeof warning === "string" && warning !== "")
+    : [];
+  const record: { key?: string; issueId?: string; warnings: string[] } = { warnings };
+  if (key !== undefined) {
+    record.key = key;
+  }
+  if (issueId !== undefined) {
+    record.issueId = issueId;
+  }
+  return record;
 }
 
 /**
@@ -401,6 +465,23 @@ export class XrayClient {
       }
       return response;
     }
+  }
+
+  // Author a new Cucumber test and read its key/issueId back in the same response (no follow-up
+  // fetch). A GraphQL `errors` envelope becomes an `XrayMutationError`; the create still not having
+  // happened is the safe reading of an errored mutation, so nothing is inserted downstream. A 200
+  // with no readable key is NOT an error here — the create succeeded — so it returns a keyless record
+  // the caller surfaces (never a silent orphan).
+  public async createTest(spec: XrayCreateTestSpec, signal?: AbortSignal): Promise<XrayCreatedTest> {
+    const body = await this.graphql(createTestMutation(spec), signal);
+    const summaries = graphqlErrorSummaries(body);
+    if (summaries.length > 0) {
+      for (const summary of summaries) {
+        this.deps.logger.error(`GraphQL (createTest) ${summary}`);
+      }
+      throw new XrayMutationError(summaries.join("; "));
+    }
+    return parseCreatedTest(body);
   }
 
   private async graphql(query: string, signal?: AbortSignal): Promise<unknown> {

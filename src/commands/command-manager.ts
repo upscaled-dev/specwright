@@ -14,11 +14,20 @@ import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
 import { XrayConnectionCommands } from "../xray/xray-connection-commands";
 import { XrayCredentialStore } from "../xray/xray-credential-store";
 import type { XrayProbe } from "../xray/xray-connection-test";
-import { computeLinkEdit, LinkScenarioPick, linkScenarioPicks } from "../traceability/link-scenario";
+import {
+  authorScenarioTest,
+  AuthorScenarioTestUi,
+  computeLinkEdit,
+  LinkScenarioPick,
+  linkScenarioPicks,
+  scenarioGherkinSlice,
+} from "../traceability/link-scenario";
 import { ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
 import {
   BatchSelection,
+  KeyGrammar,
+  NewTestSpec,
   PreflightDecision,
   PreflightItem,
   PreflightState,
@@ -51,6 +60,11 @@ const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
   "automation-binding-required": "automation binding required",
   "not-in-target-plan": "not in the target plan",
 };
+
+// What the link picker returned: an existing test to tag, or a request to author a brand-new one.
+type LinkChoice =
+  | { readonly kind: "existing"; readonly key: string; readonly synced: boolean }
+  | { readonly kind: "create" };
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -574,16 +588,39 @@ export class CommandManager {
 
     const chosen = await this.pickTestToLink(adapter, picks);
     if (!chosen) {return;}
+    if (chosen.kind === "create") {
+      await this.createTestFromScenario(adapter, scenario);
+      return;
+    }
 
-    const uri = vscode.Uri.file(scenario.filePath);
-    const doc = await vscode.workspace.openTextDocument(uri);
-    const lines = doc.getText().split("\n");
-    const edit = computeLinkEdit(lines, scenario.line, chosen.key, adapter.keyGrammar);
-    if (edit.kind === "unchanged") {
+    const outcome = await this.applyTagInsert(scenario, chosen.key, adapter.keyGrammar);
+    if (outcome === "unchanged") {
       vscode.window.showInformationMessage(`Scenario already linked to ${chosen.key}.`);
       return;
     }
 
+    // A test picked from the remote search section was never synced, so its metadata is missing from
+    // the tree. Fire an additive background merge so the summary/status appear without a full sync.
+    if (!chosen.synced && adapter.remoteSearch) {
+      adapter.remoteSearch.mergeKeys([chosen.key]).catch((error) => {
+        this.logger.warn("Xray metadata merge for a newly linked test failed", { error: errMsg(error) });
+      });
+    }
+  }
+
+  // The idempotent `@TEST_<key>` insert, shared by linking an existing test and authoring a new one.
+  private async applyTagInsert(
+    scenario: ScenarioRef,
+    key: string,
+    grammar: KeyGrammar
+  ): Promise<"inserted" | "unchanged"> {
+    const uri = vscode.Uri.file(scenario.filePath);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const lines = doc.getText().split("\n");
+    const edit = computeLinkEdit(lines, scenario.line, key, grammar);
+    if (edit.kind === "unchanged") {
+      return "unchanged";
+    }
     const wsEdit = new vscode.WorkspaceEdit();
     if (edit.kind === "insertLine") {
       const eol = doc.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
@@ -596,44 +633,129 @@ export class CommandManager {
     }
     await vscode.workspace.applyEdit(wsEdit);
     await doc.save();
+    return "inserted";
+  }
 
-    // A test picked from the remote search section was never synced, so its metadata is missing from
-    // the tree. Fire an additive background merge so the summary/status appear without a full sync.
-    if (!chosen.synced && adapter.remoteSearch) {
-      adapter.remoteSearch.mergeKeys([chosen.key]).catch((error) => {
-        this.logger.warn("Xray metadata merge for a newly linked test failed", { error: errMsg(error) });
-      });
+  // The capability-gated "Create new <provider> test from this scenario…" flow. Project comes from
+  // `xray.defaultProjectKey` or a prompt; the Gherkin is the verbatim source slice (never the lossy
+  // reconstruction); the modal in `authorScenarioTest` gates the remote write; on success the tag is
+  // inserted and the new key is merged into the snapshot without a full sync.
+  private async createTestFromScenario(adapter: TraceabilityAdapter, scenario: ScenarioRef): Promise<void> {
+    const authoring = adapter.testAuthoring;
+    if (!authoring) {
+      return;
     }
+    const project = await this.resolveProjectForCreate();
+    if (project === undefined) {
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(scenario.filePath));
+    const gherkin = scenarioGherkinSlice(doc.getText().split("\n"), scenario.line);
+    const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
+    const spec: NewTestSpec = { project, summary: scenario.name, gherkin };
+    const ui: AuthorScenarioTestUi = {
+      confirm: () => this.confirmCreateTest(project, site, scenario.name, adapter.label),
+      info: (message) => {
+        vscode.window.showInformationMessage(message);
+      },
+      error: (message) => {
+        vscode.window.showErrorMessage(message);
+      },
+    };
+    try {
+      await authorScenarioTest(spec, adapter.label, ui, {
+        createTest: (input, signal) => authoring.createTest(input, signal),
+        insertTag: async (key) => {
+          await this.applyTagInsert(scenario, key, adapter.keyGrammar);
+        },
+        merge: (key) => {
+          adapter.remoteSearch?.mergeKeys([key]).catch((error) => {
+            this.logger.warn("Xray metadata merge for a newly created test failed", { error: errMsg(error) });
+          });
+        },
+      });
+    } catch (error) {
+      this.logger.error("Create test from scenario failed", { error: errMsg(error) });
+      vscode.window.showErrorMessage(`Could not create the ${adapter.label} test: ${errMsg(error)}`);
+    }
+  }
+
+  private async resolveProjectForCreate(): Promise<string | undefined> {
+    // Normalize the configured key the same way as manual input, so the confirm dialog and the
+    // mutation always see one consistent, uppercased key.
+    const configured = this.context.config.xrayDefaultProjectKey.trim().toUpperCase();
+    if (configured !== "") {
+      return configured;
+    }
+    const input = await vscode.window.showInputBox({
+      prompt: "Project key for the new test",
+      placeHolder: "e.g. CALC",
+      validateInput: (value) => (value.trim() === "" ? "Enter a project key." : undefined),
+    });
+    return input === undefined ? undefined : input.trim().toUpperCase();
+  }
+
+  private async confirmCreateTest(
+    project: string,
+    site: string,
+    scenarioName: string,
+    providerLabel: string
+  ): Promise<boolean> {
+    const target = site !== "" ? `project ${project} on ${site}` : `project ${project}`;
+    const choice = await vscode.window.showWarningMessage(
+      `Create a new ${providerLabel} test in ${target} from "${scenarioName}"?`,
+      { modal: true },
+      "Create test"
+    );
+    return choice === "Create test";
   }
 
   // The link-target picker. Default list = the synced snapshot; when the adapter exposes remote
   // search, typing ≥3 chars runs a debounced (400ms) Xray search appended as a separate section, so a
-  // never-synced test can still be linked. `synced` tells the caller whether to background-merge it.
+  // never-synced test can still be linked. A capability-gated "create a new test" entry is pinned on
+  // top when the adapter can author. `synced` tells the caller whether to background-merge it.
   private pickTestToLink(
     adapter: TraceabilityAdapter,
     syncedPicks: readonly LinkScenarioPick[]
-  ): Promise<{ key: string; synced: boolean } | undefined> {
+  ): Promise<LinkChoice | undefined> {
+    const createLabel = adapter.testAuthoring
+      ? `Create new ${adapter.label} test from this scenario…`
+      : undefined;
     const remoteSearch = adapter.remoteSearch;
     if (!remoteSearch) {
-      const items = syncedPicks.map((pick) => ({ label: pick.key, description: pick.summary ?? "", key: pick.key }));
+      const items: Array<vscode.QuickPickItem & { key?: string; create?: boolean }> = [];
+      if (createLabel !== undefined) {
+        items.push({ label: createLabel, alwaysShow: true, create: true });
+      }
+      for (const pick of syncedPicks) {
+        items.push({ label: pick.key, description: pick.summary ?? "", key: pick.key });
+      }
       return Promise.resolve(
         vscode.window
           .showQuickPick(items, { placeHolder: "Select a test to link to this scenario", matchOnDescription: true })
-          .then((chosen) => (chosen ? { key: chosen.key, synced: true } : undefined))
+          .then((chosen): LinkChoice | undefined => {
+            if (!chosen) {return undefined;}
+            if (chosen.create) {return { kind: "create" };}
+            return chosen.key !== undefined ? { kind: "existing", key: chosen.key, synced: true } : undefined;
+          })
       );
     }
-    return this.pickWithRemoteSearch(remoteSearch, syncedPicks);
+    return this.pickWithRemoteSearch(remoteSearch, syncedPicks, createLabel);
   }
 
   private pickWithRemoteSearch(
     remoteSearch: RemoteSearchCapability,
-    syncedPicks: readonly LinkScenarioPick[]
-  ): Promise<{ key: string; synced: boolean } | undefined> {
+    syncedPicks: readonly LinkScenarioPick[],
+    createLabel: string | undefined
+  ): Promise<LinkChoice | undefined> {
     interface Row extends vscode.QuickPickItem {
       key?: string | undefined;
       synced?: boolean | undefined;
+      create?: boolean | undefined;
     }
     const syncedKeys = new Set(syncedPicks.map((pick) => pick.key));
+    const topRows: Row[] =
+      createLabel !== undefined ? [{ label: createLabel, alwaysShow: true, create: true }] : [];
     const syncedRows: Row[] = syncedPicks.map((pick) => ({
       label: pick.key,
       description: pick.summary ?? "",
@@ -645,7 +767,7 @@ export class CommandManager {
       const qp = vscode.window.createQuickPick<Row>();
       qp.placeholder = "Filter synced tests, or type ≥3 characters to search Xray";
       qp.matchOnDescription = true;
-      qp.items = syncedRows;
+      qp.items = [...topRows, ...syncedRows];
       let timer: ReturnType<typeof setTimeout> | undefined;
       let searchToken = 0;
       let searchController: AbortController | undefined;
@@ -682,7 +804,7 @@ export class CommandManager {
                 : result.complete
                   ? "No matches — or the summary field isn't searchable with these credentials"
                   : "Search did not complete — try again";
-            qp.items = [...syncedRows, { label: header, kind: vscode.QuickPickItemKind.Separator }, ...remoteRows];
+            qp.items = [...topRows, ...syncedRows, { label: header, kind: vscode.QuickPickItemKind.Separator }, ...remoteRows];
           })
           .catch((error: unknown) => {
             // A superseded/aborted search is expected — only a live, current failure is worth a note.
@@ -698,7 +820,7 @@ export class CommandManager {
         supersede();
         const trimmed = value.trim();
         if (trimmed.length < 3) {
-          qp.items = syncedRows;
+          qp.items = [...topRows, ...syncedRows];
           qp.busy = false;
           return;
         }
@@ -708,7 +830,12 @@ export class CommandManager {
         const picked = qp.selectedItems[0];
         supersede();
         // Resolve BEFORE hide so a synchronous onDidHide can't win the race with `undefined`.
-        resolve(picked?.key ? { key: picked.key, synced: picked.synced ?? false } : undefined);
+        const choice: LinkChoice | undefined = picked?.create
+          ? { kind: "create" }
+          : picked?.key !== undefined
+            ? { kind: "existing", key: picked.key, synced: picked.synced ?? false }
+            : undefined;
+        resolve(choice);
         qp.hide();
       });
       qp.onDidHide(() => {

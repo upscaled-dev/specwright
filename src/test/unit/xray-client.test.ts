@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
-import { FetchLike, XrayAbortError, XrayClient } from "../../xray/xray-client";
+import { FetchLike, XrayAbortError, XrayClient, XrayMutationError } from "../../xray/xray-client";
 import { XrayCredentials } from "../../xray/xray-credential-store";
 
 const JWT = `${"a".repeat(140)}.${"b".repeat(140)}.${"c".repeat(140)}`;
@@ -69,6 +69,7 @@ function testsPage(keys: string[], total = keys.length): unknown {
       getTests: {
         total,
         results: keys.map((key) => ({
+          issueId: `${key}-id`,
           jira: { key, summary: `summary ${key}` },
           gherkin: `Scenario: ${key}\n  Given a step`,
           status: { name: "PASS", color: "#0f0", final: true },
@@ -103,6 +104,7 @@ describe("XrayClient.fetchTestsByKeys", () => {
     expect(outcome.tests).toHaveLength(1);
     const record = outcome.tests[0]!;
     expect(record.key).toBe("CALC-1");
+    expect(record.issueId).toBe("CALC-1-id");
     expect(record.summary).toBe("summary CALC-1");
     expect(record.status).toEqual({ category: "passed", providerValue: "PASS", color: "#0f0" });
     expect(record.gherkin).toContain("Given a step");
@@ -638,5 +640,68 @@ describe("XrayClient redaction", () => {
     expect(emitted).toContain("FORBIDDEN");
     expect(outcome.complete).toBe(false);
     expect(outcome.errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("XrayClient.createTest", () => {
+  it("sends a Cucumber createTest mutation with JSON-escaped gherkin/project/summary and reads key/issueId/warnings back inline", async () => {
+    let captured = "";
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        captured = query;
+        return { data: { createTest: { test: { issueId: "45678", jira: { key: "calc-9" } }, warnings: [] } } };
+      }),
+    });
+
+    const created = await client.createTest({
+      project: "CALC",
+      summary: 'Login "flow"',
+      gherkin: "Scenario: Login\n  Given a user",
+    });
+
+    expect(captured).toContain('testType: { name: "Cucumber" }');
+    expect(captured).toContain('gherkin: "Scenario: Login\\n  Given a user"');
+    expect(captured).toContain('project: { key: "CALC" }');
+    expect(captured).toContain('summary: "Login \\"flow\\""');
+    expect(captured).toContain('test { issueId jira(fields: ["key"]) } warnings');
+    // The key is uppercased on the way back, mirroring the getTests parse.
+    expect(created).toEqual({ key: "CALC-9", issueId: "45678", warnings: [] });
+  });
+
+  it("returns a keyless record (never throws) when the create response carries no readable key", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({ data: { createTest: { test: { issueId: "99" }, warnings: [] } } })),
+    });
+
+    const created = await client.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" });
+
+    expect(created.key).toBeUndefined();
+    expect(created.issueId).toBe("99");
+    expect(created.warnings).toEqual([]);
+  });
+
+  it("surfaces non-empty createTest warnings and drops empty ones", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({
+        data: { createTest: { test: { issueId: "1", jira: { key: "CALC-1" } }, warnings: ["gherkin adjusted", ""] } },
+      })),
+    });
+
+    const created = await client.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" });
+
+    expect(created).toEqual({ key: "CALC-1", issueId: "1", warnings: ["gherkin adjusted"] });
+  });
+
+  it("throws XrayMutationError on a GraphQL errors envelope (the create is treated as not having happened)", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({
+        errors: [{ message: "Project CALC does not exist", extensions: { code: "BAD_REQUEST" } }],
+        data: null,
+      })),
+    });
+
+    await expect(
+      client.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" })
+    ).rejects.toBeInstanceOf(XrayMutationError);
   });
 });

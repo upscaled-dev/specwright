@@ -1,11 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { FeatureParser } from "../../parsers/feature-parser";
 import {
+  authorScenarioTest,
   buildTestTag,
   computeLinkEdit,
   LinkEdit,
   linkScenarioPicks,
+  scenarioGherkinSlice,
 } from "../../traceability/link-scenario";
+import { AuthoredTest } from "../../traceability/contracts";
 import { buildTraceabilitySnapshot } from "../../traceability/traceability-model";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import { JIRA_KEY_SHAPE, projectFromKey } from "../../xray/xray-adapter";
@@ -147,6 +150,333 @@ describe("computeLinkEdit", () => {
   it("is idempotent on a CRLF document", () => {
     const feature = "Feature: F\r\n\r\n@TEST_CALC-1\r\nScenario: A\r\n  Given x\r\n";
     expect(computeLinkEdit(feature.split("\n"), 4, "CALC-1", JIRA_GRAMMAR)).toEqual({ kind: "unchanged" });
+  });
+});
+
+describe("scenarioGherkinSlice", () => {
+  const lines = (feature: string): string[] => feature.split("\n");
+
+  it("slices a plain scenario from its keyword line through its steps, excluding the preceding tag lines", () => {
+    const feature =
+      "Feature: F\n\n@smoke @REQ_CALC-9\nScenario: Login\n  Given a user\n  When they log in\n  Then ok\n\nScenario: Other\n  Given x\n";
+    expect(scenarioGherkinSlice(lines(feature), 4)).toBe(
+      "Scenario: Login\n  Given a user\n  When they log in\n  Then ok"
+    );
+  });
+
+  it("keeps a Scenario Outline's Examples tables and tagged Examples blocks, stopping at the next scenario's tags", () => {
+    const feature = [
+      "Feature: F",
+      "",
+      "Scenario Outline: Add",
+      "  Given <a>",
+      "  Then <b>",
+      "",
+      "  Examples:",
+      "    | a | b |",
+      "    | 1 | 2 |",
+      "",
+      "  @edge",
+      "  Examples: edge",
+      "    | a | b |",
+      "    | 9 | 9 |",
+      "",
+      "@wip",
+      "Scenario: Next",
+      "  Given z",
+    ].join("\n");
+
+    const slice = scenarioGherkinSlice(lines(feature), 3);
+
+    expect(slice).toContain("Scenario Outline: Add");
+    expect(slice).toContain("@edge");
+    expect(slice).toContain("Examples: edge");
+    expect(slice).toContain("| 9 | 9 |");
+    expect(slice).not.toContain("@wip");
+    expect(slice).not.toContain("Scenario: Next");
+  });
+
+  it("includes doc-strings and data tables verbatim and stops at a following Rule", () => {
+    const feature = [
+      "Feature: F",
+      "",
+      "Scenario: Payload",
+      "  Given a request:",
+      '    """',
+      '    { "k": 1 }',
+      '    """',
+      "  And rows:",
+      "    | x |",
+      "    | 1 |",
+      "",
+      "Rule: R",
+      "  Scenario: Inner",
+      "    Given y",
+    ].join("\n");
+
+    const slice = scenarioGherkinSlice(lines(feature), 3);
+
+    expect(slice).toContain('"""');
+    expect(slice).toContain('{ "k": 1 }');
+    expect(slice).toContain("| 1 |");
+    expect(slice).not.toContain("Rule: R");
+    expect(slice).not.toContain("Scenario: Inner");
+  });
+
+  it("strips carriage returns so a CRLF document yields clean \\n-joined text", () => {
+    const feature = "Feature: F\r\n\r\nScenario: A\r\n  Given x\r\n";
+    expect(scenarioGherkinSlice(feature.split("\n"), 3)).toBe("Scenario: A\n  Given x");
+  });
+
+  it("slices the last scenario in a file to EOF, trimming trailing blank lines", () => {
+    const feature = "Feature: F\n\nScenario: Last\n  Given x\n\n\n";
+    expect(scenarioGherkinSlice(feature.split("\n"), 3)).toBe("Scenario: Last\n  Given x");
+  });
+
+  it("keeps a doc-string whose body line reads like a scenario, and still terminates at the next real scenario", () => {
+    const feature = [
+      "Feature: F",
+      "",
+      "Scenario: Has a docstring",
+      "  Given a payload:",
+      '    """',
+      "    Scenario: not a real one",
+      "    still inside the string",
+      '    """',
+      "  Then ok",
+      "",
+      "Scenario: Real next",
+      "  Given z",
+    ].join("\n");
+
+    const slice = scenarioGherkinSlice(feature.split("\n"), 3);
+
+    expect(slice).toContain("Scenario: not a real one");
+    expect(slice).toContain("still inside the string");
+    expect(slice.match(/"""/g)).toHaveLength(2);
+    expect(slice).toContain("Then ok");
+    expect(slice).not.toContain("Scenario: Real next");
+  });
+
+  it("keeps a doc-string body line that looks like a tag, and terminates at the next scenario's tags", () => {
+    const feature = [
+      "Feature: F",
+      "",
+      "Scenario: Tag-in-string",
+      "  Given a note:",
+      '    """',
+      "    @not-a-tag lives in prose",
+      '    """',
+      "",
+      "@wip",
+      "Scenario: Next",
+      "  Given z",
+    ].join("\n");
+
+    const slice = scenarioGherkinSlice(feature.split("\n"), 3);
+
+    expect(slice).toContain("@not-a-tag lives in prose");
+    expect(slice).not.toContain("@wip");
+    expect(slice).not.toContain("Scenario: Next");
+  });
+
+  it("keeps doc-string prose beginning with Feature/Rule-style words", () => {
+    const feature = [
+      "Feature: F",
+      "",
+      "Scenario: Prose",
+      "  Given docs:",
+      '    """',
+      "    Feature flags are described here",
+      "    Rule of thumb: keep it short",
+      '    """',
+      "  Then ok",
+      "",
+      "Rule: R",
+      "  Scenario: Inner",
+      "    Given y",
+    ].join("\n");
+
+    const slice = scenarioGherkinSlice(feature.split("\n"), 3);
+
+    expect(slice).toContain("Feature flags are described here");
+    expect(slice).toContain("Rule of thumb: keep it short");
+    expect(slice).toContain("Then ok");
+    expect(slice).not.toContain("Rule: R");
+    expect(slice).not.toContain("Scenario: Inner");
+  });
+
+  it("handles a backtick-fenced doc-string the same way as a triple-quote one", () => {
+    const feature = [
+      "Feature: F",
+      "",
+      "Scenario: Backtick docstring",
+      "  Given json:",
+      "    ```",
+      "    Scenario: still prose",
+      "    @nope",
+      "    ```",
+      "  Then ok",
+      "",
+      "Scenario: Next",
+      "  Given z",
+    ].join("\n");
+
+    const slice = scenarioGherkinSlice(feature.split("\n"), 3);
+
+    expect(slice).toContain("Scenario: still prose");
+    expect(slice).toContain("@nope");
+    expect(slice.match(/```/g)).toHaveLength(2);
+    expect(slice).toContain("Then ok");
+    expect(slice).not.toContain("Scenario: Next");
+  });
+
+  it("does not close a \"\"\"-fenced doc-string at a bare backtick line, nor a backtick fence at a bare \"\"\" line", () => {
+    const tripleQuoted = [
+      "Feature: F",
+      "",
+      "Scenario: Quote fence",
+      "  Given a payload:",
+      '    """',
+      "    ```",
+      "    still inside the quote fence",
+      '    """',
+      "  Then ok",
+      "",
+      "Scenario: Next",
+      "  Given z",
+    ].join("\n");
+
+    const quoteSlice = scenarioGherkinSlice(tripleQuoted.split("\n"), 3);
+
+    expect(quoteSlice).toContain("```");
+    expect(quoteSlice).toContain("still inside the quote fence");
+    expect(quoteSlice.match(/"""/g)).toHaveLength(2);
+    expect(quoteSlice).toContain("Then ok");
+    expect(quoteSlice).not.toContain("Scenario: Next");
+
+    const backtickFenced = [
+      "Feature: F",
+      "",
+      "Scenario: Backtick fence",
+      "  Given a payload:",
+      "    ```",
+      '    """',
+      "    still inside the backtick fence",
+      "    ```",
+      "  Then ok",
+      "",
+      "Scenario: Next",
+      "  Given z",
+    ].join("\n");
+
+    const backtickSlice = scenarioGherkinSlice(backtickFenced.split("\n"), 3);
+
+    expect(backtickSlice).toContain('"""');
+    expect(backtickSlice).toContain("still inside the backtick fence");
+    expect(backtickSlice.match(/```/g)).toHaveLength(2);
+    expect(backtickSlice).toContain("Then ok");
+    expect(backtickSlice).not.toContain("Scenario: Next");
+  });
+
+  it("trims trailing blank and comment-only lines so a stray comment between scenarios is left out", () => {
+    const feature = [
+      "Feature: F",
+      "",
+      "Scenario: A",
+      "  Given x",
+      "",
+      "# a stray comment between scenarios",
+      "",
+      "Scenario: B",
+      "  Given y",
+    ].join("\n");
+
+    expect(scenarioGherkinSlice(feature.split("\n"), 3)).toBe("Scenario: A\n  Given x");
+  });
+});
+
+describe("authorScenarioTest", () => {
+  const spec = { project: "CALC", summary: "Login", gherkin: "Scenario: Login\n  Given a user" };
+  const noopUi = { confirm: () => Promise.resolve(true), info: (): void => {}, error: (): void => {} };
+
+  it("never calls createTest when the confirmation modal is dismissed", async () => {
+    const createTest = vi.fn(() => Promise.resolve<AuthoredTest>({ key: "CALC-9", warnings: [] }));
+    const insertTag = vi.fn(() => Promise.resolve());
+
+    await authorScenarioTest(
+      spec,
+      "Xray",
+      { ...noopUi, confirm: () => Promise.resolve(false) },
+      { createTest, insertTag, merge: () => {} }
+    );
+
+    expect(createTest).not.toHaveBeenCalled();
+    expect(insertTag).not.toHaveBeenCalled();
+  });
+
+  it("inserts the tag, merges the key, and shows a success toast after a confirmed create", async () => {
+    const inserted: string[] = [];
+    const merged: string[] = [];
+    const info: string[] = [];
+
+    await authorScenarioTest(
+      spec,
+      "Xray",
+      { confirm: () => Promise.resolve(true), info: (m) => info.push(m), error: () => {} },
+      {
+        createTest: () => Promise.resolve<AuthoredTest>({ key: "CALC-9", issueId: "1", warnings: [] }),
+        insertTag: (key) => {
+          inserted.push(key);
+          return Promise.resolve();
+        },
+        merge: (key) => merged.push(key),
+      }
+    );
+
+    expect(inserted).toEqual(["CALC-9"]);
+    expect(merged).toEqual(["CALC-9"]);
+    expect(info[0]).toContain("Created CALC-9");
+  });
+
+  it("lists non-empty warnings in the success toast", async () => {
+    const info: string[] = [];
+
+    await authorScenarioTest(
+      spec,
+      "Xray",
+      { confirm: () => Promise.resolve(true), info: (m) => info.push(m), error: () => {} },
+      {
+        createTest: () => Promise.resolve<AuthoredTest>({ key: "CALC-9", warnings: ["Gherkin was adjusted"] }),
+        insertTag: () => Promise.resolve(),
+        merge: () => {},
+      }
+    );
+
+    expect(info[0]).toContain("Gherkin was adjusted");
+  });
+
+  it("never inserts a tag it could not read back — reports the remote write and its issue id instead", async () => {
+    const inserted: string[] = [];
+    const errors: string[] = [];
+
+    await authorScenarioTest(
+      spec,
+      "Xray",
+      { confirm: () => Promise.resolve(true), info: () => {}, error: (m) => errors.push(m) },
+      {
+        createTest: () => Promise.resolve<AuthoredTest>({ issueId: "45678", warnings: [] }),
+        insertTag: (key) => {
+          inserted.push(key);
+          return Promise.resolve();
+        },
+        merge: () => {},
+      }
+    );
+
+    expect(inserted).toEqual([]);
+    expect(errors[0]).toContain("was created");
+    expect(errors[0]).toContain("45678");
   });
 });
 
