@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
 import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
-import { BoardViewModel } from "../../traceability/board-data";
+import { BoardViewModel, ExecutionRow } from "../../traceability/board-data";
 
 // The panel drives the real `vscode.window.createWebviewPanel` stub: `__receive` delivers an inbound
 // webview message, `webview.__posted` records outbound ones, `__revealCount` counts reveals, and
@@ -21,6 +21,7 @@ interface OutgoingMessage {
   scenarios: Array<{ name: string }>;
   tests: Array<{ key: string }>;
   matrix: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }>;
+  executions: Array<{ key: string; summary: string }>;
 }
 
 const win = vscode.window as unknown as {
@@ -45,12 +46,19 @@ const MODEL: BoardViewModel = {
   ],
 };
 
+const EXECUTIONS: ExecutionRow[] = [
+  { key: "XNP-1", summary: "Checkout suite", action: "Created", resultsImported: "6", passRate: "5/6 passed", publishedAt: "2026-07-22", timesFromHere: 1 },
+  { key: "PAY-9", summary: "Payments", action: "Appended", resultsImported: "-", passRate: "-", publishedAt: "2026-07-20", timesFromHere: 2 },
+];
+
 function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
   return {
     providerLabel: "Xray",
     buildModel: () => MODEL,
+    buildExecutions: () => EXECUTIONS,
     onDidChange: new vscode.EventEmitter<void>().event,
     applyDrop: () => Promise.resolve(),
+    openExecution: () => undefined,
     ...over,
   };
 }
@@ -59,7 +67,7 @@ const lastRender = (panel: StubPanel): OutgoingMessage | undefined =>
   [...panel.webview.__posted].reverse().find((m) => m.type === "render");
 
 describe("BoardPanel", () => {
-  it("renders the shell — title, tabs, the drag-to-link gutter, the provider label, the matrix header, and the executions placeholder", () => {
+  it("renders the shell — title, tabs, the drag-to-link gutter, the provider label, the matrix header, and the executions table", () => {
     BoardPanel.open(deps());
     const panel = win.__webviewPanels[0]!;
 
@@ -75,7 +83,8 @@ describe("BoardPanel", () => {
     expect(panel.webview.html).toContain("Xray test");
     expect(panel.webview.html).toContain("Tag in file");
     expect(panel.webview.html).toContain("Last result");
-    expect(panel.webview.html).toContain("design pending review");
+    expect(panel.webview.html).toContain("Pass rate");
+    expect(panel.webview.html).toContain("Publishes from this workspace appear here.");
   });
 
   it("reveals the existing panel instead of opening a second (singleton surface)", () => {
@@ -97,6 +106,43 @@ describe("BoardPanel", () => {
     expect(render.scenarios.map((s) => s.name)).toEqual(["Log in", "Checkout"]);
     expect(render.tests.map((t) => t.key)).toEqual(["CALC-1", "PAY-9"]);
     expect(render.matrix.map((r) => r.test)).toEqual(["CALC-1", "PAY-9"]);
+  });
+
+  it("posts the executions rows from the ledger on render", async () => {
+    BoardPanel.open(deps());
+    const panel = win.__webviewPanels[0]!;
+
+    await panel.__receive({ type: "ready" });
+
+    expect(lastRender(panel)!.executions.map((e) => e.key)).toEqual(["XNP-1", "PAY-9"]);
+  });
+
+  it("posts an empty executions list when the ledger is empty", async () => {
+    BoardPanel.open(deps({ buildExecutions: () => [] }));
+    const panel = win.__webviewPanels[0]!;
+
+    await panel.__receive({ type: "ready" });
+
+    expect(lastRender(panel)!.executions).toEqual([]);
+  });
+
+  it("filters the executions rows on key and summary", async () => {
+    BoardPanel.open(deps());
+    const panel = win.__webviewPanels[0]!;
+
+    await panel.__receive({ type: "search", value: "payments" });
+
+    expect(lastRender(panel)!.executions.map((e) => e.key)).toEqual(["PAY-9"]);
+  });
+
+  it("routes an open message to openExecution with the row key", async () => {
+    const openExecution = vi.fn();
+    BoardPanel.open(deps({ openExecution }));
+    const panel = win.__webviewPanels[0]!;
+
+    await panel.__receive({ type: "open", key: "XNP-1" });
+
+    expect(openExecution).toHaveBeenCalledWith("XNP-1");
   });
 
   it("filters both buckets on a search message via the vscode-free filter", async () => {

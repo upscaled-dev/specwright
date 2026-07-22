@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import type { LedgerEntry } from "./publish-ledger";
 import type { ScenarioRef } from "./scenario-ref";
 import type {
   TraceabilitySnapshot,
@@ -233,6 +234,84 @@ export function resolveBoardDrop(
     return undefined;
   }
   return { ref: untraced.scenario, key };
+}
+
+// One row of the Executions tab. Every cell is render-ready text (dates as ISO days, a plain dash
+// where an older ledger entry recorded no counts), except `timesFromHere` — the per-key publish count
+// the panel renders as its own column. `action` is the create/append the publish took.
+export interface ExecutionRow {
+  readonly key: string;
+  readonly summary: string;
+  readonly action: string;
+  readonly resultsImported: string;
+  readonly passRate: string;
+  readonly publishedAt: string;
+  readonly timesFromHere: number;
+}
+
+const DASH = "-";
+
+function executionAction(mode: LedgerEntry["mode"]): string {
+  if (mode === "create-new") {
+    return "Created";
+  }
+  if (mode === "append") {
+    return "Appended";
+  }
+  return DASH;
+}
+
+// Imported reads the recorded `total` (the whole publishable count); the pass rate is honest only when
+// passed+failed+skipped accounts for every imported result, so a run with a timed-out or interrupted
+// result — where the three counts fall short of `total` — dashes the rate rather than overstating it.
+function executionImported(entry: LedgerEntry): string {
+  return entry.total === undefined ? DASH : String(entry.total);
+}
+
+function executionPassRate(entry: LedgerEntry): string {
+  if (entry.passed === undefined || entry.failed === undefined || entry.skipped === undefined || entry.total === undefined) {
+    return DASH;
+  }
+  if (entry.passed + entry.failed + entry.skipped !== entry.total) {
+    return DASH;
+  }
+  return `${entry.passed}/${entry.total} passed`;
+}
+
+/**
+ * The Executions tab rows (vscode-free), newest first, over the site-scoped publish ledger. No live
+ * remote execution query exists, so this reflects only what this workspace has published: each row
+ * carries the execution key, its summary, whether the publish created or appended, the imported result
+ * count (the recorded total) and pass rate (rendered only when the recorded pass/fail/skip counts add
+ * up to that total, else a dash), the ISO publish date, and how many ledger entries published to that
+ * same key.
+ */
+export function buildExecutionRows(entries: readonly LedgerEntry[]): ExecutionRow[] {
+  const timesByKey = new Map<string, number>();
+  for (const entry of entries) {
+    timesByKey.set(entry.executionRef, (timesByKey.get(entry.executionRef) ?? 0) + 1);
+  }
+  return [...entries]
+    .sort((a, b) => b.publishedAt - a.publishedAt)
+    .map((entry) => ({
+      key: entry.executionRef,
+      summary: entry.summary ?? "",
+      action: executionAction(entry.mode),
+      resultsImported: executionImported(entry),
+      passRate: executionPassRate(entry),
+      publishedAt: new Date(entry.publishedAt).toISOString().slice(0, 10),
+      timesFromHere: timesByKey.get(entry.executionRef) ?? 1,
+    }));
+}
+
+// The Executions header search: case-insensitive substring over the execution key and its summary. An
+// empty query returns the rows untouched.
+export function filterExecutionRows(rows: readonly ExecutionRow[], query: string): readonly ExecutionRow[] {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") {
+    return rows;
+  }
+  return rows.filter((row) => row.key.toLowerCase().includes(needle) || row.summary.toLowerCase().includes(needle));
 }
 
 // The header search: case-insensitive substring over a test's key/summary and a scenario's name, its

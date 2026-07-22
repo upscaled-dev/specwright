@@ -2,10 +2,13 @@ import { describe, it, expect } from "vitest";
 import {
   BoardViewModel,
   buildBoardViewModel,
+  buildExecutionRows,
   filterBoardViewModel,
+  filterExecutionRows,
   resolveBoardDrop,
   scenarioDropId,
 } from "../../traceability/board-data";
+import type { LedgerEntry } from "../../traceability/publish-ledger";
 import type {
   OrphanTest,
   TraceabilitySnapshot,
@@ -374,5 +377,99 @@ describe("resolveBoardDrop", () => {
     const dragged = scenarioDropId(ref({ line: 5, name: "Log in" }));
     const rebuilt = snapshot({ untraced: [untraced({ scenario: ref({ line: 5, name: "Log out" }) })], orphans: [orphan({ testKey: "CALC-9" })] });
     expect(resolveBoardDrop(rebuilt, dragged, "CALC-9")).toBeUndefined();
+  });
+});
+
+function ledgerEntry(over: Partial<LedgerEntry> = {}): LedgerEntry {
+  return {
+    artifactId: "run-1",
+    executionRef: "XNP-1",
+    site: "acme.atlassian.net",
+    account: "client-1",
+    publishedAt: Date.UTC(2026, 6, 22),
+    pendingAttachments: [],
+    ...over,
+  };
+}
+
+describe("buildExecutionRows", () => {
+  it("returns no rows for an empty ledger", () => {
+    expect(buildExecutionRows([])).toEqual([]);
+  });
+
+  it("orders rows newest first by published time", () => {
+    const rows = buildExecutionRows([
+      ledgerEntry({ executionRef: "OLD-1", publishedAt: 1000 }),
+      ledgerEntry({ executionRef: "NEW-1", publishedAt: 3000 }),
+      ledgerEntry({ executionRef: "MID-1", publishedAt: 2000 }),
+    ]);
+    expect(rows.map((r) => r.key)).toEqual(["NEW-1", "MID-1", "OLD-1"]);
+  });
+
+  it("renders the pass rate and results imported from the recorded counts and total", () => {
+    const [row] = buildExecutionRows([ledgerEntry({ passed: 3, failed: 1, skipped: 2, total: 6 })]);
+    expect(row).toMatchObject({ passRate: "3/6 passed", resultsImported: "6" });
+  });
+
+  it("renders a plain dash for the rate and imported count when an entry recorded no counts", () => {
+    const [row] = buildExecutionRows([ledgerEntry()]);
+    expect(row).toMatchObject({ passRate: "-", resultsImported: "-" });
+  });
+
+  it("shows the imported total but dashes the pass rate when pass/fail/skip fall short of it (timed out or interrupted)", () => {
+    // 3 passed + 1 timed-out: passed+failed+skipped is 3, but 4 results were imported — the pass rate
+    // cannot be honestly stated, so it dashes while Imported still reports the whole total.
+    const [row] = buildExecutionRows([ledgerEntry({ passed: 3, failed: 0, skipped: 0, total: 4 })]);
+    expect(row).toMatchObject({ resultsImported: "4", passRate: "-" });
+  });
+
+  it("maps the publish mode to a Created or Appended action, dashing an entry with none", () => {
+    const rows = buildExecutionRows([
+      ledgerEntry({ executionRef: "A-1", publishedAt: 3000, mode: "create-new" }),
+      ledgerEntry({ executionRef: "B-1", publishedAt: 2000, mode: "append" }),
+      ledgerEntry({ executionRef: "C-1", publishedAt: 1000 }),
+    ]);
+    expect(rows.map((r) => r.action)).toEqual(["Created", "Appended", "-"]);
+  });
+
+  it("carries the summary and renders the published date as an ISO day", () => {
+    const [row] = buildExecutionRows([ledgerEntry({ summary: "Nightly", publishedAt: Date.UTC(2026, 6, 22) })]);
+    expect(row).toMatchObject({ summary: "Nightly", publishedAt: "2026-07-22" });
+  });
+
+  it("defaults an absent summary to an empty string", () => {
+    expect(buildExecutionRows([ledgerEntry()])[0]!.summary).toBe("");
+  });
+
+  it("counts how many entries published to the same execution key", () => {
+    const rows = buildExecutionRows([
+      ledgerEntry({ executionRef: "XNP-1", publishedAt: 3000 }),
+      ledgerEntry({ executionRef: "XNP-1", publishedAt: 2000 }),
+      ledgerEntry({ executionRef: "XNP-9", publishedAt: 1000 }),
+    ]);
+    expect(rows.map((r) => [r.key, r.timesFromHere])).toEqual([
+      ["XNP-1", 2],
+      ["XNP-1", 2],
+      ["XNP-9", 1],
+    ]);
+  });
+});
+
+describe("filterExecutionRows", () => {
+  const rows = buildExecutionRows([
+    ledgerEntry({ executionRef: "XNP-1", summary: "Checkout suite", publishedAt: 3000 }),
+    ledgerEntry({ executionRef: "PAY-9", summary: "Payments", publishedAt: 2000 }),
+  ]);
+
+  it("returns the rows untouched for an empty query", () => {
+    expect(filterExecutionRows(rows, "  ")).toBe(rows);
+  });
+
+  it("matches on the execution key", () => {
+    expect(filterExecutionRows(rows, "pay").map((r) => r.key)).toEqual(["PAY-9"]);
+  });
+
+  it("matches on the summary, case-insensitively", () => {
+    expect(filterExecutionRows(rows, "CHECKOUT").map((r) => r.key)).toEqual(["XNP-1"]);
   });
 });

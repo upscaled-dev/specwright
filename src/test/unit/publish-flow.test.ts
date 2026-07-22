@@ -183,10 +183,50 @@ describe("runPublishFlow — publish", () => {
       account: "client-1",
       publishedAt: 1_700_000_000_000,
       pendingAttachments: [],
+      summary: "s",
+      mode: "create-new",
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      total: 1,
     });
     // No attachments picked and none issue-routed → attachedCount 0, no upload attempted.
     expect(d.attachFiles).not.toHaveBeenCalled();
     expect(d.reportSuccess).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 0);
+  });
+
+  it("threads the publishable pass/fail/skip counts and total to the ledger append", async () => {
+    const run = artifact("complete", [
+      mapped("a", "CALC-1", "passed"),
+      mapped("b", "CALC-2", "failed"),
+      mapped("c", "CALC-3", "skipped"),
+      mapped("d", "CALC-4", "passed"),
+    ]);
+    const d = deps({ presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))) });
+
+    await runPublishFlow(run, d);
+
+    expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ passed: 2, failed: 1, skipped: 1, total: 4 }));
+  });
+
+  it("records a total that exceeds pass/fail/skip when a result timed out", async () => {
+    const run = artifact("complete", [mapped("a", "CALC-1", "passed"), mapped("b", "CALC-2", "timed-out")]);
+    const d = deps({ presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))) });
+
+    await runPublishFlow(run, d);
+
+    expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ passed: 1, failed: 0, skipped: 0, total: 2 }));
+  });
+
+  it("records the append mode without a summary when appending to an existing execution", async () => {
+    const append: PublishRequest = { mode: "append", executionKey: "XNP-9" };
+    const d = deps({ presentDialog: vi.fn(() => Promise.resolve(dialogResult(append))) });
+
+    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+
+    const entry = (d.recordPublish as ReturnType<typeof vi.fn>).mock.calls[0]![0] as LedgerEntry;
+    expect(entry.mode).toBe("append");
+    expect(entry.summary).toBeUndefined();
   });
 
   it("reports failure and records nothing when the import rejects", async () => {

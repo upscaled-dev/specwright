@@ -4,8 +4,10 @@ import {
   BoardScenarioCard,
   BoardTestCard,
   BoardViewModel,
+  ExecutionRow,
   MatrixRow,
   filterBoardViewModel,
+  filterExecutionRows,
 } from "./board-data";
 
 const VIEW_TYPE = "playwrightBddRunner.coverageBoard";
@@ -28,7 +30,11 @@ interface DropMessage {
   scenario: string;
   key: string;
 }
-type IncomingMessage = ReadyMessage | SearchMessage | TabMessage | DropMessage;
+interface OpenMessage {
+  type: "open";
+  key: string;
+}
+type IncomingMessage = ReadyMessage | SearchMessage | TabMessage | DropMessage | OpenMessage;
 
 interface RenderMessage {
   type: "render";
@@ -36,6 +42,7 @@ interface RenderMessage {
   scenarios: readonly BoardScenarioCard[];
   tests: readonly BoardTestCard[];
   matrix: readonly MatrixRow[];
+  executions: readonly ExecutionRow[];
 }
 type OutgoingMessage = RenderMessage;
 
@@ -46,8 +53,13 @@ type OutgoingMessage = RenderMessage;
 export interface BoardPanelDeps {
   readonly providerLabel: string;
   buildModel(): BoardViewModel;
+  // The Executions tab's rows, read from the publish ledger — what this workspace has published, never
+  // a live remote query. Rebuilt alongside the model on every refresh.
+  buildExecutions(): readonly ExecutionRow[];
   readonly onDidChange: vscode.Event<void>;
   applyDrop(scenario: string, key: string): Promise<void>;
+  // An Executions row's key link: routed through the host's browseIssue path.
+  openExecution(key: string): void;
 }
 
 function escapeHtml(value: string): string {
@@ -119,6 +131,8 @@ function renderHtml(providerLabel: string): string {
   table.matrix thead th { position: sticky; top: 0; z-index: 1; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); font-weight: 600; }
   table.matrix td.hole { background: var(--vscode-inputValidation-warningBackground, transparent); }
   table.matrix .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
+  table.matrix a.link { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
+  table.matrix a.link:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -156,7 +170,15 @@ function renderHtml(providerLabel: string): string {
       </div>
     </section>
     <section id="pane-executions" class="pane" hidden>
-      <p class="muted">Executions — design pending review.</p>
+      <div id="executions-empty" class="empty" hidden>Publishes from this workspace appear here.</div>
+      <div id="executions-scroll" class="matrix-scroll">
+        <table class="matrix">
+          <thead>
+            <tr><th>Execution</th><th>Summary</th><th>Action</th><th>Imported</th><th>Pass rate</th><th>Published</th><th>From here</th></tr>
+          </thead>
+          <tbody id="executions-rows"></tbody>
+        </table>
+      </div>
     </section>
   </main>
 <script nonce="${nonce}">
@@ -167,6 +189,9 @@ function renderHtml(providerLabel: string): string {
   const scenarioCount = document.getElementById('scenario-count');
   const testCount = document.getElementById('test-count');
   const matrixRows = document.getElementById('matrix-rows');
+  const executionsRows = document.getElementById('executions-rows');
+  const executionsEmpty = document.getElementById('executions-empty');
+  const executionsScroll = document.getElementById('executions-scroll');
   const tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
   const panes = {
     mapping: document.getElementById('pane-mapping'),
@@ -313,6 +338,41 @@ function renderHtml(providerLabel: string): string {
     }
   }
 
+  function executionCell(text) {
+    const td = document.createElement('td');
+    td.textContent = text;
+    return td;
+  }
+
+  function renderExecutions(rows) {
+    executionsRows.textContent = '';
+    const empty = rows.length === 0;
+    executionsEmpty.hidden = !empty;
+    executionsScroll.hidden = empty;
+    if (empty) { return; }
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+      const keyTd = document.createElement('td');
+      const link = document.createElement('a');
+      link.className = 'link';
+      link.href = '#';
+      link.textContent = row.key;
+      link.addEventListener('click', function (e) {
+        e.preventDefault();
+        vscodeApi.postMessage({ type: 'open', key: row.key });
+      });
+      keyTd.appendChild(link);
+      tr.appendChild(keyTd);
+      tr.appendChild(executionCell(row.summary));
+      tr.appendChild(executionCell(row.action));
+      tr.appendChild(executionCell(row.resultsImported));
+      tr.appendChild(executionCell(row.passRate));
+      tr.appendChild(executionCell(row.publishedAt));
+      tr.appendChild(executionCell(String(row.timesFromHere)));
+      executionsRows.appendChild(tr);
+    }
+  }
+
   function showTab(tab) {
     for (const t of tabs) { t.classList.toggle('active', t.dataset.tab === tab); }
     for (const name of Object.keys(panes)) { panes[name].hidden = name !== tab; }
@@ -330,6 +390,7 @@ function renderHtml(providerLabel: string): string {
       renderScenarios(msg.scenarios || []);
       renderTests(msg.tests || []);
       renderMatrix(msg.matrix || []);
+      renderExecutions(msg.executions || []);
     }
   });
 
@@ -343,7 +404,8 @@ function renderHtml(providerLabel: string): string {
  * The Coverage Board (View 2) — a singleton, document-like webview in the editor area (a second open
  * reveals the existing panel, unlike the modal dialogs). The Mapping tab lets an untraced scenario be
  * dragged onto a test card (and an orphan test onto a scenario) to write its `@TEST_` tag; the Matrix
- * tab is the requirement/test/scenario/tag/result table. Executions is still a placeholder. Header
+ * tab is the requirement/test/scenario/tag/result table; the Executions tab lists what this workspace
+ * has published, read from the publish ledger, each key linking out through browseIssue. Header
  * search, tab state, and drop validation live here (the extension host) so the webview JS stays thin
  * and untested; every render round-trips through the vscode-free
  * `buildBoardViewModel`/`filterBoardViewModel`, and a drop routes to `applyDrop`. The panel re-renders
@@ -357,12 +419,14 @@ export class BoardPanel {
   private activeTab: BoardTab = "mapping";
   private query = "";
   private model: BoardViewModel;
+  private executions: readonly ExecutionRow[];
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
     private readonly deps: BoardPanelDeps
   ) {
     this.model = deps.buildModel();
+    this.executions = deps.buildExecutions();
     this.disposables.push(
       this.panel.onDidDispose(() => this.dispose()),
       this.panel.webview.onDidReceiveMessage((message) => this.handleMessage(message as IncomingMessage)),
@@ -398,6 +462,10 @@ export class BoardPanel {
       this.deps.applyDrop(message.scenario, message.key).catch(() => undefined);
       return;
     }
+    if (message.type === "open") {
+      this.deps.openExecution(message.key);
+      return;
+    }
     if (message.type === "search") {
       this.query = message.value;
     } else if (message.type === "tab") {
@@ -408,6 +476,7 @@ export class BoardPanel {
 
   private refresh(): void {
     this.model = this.deps.buildModel();
+    this.executions = this.deps.buildExecutions();
     this.post(this.renderMessage());
   }
 
@@ -419,6 +488,7 @@ export class BoardPanel {
       scenarios: filtered.scenarios,
       tests: filtered.tests,
       matrix: filtered.matrix,
+      executions: filterExecutionRows(this.executions, this.query),
     };
   }
 

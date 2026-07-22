@@ -166,6 +166,12 @@ export async function runPublishFlow(artifact: RunArtifact, deps: PublishFlowDep
     account: deps.account,
     publishedAt: deps.now(),
     pendingAttachments: [...failed],
+    ...(dialog.request.mode === "create-new" ? { summary: dialog.request.summary } : {}),
+    mode: dialog.request.mode,
+    passed: summary.passed,
+    failed: summary.failed,
+    skipped: summary.skipped,
+    total: summary.total,
   });
 
   const attachedCount = files.length - failed.length;

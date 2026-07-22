@@ -6,6 +6,12 @@ import { Logger } from "../utils/logger";
 // is the created/appended execution KEY (the browse-link identity). `pendingAttachments` are the
 // absolute file paths that failed to upload after a successful import — the resume/retry routine
 // replays them WITHOUT re-importing, and clears the ones that then succeed.
+//
+// `summary`, `mode`, the passed/failed/skipped counts, and `total` back the Executions board (what
+// this workspace has published). They are optional because entries written before the ledger recorded
+// them have none — readers render a dash rather than migrating the store. `total` is the whole
+// publishable count: it can exceed passed+failed+skipped when a result timed out or was interrupted,
+// so the board reads it for Imported and dashes the pass rate when the three counts do not add up.
 export interface LedgerEntry {
   readonly artifactId: string;
   readonly executionRef: string;
@@ -13,11 +19,18 @@ export interface LedgerEntry {
   readonly account: string;
   readonly publishedAt: number;
   readonly pendingAttachments: readonly string[];
+  readonly summary?: string | undefined;
+  readonly mode?: "create-new" | "append" | undefined;
+  readonly passed?: number | undefined;
+  readonly failed?: number | undefined;
+  readonly skipped?: number | undefined;
+  readonly total?: number | undefined;
 }
 
-const MAX_ENTRIES = 10;
+const MAX_ENTRIES = 50;
 
-// Prepend the newest entry and cap the list — the ledger is an idempotency buffer, not a history.
+// Prepend the newest entry and cap the list. At 50 the ledger is both the idempotency source (the
+// re-publish banner reads the matching entry) and the Executions board's local publish history.
 export function withLedgerEntry(entries: readonly LedgerEntry[], entry: LedgerEntry): LedgerEntry[] {
   return [entry, ...entries].slice(0, MAX_ENTRIES);
 }
@@ -48,18 +61,29 @@ export function withUpdatedPending(
   });
 }
 
+function isOptional(value: unknown, guard: (value: unknown) => boolean): boolean {
+  return value === undefined || guard(value);
+}
+
 function isValidEntry(value: unknown): value is LedgerEntry {
   if (typeof value !== "object" || value === null) {
     return false;
   }
   const entry = value as Record<string, unknown>;
+  const isNumber = (v: unknown): boolean => typeof v === "number";
   return (
     typeof entry["artifactId"] === "string" &&
     typeof entry["executionRef"] === "string" &&
     typeof entry["site"] === "string" &&
     typeof entry["account"] === "string" &&
     typeof entry["publishedAt"] === "number" &&
-    Array.isArray(entry["pendingAttachments"])
+    Array.isArray(entry["pendingAttachments"]) &&
+    isOptional(entry["summary"], (v) => typeof v === "string") &&
+    isOptional(entry["mode"], (v) => v === "create-new" || v === "append") &&
+    isOptional(entry["passed"], isNumber) &&
+    isOptional(entry["failed"], isNumber) &&
+    isOptional(entry["skipped"], isNumber) &&
+    isOptional(entry["total"], isNumber)
   );
 }
 

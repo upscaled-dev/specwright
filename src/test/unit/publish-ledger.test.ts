@@ -45,14 +45,19 @@ describe("withLedgerEntry", () => {
     expect(list.map((e) => e.artifactId)).toEqual(["new", "old"]);
   });
 
-  it("caps the ledger at ten entries", () => {
+  it("caps the ledger at fifty entries", () => {
     let list: LedgerEntry[] = [];
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < 55; i++) {
       list = withLedgerEntry(list, entry({ artifactId: `run-${i}` }));
     }
-    expect(list).toHaveLength(10);
-    expect(list[0]!.artifactId).toBe("run-14");
-    expect(list[9]!.artifactId).toBe("run-5");
+    expect(list).toHaveLength(50);
+    expect(list[0]!.artifactId).toBe("run-54");
+    expect(list[49]!.artifactId).toBe("run-5");
+  });
+
+  it("carries the recorded summary, mode, counts, and total through", () => {
+    const [recorded] = withLedgerEntry([], entry({ summary: "Nightly", mode: "create-new", passed: 3, failed: 1, skipped: 2, total: 6 }));
+    expect(recorded).toMatchObject({ summary: "Nightly", mode: "create-new", passed: 3, failed: 1, skipped: 2, total: 6 });
   });
 });
 
@@ -110,6 +115,53 @@ describe("PublishLedger", () => {
     const ledger = new PublishLedger(memento, logger);
     expect(ledger.find("good", "acme.atlassian.net")).toBeDefined();
     expect(ledger.find("bad", "acme.atlassian.net")).toBeUndefined();
+  });
+
+  it("reads back a v1 entry that predates the counts, leaving them absent", () => {
+    // A v1 entry carries only the original required fields — no summary/mode/counts.
+    const v1 = {
+      artifactId: "v1",
+      executionRef: "XNP-1",
+      site: "acme.atlassian.net",
+      account: "client-1",
+      publishedAt: 1000,
+      pendingAttachments: [],
+    };
+    const ledger = new PublishLedger(fakeMemento([v1]), logger);
+    const loaded = ledger.find("v1", "acme.atlassian.net");
+    expect(loaded).toBeDefined();
+    expect(loaded?.passed).toBeUndefined();
+    expect(loaded?.mode).toBeUndefined();
+    expect(loaded?.summary).toBeUndefined();
+  });
+
+  it("records and reads back the counts, summary, mode, and total", () => {
+    const memento = fakeMemento();
+    const ledger = new PublishLedger(memento, logger);
+    ledger.record(entry({ artifactId: "run-1", summary: "Nightly", mode: "append", passed: 4, failed: 0, skipped: 1, total: 5 }));
+
+    expect(ledger.find("run-1", "acme.atlassian.net")).toMatchObject({
+      summary: "Nightly",
+      mode: "append",
+      passed: 4,
+      failed: 0,
+      skipped: 1,
+      total: 5,
+    });
+  });
+
+  it("drops an entry whose optional fields are the wrong type (corrupt store)", () => {
+    const memento = fakeMemento([
+      { ...entry({ artifactId: "bad-summary" }), summary: 7 },
+      { ...entry({ artifactId: "bad-mode" }), mode: "sideways" },
+      { ...entry({ artifactId: "bad-count" }), passed: "3" },
+      entry({ artifactId: "good", mode: "create-new", passed: 1, failed: 0, skipped: 0, total: 1 }),
+    ]);
+    const ledger = new PublishLedger(memento, logger);
+    expect(ledger.find("bad-summary", "acme.atlassian.net")).toBeUndefined();
+    expect(ledger.find("bad-mode", "acme.atlassian.net")).toBeUndefined();
+    expect(ledger.find("bad-count", "acme.atlassian.net")).toBeUndefined();
+    expect(ledger.find("good", "acme.atlassian.net")).toBeDefined();
   });
 
   it("renders entries for the current site only", () => {

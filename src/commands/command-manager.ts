@@ -24,7 +24,7 @@ import {
 } from "../traceability/link-scenario";
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
 import { LinkPickerPanel } from "../traceability/link-picker-panel";
-import { buildBoardViewModel, resolveBoardDrop } from "../traceability/board-data";
+import { buildBoardViewModel, buildExecutionRows, resolveBoardDrop } from "../traceability/board-data";
 import { BoardPanel } from "../traceability/board-panel";
 import { linkedTestsForScenario, ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
@@ -1187,12 +1187,20 @@ export class CommandManager {
       return;
     }
     const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
     BoardPanel.open({
       providerLabel: subsystem.getActiveAdapter()?.label ?? "Xray",
       buildModel: () =>
         buildBoardViewModel(subsystem.getSnapshot(), roots, subsystem.getActiveAdapter()?.keyGrammar.testPrefix ?? ""),
+      buildExecutions: () => buildExecutionRows(this.publishLedger?.entriesForSite(site) ?? []),
       onDidChange: subsystem.onDidChangeSnapshot,
       applyDrop: (scenario, key) => this.applyBoardDrop(scenario, key),
+      openExecution: (key) => {
+        const adapter = subsystem.getActiveAdapter() ?? this.context.traceabilityAdapter;
+        this.browseIssue(adapter, key).catch((error) => {
+          this.logger.warn("Opening the execution issue failed", { error: errMsg(error) });
+        });
+      },
     });
   }
 
