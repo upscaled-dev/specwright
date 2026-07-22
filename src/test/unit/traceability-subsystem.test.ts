@@ -118,6 +118,7 @@ interface TraceabilityConfigState {
   traceabilityTestTagPrefix: string;
   traceabilityReqTagPrefix: string;
   xraySiteUrl: string;
+  xrayDefaultProjectKey: string;
 }
 
 function makeConfig(initial?: Partial<TraceabilityConfigState>): {
@@ -132,6 +133,7 @@ function makeConfig(initial?: Partial<TraceabilityConfigState>): {
     traceabilityTestTagPrefix: "TEST_",
     traceabilityReqTagPrefix: "REQ_",
     xraySiteUrl: "",
+    xrayDefaultProjectKey: "",
     ...initial,
   };
   let listener: (() => void) | undefined;
@@ -142,6 +144,7 @@ function makeConfig(initial?: Partial<TraceabilityConfigState>): {
     get traceabilityTestTagPrefix(): string { return state.traceabilityTestTagPrefix; },
     get traceabilityReqTagPrefix(): string { return state.traceabilityReqTagPrefix; },
     get xraySiteUrl(): string { return state.xraySiteUrl; },
+    get xrayDefaultProjectKey(): string { return state.xrayDefaultProjectKey; },
     addChangeListener(l: () => void): { dispose: () => void } {
       listener = l;
       return { dispose: () => { listener = undefined; } };
@@ -180,17 +183,28 @@ function registryOf(adapters: Record<string, TraceabilityAdapter>): Traceability
   return registry;
 }
 
+function fakeMemento(): vscode.Memento {
+  const store = new Map<string, unknown>();
+  return {
+    keys: () => [...store.keys()],
+    get: (key: string, dflt?: unknown) => (store.has(key) ? store.get(key) : dflt),
+    update: (key: string, value: unknown) => { store.set(key, value); return Promise.resolve(); },
+  } as unknown as vscode.Memento;
+}
+
 function build(
   config: ExtensionConfig,
   adapters?: Record<string, TraceabilityAdapter>,
   logger = Logger.create(),
-  connection: ConnectionControl = makeConnection()
+  connection: ConnectionControl = makeConnection(),
+  memento: vscode.Memento = fakeMemento()
 ): {
   subsystem: TraceabilitySubsystem;
   created: FakeWatcher[];
   connection: ConnectionControl;
   store: RunResultStore;
   discovery: TestDiscoveryManager;
+  memento: vscode.Memento;
 } {
   const registry = registryOf(adapters ?? { xray: fakeAdapter("xray", connection.connection) });
   const store = new RunResultStore();
@@ -202,7 +216,8 @@ function build(
     discovery,
     PlaywrightJsonParser.create(logger),
     store,
-    logger
+    logger,
+    memento
   );
   subsystem.rebuildDebounceMs = 0;
   const created: FakeWatcher[] = [];
@@ -216,8 +231,59 @@ function build(
     created.push(watcher);
     return watcher as unknown as vscode.FileSystemWatcher;
   });
-  return { subsystem, created, connection, store, discovery };
+  return { subsystem, created, connection, store, discovery, memento };
 }
+
+describe("TraceabilitySubsystem grouping mode", () => {
+  const GROUPING_KEY = "playwrightBddRunner.traceability.groupingMode";
+
+  beforeEach(() => {
+    treeViews.__resetTreeViewCounters();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("persists a toggle to workspaceState and restores it on a rebuilt provider", async () => {
+    const memento = fakeMemento();
+    const { config, set, fireChange } = makeConfig();
+    const { subsystem } = build(config, undefined, Logger.create(), makeConnection(), memento);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    subsystem.toggleGrouping();
+    expect(memento.get(GROUPING_KEY)).toBe("file");
+
+    // Rebuild the panel; the fresh provider must restore "file" from the memento, so the next
+    // toggle returns to "test" rather than flipping away from a defaulted "test".
+    set({ enableTraceabilityPanel: false });
+    fireChange();
+    set({ enableTraceabilityPanel: true });
+    fireChange();
+    await flush();
+
+    subsystem.toggleGrouping();
+    expect(memento.get(GROUPING_KEY)).toBe("test");
+    subsystem.dispose();
+  });
+
+  it("coerces an unknown stored mode to the by-test layout", async () => {
+    const memento = fakeMemento();
+    await memento.update(GROUPING_KEY, "bogus");
+    const { config } = makeConfig();
+    const { subsystem } = build(config, undefined, Logger.create(), makeConnection(), memento);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    // A garbage value reads back as "test", so one toggle lands on "file".
+    subsystem.toggleGrouping();
+    expect(memento.get(GROUPING_KEY)).toBe("file");
+    subsystem.dispose();
+  });
+});
 
 describe("TraceabilitySubsystem lifecycle", () => {
   beforeEach(() => {
@@ -526,6 +592,20 @@ describe("TraceabilitySubsystem connection indicator", () => {
     const calls = indicatorCalls(setIndicator);
     expect(calls).toContainEqual({ state: "checking", label: "acme.atlassian.net", message: "Checking connection…" });
     expect(calls.at(-1)).toEqual({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme — project CALC" });
+    subsystem.dispose();
+  });
+
+  it("appends the configured default project key to the committed indicator", async () => {
+    const setIndicator = spyIndicator();
+    const { config } = makeConfig({ xrayDefaultProjectKey: "CALC" });
+    const conn = makeConnection(true, () => Promise.resolve({ status: "ok", message: "Connected to acme" }));
+    conn.setLabel("acme.atlassian.net");
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    expect(indicatorCalls(setIndicator).at(-1)?.defaultProject).toBe("CALC");
     subsystem.dispose();
   });
 

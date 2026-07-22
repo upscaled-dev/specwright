@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
 import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import { BoardViewModel } from "../../traceability/board-data";
@@ -20,6 +20,7 @@ interface OutgoingMessage {
   activeTab: string;
   scenarios: Array<{ name: string }>;
   tests: Array<{ key: string }>;
+  matrix: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }>;
 }
 
 const win = vscode.window as unknown as {
@@ -31,12 +32,16 @@ afterEach(() => win.__resetWebviewPanels());
 
 const MODEL: BoardViewModel = {
   scenarios: [
-    { name: "Log in", location: "features/login.feature:5", pills: ["no tag"], reqKeys: [] },
-    { name: "Checkout", location: "features/cart.feature:12", pills: ["no tag"], reqKeys: ["REQ-7"] },
+    { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: ["no tag"], reqKeys: [] },
+    { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: ["no tag"], reqKeys: ["REQ-7"] },
   ],
   tests: [
     { key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"] },
     { key: "PAY-9", pills: ["orphan"] },
+  ],
+  matrix: [
+    { requirement: "REQ-7", test: "CALC-1", scenario: "Checkout", tag: "@TEST_CALC-1", result: "passed" },
+    { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage" },
   ],
 };
 
@@ -45,6 +50,7 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     providerLabel: "Xray",
     buildModel: () => MODEL,
     onDidChange: new vscode.EventEmitter<void>().event,
+    applyDrop: () => Promise.resolve(),
     ...over,
   };
 }
@@ -53,7 +59,7 @@ const lastRender = (panel: StubPanel): OutgoingMessage | undefined =>
   [...panel.webview.__posted].reverse().find((m) => m.type === "render");
 
 describe("BoardPanel", () => {
-  it("renders the shell — title, tabs, the drag-to-link gutter, the provider label, and both placeholders", () => {
+  it("renders the shell — title, tabs, the drag-to-link gutter, the provider label, the matrix header, and the executions placeholder", () => {
     BoardPanel.open(deps());
     const panel = win.__webviewPanels[0]!;
 
@@ -65,7 +71,10 @@ describe("BoardPanel", () => {
     expect(panel.webview.html).toContain("Filter by key, tag, file");
     expect(panel.webview.html).toContain("drag to link");
     expect(panel.webview.html).toContain("Xray tests");
-    expect(panel.webview.html).toContain("coming in the next slice");
+    expect(panel.webview.html).toContain("Requirement");
+    expect(panel.webview.html).toContain("Xray test");
+    expect(panel.webview.html).toContain("Tag in file");
+    expect(panel.webview.html).toContain("Last result");
     expect(panel.webview.html).toContain("design pending review");
   });
 
@@ -87,6 +96,7 @@ describe("BoardPanel", () => {
     expect(render.activeTab).toBe("mapping");
     expect(render.scenarios.map((s) => s.name)).toEqual(["Log in", "Checkout"]);
     expect(render.tests.map((t) => t.key)).toEqual(["CALC-1", "PAY-9"]);
+    expect(render.matrix.map((r) => r.test)).toEqual(["CALC-1", "PAY-9"]);
   });
 
   it("filters both buckets on a search message via the vscode-free filter", async () => {
@@ -98,6 +108,40 @@ describe("BoardPanel", () => {
     const render = lastRender(panel)!;
     expect(render.scenarios.map((s) => s.name)).toEqual(["Checkout"]);
     expect(render.tests).toEqual([]);
+  });
+
+  it("filters the matrix rows alongside the cards", async () => {
+    BoardPanel.open(deps());
+    const panel = win.__webviewPanels[0]!;
+
+    await panel.__receive({ type: "search", value: "PAY" });
+
+    const render = lastRender(panel)!;
+    expect(render.matrix.map((r) => r.test)).toEqual(["PAY-9"]);
+    expect(render.tests.map((t) => t.key)).toEqual(["PAY-9"]);
+  });
+
+  it("routes a drop to applyDrop with the normalized scenario and key", async () => {
+    const applyDrop = vi.fn(() => Promise.resolve());
+    BoardPanel.open(deps({ applyDrop }));
+    const panel = win.__webviewPanels[0]!;
+
+    await panel.__receive({ type: "drop", scenario: "features/login.feature:5", key: "PAY-9" });
+
+    expect(applyDrop).toHaveBeenCalledWith("features/login.feature:5", "PAY-9");
+  });
+
+  it("posts no render on a drop — the snapshot rebuild drives the next render, so a stale drop leaves the board untouched", async () => {
+    const applyDrop = vi.fn(() => Promise.resolve());
+    BoardPanel.open(deps({ applyDrop }));
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+
+    const before = panel.webview.__posted.length;
+    await panel.__receive({ type: "drop", scenario: "gone:1", key: "GONE-1" });
+
+    expect(applyDrop).toHaveBeenCalledOnce();
+    expect(panel.webview.__posted).toHaveLength(before);
   });
 
   it("switches the active tab on a tab message", async () => {
@@ -128,7 +172,7 @@ describe("BoardPanel", () => {
     const panel = win.__webviewPanels[0]!;
     await panel.__receive({ type: "ready" });
 
-    current = { scenarios: [], tests: [{ key: "NEW-1", pills: ["orphan"] }] };
+    current = { scenarios: [], tests: [{ key: "NEW-1", pills: ["orphan"] }], matrix: [] };
     changes.fire();
 
     expect(lastRender(panel)!.tests.map((t) => t.key)).toEqual(["NEW-1"]);

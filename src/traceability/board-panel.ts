@@ -4,6 +4,7 @@ import {
   BoardScenarioCard,
   BoardTestCard,
   BoardViewModel,
+  MatrixRow,
   filterBoardViewModel,
 } from "./board-data";
 
@@ -22,22 +23,31 @@ interface TabMessage {
   type: "tab";
   tab: BoardTab;
 }
-type IncomingMessage = ReadyMessage | SearchMessage | TabMessage;
+interface DropMessage {
+  type: "drop";
+  scenario: string;
+  key: string;
+}
+type IncomingMessage = ReadyMessage | SearchMessage | TabMessage | DropMessage;
 
 interface RenderMessage {
   type: "render";
   activeTab: BoardTab;
   scenarios: readonly BoardScenarioCard[];
   tests: readonly BoardTestCard[];
+  matrix: readonly MatrixRow[];
 }
 type OutgoingMessage = RenderMessage;
 
 // The board is a document-like surface, so its data source is the stable subsystem — not a one-shot
 // snapshot — letting it re-render across syncs and provider swaps while the panel stays open.
+// `applyDrop` is the drag-to-link seam: the webview posts a normalized {scenario, key} and the host
+// validates and writes the tag, then the snapshot rebuild re-renders the board (no hand-patching here).
 export interface BoardPanelDeps {
   readonly providerLabel: string;
   buildModel(): BoardViewModel;
   readonly onDidChange: vscode.Event<void>;
+  applyDrop(scenario: string, key: string): Promise<void>;
 }
 
 function escapeHtml(value: string): string {
@@ -52,6 +62,7 @@ function escapeHtml(value: string): string {
 function renderHtml(providerLabel: string): string {
   const nonce = randomBytes(16).toString("hex");
   const testsHeading = escapeHtml(`${providerLabel} tests`);
+  const testColumn = escapeHtml(`${providerLabel} test`);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -100,6 +111,14 @@ function renderHtml(providerLabel: string): string {
   .gutter span { color: var(--vscode-descriptionForeground); font-style: italic; font-size: 0.85em; text-align: center; }
   .empty { color: var(--vscode-descriptionForeground); font-style: italic; padding: 0.4rem 0; }
   .muted { color: var(--vscode-descriptionForeground); font-style: italic; }
+  .card[draggable="true"] { cursor: grab; }
+  .card.drop-target { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -2px; }
+  .matrix-scroll { overflow: auto; max-height: calc(100vh - 9rem); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; }
+  table.matrix { border-collapse: collapse; width: 100%; font-size: 0.9em; }
+  table.matrix th, table.matrix td { text-align: left; padding: 0.4rem 0.6rem; white-space: nowrap; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
+  table.matrix thead th { position: sticky; top: 0; z-index: 1; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); font-weight: 600; }
+  table.matrix td.hole { background: var(--vscode-inputValidation-warningBackground, transparent); }
+  table.matrix .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
 </style>
 </head>
 <body>
@@ -127,7 +146,14 @@ function renderHtml(providerLabel: string): string {
       </div>
     </section>
     <section id="pane-matrix" class="pane" hidden>
-      <p class="muted">Coverage matrix — coming in the next slice.</p>
+      <div class="matrix-scroll">
+        <table class="matrix">
+          <thead>
+            <tr><th>Requirement</th><th>${testColumn}</th><th>Scenario</th><th>Tag in file</th><th>Last result</th></tr>
+          </thead>
+          <tbody id="matrix-rows"></tbody>
+        </table>
+      </div>
     </section>
     <section id="pane-executions" class="pane" hidden>
       <p class="muted">Executions — design pending review.</p>
@@ -140,12 +166,49 @@ function renderHtml(providerLabel: string): string {
   const testCards = document.getElementById('test-cards');
   const scenarioCount = document.getElementById('scenario-count');
   const testCount = document.getElementById('test-count');
+  const matrixRows = document.getElementById('matrix-rows');
   const tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
   const panes = {
     mapping: document.getElementById('pane-mapping'),
     matrix: document.getElementById('pane-matrix'),
     executions: document.getElementById('pane-executions'),
   };
+
+  // A scenario card carries kind 'scenario' + its location; a test card kind 'test' + its key. A drop
+  // is valid only across kinds, so a scenario lands on any test card and an orphan test on a scenario,
+  // never like on like. The drop normalizes both directions to {scenario, key}.
+  let dragged = null;
+  function clearDropTargets() {
+    const marked = document.querySelectorAll('.drop-target');
+    for (const el of Array.prototype.slice.call(marked)) { el.classList.remove('drop-target'); }
+  }
+  function wireCardDrag(el, kind, id, draggable) {
+    if (draggable) {
+      el.draggable = true;
+      el.addEventListener('dragstart', function (e) {
+        dragged = { kind: kind, id: id };
+        if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'link'; }
+      });
+      el.addEventListener('dragend', function () { dragged = null; clearDropTargets(); });
+    }
+    el.addEventListener('dragover', function (e) {
+      if (dragged && dragged.kind !== kind) {
+        e.preventDefault();
+        if (e.dataTransfer) { e.dataTransfer.dropEffect = 'link'; }
+        el.classList.add('drop-target');
+      }
+    });
+    el.addEventListener('dragleave', function () { el.classList.remove('drop-target'); });
+    el.addEventListener('drop', function (e) {
+      if (!dragged || dragged.kind === kind) { return; }
+      e.preventDefault();
+      el.classList.remove('drop-target');
+      const scenario = dragged.kind === 'scenario' ? dragged.id : id;
+      const key = dragged.kind === 'scenario' ? id : dragged.id;
+      vscodeApi.postMessage({ type: 'drop', scenario: scenario, key: key });
+      dragged = null;
+    });
+  }
 
   function pillEl(text) {
     const el = document.createElement('span');
@@ -183,6 +246,7 @@ function renderHtml(providerLabel: string): string {
       meta.textContent = card.location;
       el.appendChild(meta);
       el.appendChild(pillsEl(card.pills));
+      wireCardDrag(el, 'scenario', card.dropId, true);
       scenarioCards.appendChild(el);
     }
   }
@@ -211,7 +275,41 @@ function renderHtml(providerLabel: string): string {
         el.appendChild(meta);
       }
       el.appendChild(pillsEl(card.pills));
+      wireCardDrag(el, 'test', card.key, card.pills.indexOf('orphan') !== -1);
       testCards.appendChild(el);
+    }
+  }
+
+  function matrixCell(text, isKey) {
+    const td = document.createElement('td');
+    if (text === '') { td.className = 'hole'; }
+    else {
+      td.textContent = text;
+      if (isKey) { td.className = 'key'; }
+    }
+    return td;
+  }
+
+  function renderMatrix(rows) {
+    matrixRows.textContent = '';
+    if (rows.length === 0) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 5;
+      td.className = 'empty';
+      td.textContent = 'Nothing to trace yet.';
+      tr.appendChild(td);
+      matrixRows.appendChild(tr);
+      return;
+    }
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+      tr.appendChild(matrixCell(row.requirement, false));
+      tr.appendChild(matrixCell(row.test, true));
+      tr.appendChild(matrixCell(row.scenario, false));
+      tr.appendChild(matrixCell(row.tag, true));
+      tr.appendChild(matrixCell(row.result, false));
+      matrixRows.appendChild(tr);
     }
   }
 
@@ -231,6 +329,7 @@ function renderHtml(providerLabel: string): string {
       showTab(msg.activeTab);
       renderScenarios(msg.scenarios || []);
       renderTests(msg.tests || []);
+      renderMatrix(msg.matrix || []);
     }
   });
 
@@ -242,12 +341,13 @@ function renderHtml(providerLabel: string): string {
 
 /**
  * The Coverage Board (View 2) — a singleton, document-like webview in the editor area (a second open
- * reveals the existing panel, unlike the modal dialogs). This slice ships the shell plus a read-only
- * Mapping tab: untraced scenario cards, a static "drag to link" gutter (no drag yet), and the remote
- * test cards. Matrix and Executions are placeholder panes. Header search and tab state live here (the
- * extension host) so the webview JS stays thin and untested; every render round-trips through the
- * vscode-free `buildBoardViewModel`/`filterBoardViewModel`. The panel re-renders on the subsystem's
- * snapshot-change event and disposes that subscription with itself.
+ * reveals the existing panel, unlike the modal dialogs). The Mapping tab lets an untraced scenario be
+ * dragged onto a test card (and an orphan test onto a scenario) to write its `@TEST_` tag; the Matrix
+ * tab is the requirement/test/scenario/tag/result table. Executions is still a placeholder. Header
+ * search, tab state, and drop validation live here (the extension host) so the webview JS stays thin
+ * and untested; every render round-trips through the vscode-free
+ * `buildBoardViewModel`/`filterBoardViewModel`, and a drop routes to `applyDrop`. The panel re-renders
+ * on the subsystem's snapshot-change event and disposes that subscription with itself.
  */
 export class BoardPanel {
   private static current: BoardPanel | undefined;
@@ -291,6 +391,13 @@ export class BoardPanel {
     if (this.disposed) {
       return;
     }
+    if (message.type === "drop") {
+      // The write, its snapshot rebuild, and the follow-up re-render are the host's job. Nothing is
+      // posted back here: a valid drop re-renders via onDidChange, a stale one toasts and leaves the
+      // board as-is for a retry.
+      this.deps.applyDrop(message.scenario, message.key).catch(() => undefined);
+      return;
+    }
     if (message.type === "search") {
       this.query = message.value;
     } else if (message.type === "tab") {
@@ -306,7 +413,13 @@ export class BoardPanel {
 
   private renderMessage(): RenderMessage {
     const filtered = filterBoardViewModel(this.model, this.query);
-    return { type: "render", activeTab: this.activeTab, scenarios: filtered.scenarios, tests: filtered.tests };
+    return {
+      type: "render",
+      activeTab: this.activeTab,
+      scenarios: filtered.scenarios,
+      tests: filtered.tests,
+      matrix: filtered.matrix,
+    };
   }
 
   private post(message: OutgoingMessage): void {

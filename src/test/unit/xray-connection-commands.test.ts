@@ -865,7 +865,8 @@ describe("TraceabilitySubsystem.knownTestKeys", () => {
       TestDiscoveryManager.create(logger, config),
       PlaywrightJsonParser.create(logger),
       new RunResultStore(),
-      logger
+      logger,
+      { get: () => undefined, update: () => Promise.resolve(), keys: () => [] } as unknown as vscode.Memento
     );
   }
 

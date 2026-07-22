@@ -15,6 +15,8 @@ import { ConnectionVerifyResult, TraceabilityAdapter } from "./contracts";
 import { TraceabilityAdapterRegistry } from "./adapter-registry";
 import {
   ConnectionIndicator,
+  GroupingMode,
+  GroupingModeStore,
   TraceabilityNode,
   TraceabilityTreeDataProvider,
 } from "./traceability-tree-data-provider";
@@ -24,6 +26,7 @@ import { RunResultStore } from "./run-result-store";
 
 const FALLBACK_PROVIDER_ID = "xray";
 const CONNECTED_CONTEXT_KEY = "playwrightBddRunner.traceability.connected";
+const GROUPING_MODE_KEY = "playwrightBddRunner.traceability.groupingMode";
 
 // One watcher per candidate report path (a brace-glob with a slash inside `{}` does not fire
 // reliably in a VS Code FileSystemWatcher). A create/change/delete on any of these refreshes the
@@ -80,7 +83,8 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     private readonly discoveryManager: TestDiscoveryManager,
     private readonly playwrightJsonParser: PlaywrightJsonParser,
     private readonly runResultStore: RunResultStore,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly workspaceState: vscode.Memento
   ) {
     this.configChangeDisposable = config.addChangeListener(() => this.applyCurrent());
     // The store outlives model rebuilds and provider swaps, so subscribe once here: a Test Explorer
@@ -95,6 +99,26 @@ export class TraceabilitySubsystem implements vscode.Disposable {
 
   public get traceabilityPanelActive(): boolean {
     return this.treeView !== undefined;
+  }
+
+  // Flip the tree between the by-test and by-file layouts. The provider persists the choice through
+  // the memento-backed store, so a recreated provider restores it. No-op when the panel is off.
+  public toggleGrouping(): void {
+    this.treeProvider?.toggleGroupingMode();
+  }
+
+  // Reads/writes the grouping mode in workspaceState. The read coerces any stored value to a valid
+  // mode (boundary), defaulting to the by-test layout.
+  private groupingStore(): GroupingModeStore {
+    return {
+      get: (): GroupingMode =>
+        (this.workspaceState.get<string>(GROUPING_MODE_KEY) === "file" ? "file" : "test"),
+      set: (mode) => {
+        Promise.resolve(this.workspaceState.update(GROUPING_MODE_KEY, mode)).catch((error) => {
+          this.logger.warn("Persisting the traceability grouping mode failed", { error: String(error) });
+        });
+      },
+    };
   }
 
   // The linkScenario command reads the live adapter's metadata snapshot from here — the browse-URL
@@ -185,7 +209,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       this.logger
     );
     this.model = model;
-    const provider = new TraceabilityTreeDataProvider(model, adapter.label);
+    const provider = new TraceabilityTreeDataProvider(model, adapter.label, this.groupingStore());
     this.treeProvider = provider;
     this.adapterSubscriptions.push(model.onDidChange(() => this._onDidChangeSnapshot.fire()));
     this.treeView = vscode.window.createTreeView("playwrightBddRunner.traceability", {
@@ -248,10 +272,12 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       this.treeProvider?.setConnectionIndicator(undefined);
       return;
     }
+    const project = this.defaultProjectKey();
     this.treeProvider?.setConnectionIndicator({
       state: "checking",
       label: connection.label,
       message: "Checking connection…",
+      ...(project ? { defaultProject: project } : {}),
     });
     let result: ConnectionVerifyResult;
     try {
@@ -278,7 +304,17 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     if (snapshot?.syncedAt !== undefined) {
       indicator.sync = { syncedAt: snapshot.syncedAt, stale: snapshot.stale };
     }
+    const project = this.defaultProjectKey();
+    if (project) {
+      indicator.defaultProject = project;
+    }
     this.treeProvider.setConnectionIndicator(indicator);
+  }
+
+  // The configured create-time default project, or undefined when unset. Undefined-safe so a hand-
+  // built config fake that omits the getter never throws here.
+  private defaultProjectKey(): string | undefined {
+    return this.config.xrayDefaultProjectKey || undefined;
   }
 
   private commitConnectedContext(connected: boolean): void {

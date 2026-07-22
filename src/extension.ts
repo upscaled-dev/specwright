@@ -205,7 +205,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     TestDiscoveryManager.create(logger, config),
     PlaywrightJsonParser.create(logger),
     runResultStore,
-    logger
+    logger,
+    context.workspaceState
   );
   context.subscriptions.push(traceabilitySubsystem);
   // Thread scenario→testKey from the snapshot into every artifact capture (Test Explorer runs

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { toWorkspaceRelative } from "../utils/workspace-path";
 import {
   RunOutcome,
   ScenarioRef,
@@ -9,9 +10,25 @@ import {
 } from "./traceability-model";
 import { NormalizedStatus } from "./contracts";
 
+// "test" is the default layout (scenarios grouped by their mapped test key); "file" groups the same
+// scenarios under their feature file. Persisted per workspace through GroupingModeStore.
+export type GroupingMode = "test" | "file";
+
+export interface GroupingModeStore {
+  get(): GroupingMode;
+  set(mode: GroupingMode): void;
+}
+
 interface SectionNode {
   kind: "section";
   section: "covered" | "untraced" | "orphan";
+}
+
+interface FileNode {
+  kind: "file";
+  filePath: string;
+  relPath: string;
+  untracedCount: number;
 }
 
 interface TestKeyNode {
@@ -56,6 +73,9 @@ export interface ConnectionIndicator {
   // Present once a sync has produced cached data; drives the "synced Nm ago" description (§7,
   // display-only). Absent before the first sync so the row shows the bare connection state.
   sync?: ConnectionSyncStatus | undefined;
+  // The configured xray.defaultProjectKey, when set, so the row can append "· project KEY". Used
+  // only when creating tests or executions, which the tooltip spells out.
+  defaultProject?: string | undefined;
 }
 
 interface ConnectionNode extends ConnectionIndicator {
@@ -65,6 +85,7 @@ interface ConnectionNode extends ConnectionIndicator {
 export type TraceabilityNode =
   | ConnectionNode
   | SectionNode
+  | FileNode
   | TestKeyNode
   | LinkNode
   | UntracedNode
@@ -111,7 +132,13 @@ function sameIndicator(
   if (!a || !b) {
     return false;
   }
-  return a.state === b.state && a.label === b.label && a.message === b.message && sameSync(a.sync, b.sync);
+  return (
+    a.state === b.state &&
+    a.label === b.label &&
+    a.message === b.message &&
+    a.defaultProject === b.defaultProject &&
+    sameSync(a.sync, b.sync)
+  );
 }
 
 // Coarse "time ago" for the sync staleness suffix (§7). Minutes below an hour, hours below a day,
@@ -160,11 +187,26 @@ function connectionTreeItem(node: ConnectionNode): vscode.TreeItem {
   // row's label is the literal product name; the provider-specific site host rides the tooltip.
   const item = new vscode.TreeItem("Xray Cloud", vscode.TreeItemCollapsibleState.None);
   const { description, tooltip } = connectionText(node, Date.now());
-  item.description = description;
-  item.tooltip = `${node.label}\n${tooltip}`;
+  const project = node.defaultProject;
+  item.description = project ? `${description} · project ${project}` : description;
+  item.tooltip = project
+    ? `${node.label}\n${tooltip}\nDefault project ${project}, used only when creating tests or executions.`
+    : `${node.label}\n${tooltip}`;
   item.contextValue = "traceabilityConnection";
   item.iconPath = connectionIcon(node.state);
   item.command = { command: "playwrightBddRunner.traceability.connect", title: "Set Up Connection" };
+  return item;
+}
+
+// A feature-file row in the by-file layout: the workspace-relative path labels it, the file icon
+// comes from the resourceUri, and the untraced count (when any) flags the coverage gap.
+function fileTreeItem(node: FileNode): vscode.TreeItem {
+  const item = new vscode.TreeItem(node.relPath, vscode.TreeItemCollapsibleState.Expanded);
+  item.resourceUri = vscode.Uri.file(node.filePath);
+  item.contextValue = "traceabilityFile";
+  if (node.untracedCount > 0) {
+    item.description = `${node.untracedCount} untraced`;
+  }
   return item;
 }
 
@@ -243,14 +285,29 @@ export class TraceabilityTreeDataProvider
   private readonly subscription: vscode.Disposable;
   private connected = false;
   private connectionIndicator: ConnectionIndicator | undefined;
+  private grouping: GroupingMode;
 
   constructor(
     private readonly model: TraceabilityModel,
-    private readonly providerLabel: string
+    private readonly providerLabel: string,
+    private readonly groupingStore?: GroupingModeStore
   ) {
+    this.grouping = groupingStore?.get() ?? "test";
     this.subscription = this.model.onDidChange(() =>
       this._onDidChangeTreeData.fire(undefined)
     );
+  }
+
+  public get groupingMode(): GroupingMode {
+    return this.grouping;
+  }
+
+  // Flip between the by-test and by-file layouts, persist the choice, and refresh. A recreated
+  // provider (panel rebuild, provider swap) reads the persisted mode back through the store.
+  public toggleGroupingMode(): void {
+    this.grouping = this.grouping === "test" ? "file" : "test";
+    this.groupingStore?.set(this.grouping);
+    this._onDidChangeTreeData.fire(undefined);
   }
 
   // Until a provider connection exists the offline tag tree stays empty so the setup welcome shows
@@ -289,6 +346,8 @@ export class TraceabilityTreeDataProvider
       }
       case "section":
         return this.sectionTreeItem(node);
+      case "file":
+        return fileTreeItem(node);
       case "testKey": {
         const item = new vscode.TreeItem(node.testKey, vscode.TreeItemCollapsibleState.Collapsed);
         const description = testKeyDescription(node);
@@ -387,20 +446,10 @@ export class TraceabilityTreeDataProvider
       if (!this.connected || (snap.links.length === 0 && snap.untraced.length === 0)) {
         return [];
       }
-      // Untraced first (the gap bucket is the work queue), then covered, then orphans last. Orphans
-      // render only on a complete catalogue fetch — a partial/unknown snapshot can never distinguish
-      // a genuine orphan from a key whose covering scenario simply wasn't fetched (§2).
-      const sections: TraceabilityNode[] = [
-        { kind: "section", section: "untraced" },
-        { kind: "section", section: "covered" },
-      ];
-      if (snap.completeness === "complete") {
-        sections.push({ kind: "section", section: "orphan" });
-      }
-      // The verified-connection row leads the tree when a status is set.
-      return this.connectionIndicator
-        ? [{ kind: "connection", ...this.connectionIndicator }, ...sections]
-        : sections;
+      return this.grouping === "file" ? this.fileRoots() : this.testRoots();
+    }
+    if (node.kind === "file") {
+      return this.fileChildren(node);
     }
     if (node.kind === "section") {
       if (node.section === "covered") {return this.coveredNodes();}
@@ -411,6 +460,78 @@ export class TraceabilityTreeDataProvider
       return node.links.map((link) => ({ kind: "link", link }));
     }
     return [];
+  }
+
+  // The verified-connection row leads the tree when a status is set, in either layout.
+  private withConnectionRow(rows: TraceabilityNode[]): TraceabilityNode[] {
+    return this.connectionIndicator
+      ? [{ kind: "connection", ...this.connectionIndicator }, ...rows]
+      : rows;
+  }
+
+  // Untraced first (the gap bucket is the work queue), then covered, then orphans last. Orphans
+  // render only on a complete catalogue fetch — a partial/unknown snapshot can never distinguish a
+  // genuine orphan from a key whose covering scenario simply wasn't fetched (§2).
+  private testRoots(): TraceabilityNode[] {
+    const sections: TraceabilityNode[] = [
+      { kind: "section", section: "untraced" },
+      { kind: "section", section: "covered" },
+    ];
+    if (this.model.snapshot.completeness === "complete") {
+      sections.push({ kind: "section", section: "orphan" });
+    }
+    return this.withConnectionRow(sections);
+  }
+
+  // By-file layout: one row per feature file, then the orphan section at the end (orphans have no
+  // file). The orphan gate matches the by-test layout's.
+  private fileRoots(): TraceabilityNode[] {
+    const roots: TraceabilityNode[] = [...this.fileNodes()];
+    if (this.model.snapshot.completeness === "complete") {
+      roots.push({ kind: "section", section: "orphan" });
+    }
+    return this.withConnectionRow(roots);
+  }
+
+  private fileNodes(): FileNode[] {
+    const snap = this.model.snapshot;
+    const byFile = new Map<string, { untraced: number; relPath: string }>();
+    const touch = (filePath: string, isUntraced: boolean): void => {
+      const existing = byFile.get(filePath);
+      if (existing) {
+        if (isUntraced) {existing.untraced += 1;}
+      } else {
+        byFile.set(filePath, { untraced: isUntraced ? 1 : 0, relPath: toWorkspaceRelative(filePath) });
+      }
+    };
+    for (const item of snap.untraced) {touch(item.scenario.filePath, true);}
+    for (const link of snap.links) {touch(link.scenario.filePath, false);}
+    return [...byFile.entries()]
+      .map(([filePath, info]): FileNode => ({
+        kind: "file",
+        filePath,
+        relPath: info.relPath,
+        untracedCount: info.untraced,
+      }))
+      // Files with untraced scenarios sort first (coverage gaps), then alphabetically by path.
+      .sort((a, b) => {
+        const gap = (a.untracedCount > 0 ? 0 : 1) - (b.untracedCount > 0 ? 0 : 1);
+        return gap !== 0 ? gap : a.relPath.localeCompare(b.relPath);
+      });
+  }
+
+  // A file's scenarios: untraced rows above mapped ones, each ordered by source line.
+  private fileChildren(node: FileNode): TraceabilityNode[] {
+    const snap = this.model.snapshot;
+    const untraced: TraceabilityNode[] = snap.untraced
+      .filter((item) => item.scenario.filePath === node.filePath)
+      .sort((a, b) => a.scenario.line - b.scenario.line)
+      .map((item) => ({ kind: "untraced", item }));
+    const links: TraceabilityNode[] = snap.links
+      .filter((link) => link.scenario.filePath === node.filePath)
+      .sort((a, b) => a.scenario.line - b.scenario.line)
+      .map((link) => ({ kind: "link", link }));
+    return [...untraced, ...links];
   }
 
   private coveredNodes(): TraceabilityNode[] {

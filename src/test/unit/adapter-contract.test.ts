@@ -24,6 +24,12 @@ import { Logger } from "../../utils/logger";
 import { extractKeys } from "../../traceability/tag-extraction";
 import type { ExtensionConfig } from "../../core/extension-config";
 
+const fakeMemento = {
+  get: () => undefined,
+  update: () => Promise.resolve(),
+  keys: () => [],
+} as unknown as vscode.Memento;
+
 function inMemoryHarness(): AdapterContractHarness {
   const adapter = new InMemoryTraceabilityAdapter({ label: "in-memory-fixture" });
   return {
@@ -315,7 +321,8 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
       TestDiscoveryManager.create(logger, config),
       PlaywrightJsonParser.create(logger),
       new RunResultStore(),
-      logger
+      logger,
+      fakeMemento
     );
     subsystem.rebuildDebounceMs = 0;
 
@@ -366,7 +373,8 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
       discovery,
       PlaywrightJsonParser.create(logger),
       new RunResultStore(),
-      logger
+      logger,
+      fakeMemento
     );
     subsystem.rebuildDebounceMs = 0;
 

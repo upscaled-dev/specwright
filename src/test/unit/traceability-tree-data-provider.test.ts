@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import * as vscode from "vscode";
 import {
   formatSyncedAgo,
+  GroupingMode,
+  GroupingModeStore,
   TraceabilityNode,
   TraceabilityTreeDataProvider,
 } from "../../traceability/traceability-tree-data-provider";
@@ -630,6 +632,168 @@ describe("TraceabilityTreeDataProvider orphan section", () => {
     expect(p.getTreeItem(orphanSection).description).toBe("0");
     const children = p.getChildren(orphanSection);
     expect(children[0]!.kind).toBe("info");
+  });
+});
+
+describe("TraceabilityTreeDataProvider connection default project", () => {
+  it("appends the default project to the connection row and spells out its create-time use", () => {
+    const p = provider(SNAPSHOT);
+    p.setConnectionIndicator({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme", defaultProject: "CALC" });
+    const item = p.getTreeItem(p.getChildren()[0]!);
+    expect(item.description).toBe("Connected · project CALC");
+    expect(String(item.tooltip)).toContain("Default project CALC, used only when creating tests or executions.");
+  });
+
+  it("omits the project segment when no default project is set", () => {
+    const p = provider(SNAPSHOT);
+    p.setConnectionIndicator({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme" });
+    const item = p.getTreeItem(p.getChildren()[0]!);
+    expect(item.description).toBe("Connected");
+    expect(String(item.tooltip)).toBe("acme.atlassian.net\nConnected to acme");
+  });
+
+  it("re-renders when only the default project changes", () => {
+    const p = provider(SNAPSHOT);
+    let refreshes = 0;
+    p.onDidChangeTreeData(() => { refreshes += 1; });
+    p.setConnectionIndicator({ state: "ok", label: "acme", message: "up" });
+    expect(refreshes).toBe(1);
+    p.setConnectionIndicator({ state: "ok", label: "acme", message: "up", defaultProject: "CALC" });
+    expect(refreshes).toBe(2);
+    p.setConnectionIndicator({ state: "ok", label: "acme", message: "up", defaultProject: "CALC" });
+    expect(refreshes).toBe(2);
+  });
+});
+
+describe("TraceabilityTreeDataProvider by-file grouping", () => {
+  const FILE_SNAPSHOT: TraceabilitySnapshot = {
+    links: [
+      { testKey: "CALC-1051", project: "CALC", scenario: { filePath: "/ws/a.feature", line: 11, name: "Multiply", kind: "scenario" }, reqKeys: [], lastResult: "failed" },
+      { testKey: "CALC-1043", project: "CALC", scenario: { filePath: "/ws/a.feature", line: 4, name: "Divide by zero", kind: "scenario" }, reqKeys: ["CALC-900"], lastResult: "passed" },
+      { testKey: "B-1", project: "B", scenario: { filePath: "/ws/b.feature", line: 5, name: "B scenario", kind: "scenario" }, reqKeys: [], lastResult: "passed" },
+    ],
+    untraced: [
+      { scenario: { filePath: "/ws/z.feature", line: 2, name: "Untagged Z", kind: "scenario" }, reqKeys: [] },
+      { scenario: { filePath: "/ws/a.feature", line: 7, name: "Untagged A", kind: "scenario" }, reqKeys: [] },
+    ],
+    orphans: [],
+    stale: false,
+    completeness: "unknown",
+    errors: [],
+  };
+
+  function fileStore(mode: GroupingMode = "file"): GroupingModeStore {
+    return { get: () => mode, set: () => { /* read-only for these tests */ } };
+  }
+
+  function fileProvider(snapshot: TraceabilitySnapshot): TraceabilityTreeDataProvider {
+    const p = new TraceabilityTreeDataProvider(makeModel(snapshot).model, "Xray", fileStore());
+    p.setConnected(true);
+    return p;
+  }
+
+  it("groups scenarios under feature files, untraced-containing files first then alphabetically", () => {
+    const p = fileProvider(FILE_SNAPSHOT);
+    const roots = p.getChildren();
+    expect(roots.map((n) => n.kind)).toEqual(["file", "file", "file"]);
+    expect(roots.map((n) => (n.kind === "file" ? n.filePath : n.kind))).toEqual([
+      "/ws/a.feature",
+      "/ws/z.feature",
+      "/ws/b.feature",
+    ]);
+  });
+
+  it("labels a file row with its path and flags the untraced count", () => {
+    const p = fileProvider(FILE_SNAPSHOT);
+    const aFile = p.getChildren()[0]!;
+    const item = p.getTreeItem(aFile);
+    expect(item.label).toBe("/ws/a.feature");
+    expect(item.description).toBe("1 untraced");
+    expect(item.contextValue).toBe("traceabilityFile");
+    const bFile = p.getChildren()[2]!;
+    expect(p.getTreeItem(bFile).description).toBeUndefined();
+  });
+
+  it("orders a file's children untraced-first, then mapped, each by source line", () => {
+    const p = fileProvider(FILE_SNAPSHOT);
+    const aFile = p.getChildren()[0]!;
+    const children = p.getChildren(aFile);
+    expect(children.map((n) => n.kind)).toEqual(["untraced", "link", "link"]);
+    expect(children.map((n) => p.getTreeItem(n).label)).toEqual([
+      "Untagged A",
+      "Divide by zero",
+      "Multiply",
+    ]);
+  });
+
+  it("keeps the mapped children rendering with their existing icons and reveal command", () => {
+    const p = fileProvider(FILE_SNAPSHOT);
+    const link = p.getChildren(p.getChildren()[0]!)[1]!;
+    const item = p.getTreeItem(link);
+    expect(item.contextValue).toBe("traceabilityScenario");
+    expect((item.iconPath as vscode.ThemeIcon).id).toBe("testing-passed-icon");
+    expect((item.command as { command: string }).command).toBe("vscode.open");
+  });
+
+  it("leads the tree with the connection row in file mode", () => {
+    const p = fileProvider(FILE_SNAPSHOT);
+    p.setConnectionIndicator({ state: "ok", label: "acme", message: "up" });
+    const roots = p.getChildren();
+    expect(roots[0]!.kind).toBe("connection");
+    expect(roots.slice(1).map((n) => n.kind)).toEqual(["file", "file", "file"]);
+  });
+
+  it("retains the orphan section at the end in file mode on a complete catalogue", () => {
+    const p = fileProvider({
+      ...FILE_SNAPSHOT,
+      completeness: "complete",
+      orphans: [{ testKey: "CALC-9999", meta: { key: "CALC-9999", summary: "Ghost" } }],
+    });
+    const roots = p.getChildren();
+    expect(roots.map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
+      "file",
+      "file",
+      "file",
+      "orphan",
+    ]);
+    const orphanRows = p.getChildren(roots.at(-1)!);
+    expect(orphanRows.map((n) => (n.kind === "orphan" ? n.testKey : n.kind))).toEqual(["CALC-9999"]);
+  });
+
+  it("reads the persisted mode from the store on construction", () => {
+    const p = new TraceabilityTreeDataProvider(makeModel(FILE_SNAPSHOT).model, "Xray", fileStore("file"));
+    p.setConnected(true);
+    expect(p.groupingMode).toBe("file");
+    expect(p.getChildren().every((n) => n.kind === "file")).toBe(true);
+  });
+
+  it("toggles between layouts, persists each flip, and refreshes", () => {
+    const writes: GroupingMode[] = [];
+    const store: GroupingModeStore = { get: () => "test", set: (m) => writes.push(m) };
+    const p = new TraceabilityTreeDataProvider(makeModel(FILE_SNAPSHOT).model, "Xray", store);
+    p.setConnected(true);
+    let refreshes = 0;
+    p.onDidChangeTreeData(() => { refreshes += 1; });
+
+    expect(p.groupingMode).toBe("test");
+    expect(p.getChildren().every((n) => n.kind === "section")).toBe(true);
+
+    p.toggleGroupingMode();
+    expect(p.groupingMode).toBe("file");
+    expect(writes).toEqual(["file"]);
+    expect(refreshes).toBe(1);
+    expect(p.getChildren().some((n) => n.kind === "file")).toBe(true);
+
+    p.toggleGroupingMode();
+    expect(p.groupingMode).toBe("test");
+    expect(writes).toEqual(["file", "test"]);
+  });
+
+  it("defaults to the by-test layout when no store is supplied", () => {
+    const p = new TraceabilityTreeDataProvider(makeModel(FILE_SNAPSHOT).model, "Xray");
+    p.setConnected(true);
+    expect(p.groupingMode).toBe("test");
+    expect(p.getChildren().every((n) => n.kind === "section")).toBe(true);
   });
 });
 

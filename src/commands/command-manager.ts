@@ -24,7 +24,7 @@ import {
 } from "../traceability/link-scenario";
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
 import { LinkPickerPanel } from "../traceability/link-picker-panel";
-import { buildBoardViewModel } from "../traceability/board-data";
+import { buildBoardViewModel, resolveBoardDrop } from "../traceability/board-data";
 import { BoardPanel } from "../traceability/board-panel";
 import { linkedTestsForScenario, ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
@@ -51,6 +51,7 @@ import { makeFeatureStepResolver } from "../xray/feature-step-resolver";
 import { XrayImportError } from "../xray/execution-importers";
 import { fetchJiraAttachmentMeta, uploadJiraAttachments } from "../xray/jira-attachments";
 import { buildAttachmentsModel } from "../xray/publish-attachment-support";
+import { JiraAccessError, JiraProject, searchJiraProjects } from "../xray/jira-project-search";
 import { normalizeSiteUrl } from "../xray/xray-adapter";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
 
@@ -237,6 +238,8 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.disconnect", title: "Disconnect from Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().disconnect() },
         { command: "playwrightBddRunner.traceability.testConnection", title: "Test Xray Connection", category: CATEGORY, handler: () => this.getXrayConnectionCommands().testConnection() },
         { command: "playwrightBddRunner.traceability.hidePanel", title: "Hide Traceability Panel", category: CATEGORY, handler: this.hideTraceabilityPanel.bind(this) },
+        { command: "playwrightBddRunner.traceability.toggleGrouping", title: "Toggle Grouping", category: CATEGORY, handler: this.toggleGrouping.bind(this) },
+        { command: "playwrightBddRunner.traceability.switchDefaultProject", title: "Switch Default Project…", category: CATEGORY, handler: this.switchDefaultProject.bind(this) },
       ];
 
       for (const cmd of commands) {
@@ -1186,9 +1189,35 @@ export class CommandManager {
     const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
     BoardPanel.open({
       providerLabel: subsystem.getActiveAdapter()?.label ?? "Xray",
-      buildModel: () => buildBoardViewModel(subsystem.getSnapshot(), roots),
+      buildModel: () =>
+        buildBoardViewModel(subsystem.getSnapshot(), roots, subsystem.getActiveAdapter()?.keyGrammar.testPrefix ?? ""),
       onDidChange: subsystem.onDidChangeSnapshot,
+      applyDrop: (scenario, key) => this.applyBoardDrop(scenario, key),
     });
+  }
+
+  // A board drag-to-link drop: validate the {scenario, key} pair against the CURRENT snapshot (a drop
+  // staged before a rebuild may name a card that no longer exists) and, when it still holds, write the
+  // tag through the same insert path as linkExisting. The file watcher rebuilds and the board
+  // re-renders on its own, so nothing here patches the view model. This runs outside the command
+  // registration's try/catch (it is a panel callback), so it surfaces a failed write itself.
+  private async applyBoardDrop(dropId: string, key: string): Promise<void> {
+    const subsystem = this.traceabilitySubsystem;
+    const adapter = subsystem?.getActiveAdapter();
+    if (!subsystem || !adapter) {
+      return;
+    }
+    const resolved = resolveBoardDrop(subsystem.getSnapshot(), dropId, key);
+    if (!resolved) {
+      vscode.window.showWarningMessage("That link is out of date because the board changed. Try the drag again.");
+      return;
+    }
+    try {
+      await this.applyTagInsert(resolved.ref, resolved.key, adapter.keyGrammar);
+    } catch (error) {
+      this.logger.error("Board drag-to-link write failed", { error: errMsg(error) });
+      vscode.window.showErrorMessage(`Could not link ${resolved.key}: ${errMsg(error)}`);
+    }
   }
 
   // Serialize sync: the palette entry and the view-title button can both fire; a second invoke while
@@ -1242,6 +1271,110 @@ export class CommandManager {
         ? vscode.ConfigurationTarget.Workspace
         : vscode.ConfigurationTarget.Global;
     await wsConfig.update("traceability.enablePanel", false, target);
+  }
+
+  // Flip the Traceability tree between the by-test and by-file layouts (title-bar button + palette).
+  // The subsystem owns the persisted mode, so this just delegates.
+  private toggleGrouping(): void {
+    this.traceabilitySubsystem?.toggleGrouping();
+  }
+
+  // Set xray.defaultProjectKey (create-time only): a project QuickPick when Jira credentials are
+  // present, a validated key input otherwise. Written back to whichever scope already holds the
+  // setting, preferring Workspace over Global when both are pinned.
+  private async switchDefaultProject(): Promise<void> {
+    const rawSite = this.context.config.xraySiteUrl;
+    const current = this.context.config.xrayDefaultProjectKey;
+    const jiraCredentials = await this.credentialStore?.getJiraCredentials(rawSite);
+    const chosen = jiraCredentials
+      ? await this.pickDefaultProjectFromJira(rawSite, jiraCredentials, current)
+      : await this.promptDefaultProjectKey(current);
+    if (chosen === undefined) {
+      return;
+    }
+    // Normalize once here so the Jira-picked key and the typed key agree; project keys are canonical
+    // uppercase (the same shape resolveProjectForCreate stores).
+    const normalized = chosen.toUpperCase();
+    await this.writeDefaultProjectKey(normalized);
+    vscode.window.showInformationMessage(
+      `Default project set to ${normalized}, used only when creating tests or executions.`
+    );
+  }
+
+  private async pickDefaultProjectFromJira(
+    rawSite: string,
+    credentials: { email: string; token: string },
+    current: string
+  ): Promise<string | undefined> {
+    const site = normalizeSiteUrl(rawSite);
+    if (site === "") {
+      return this.promptDefaultProjectKey(current);
+    }
+    let projects: JiraProject[];
+    try {
+      projects = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "Loading Jira projects…" },
+        () => searchJiraProjects({ site, credentials, logger: this.logger })
+      ).then((result) => result.projects);
+    } catch (error) {
+      // A terminal Jira failure degrades to the manual key input rather than dead-ending.
+      const message = error instanceof JiraAccessError ? error.message : errMsg(error);
+      vscode.window.showWarningMessage(`Could not list Jira projects: ${message}`);
+      return this.promptDefaultProjectKey(current);
+    }
+    if (projects.length === 0) {
+      return this.promptDefaultProjectKey(current);
+    }
+    interface ProjectItem extends vscode.QuickPickItem {
+      key: string;
+    }
+    const items: ProjectItem[] = projects.map((project) => ({
+      label: project.key,
+      description: project.name,
+      key: project.key,
+    }));
+    const picker = vscode.window.createQuickPick<ProjectItem>();
+    picker.title = "Switch Default Project";
+    picker.placeholder = "Select the default Jira project (used only when creating tests or executions)";
+    picker.items = items;
+    const currentItem = items.find((item) => item.key === current);
+    if (currentItem) {
+      picker.activeItems = [currentItem];
+    }
+    try {
+      const picked = await new Promise<ProjectItem | undefined>((resolve) => {
+        picker.onDidAccept(() => resolve(picker.selectedItems[0]));
+        picker.onDidHide(() => resolve(undefined));
+        picker.show();
+      });
+      return picked?.key;
+    } finally {
+      picker.dispose();
+    }
+  }
+
+  private async promptDefaultProjectKey(current: string): Promise<string | undefined> {
+    const input = await vscode.window.showInputBox({
+      title: "Switch Default Project",
+      prompt: "Jira project key, used only when creating tests or executions",
+      placeHolder: "e.g. CALC",
+      value: current,
+      validateInput: (value) =>
+        (/^[A-Za-z][A-Za-z0-9_]*$/.test(value.trim()) ? undefined : "Enter a project key such as CALC."),
+    });
+    // Caller (switchDefaultProject) uppercases at the shared write path, so just trim here.
+    return input === undefined ? undefined : input.trim();
+  }
+
+  // Write to wherever the setting already lives so a workspace-pinned value isn't promoted to Global
+  // (mirrors the Xray site-URL and hide-panel targets); Workspace wins when both scopes hold a value.
+  private async writeDefaultProjectKey(key: string): Promise<void> {
+    const wsConfig = vscode.workspace.getConfiguration("playwrightBddRunner");
+    const target =
+      wsConfig.inspect<string>("xray.defaultProjectKey")?.workspaceValue !== undefined
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await wsConfig.update("xray.defaultProjectKey", key, target);
   }
 
   public dispose(): void {

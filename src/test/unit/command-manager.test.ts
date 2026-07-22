@@ -18,6 +18,7 @@ import { XrayAdapter } from "../../xray/xray-adapter";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
+import { scenarioDropId } from "../../traceability/board-data";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { PreflightChoice } from "../../traceability/preflight-flow";
@@ -927,7 +928,7 @@ describe("traceability openBoard command handler", () => {
     return {
       traceabilityPanelActive: panelActive,
       getSnapshot: () => ({ links: [], untraced: [], orphans: [], stale: false, completeness: "complete", errors: [] }),
-      getActiveAdapter: () => ({ label: "Xray" }),
+      getActiveAdapter: () => ({ label: "Xray", keyGrammar: { testPrefix: "TEST_" } }),
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
   }
@@ -999,5 +1000,104 @@ describe("traceability coverage board contributions", () => {
     expect(palette.find((e) => e.command === CMD)?.when).toBe(
       "config.playwrightBddRunner.traceability.enablePanel"
     );
+  });
+});
+
+describe("traceability board drag-to-link drop handler", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const A: ScenarioRef = { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" };
+
+  function dropSnapshot(): TraceabilitySnapshot {
+    return {
+      links: [],
+      untraced: [{ scenario: A, reqKeys: [] }],
+      orphans: [{ testKey: "5", meta: { key: "5" } }],
+      stale: false,
+      completeness: "complete",
+      errors: [],
+    };
+  }
+
+  function harness(snapshot: TraceabilitySnapshot) {
+    const adapter = new InMemoryTraceabilityAdapter();
+    const doc = {
+      uri: vscode.Uri.file("/ws/a.feature"),
+      getText: () => "Feature: F\n\nScenario: A\n  Given x\n",
+      save: () => Promise.resolve(true),
+    };
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(doc as unknown as vscode.TextDocument);
+    const applied: Array<{ __entries: Array<{ op: string; text: string }> }> = [];
+    vi.spyOn(vscode.workspace, "applyEdit").mockImplementation((edit) => {
+      applied.push(edit as unknown as { __entries: Array<{ op: string; text: string }> });
+      return Promise.resolve(true);
+    });
+    const mgr = CommandManager.create(makeContext({ traceabilityAdapter: adapter }));
+    const subsystem = {
+      getActiveAdapter: () => adapter,
+      getSnapshot: () => snapshot,
+    } as unknown as TraceabilitySubsystem;
+    mgr.setTraceabilitySubsystem(subsystem);
+    return { mgr, applied };
+  }
+
+  const drop = (mgr: CommandManager, dropId: string, key: string): Promise<void> =>
+    (mgr as unknown as { applyBoardDrop: (d: string, k: string) => Promise<void> }).applyBoardDrop(dropId, key);
+
+  it("writes the tag via a single WorkspaceEdit inserting the grammar-built tag", async () => {
+    const { mgr, applied } = harness(dropSnapshot());
+    await drop(mgr, scenarioDropId(A), "5");
+    expect(applied).toHaveLength(1);
+    expect(applied[0]!.__entries).toHaveLength(1);
+    expect(applied[0]!.__entries[0]).toMatchObject({ op: "insert", text: "@TC-5\n" });
+  });
+
+  it("routes through the shared applyTagInsert rather than duplicating the insert", async () => {
+    const { mgr, applied } = harness(dropSnapshot());
+    const insert = vi.spyOn(
+      mgr as unknown as { applyTagInsert: (...a: unknown[]) => Promise<unknown> },
+      "applyTagInsert"
+    );
+    await drop(mgr, scenarioDropId(A), "5");
+    expect(insert).toHaveBeenCalledOnce();
+    expect(insert.mock.calls[0]![0]).toMatchObject({ filePath: "/ws/a.feature", line: 3 });
+    expect(insert.mock.calls[0]![1]).toBe("5");
+    expect(applied).toHaveLength(1);
+  });
+
+  it("rejects a stale drop with a toast and no edit when the scenario is gone from the snapshot", async () => {
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const { mgr, applied } = harness(dropSnapshot());
+    await drop(mgr, scenarioDropId({ ...A, line: 999 }), "5");
+    expect(applied).toHaveLength(0);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a drop naming a key the snapshot no longer knows", async () => {
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const { mgr, applied } = harness(dropSnapshot());
+    await drop(mgr, scenarioDropId(A), "NOPE-1");
+    expect(applied).toHaveLength(0);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces a failed write as an error toast without crashing", async () => {
+    const adapter = new InMemoryTraceabilityAdapter();
+    const doc = {
+      uri: vscode.Uri.file("/ws/a.feature"),
+      getText: () => "Feature: F\n\nScenario: A\n  Given x\n",
+      save: () => Promise.resolve(true),
+    };
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(doc as unknown as vscode.TextDocument);
+    vi.spyOn(vscode.workspace, "applyEdit").mockRejectedValue(new Error("disk full"));
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const mgr = CommandManager.create(makeContext({ traceabilityAdapter: adapter }));
+    mgr.setTraceabilitySubsystem({
+      getActiveAdapter: () => adapter,
+      getSnapshot: () => dropSnapshot(),
+    } as unknown as TraceabilitySubsystem);
+
+    await expect(drop(mgr, scenarioDropId(A), "5")).resolves.toBeUndefined();
+    expect(error).toHaveBeenCalledOnce();
   });
 });

@@ -189,6 +189,50 @@ function createStubWebviewPanel(
   return panel;
 }
 
+// A controllable QuickPick: the code under test sets items/activeItems, registers onDidAccept/onDidHide
+// and calls show(). Tests drive the pending pick with `__accept(selection)` (sets selectedItems then
+// fires accept) or `__hide()` (fires hide → resolves undefined), mirroring the webview-panel seam.
+interface StubQuickPick {
+  title: string;
+  placeholder: string;
+  items: ReadonlyArray<unknown>;
+  activeItems: ReadonlyArray<unknown>;
+  selectedItems: ReadonlyArray<unknown>;
+  onDidAccept: (listener: () => void) => { dispose: () => void };
+  onDidHide: (listener: () => void) => { dispose: () => void };
+  show: () => void;
+  dispose: () => void;
+  __shown: boolean;
+  __accept: (selection?: ReadonlyArray<unknown>) => void;
+  __hide: () => void;
+}
+
+const __quickPicks: StubQuickPick[] = [];
+
+function createStubQuickPick(): StubQuickPick {
+  const acceptListeners: Array<() => void> = [];
+  const hideListeners: Array<() => void> = [];
+  const picker: StubQuickPick = {
+    title: "",
+    placeholder: "",
+    items: [],
+    activeItems: [],
+    selectedItems: [],
+    onDidAccept: (listener) => { acceptListeners.push(listener); return { dispose: () => {} }; },
+    onDidHide: (listener) => { hideListeners.push(listener); return { dispose: () => {} }; },
+    show: (): void => { picker.__shown = true; },
+    dispose: (): void => { /* no-op */ },
+    __shown: false,
+    __accept: (selection): void => {
+      if (selection) { picker.selectedItems = selection; }
+      for (const l of [...acceptListeners]) { l(); }
+    },
+    __hide: (): void => { for (const l of [...hideListeners]) { l(); } },
+  };
+  __quickPicks.push(picker);
+  return picker;
+}
+
 export const window = {
   createOutputChannel: () => new StubOutputChannel(),
   createTerminal: () => ({ show: () => {}, sendText: () => {}, dispose: () => {} }),
@@ -248,6 +292,9 @@ export const window = {
     showOptions?: unknown,
     options?: unknown
   ): StubWebviewPanel => createStubWebviewPanel(viewType, title, showOptions, options),
+  createQuickPick: (): StubQuickPick => createStubQuickPick(),
+  __quickPicks,
+  __resetQuickPicks: (): void => { __quickPicks.length = 0; },
   __treeViewCounters,
   __getLastTreeView: (): StubTreeView | undefined => __lastTreeView,
   __resetTreeViewCounters: (): void => {
