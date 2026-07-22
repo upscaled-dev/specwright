@@ -507,12 +507,27 @@ describe("traceability panel connection UX contributions", () => {
 });
 
 describe("traceability linkScenario command", () => {
-  afterEach(() => vi.restoreAllMocks());
+  const win = vscode.window as unknown as {
+    __webviewPanels: Array<{ __receive: (message: unknown) => Promise<void>; dispose: () => void }>;
+    __resetWebviewPanels: () => void;
+  };
+
+  afterEach(() => {
+    win.__resetWebviewPanels();
+    vi.restoreAllMocks();
+  });
 
   const untracedNode = {
     kind: "untraced",
     item: { scenario: { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" } },
   };
+
+  // The command opens the webview picker and awaits the flow; drive a confirm on the last-opened
+  // panel, then await the handler so the tag-write side effect has run.
+  async function confirmLink(pending: Promise<void>, id: string): Promise<void> {
+    await win.__webviewPanels.at(-1)!.__receive({ type: "confirm", id });
+    await pending;
+  }
 
   async function syncedAdapter(): Promise<InMemoryTraceabilityAdapter> {
     const adapter = new InMemoryTraceabilityAdapter();
@@ -551,9 +566,6 @@ describe("traceability linkScenario command", () => {
       save: () => Promise.resolve(true),
     };
     vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(doc as unknown as vscode.TextDocument);
-    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(
-      { label: "5", description: "Five", key: "5" } as unknown as vscode.QuickPickItem
-    );
     const applied: Array<{ __entries: Array<{ op: string; text: string }> }> = [];
     vi.spyOn(vscode.workspace, "applyEdit").mockImplementation((edit) => {
       applied.push(edit as unknown as { __entries: Array<{ op: string; text: string }> });
@@ -561,7 +573,7 @@ describe("traceability linkScenario command", () => {
     });
 
     const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
-    await handlers.get("playwrightBddRunner.traceability.linkScenario")!(untracedNode);
+    await confirmLink(handlers.get("playwrightBddRunner.traceability.linkScenario")!(untracedNode), "5");
 
     expect(applied).toHaveLength(1);
     expect(applied[0]!.__entries).toHaveLength(1);
@@ -605,19 +617,19 @@ describe("traceability linkScenario command", () => {
     adapter.seedCatalogue([{ key: "9", summary: "Nine" }], "complete");
     await adapter.metadata.sync({ testKeys: ["9"] });
     vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(fakeDoc(feature));
-    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(
-      { label: "9", key: "9" } as unknown as vscode.QuickPickItem
-    );
     const applied: EditEntry[][] = [];
     vi.spyOn(vscode.workspace, "applyEdit").mockImplementation((edit) => {
       applied.push((edit as unknown as { __entries: EditEntry[] }).__entries);
       return Promise.resolve(true);
     });
     const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
-    await handlers.get("playwrightBddRunner.traceability.linkScenario")!({
-      kind: "link",
-      link: { scenario: { filePath: "/ws/a.feature", line: 4, name: "A", kind: "scenario" } },
-    });
+    await confirmLink(
+      handlers.get("playwrightBddRunner.traceability.linkScenario")!({
+        kind: "link",
+        link: { scenario: { filePath: "/ws/a.feature", line: 4, name: "A", kind: "scenario" } },
+      }),
+      "9"
+    );
     expect(applied).toHaveLength(1);
     return applyWsEdit(feature, applied[0]!);
   }

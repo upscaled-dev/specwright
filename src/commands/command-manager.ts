@@ -18,10 +18,11 @@ import {
   authorScenarioTest,
   AuthorScenarioTestUi,
   computeLinkEdit,
-  LinkScenarioPick,
   linkScenarioPicks,
   scenarioGherkinSlice,
 } from "../traceability/link-scenario";
+import { runLinkPickerFlow } from "../traceability/link-picker-flow";
+import { LinkPickerPanel } from "../traceability/link-picker-panel";
 import { ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
 import {
@@ -33,7 +34,6 @@ import {
   PreflightState,
   PublishOutcome,
   PublishRequest,
-  RemoteSearchCapability,
   RunArtifact,
   SyncScope,
   TraceabilityAdapter,
@@ -60,11 +60,6 @@ const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
   "automation-binding-required": "automation binding required",
   "not-in-target-plan": "not in the target plan",
 };
-
-// What the link picker returned: an existing test to tag, or a request to author a brand-new one.
-type LinkChoice =
-  | { readonly kind: "existing"; readonly key: string; readonly synced: boolean }
-  | { readonly kind: "create" };
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -571,8 +566,8 @@ export class CommandManager {
     await this.linkScenarioForRef(scenario);
   }
 
-  // The linkScenario quick-pick + idempotent tag insert for a known scenario ref. Shared by the
-  // context-menu command and the preflight flow's `repair` outcome.
+  // The linkScenario picker (webview modal) + idempotent tag insert for a known scenario ref. Shared
+  // by the context-menu command and the preflight flow's `repair` outcome.
   private async linkScenarioForRef(scenario: ScenarioRef): Promise<void> {
     const adapter = this.traceabilitySubsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
     const metadata = adapter.metadata;
@@ -586,23 +581,40 @@ export class CommandManager {
       return;
     }
 
-    const chosen = await this.pickTestToLink(adapter, picks);
-    if (!chosen) {return;}
-    if (chosen.kind === "create") {
-      await this.createTestFromScenario(adapter, scenario);
-      return;
-    }
+    const orphans = this.traceabilitySubsystem?.getSnapshot()?.orphans ?? [];
+    const ui = LinkPickerPanel.open({
+      title: `Link scenario to ${adapter.label} test`,
+      searchPlaceholder: `Search ${adapter.label} tests`,
+    });
+    await runLinkPickerFlow({
+      ui,
+      orphanSuggestions: orphans.map((orphan) => ({ key: orphan.testKey, summary: orphan.meta.summary })),
+      localCandidates: picks,
+      syncedKeys: new Set(picks.map((pick) => pick.key)),
+      ...(adapter.testAuthoring ? { createLabel: `Create new ${adapter.label} test from this scenario…` } : {}),
+      ...(adapter.remoteSearch ? { remoteSearch: adapter.remoteSearch } : {}),
+      linkExisting: (key, synced) => this.linkExisting(scenario, key, synced, adapter),
+      createNew: () => this.createTestFromScenario(adapter, scenario),
+      logSearchError: (error) => this.logger.warn("Xray remote search failed", { error: errMsg(error) }),
+    });
+  }
 
-    const outcome = await this.applyTagInsert(scenario, chosen.key, adapter.keyGrammar);
+  // Confirm on an existing test: the idempotent tag insert, plus — for a test picked from remote
+  // search that the snapshot never synced — an additive background merge so its summary/status appear
+  // without a full sync.
+  private async linkExisting(
+    scenario: ScenarioRef,
+    key: string,
+    synced: boolean,
+    adapter: TraceabilityAdapter
+  ): Promise<void> {
+    const outcome = await this.applyTagInsert(scenario, key, adapter.keyGrammar);
     if (outcome === "unchanged") {
-      vscode.window.showInformationMessage(`Scenario already linked to ${chosen.key}.`);
+      vscode.window.showInformationMessage(`Scenario already linked to ${key}.`);
       return;
     }
-
-    // A test picked from the remote search section was never synced, so its metadata is missing from
-    // the tree. Fire an additive background merge so the summary/status appear without a full sync.
-    if (!chosen.synced && adapter.remoteSearch) {
-      adapter.remoteSearch.mergeKeys([chosen.key]).catch((error) => {
+    if (!synced && adapter.remoteSearch) {
+      adapter.remoteSearch.mergeKeys([key]).catch((error) => {
         this.logger.warn("Xray metadata merge for a newly linked test failed", { error: errMsg(error) });
       });
     }
@@ -708,144 +720,6 @@ export class CommandManager {
       "Create test"
     );
     return choice === "Create test";
-  }
-
-  // The link-target picker. Default list = the synced snapshot; when the adapter exposes remote
-  // search, typing ≥3 chars runs a debounced (400ms) Xray search appended as a separate section, so a
-  // never-synced test can still be linked. A capability-gated "create a new test" entry is pinned on
-  // top when the adapter can author. `synced` tells the caller whether to background-merge it.
-  private pickTestToLink(
-    adapter: TraceabilityAdapter,
-    syncedPicks: readonly LinkScenarioPick[]
-  ): Promise<LinkChoice | undefined> {
-    const createLabel = adapter.testAuthoring
-      ? `Create new ${adapter.label} test from this scenario…`
-      : undefined;
-    const remoteSearch = adapter.remoteSearch;
-    if (!remoteSearch) {
-      const items: Array<vscode.QuickPickItem & { key?: string; create?: boolean }> = [];
-      if (createLabel !== undefined) {
-        items.push({ label: createLabel, alwaysShow: true, create: true });
-      }
-      for (const pick of syncedPicks) {
-        items.push({ label: pick.key, description: pick.summary ?? "", key: pick.key });
-      }
-      return Promise.resolve(
-        vscode.window
-          .showQuickPick(items, { placeHolder: "Select a test to link to this scenario", matchOnDescription: true })
-          .then((chosen): LinkChoice | undefined => {
-            if (!chosen) {return undefined;}
-            if (chosen.create) {return { kind: "create" };}
-            return chosen.key !== undefined ? { kind: "existing", key: chosen.key, synced: true } : undefined;
-          })
-      );
-    }
-    return this.pickWithRemoteSearch(remoteSearch, syncedPicks, createLabel);
-  }
-
-  private pickWithRemoteSearch(
-    remoteSearch: RemoteSearchCapability,
-    syncedPicks: readonly LinkScenarioPick[],
-    createLabel: string | undefined
-  ): Promise<LinkChoice | undefined> {
-    interface Row extends vscode.QuickPickItem {
-      key?: string | undefined;
-      synced?: boolean | undefined;
-      create?: boolean | undefined;
-    }
-    const syncedKeys = new Set(syncedPicks.map((pick) => pick.key));
-    const topRows: Row[] =
-      createLabel !== undefined ? [{ label: createLabel, alwaysShow: true, create: true }] : [];
-    const syncedRows: Row[] = syncedPicks.map((pick) => ({
-      label: pick.key,
-      description: pick.summary ?? "",
-      key: pick.key,
-      synced: true,
-    }));
-
-    return new Promise((resolve) => {
-      const qp = vscode.window.createQuickPick<Row>();
-      qp.placeholder = "Filter synced tests, or type ≥3 characters to search Xray";
-      qp.matchOnDescription = true;
-      qp.items = [...topRows, ...syncedRows];
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let searchToken = 0;
-      let searchController: AbortController | undefined;
-      let disposed = false;
-
-      // Supersede any pending/in-flight search: cancel the debounce, bump the token so a late resolve
-      // no-ops, and abort the fetch so it stops paging. Bumping the token here (not just on a new
-      // search) is what stops a sub-3-char reset from being clobbered by an earlier search landing.
-      const supersede = (): void => {
-        if (timer) {
-          clearTimeout(timer);
-          timer = undefined;
-        }
-        searchToken += 1;
-        searchController?.abort();
-        searchController = undefined;
-      };
-
-      const runSearch = (value: string): void => {
-        const token = (searchToken += 1);
-        const controller = new AbortController();
-        searchController = controller;
-        qp.busy = true;
-        remoteSearch
-          .search(value, controller.signal)
-          .then((result) => {
-            if (disposed || token !== searchToken) {return;}
-            const remoteRows: Row[] = result.tests
-              .filter((test) => !syncedKeys.has(test.key))
-              .map((test) => ({ label: test.key, description: test.summary ?? "", key: test.key, synced: false }));
-            const header =
-              remoteRows.length > 0
-                ? "Xray search results"
-                : result.complete
-                  ? "No matches — or the summary field isn't searchable with these credentials"
-                  : "Search did not complete — try again";
-            qp.items = [...topRows, ...syncedRows, { label: header, kind: vscode.QuickPickItemKind.Separator }, ...remoteRows];
-          })
-          .catch((error: unknown) => {
-            // A superseded/aborted search is expected — only a live, current failure is worth a note.
-            if (disposed || token !== searchToken) {return;}
-            this.logger.warn("Xray remote search failed", { error: errMsg(error) });
-          })
-          .finally(() => {
-            if (!disposed && token === searchToken) {qp.busy = false;}
-          });
-      };
-
-      qp.onDidChangeValue((value) => {
-        supersede();
-        const trimmed = value.trim();
-        if (trimmed.length < 3) {
-          qp.items = [...topRows, ...syncedRows];
-          qp.busy = false;
-          return;
-        }
-        timer = setTimeout(() => runSearch(trimmed), 400);
-      });
-      qp.onDidAccept(() => {
-        const picked = qp.selectedItems[0];
-        supersede();
-        // Resolve BEFORE hide so a synchronous onDidHide can't win the race with `undefined`.
-        const choice: LinkChoice | undefined = picked?.create
-          ? { kind: "create" }
-          : picked?.key !== undefined
-            ? { kind: "existing", key: picked.key, synced: picked.synced ?? false }
-            : undefined;
-        resolve(choice);
-        qp.hide();
-      });
-      qp.onDidHide(() => {
-        disposed = true;
-        supersede();
-        qp.dispose();
-        resolve(undefined);
-      });
-      qp.show();
-    });
   }
 
   // Run Locally and Publish… — the preflight batch flow. Resolves the scope, classifies every
