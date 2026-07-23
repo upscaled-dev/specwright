@@ -94,6 +94,7 @@ function renderHtml(providerLabel: string): string {
   .search input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   main { padding: 1rem 1.1rem; }
   .pane[hidden] { display: none; }
+  .mapping-hint { margin: 0 0 1rem; padding: 0.5rem 0.7rem; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); color: var(--vscode-descriptionForeground); font-size: 0.85em; line-height: 1.4; }
   .columns { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: start; }
   .column h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); font-weight: 600; margin: 0 0 0.6rem; }
   .count { color: var(--vscode-descriptionForeground); font-weight: 400; }
@@ -138,6 +139,7 @@ function renderHtml(providerLabel: string): string {
   </header>
   <main>
     <section id="pane-mapping" class="pane" hidden>
+      <p class="mapping-hint">Drag a scenario from the left onto a test on the right to link them. Orphaned tests can also be dragged onto a scenario.</p>
       <div class="columns">
         <div class="column">
           <h2>Untraced scenarios <span id="scenario-count" class="count"></span></h2>

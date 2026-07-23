@@ -78,6 +78,7 @@ describe("BoardPanel", () => {
     expect(panel.webview.html).toContain("Executions");
     expect(panel.webview.html).toContain("Filter by key, tag, file");
     expect(panel.webview.html).toContain("drag to link");
+    expect(panel.webview.html).toContain("Drag a scenario from the left onto a test on the right to link them.");
     expect(panel.webview.html).toContain("Xray tests");
     expect(panel.webview.html).toContain("Requirement");
     expect(panel.webview.html).toContain("Xray test");
