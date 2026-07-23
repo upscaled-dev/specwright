@@ -1,5 +1,6 @@
 Feature: Create product
 
+  @TEST_APEX-5
   Scenario Outline: User should be able to create a product with the following specifications: (<productName>, <productTemplate>, <quantity>)
     Given I am on the product page
     When I create a product "<productName>" from template "<productTemplate>" with quantity "<quantity>"
