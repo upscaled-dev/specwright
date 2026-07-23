@@ -1,6 +1,5 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
-import * as vscode from "vscode";
-import { PendingAttachmentsResult, PublishDialogDelegate, PublishDialogPanel } from "../../traceability/publish-dialog-panel";
+import { describe, it, expect, vi } from "vitest";
+import { PendingAttachmentsResult, PublishDialogDelegate, PublishSurface } from "../../traceability/publish-dialog-panel";
 import {
   AttachmentSuggestion,
   PublishAttachmentsModel,
@@ -8,24 +7,49 @@ import {
   PublishRunOption,
 } from "../../traceability/publish-flow";
 import { PublishRequest, PublishTarget } from "../../traceability/contracts";
+import { SurfaceHost, SurfaceName } from "../../traceability/webview-host";
 
-// The panel drives the real `vscode.window.createWebviewPanel` stub (src/test/__mocks__/vscode.ts):
-// `__receive` delivers an inbound webview message, `webview.__posted` records outbound ones, and
-// `dispose()` fires the onDidDispose seam — the same rig the Xray setup-panel tests use. No real
-// extension host is needed, so this stays a unit test rather than an integration one.
-interface StubPanel {
-  viewType: string;
-  title: string;
-  webview: { html: string; __posted: unknown[] };
-  __disposed: boolean;
+// A fake SurfaceHost driving PublishSurface in isolation: `receive` delivers an inbound (webview)
+// message to the surface's handler, `posted` records outbound ones, `activations` records `activate`
+// targets, and `dispose` fires the onDidDispose seam. No real webview or extension host is involved.
+interface FakeHost {
+  host: SurfaceHost;
+  posted: Array<{ type: string; [key: string]: unknown }>;
+  activations: Array<SurfaceName | undefined>;
+  receive: (message: unknown) => void;
   dispose: () => void;
-  __receive: (message: unknown) => Promise<void>;
 }
 
-const win = vscode.window as unknown as {
-  __webviewPanels: StubPanel[];
-  __resetWebviewPanels: () => void;
-};
+function fakeHost(): FakeHost {
+  let messageHandler: ((message: unknown) => void) | undefined;
+  let disposeHandler: (() => void) | undefined;
+  let disposed = false;
+  const posted: Array<{ type: string; [key: string]: unknown }> = [];
+  const activations: Array<SurfaceName | undefined> = [];
+  const host: SurfaceHost = {
+    post: (message) => posted.push(message as { type: string }),
+    onMessage: (handler) => {
+      messageHandler = handler;
+    },
+    reveal: () => undefined,
+    activate: (surface) => activations.push(surface),
+    onDidDispose: (handler) => {
+      disposeHandler = handler;
+    },
+    isDisposed: () => disposed,
+    setTabVisible: () => undefined,
+  };
+  return {
+    host,
+    posted,
+    activations,
+    receive: (message) => messageHandler?.(message),
+    dispose: () => {
+      disposed = true;
+      disposeHandler?.();
+    },
+  };
+}
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -65,7 +89,6 @@ interface DeferredCall {
 
 // A delegate whose searchTargets never settles on its own — the test drives each call's resolution,
 // letting it exercise superseded/aborted responses. `calls` is also the transport-call ledger.
-// `browseFiles` returns `browseResult`; `attachPending` returns `pendingResult` and records its runIds.
 function deferredDelegate(): {
   delegate: PublishDialogDelegate;
   calls: DeferredCall[];
@@ -107,35 +130,39 @@ function target(key: string, label: string): PublishTarget {
   return { id: key, label, ref: { key } };
 }
 
-afterEach(() => {
-  win.__resetWebviewPanels();
-});
+function surface(delegate: PublishDialogDelegate, startPublish: () => void = () => undefined): { rig: FakeHost; publish: PublishSurface } {
+  const rig = fakeHost();
+  const publish = new PublishSurface(rig.host, delegate, startPublish);
+  return { rig, publish };
+}
 
-describe("PublishDialogPanel — lifecycle", () => {
-  it("resolves undefined when the panel is closed without confirming (the flow's zero-transport signal)", async () => {
+describe("PublishSurface — lifecycle", () => {
+  it("resolves undefined when the panel is disposed without confirming (the flow's zero-transport signal)", async () => {
     const { delegate, calls } = deferredDelegate();
-    const promise = PublishDialogPanel.show(makeModel(), delegate);
-    const panel = win.__webviewPanels[0]!;
+    const { rig, publish } = surface(delegate);
+    const promise = publish.present(makeModel());
 
-    panel.dispose();
+    rig.dispose();
 
     await expect(promise).resolves.toBeUndefined();
     expect(calls).toHaveLength(0);
   });
 
-  it("resolves undefined and makes zero delegate calls when the user cancels", async () => {
+  it("resolves undefined, returns to the board, and makes zero delegate calls when the user cancels", async () => {
     const { delegate, calls } = deferredDelegate();
-    const promise = PublishDialogPanel.show(makeModel(), delegate);
-    const panel = win.__webviewPanels[0]!;
+    const { rig, publish } = surface(delegate);
+    const promise = publish.present(makeModel());
 
-    await panel.__receive({ type: "cancel" });
+    rig.receive({ type: "cancel" });
 
     await expect(promise).resolves.toBeUndefined();
     expect(calls).toHaveLength(0);
+    expect(rig.activations).toContain("board");
   });
 
   it("resolves the confirmed run id, request, and picked attachments untouched", async () => {
     const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
     const request: PublishRequest = {
       mode: "create-new",
       project: "CALC",
@@ -143,159 +170,131 @@ describe("PublishDialogPanel — lifecycle", () => {
       testPlanKey: "CALC-100",
       environments: ["staging"],
     };
-    const promise = PublishDialogPanel.show(makeModel(), delegate);
-    const panel = win.__webviewPanels[0]!;
+    const promise = publish.present(makeModel());
 
-    await panel.__receive({ type: "confirm", runId: "run-1", request, attachments: ["/ws/playwright-report/index.html"] });
+    rig.receive({ type: "confirm", runId: "run-1", request, attachments: ["/ws/playwright-report/index.html"] });
 
     await expect(promise).resolves.toEqual({ runId: "run-1", request, attachments: ["/ws/playwright-report/index.html"] });
   });
 
   it("guards double resolution: a dispose after a confirm neither re-resolves nor throws", async () => {
     const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
     const request: PublishRequest = { mode: "append", executionKey: "XNP-9" };
-    const promise = PublishDialogPanel.show(makeModel(), delegate);
-    const panel = win.__webviewPanels[0]!;
+    const promise = publish.present(makeModel());
 
-    await panel.__receive({ type: "confirm", runId: "run-1", request, attachments: [] });
+    rig.receive({ type: "confirm", runId: "run-1", request, attachments: [] });
     expect(await promise).toEqual({ runId: "run-1", request, attachments: [] });
 
-    expect(() => panel.dispose()).not.toThrow();
+    expect(() => rig.dispose()).not.toThrow();
     await expect(promise).resolves.toEqual({ runId: "run-1", request, attachments: [] });
   });
 
-  it("guards double resolution: a message arriving after the panel settled is dropped", async () => {
+  it("guards double resolution: a message arriving after the surface settled is dropped", async () => {
     const { delegate } = deferredDelegate();
-    const promise = PublishDialogPanel.show(makeModel(), delegate);
-    const panel = win.__webviewPanels[0]!;
+    const { rig, publish } = surface(delegate);
+    const promise = publish.present(makeModel());
 
-    panel.dispose();
+    rig.dispose();
     await expect(promise).resolves.toBeUndefined();
 
-    await panel.__receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "LATE-1" }, attachments: [] });
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "LATE-1" }, attachments: [] });
     await expect(promise).resolves.toBeUndefined();
   });
 });
 
-describe("PublishDialogPanel — rendered shell", () => {
-  it("renders a newest-first run dropdown with an option per run", () => {
-    const rig = deferredDelegate();
-    const model = makeModel({
-      runs: [
-        runOption({ id: "new", label: "newest run" }),
-        runOption({ id: "old", label: "older run" }),
-      ],
-      selectedRunId: "new",
-    });
-    const promise = PublishDialogPanel.show(model, rig.delegate);
-    const panel = win.__webviewPanels[0]!;
+describe("PublishSurface — hydrate on present", () => {
+  it("paints the run model onto the tab and activates the Publish tab", () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
 
-    expect(panel.webview.html).toContain('id="run-select"');
-    expect(panel.webview.html).toContain("newest run");
-    expect(panel.webview.html).toContain("older run");
+    void publish.present(makeModel({ runs: [runOption({ id: "new", label: "newest run" })], selectedRunId: "new" }));
 
-    panel.dispose();
-    return promise;
+    const model = rig.posted.find((m) => m.type === "model");
+    expect(model).toBeDefined();
+    expect((model as unknown as { model: PublishDialogModel }).model.runs.map((r) => r.id)).toEqual(["new"]);
+    expect(rig.activations).toContain(undefined);
   });
 
-  it("renders the selected run's project prefill and the derivation hint", () => {
-    const rig = deferredDelegate();
-    const model = makeModel({ runs: [runOption({ project: { value: "SHOP", fromDerivation: true } })] });
-    const promise = PublishDialogPanel.show(model, rig.delegate);
-    const panel = win.__webviewPanels[0]!;
+  it("resolves the prior present as undefined when a second one supersedes it, then re-hydrates", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
 
-    expect(panel.webview.html).toContain('value="SHOP"');
-    expect(panel.webview.html).toContain("from this run's test keys");
+    const first = publish.present(makeModel({ selectedRunId: "run-1" }));
+    void publish.present(makeModel({ runs: [runOption({ id: "run-2", label: "second" })], selectedRunId: "run-2" }));
 
-    panel.dispose();
-    return promise;
+    await expect(first).resolves.toBeUndefined();
+    expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(2);
   });
 
-  it("hides the derivation hint when the prefill came from the setting", () => {
-    const rig = deferredDelegate();
-    const model = makeModel({ runs: [runOption({ project: { value: "PAY", fromDerivation: false } })] });
-    const promise = PublishDialogPanel.show(model, rig.delegate);
-    const panel = win.__webviewPanels[0]!;
+  it("markSettled clears the busy state to idle after a confirm, staying on the Publish tab", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const promise = publish.present(makeModel());
 
-    expect(panel.webview.html).toContain('<div class="hint" id="project-hint" hidden>');
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await promise;
+    publish.markSettled();
 
-    panel.dispose();
-    return promise;
+    expect(rig.posted.filter((m) => m.type === "settled")).toHaveLength(1);
+    expect(rig.activations).not.toContain("board");
   });
 
-  it("renders the republish banner (target, time, mode) for a previously-published run", () => {
-    const rig = deferredDelegate();
-    const model = makeModel({
-      runs: [runOption({ republish: { key: "XNP-9", publishedAt: Date.UTC(2026, 6, 20, 12, 0, 0), mode: "append" } })],
-    });
-    const promise = PublishDialogPanel.show(model, rig.delegate);
-    const panel = win.__webviewPanels[0]!;
+  it("markSettled is a no-op once a newer present has superseded the settled one", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
 
-    expect(panel.webview.html).toContain("Already published to XNP-9");
-    expect(panel.webview.html).toContain("(appended)");
-    expect(panel.webview.html).toContain("Publishing again creates a duplicate.");
+    const first = publish.present(makeModel());
+    void publish.present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
+    await first;
+    publish.markSettled();
 
-    panel.dispose();
-    return promise;
-  });
-
-  it("renders the pending-attachments banner with its attach action", () => {
-    const rig = deferredDelegate();
-    const model = makeModel({ runs: [runOption({ pendingAttachments: { key: "XNP-9", count: 2 } })] });
-    const promise = PublishDialogPanel.show(model, rig.delegate);
-    const panel = win.__webviewPanels[0]!;
-
-    expect(panel.webview.html).toContain("2 attachment files from the last publish to XNP-9 did not upload.");
-    expect(panel.webview.html).toContain("Attach pending files");
-
-    panel.dispose();
-    return promise;
-  });
-
-  it("renders the disabled attachments reason and the evidence-stream wording into the html", () => {
-    const rig = deferredDelegate();
-    const model = makeModel({
-      attachments: {
-        available: false,
-        reason: "Add Jira access in Xray setup to attach files.",
-        suggestions: [],
-        uploadLimitBytes: 5 * 1024 * 1024,
-        evidenceStream: "issue",
-      },
-    });
-    const promise = PublishDialogPanel.show(model, rig.delegate);
-    const panel = win.__webviewPanels[0]!;
-
-    expect(panel.webview.html).toContain("Add Jira access in Xray setup to attach files.");
-    expect(panel.webview.html).toContain("uploads to the execution's Jira issue");
-
-    panel.dispose();
-    return promise;
+    expect(rig.posted.filter((m) => m.type === "settled")).toHaveLength(0);
   });
 });
 
-describe("PublishDialogPanel — search", () => {
-  it("does not call the search delegate until the webview asks for a search", async () => {
+describe("PublishSurface — manual activation", () => {
+  it("starts a fresh publish when the tab is activated with none underway", () => {
+    const { delegate } = deferredDelegate();
+    const startPublish = vi.fn();
+    const { publish } = surface(delegate, startPublish);
+
+    publish.onManualActivate();
+
+    expect(startPublish).toHaveBeenCalledOnce();
+  });
+
+  it("does not start another publish while one is already being presented", () => {
+    const { delegate } = deferredDelegate();
+    const startPublish = vi.fn();
+    const { publish } = surface(delegate, startPublish);
+
+    void publish.present(makeModel());
+    publish.onManualActivate();
+
+    expect(startPublish).not.toHaveBeenCalled();
+  });
+});
+
+describe("PublishSurface — search", () => {
+  it("does not call the search delegate until the webview asks for a search", () => {
     const { delegate, calls } = deferredDelegate();
-    const promise = PublishDialogPanel.show(makeModel(), delegate);
-    const panel = win.__webviewPanels[0]!;
+    const { rig, publish } = surface(delegate);
+    void publish.present(makeModel());
 
     expect(calls).toHaveLength(0);
 
-    await panel.__receive({ type: "search", token: 1, kind: "execution", query: "CALC" });
+    rig.receive({ type: "search", token: 1, kind: "execution", query: "CALC" });
     expect(calls).toHaveLength(1);
-
-    panel.dispose();
-    await promise;
   });
 
   it("does not post a superseded search response (the aborted token is dropped, the fresh one posts)", async () => {
     const { delegate, calls } = deferredDelegate();
-    const promise = PublishDialogPanel.show(makeModel(), delegate);
-    const panel = win.__webviewPanels[0]!;
+    const { rig, publish } = surface(delegate);
+    void publish.present(makeModel());
 
-    await panel.__receive({ type: "search", token: 1, kind: "execution", query: "A" });
-    await panel.__receive({ type: "search", token: 2, kind: "execution", query: "AB" });
+    rig.receive({ type: "search", token: 1, kind: "execution", query: "A" });
+    rig.receive({ type: "search", token: 2, kind: "execution", query: "AB" });
 
     expect(calls).toHaveLength(2);
     expect(calls[0]!.signal?.aborted).toBe(true);
@@ -306,89 +305,77 @@ describe("PublishDialogPanel — search", () => {
     calls[1]!.resolve([target("XNP-2", "Fresh exec")]);
     await flush();
 
-    const posted = panel.webview.__posted as Array<{ type: string; token: number }>;
-    expect(posted).toHaveLength(1);
-    expect(posted[0]).toMatchObject({ type: "search-result", token: 2 });
-
-    panel.dispose();
-    await promise;
+    const results = rig.posted.filter((m) => m.type === "search-result");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ token: 2 });
   });
 
-  it("does not post a search response that resolves after the dialog is confirmed", async () => {
+  it("does not post a search response that resolves after the surface is confirmed", async () => {
     const { delegate, calls } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
     const request: PublishRequest = { mode: "append", executionKey: "XNP-3" };
-    const promise = PublishDialogPanel.show(makeModel(), delegate);
-    const panel = win.__webviewPanels[0]!;
+    const promise = publish.present(makeModel());
 
-    await panel.__receive({ type: "search", token: 1, kind: "test-plan", query: "CALC" });
+    rig.receive({ type: "search", token: 1, kind: "test-plan", query: "CALC" });
     expect(calls).toHaveLength(1);
 
-    await panel.__receive({ type: "confirm", runId: "run-1", request, attachments: [] });
+    rig.receive({ type: "confirm", runId: "run-1", request, attachments: [] });
     await expect(promise).resolves.toEqual({ runId: "run-1", request, attachments: [] });
 
     calls[0]!.resolve([target("PLAN-1", "Some plan")]);
     await flush();
 
-    expect(panel.webview.__posted).toHaveLength(0);
+    expect(rig.posted.filter((m) => m.type === "search-result")).toHaveLength(0);
   });
 });
 
-describe("PublishDialogPanel — attachments", () => {
+describe("PublishSurface — attachments", () => {
   it("calls the browse seam on a browse message and posts the picked files back", async () => {
     const rig = deferredDelegate();
     rig.browseResult = [{ path: "/ws/trace.zip", name: "trace.zip", size: 2048 }];
-    const promise = PublishDialogPanel.show(makeModel(), rig.delegate);
-    const panel = win.__webviewPanels[0]!;
+    const { rig: host, publish } = surface(rig.delegate);
+    void publish.present(makeModel());
 
-    await panel.__receive({ type: "browse" });
+    host.receive({ type: "browse" });
     await flush();
 
-    const posted = panel.webview.__posted as Array<{ type: string; items: unknown }>;
-    expect(posted).toHaveLength(1);
-    expect(posted[0]).toEqual({
+    const results = host.posted.filter((m) => m.type === "browse-result");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toEqual({
       type: "browse-result",
       items: [{ path: "/ws/trace.zip", name: "trace.zip", size: 2048 }],
     });
-
-    panel.dispose();
-    await promise;
   });
 
   it("runs the attach-pending action and posts the remaining count back", async () => {
     const rig = deferredDelegate();
     rig.pendingResult = { remaining: 1 };
-    const promise = PublishDialogPanel.show(
-      makeModel({ runs: [runOption({ pendingAttachments: { key: "XNP-9", count: 2 } })] }),
-      rig.delegate
-    );
-    const panel = win.__webviewPanels[0]!;
+    const { rig: host, publish } = surface(rig.delegate);
+    void publish.present(makeModel({ runs: [runOption({ pendingAttachments: { key: "XNP-9", count: 2 } })] }));
 
-    await panel.__receive({ type: "attachPending", runId: "run-1" });
+    host.receive({ type: "attachPending", runId: "run-1" });
     await flush();
 
     expect(rig.attachPending).toHaveBeenCalledWith("run-1");
-    expect(panel.webview.__posted).toEqual([{ type: "pending-result", runId: "run-1", remaining: 1 }]);
-
-    panel.dispose();
-    await promise;
+    expect(host.posted.filter((m) => m.type === "pending-result")).toEqual([{ type: "pending-result", runId: "run-1", remaining: 1 }]);
   });
 
-  it("drops an attach-pending response that resolves after the dialog settled", async () => {
+  it("drops an attach-pending response that resolves after the surface settled", async () => {
     const rig = deferredDelegate();
     let resolvePending: (value: PendingAttachmentsResult) => void = () => undefined;
     rig.attachPending.mockImplementation(
       () => new Promise<PendingAttachmentsResult>((resolve) => { resolvePending = resolve; })
     );
-    const promise = PublishDialogPanel.show(makeModel(), rig.delegate);
-    const panel = win.__webviewPanels[0]!;
+    const { rig: host, publish } = surface(rig.delegate);
+    const promise = publish.present(makeModel());
 
-    await panel.__receive({ type: "attachPending", runId: "run-1" });
-    panel.dispose();
+    host.receive({ type: "attachPending", runId: "run-1" });
+    host.dispose();
     await expect(promise).resolves.toBeUndefined();
 
     resolvePending({ remaining: 0 });
     await flush();
 
-    expect(panel.webview.__posted).toHaveLength(0);
+    expect(host.posted.filter((m) => m.type === "pending-result")).toHaveLength(0);
   });
 });

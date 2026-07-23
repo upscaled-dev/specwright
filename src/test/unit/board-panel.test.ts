@@ -2,6 +2,13 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
 import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import { BoardViewModel, ExecutionRow } from "../../traceability/board-data";
+import { PublishDialogDelegate } from "../../traceability/publish-dialog-panel";
+
+const noopDelegate: PublishDialogDelegate = {
+  searchTargets: () => Promise.resolve([]),
+  browseFiles: () => Promise.resolve([]),
+  attachPending: () => Promise.resolve({ remaining: 0 }),
+};
 
 // The panel drives the real `vscode.window.createWebviewPanel` stub: `__receive` delivers an inbound
 // webview message, `webview.__posted` records outbound ones, `__revealCount` counts reveals, and
@@ -65,6 +72,8 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     onDidChange: new vscode.EventEmitter<void>().event,
     applyDrop: () => Promise.resolve(),
     openExecution: () => undefined,
+    publishDelegate: noopDelegate,
+    startPublish: () => undefined,
     ...over,
   };
 }
@@ -110,6 +119,40 @@ describe("BoardPanel", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
     expect(html.split("acquireVsCodeApi()").length - 1).toBe(1);
+  });
+
+  it("carries the permanent Publish tab and its pane in the shell", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+    expect(html).toContain('data-tab="publish"');
+    expect(html).toContain('id="pane-publish"');
+    expect(html).toContain(">Publish</button>");
+  });
+
+  it("fires startPublish when the Publish tab is activated with no publish underway", async () => {
+    const startPublish = vi.fn();
+    const { panel } = await openReady({ startPublish });
+
+    await panel.__receive({ type: "tab", tab: "publish" });
+
+    expect(lastActivate(panel)).toBe("publish");
+    expect(startPublish).toHaveBeenCalledOnce();
+  });
+
+  it("does not re-fire startPublish while a publish is already being presented", async () => {
+    const startPublish = vi.fn();
+    const { instance, panel } = await openReady({ startPublish });
+
+    void instance.publish.present({
+      title: "Publish run results",
+      runs: [],
+      selectedRunId: "",
+      jiraSearchAvailable: false,
+      attachments: { available: false, suggestions: [], uploadLimitBytes: 0, evidenceStream: "evidence" },
+    });
+    await panel.__receive({ type: "tab", tab: "publish" });
+
+    expect(startPublish).not.toHaveBeenCalled();
   });
 
   it("reveals the existing panel instead of opening a second (singleton surface)", () => {

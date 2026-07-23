@@ -13,7 +13,7 @@ import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { TestOrganizationManager } from "../../core/test-organization";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { CommandBuilder } from "../../core/command-builder";
-import { ExternalRef, TraceabilityAdapter } from "../../traceability/contracts";
+import { ExternalRef, RunArtifact, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayAdapter } from "../../xray/xray-adapter";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
@@ -968,6 +968,90 @@ describe("traceability openBoard command handler", () => {
     openBoard(mgr);
     expect(win.__webviewPanels).toHaveLength(0);
     expect(String(info.mock.calls[0]?.[0])).toContain("Enable the Traceability panel");
+  });
+});
+
+describe("traceability publishLastRun — Publish tab", () => {
+  const win = vscode.window as unknown as {
+    __webviewPanels: Array<{
+      title: string;
+      webview: { __posted: Array<{ surface?: string; type: string }> };
+      __receive: (message: unknown) => Promise<void>;
+      dispose: () => void;
+    }>;
+    __resetWebviewPanels: () => void;
+  };
+  const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+  afterEach(() => {
+    win.__resetWebviewPanels();
+    vi.restoreAllMocks();
+  });
+
+  function publishableArtifact(): RunArtifact {
+    return {
+      id: "run-1",
+      createdAt: Date.UTC(2026, 6, 22, 9, 0, 0),
+      results: [
+        {
+          scenario: { filePath: "/ws/a.feature", line: 3, name: "a", kind: "scenario" },
+          testKey: "CALC-1",
+          outcome: "passed",
+          durationMs: 10,
+          attempts: 1,
+          flaky: false,
+          evidenceRefs: [],
+        },
+      ],
+      shards: [],
+      selection: { kind: "all-mapped" },
+      preflight: [],
+      state: "complete",
+    };
+  }
+
+  function connectedSubsystem(): TraceabilitySubsystem {
+    const adapter = {
+      id: "xray",
+      label: "Xray",
+      keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", projectOf: (k: string) => k.split("-")[0] },
+      resultPublishing: {
+        searchTargets: () => Promise.resolve([]),
+        publish: () => Promise.resolve({ ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [] }),
+      },
+    } as unknown as TraceabilityAdapter;
+    return {
+      traceabilityPanelActive: true,
+      getActiveAdapter: () => adapter,
+      getSnapshot: () => undefined,
+      onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
+    } as unknown as TraceabilitySubsystem;
+  }
+
+  it("opens the board and presents the run model on the Publish tab", async () => {
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem());
+
+    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    await flush();
+
+    const panel = win.__webviewPanels[0]!;
+    expect(panel.title).toBe("Coverage Board");
+    await panel.__receive({ type: "ready" });
+    expect(panel.webview.__posted.find((m) => m.surface === "publish" && m.type === "model")).toBeDefined();
+
+    // Cancel resolves the present so the flow (and its finally) unwinds.
+    await panel.__receive({ surface: "publish", type: "cancel" });
+    await promise;
+  });
+
+  it("guides the user and opens no board when no publishing capability is connected", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const mgr = CommandManager.create(makeContext());
+    await (mgr as unknown as { runPublish: () => Promise<void> }).runPublish();
+    expect(win.__webviewPanels).toHaveLength(0);
+    expect(String(info.mock.calls[0]?.[0])).toContain("Connect");
   });
 });
 

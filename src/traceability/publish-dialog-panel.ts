@@ -1,26 +1,19 @@
-import * as vscode from "vscode";
-import { contentSecurityPolicy, createNonce, escapeHtml } from "../utils/webview";
+import { escapeHtml } from "../utils/webview";
 import { PublishRequest, PublishTarget } from "./contracts";
-import {
-  AttachmentSuggestion,
-  PendingAttachmentsNotice,
-  PublishDialogModel,
-  PublishDialogResult,
-  PublishRunOption,
-  RepublishNotice,
-} from "./publish-flow";
+import { AttachmentSuggestion, PublishDialogModel, PublishDialogResult } from "./publish-flow";
+import { SurfaceFragment, SurfaceHost } from "./webview-host";
 
-const VIEW_TYPE = "playwrightBddRunner.publishResults";
 const IMPORT_HINT = "Create → POST /import/execution/cucumber/multipart · Append → POST /import/execution";
+const IDLE_HINT = "Pick a run to publish and its details appear here.";
 
 // The still-pending count after an in-dialog attach-pending action; 0 clears the banner.
 export interface PendingAttachmentsResult {
   readonly remaining: number;
 }
 
-// The delegate the dialog calls back into. `searchTargets` rejects (NotSupportedError) without Jira
-// creds — the dialog only calls it when `jiraSearchAvailable`. `browseFiles` opens the native file
-// picker behind a mockable seam (the panel never imports `showOpenDialog` directly, so the unit rig
+// The delegate the surface calls back into. `searchTargets` rejects (NotSupportedError) without Jira
+// creds — the surface only calls it when `jiraSearchAvailable`. `browseFiles` opens the native file
+// picker behind a mockable seam (the surface never imports `showOpenDialog` directly, so the unit rig
 // can drive it) and returns the picked files with their sizes. `attachPending` uploads a run's ledgered
 // pending files WITHOUT a reimport and returns how many still failed.
 export interface PublishDialogDelegate {
@@ -51,111 +44,142 @@ interface AttachPendingMessage {
 interface CancelMessage {
   type: "cancel";
 }
-type IncomingMessage = SearchMessage | BrowseMessage | ConfirmMessage | AttachPendingMessage | CancelMessage;
+type PublishIncoming = SearchMessage | BrowseMessage | ConfirmMessage | AttachPendingMessage | CancelMessage;
 
-type OutgoingMessage =
-  | {
-      type: "search-result";
-      token: number;
-      kind: "execution" | "test-plan";
-      items: ReadonlyArray<{ readonly key: string; readonly label: string }>;
-      error?: string | undefined;
+/**
+ * The View 3 publish dialog, hosted as the board's permanent Publish tab. Constructed once with a
+ * `SurfaceHost`, the delegate, and a `startPublish` callback (invoked when the user activates the tab
+ * with no publish underway). `present` hydrates the tab with a run model and resolves to the confirmed
+ * `PublishDialogResult` — or `undefined` on cancel/close/supersede, the flow's zero-transport signal.
+ * The surface owns run selection and search/browse/attach seams; the webview paints the run dropdown,
+ * banners, and form from the posted model.
+ */
+export class PublishSurface {
+  private pending: { resolve: (result: PublishDialogResult | undefined) => void } | undefined;
+  private searchController: AbortController | undefined;
+
+  constructor(
+    private readonly host: SurfaceHost,
+    private readonly delegate: PublishDialogDelegate,
+    private readonly startPublish: () => void
+  ) {
+    host.onMessage((message) => this.handle(message as PublishIncoming));
+    host.onDidDispose(() => this.dispose());
+  }
+
+  // Hydrate the tab with a run model and await the user's decision. A present while one is pending
+  // resolves the prior as undefined (supersede), then re-hydrates.
+  public present(model: PublishDialogModel): Promise<PublishDialogResult | undefined> {
+    this.resolvePending(undefined);
+    this.searchController?.abort();
+    this.searchController = undefined;
+    this.host.post({ type: "model", model });
+    this.host.activate();
+    return new Promise<PublishDialogResult | undefined>((resolve) => {
+      this.pending = { resolve };
+    });
+  }
+
+  // Called in the flow's finally: clears the busy state to an idle placeholder, staying on the Publish
+  // tab (toasts convey the outcome). A no-op when a newer present has already superseded this one.
+  public markSettled(): void {
+    if (this.pending) {
+      return;
     }
-  | {
-      type: "browse-result";
-      items: ReadonlyArray<{ readonly path: string; readonly name: string; readonly size: number }>;
+    this.host.post({ type: "settled" });
+  }
+
+  // The user activated the Publish tab: start a fresh publish only when none is underway; otherwise the
+  // shell has already re-activated the in-progress form.
+  public onManualActivate(): void {
+    if (this.pending) {
+      return;
     }
-  | { type: "pending-result"; runId: string; remaining: number };
-
-// Serialize a value for embedding inside a nonce'd <script> block — only `<` can break out (`</script>`).
-function embedJson(value: unknown): string {
-  return JSON.stringify(value).replaceAll("<", "\\u003c");
-}
-
-// The banner wording is shared with the webview JS (which rebuilds it when the dropdown changes), so
-// both must produce the same text; keep these in sync with `republishText`/`pendingText` in the script.
-function modeWord(mode: RepublishNotice["mode"]): string {
-  if (mode === "append") {
-    return "appended";
+    this.startPublish();
   }
-  return mode === "create-new" ? "new execution" : "";
-}
 
-function republishBannerText(notice: RepublishNotice): string {
-  const when = new Date(notice.publishedAt).toLocaleString();
-  const mode = modeWord(notice.mode);
-  const modePart = mode ? ` (${mode})` : "";
-  return `Already published to ${notice.key} on ${when}${modePart}. Publishing again creates a duplicate.`;
-}
-
-function pendingBannerText(notice: PendingAttachmentsNotice): string {
-  const files = notice.count === 1 ? "file" : "files";
-  return `${notice.count} attachment ${files} from the last publish to ${notice.key} did not upload.`;
-}
-
-function bannersHtml(run: PublishRunOption): string {
-  const parts: string[] = [];
-  if (run.republish) {
-    parts.push(`<div class="banner">${escapeHtml(republishBannerText(run.republish))}</div>`);
+  public dispose(): void {
+    this.resolvePending(undefined);
+    this.searchController?.abort();
   }
-  if (run.pendingAttachments) {
-    parts.push(
-      `<div class="banner pending"><span>${escapeHtml(pendingBannerText(run.pendingAttachments))}</span>` +
-        `<button type="button" class="link" data-attach-pending>Attach pending files</button></div>`
-    );
+
+  private handle(message: PublishIncoming): void {
+    if (message.type === "cancel") {
+      this.resolvePending(undefined);
+      this.host.activate("board");
+    } else if (message.type === "confirm") {
+      this.resolvePending({ runId: message.runId, request: message.request, attachments: message.attachments });
+    } else if (message.type === "search") {
+      this.runSearch(message).catch(() => undefined);
+    } else if (message.type === "browse") {
+      this.runBrowse().catch(() => undefined);
+    } else if (message.type === "attachPending") {
+      this.runAttachPending(message).catch(() => undefined);
+    }
   }
-  return parts.join("\n");
+
+  private resolvePending(result: PublishDialogResult | undefined): void {
+    const pending = this.pending;
+    if (!pending) {
+      return;
+    }
+    this.pending = undefined;
+    pending.resolve(result);
+  }
+
+  private async runBrowse(): Promise<void> {
+    const files = await this.delegate.browseFiles();
+    if (this.settled()) {
+      return;
+    }
+    this.host.post({ type: "browse-result", items: files.map((f) => ({ path: f.path, name: f.name, size: f.size })) });
+  }
+
+  private async runAttachPending(message: AttachPendingMessage): Promise<void> {
+    const result = await this.delegate.attachPending(message.runId);
+    if (this.settled()) {
+      return;
+    }
+    this.host.post({ type: "pending-result", runId: message.runId, remaining: result.remaining });
+  }
+
+  private async runSearch(message: SearchMessage): Promise<void> {
+    this.searchController?.abort();
+    const controller = new AbortController();
+    this.searchController = controller;
+    try {
+      const targets = await this.delegate.searchTargets(message.kind, message.query, controller.signal);
+      if (controller.signal.aborted || this.settled()) {
+        return;
+      }
+      this.host.post({
+        type: "search-result",
+        token: message.token,
+        kind: message.kind,
+        items: targets.map((t) => ({ key: t.ref.key, label: t.label })),
+      });
+    } catch (error) {
+      if (controller.signal.aborted || this.settled()) {
+        return;
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      this.host.post({ type: "search-result", token: message.token, kind: message.kind, items: [], error: reason });
+    }
+  }
+
+  // A response is stale once the present has resolved (confirm/cancel/supersede) or the panel is gone.
+  private settled(): boolean {
+    return this.pending === undefined || this.host.isDisposed();
+  }
 }
 
-function runOptionsHtml(runs: readonly PublishRunOption[], selectedRunId: string): string {
-  return runs
-    .map(
-      (run) =>
-        `<option value="${escapeHtml(run.id)}"${run.id === selectedRunId ? " selected" : ""}>${escapeHtml(run.label)}</option>`
-    )
-    .join("\n");
-}
-
-function evidenceStreamLine(stream: PublishDialogModel["attachments"]["evidenceStream"]): string {
-  if (stream === "issue") {
-    return "Per-test evidence uploads to the execution's Jira issue (xray.attachTo).";
-  }
-  if (stream === "both") {
-    return "Per-test evidence rides the result payload and the Jira issue (xray.attachTo).";
-  }
-  return "Per-test evidence rides the result payload (xray.attachTo).";
-}
-
-function attachmentsHint(stream: PublishDialogModel["attachments"]["evidenceStream"]): string {
-  return `${evidenceStreamLine(stream)} These run-level files always attach to the execution's Jira issue.`;
-}
-
-function renderHtml(model: PublishDialogModel): string {
-  const nonce = createNonce();
-  const selected = model.runs.find((run) => run.id === model.selectedRunId) ?? model.runs[0];
-  if (selected === undefined) {
-    return "";
-  }
-  const planValue = escapeHtml(selected.prefillPlanKey ?? "");
-  const attachModel = { ...model.attachments, hint: attachmentsHint(model.attachments.evidenceStream) };
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Publish run results</title>
-<style>
-  body {
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    color: var(--vscode-foreground);
-    padding: 1.25rem;
-    max-width: 34rem;
-  }
-  h1 { font-size: 1.3rem; font-weight: 600; margin: 0 0 0.25rem; }
-  .subtitle { color: var(--vscode-descriptionForeground); margin: 0.75rem 0 1rem; }
-  .banner {
+const PUBLISH_CSS = `
+  #pane-publish { max-width: 34rem; }
+  #pane-publish .idle { color: var(--vscode-descriptionForeground); font-style: italic; padding: 0.5rem 0; }
+  #pane-publish .busy { color: var(--vscode-descriptionForeground); font-style: italic; padding: 0.5rem 0; }
+  #pane-publish h1 { font-size: 1.3rem; font-weight: 600; margin: 0 0 0.25rem; }
+  #pane-publish .subtitle { color: var(--vscode-descriptionForeground); margin: 0.75rem 0 1rem; }
+  #pane-publish .banner {
     color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
     background: var(--vscode-inputValidation-warningBackground, transparent);
     border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
@@ -163,13 +187,13 @@ function renderHtml(model: PublishDialogModel): string {
     padding: 0.5rem 0.65rem;
     margin: 0 0 1rem;
   }
-  .banner.pending { display: flex; align-items: center; gap: 0.6rem; }
-  .banner.pending span { flex: 1; }
-  fieldset { border: none; margin: 0; padding: 0; }
-  .radio-row { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.5rem; }
-  label { display: block; margin-top: 1rem; font-weight: 600; }
-  .radio-row label { display: inline; margin: 0; font-weight: 400; }
-  input[type="text"], select {
+  #pane-publish .banner.pending { display: flex; align-items: center; gap: 0.6rem; }
+  #pane-publish .banner.pending span { flex: 1; }
+  #pane-publish fieldset { border: none; margin: 0; padding: 0; }
+  #pane-publish .radio-row { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.5rem; }
+  #pane-publish label { display: block; margin-top: 1rem; font-weight: 600; }
+  #pane-publish .radio-row label { display: inline; margin: 0; font-weight: 400; }
+  #pane-publish input[type="text"], #pane-publish select {
     width: 100%;
     box-sizing: border-box;
     margin-top: 0.35rem;
@@ -181,93 +205,94 @@ function renderHtml(model: PublishDialogModel): string {
     font-family: inherit;
     font-size: inherit;
   }
-  input:focus, select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-  .hint { color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-top: 0.25rem; }
-  .field-error { color: var(--vscode-errorForeground); font-size: 0.85em; min-height: 1.1em; margin-top: 0.25rem; }
-  .results { list-style: none; margin: 0.35rem 0 0; padding: 0; border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; }
-  .results:empty { display: none; border: none; }
-  .results li { padding: 0.35rem 0.5rem; cursor: pointer; }
-  .results li:hover { background: var(--vscode-list-hoverBackground); }
-  .attach-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
-  .attach-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; }
-  .attach-row .name { flex: 1; }
-  .attach-row .size { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
-  .attach-row .over { color: var(--vscode-errorForeground); font-size: 0.85em; }
-  .disabled-note { color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-top: 0.5rem; font-style: italic; }
-  [hidden] { display: none !important; }
-  .actions { display: flex; gap: 0.6rem; margin-top: 1.5rem; }
-  button { padding: 0.45rem 0.9rem; border: none; border-radius: 2px; cursor: pointer; font-family: inherit; }
-  button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
-  button.primary:hover { background: var(--vscode-button-hoverBackground); }
-  button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
-  button.link { background: none; color: var(--vscode-textLink-foreground); padding: 0; text-align: left; flex: none; }
-  .footer { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 1.25rem; }
-</style>
-</head>
-<body>
-  <h1>${escapeHtml(model.title)}</h1>
+  #pane-publish input:focus, #pane-publish select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  #pane-publish .hint { color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-top: 0.25rem; }
+  #pane-publish .field-error { color: var(--vscode-errorForeground); font-size: 0.85em; min-height: 1.1em; margin-top: 0.25rem; }
+  #pane-publish .results { list-style: none; margin: 0.35rem 0 0; padding: 0; border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; }
+  #pane-publish .results:empty { display: none; border: none; }
+  #pane-publish .results li { padding: 0.35rem 0.5rem; cursor: pointer; }
+  #pane-publish .results li:hover { background: var(--vscode-list-hoverBackground); }
+  #pane-publish .attach-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+  #pane-publish .attach-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; }
+  #pane-publish .attach-row .name { flex: 1; }
+  #pane-publish .attach-row .size { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  #pane-publish .attach-row .over { color: var(--vscode-errorForeground); font-size: 0.85em; }
+  #pane-publish .disabled-note { color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-top: 0.5rem; font-style: italic; }
+  #pane-publish [hidden] { display: none !important; }
+  #pane-publish .actions { display: flex; gap: 0.6rem; margin-top: 1.5rem; }
+  #pane-publish button { padding: 0.45rem 0.9rem; border: none; border-radius: 2px; cursor: pointer; font-family: inherit; }
+  #pane-publish button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+  #pane-publish button.primary:hover { background: var(--vscode-button-hoverBackground); }
+  #pane-publish button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+  #pane-publish button.link { background: none; color: var(--vscode-textLink-foreground); padding: 0; text-align: left; flex: none; }
+  #pane-publish .footer { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 1.25rem; }`;
 
-  <label for="run-select">Run</label>
-  <select id="run-select">${runOptionsHtml(model.runs, selected.id)}</select>
+const PUBLISH_PANE = `<div id="publish-idle" class="idle">${escapeHtml(IDLE_HINT)}</div>
+      <div id="publish-busy" class="busy" hidden>Publishing…</div>
+      <div id="publish-form" hidden>
+        <h1 id="publish-title"></h1>
 
-  <p class="subtitle" id="subtitle">${escapeHtml(selected.subtitle)}</p>
-  <div id="banners">${bannersHtml(selected)}</div>
+        <label for="run-select">Run</label>
+        <select id="run-select"></select>
 
-  <fieldset>
-    <div class="radio-row">
-      <input type="radio" id="mode-create" name="mode" value="create-new" checked>
-      <label for="mode-create">Create new execution</label>
-    </div>
-    <div class="radio-row">
-      <input type="radio" id="mode-append" name="mode" value="append">
-      <label for="mode-append">Add to existing execution</label>
-    </div>
-  </fieldset>
+        <p class="subtitle" id="subtitle"></p>
+        <div id="banners"></div>
 
-  <div id="create-fields">
-    <label for="project">Project key</label>
-    <input id="project" type="text" spellcheck="false" autocapitalize="characters" value="${escapeHtml(selected.project.value)}">
-    <div class="hint" id="project-hint"${selected.project.fromDerivation ? "" : " hidden"}>from this run's test keys</div>
-    <div id="err-project" class="field-error"></div>
+        <fieldset>
+          <div class="radio-row">
+            <input type="radio" id="mode-create" name="publish-mode" value="create-new" checked>
+            <label for="mode-create">Create new execution</label>
+          </div>
+          <div class="radio-row">
+            <input type="radio" id="mode-append" name="publish-mode" value="append">
+            <label for="mode-append">Add to existing execution</label>
+          </div>
+        </fieldset>
 
-    <label for="summary">Summary</label>
-    <input id="summary" type="text" value="${escapeHtml(selected.defaultSummary)}">
-    <div id="err-summary" class="field-error"></div>
+        <div id="create-fields">
+          <label for="project">Project key</label>
+          <input id="project" type="text" spellcheck="false" autocapitalize="characters">
+          <div class="hint" id="project-hint" hidden>from this run's test keys</div>
+          <div id="err-project" class="field-error"></div>
 
-    <label for="plan">Test Plan key (optional)</label>
-    <input id="plan" type="text" spellcheck="false" autocapitalize="characters" value="${planValue}">
-    <ul id="plan-results" class="results"></ul>
+          <label for="summary">Summary</label>
+          <input id="summary" type="text">
+          <div id="err-summary" class="field-error"></div>
 
-    <label for="environments">Environments (optional, comma-separated)</label>
-    <input id="environments" type="text" spellcheck="false">
-  </div>
+          <label for="plan">Test Plan key (optional)</label>
+          <input id="plan" type="text" spellcheck="false" autocapitalize="characters">
+          <ul id="plan-results" class="results"></ul>
 
-  <div id="append-fields" hidden>
-    <label for="execution">Execution key</label>
-    <input id="execution" type="text" spellcheck="false" autocapitalize="characters">
-    <p class="hint" id="exec-hint"></p>
-    <ul id="exec-results" class="results"></ul>
-    <div id="err-execution" class="field-error"></div>
-  </div>
+          <label for="environments">Environments (optional, comma-separated)</label>
+          <input id="environments" type="text" spellcheck="false">
+        </div>
 
-  <label>Run-level attachments</label>
-  <p class="hint" id="attach-hint"></p>
-  <ul id="attach-list" class="attach-list"></ul>
-  <button id="browse" class="link" type="button" hidden>Add files…</button>
-  <p class="disabled-note" id="attach-disabled" hidden></p>
+        <div id="append-fields" hidden>
+          <label for="execution">Execution key</label>
+          <input id="execution" type="text" spellcheck="false" autocapitalize="characters">
+          <p class="hint" id="exec-hint"></p>
+          <ul id="exec-results" class="results"></ul>
+          <div id="err-execution" class="field-error"></div>
+        </div>
 
-  <div class="actions">
-    <button id="publish" class="primary" type="button">Publish</button>
-    <button id="cancel" class="secondary" type="button">Cancel</button>
-  </div>
-  <p class="footer">${escapeHtml(IMPORT_HINT)}</p>
+        <label>Run-level attachments</label>
+        <p class="hint" id="attach-hint"></p>
+        <ul id="attach-list" class="attach-list"></ul>
+        <button id="browse" class="link" type="button" hidden>Add files…</button>
+        <p class="disabled-note" id="attach-disabled" hidden></p>
 
-<script nonce="${nonce}">
-  const vscodeApi = acquireVsCodeApi();
-  const searchable = ${model.jiraSearchAvailable ? "true" : "false"};
-  const attachModel = ${embedJson(attachModel)};
-  const runs = ${embedJson(model.runs)};
-  let selectedRunId = ${embedJson(selected.id)};
+        <div class="actions">
+          <button id="publish" class="primary" type="button">Publish</button>
+          <button id="cancel" class="secondary" type="button">Cancel</button>
+        </div>
+        <p class="footer">${escapeHtml(IMPORT_HINT)}</p>
+      </div>`;
+
+const PUBLISH_SCRIPT = `
+  const idleBox = document.getElementById('publish-idle');
+  const busyBox = document.getElementById('publish-busy');
+  const formBox = document.getElementById('publish-form');
+  const titleEl = document.getElementById('publish-title');
   const runSelect = document.getElementById('run-select');
   const subtitle = document.getElementById('subtitle');
   const banners = document.getElementById('banners');
@@ -289,6 +314,15 @@ function renderHtml(model: PublishDialogModel): string {
   const attachList = document.getElementById('attach-list');
   const browseButton = document.getElementById('browse');
   const attachDisabled = document.getElementById('attach-disabled');
+  const modeCreate = document.getElementById('mode-create');
+
+  let runs = [];
+  let selectedRunId = null;
+  let searchable = false;
+  let attachModel = { available: false, suggestions: [], uploadLimitBytes: 0, evidenceStream: 'evidence' };
+  let seenPaths = new Set();
+  let token = 0;
+  const timers = {};
 
   function findRun(id) { return runs.find(function (r) { return r.id === id; }); }
 
@@ -301,6 +335,14 @@ function renderHtml(model: PublishDialogModel): string {
   function pendingText(n) {
     const files = n.count === 1 ? 'file' : 'files';
     return n.count + ' attachment ' + files + ' from the last publish to ' + n.key + ' did not upload.';
+  }
+  function evidenceStreamLine(stream) {
+    if (stream === 'issue') { return "Per-test evidence uploads to the execution's Jira issue (xray.attachTo)."; }
+    if (stream === 'both') { return "Per-test evidence rides the result payload and the Jira issue (xray.attachTo)."; }
+    return "Per-test evidence rides the result payload (xray.attachTo).";
+  }
+  function attachHintText(att) {
+    return evidenceStreamLine(att.evidenceStream) + " These run-level files always attach to the execution's Jira issue.";
   }
   function renderBanners(run) {
     banners.textContent = '';
@@ -319,14 +361,14 @@ function renderHtml(model: PublishDialogModel): string {
       btn.type = 'button';
       btn.className = 'link';
       btn.textContent = 'Attach pending files';
-      btn.addEventListener('click', function () { vscodeApi.postMessage({ type: 'attachPending', runId: run.id }); });
+      btn.addEventListener('click', function () { window.__spec.post('publish', { type: 'attachPending', runId: run.id }); });
       div.appendChild(span);
       div.appendChild(btn);
       banners.appendChild(div);
     }
   }
   // Switching runs re-derives everything the selected run owns: subtitle, project prefill + hint,
-  // the summary default, the plan prefill, and both banners (§ points 1–4).
+  // the summary default, the plan prefill, and both banners.
   function applyRun(run) {
     subtitle.textContent = run.subtitle;
     projectInput.value = run.project.value;
@@ -335,24 +377,12 @@ function renderHtml(model: PublishDialogModel): string {
     planInput.value = run.prefillPlanKey || '';
     renderBanners(run);
   }
-  runSelect.addEventListener('change', function () {
-    selectedRunId = runSelect.value;
-    const run = findRun(selectedRunId);
-    if (run) { applyRun(run); }
-  });
-  renderBanners(findRun(selectedRunId));
-
-  execHint.textContent = searchable
-    ? 'Type a project key to search its Test Executions, or type an execution key directly.'
-    : 'Type the execution key to append to. Add Jira access in Xray setup to search instead.';
 
   function formatSize(bytes) {
     if (bytes >= 1024 * 1024) { return (bytes / (1024 * 1024)).toFixed(1) + ' MB'; }
     if (bytes >= 1024) { return Math.round(bytes / 1024) + ' KB'; }
     return bytes + ' B';
   }
-
-  const seenPaths = new Set();
 
   function addAttachmentRow(file) {
     if (seenPaths.has(file.path)) { return; }
@@ -384,17 +414,6 @@ function renderHtml(model: PublishDialogModel): string {
     attachList.appendChild(row);
   }
 
-  if (attachModel.available) {
-    attachHint.textContent = attachModel.hint;
-    browseButton.hidden = false;
-    for (const file of attachModel.suggestions) { addAttachmentRow(file); }
-    browseButton.addEventListener('click', function () { vscodeApi.postMessage({ type: 'browse' }); });
-  } else {
-    attachHint.hidden = true;
-    attachDisabled.hidden = false;
-    attachDisabled.textContent = attachModel.reason || 'Add Jira access in Xray setup to attach run-level files.';
-  }
-
   function selectedAttachments() {
     const paths = [];
     if (attachModel.available) {
@@ -405,11 +424,8 @@ function renderHtml(model: PublishDialogModel): string {
     return paths;
   }
 
-  let token = 0;
-  const timers = {};
-
   function currentMode() {
-    return document.querySelector('input[name="mode"]:checked').value;
+    return document.querySelector('input[name="publish-mode"]:checked').value;
   }
 
   function applyMode() {
@@ -418,24 +434,16 @@ function renderHtml(model: PublishDialogModel): string {
     createFields.hidden = append;
   }
 
-  for (const radio of document.querySelectorAll('input[name="mode"]')) {
-    radio.addEventListener('change', applyMode);
-  }
-  applyMode();
-
   function runSearch(kind, query, listEl, targetInput) {
     if (!searchable) { return; }
     const myToken = ++token;
     clearTimeout(timers[kind]);
     timers[kind] = setTimeout(function () {
-      vscodeApi.postMessage({ type: 'search', token: myToken, kind: kind, query: query });
+      window.__spec.post('publish', { type: 'search', token: myToken, kind: kind, query: query });
     }, 400);
     listEl.__token = myToken;
     listEl.__input = targetInput;
   }
-
-  execInput.addEventListener('input', function () { runSearch('execution', execInput.value.trim(), execResults, execInput); });
-  planInput.addEventListener('input', function () { runSearch('test-plan', planInput.value.trim(), planResults, planInput); });
 
   function renderResults(listEl, items) {
     listEl.textContent = '';
@@ -450,9 +458,106 @@ function renderHtml(model: PublishDialogModel): string {
     }
   }
 
-  window.addEventListener('message', function (event) {
-    const msg = event.data;
-    if (msg.type === 'search-result') {
+  function show(which) {
+    idleBox.hidden = which !== 'idle';
+    busyBox.hidden = which !== 'busy';
+    formBox.hidden = which !== 'form';
+  }
+
+  // Repaint the whole form from a fresh run model, clearing every mutable field first so a second
+  // present never inherits the previous run's dropdown, banners, prefill, attach rows, or mode.
+  function applyModel(model) {
+    runs = model.runs || [];
+    selectedRunId = model.selectedRunId;
+    searchable = !!model.jiraSearchAvailable;
+    attachModel = model.attachments;
+    seenPaths = new Set();
+    titleEl.textContent = model.title;
+    runSelect.textContent = '';
+    runs.forEach(function (run) {
+      const opt = document.createElement('option');
+      opt.value = run.id;
+      opt.textContent = run.label;
+      if (run.id === selectedRunId) { opt.selected = true; }
+      runSelect.appendChild(opt);
+    });
+    const selected = findRun(selectedRunId) || runs[0];
+    errProject.textContent = '';
+    errSummary.textContent = '';
+    errExecution.textContent = '';
+    execInput.value = '';
+    envInput.value = '';
+    execResults.textContent = '';
+    planResults.textContent = '';
+    modeCreate.checked = true;
+    applyMode();
+    execHint.textContent = searchable
+      ? 'Type a project key to search its Test Executions, or type an execution key directly.'
+      : 'Type the execution key to append to. Add Jira access in Xray setup to search instead.';
+    attachList.textContent = '';
+    if (attachModel.available) {
+      attachHint.hidden = false;
+      attachHint.textContent = attachHintText(attachModel);
+      attachDisabled.hidden = true;
+      browseButton.hidden = false;
+      (attachModel.suggestions || []).forEach(addAttachmentRow);
+    } else {
+      attachHint.hidden = true;
+      browseButton.hidden = true;
+      attachDisabled.hidden = false;
+      attachDisabled.textContent = attachModel.reason || 'Add Jira access in Xray setup to attach run-level files.';
+    }
+    if (selected) { selectedRunId = selected.id; applyRun(selected); }
+    show('form');
+  }
+
+  runSelect.addEventListener('change', function () {
+    selectedRunId = runSelect.value;
+    const run = findRun(selectedRunId);
+    if (run) { applyRun(run); }
+  });
+  for (const radio of document.querySelectorAll('input[name="publish-mode"]')) {
+    radio.addEventListener('change', applyMode);
+  }
+  execInput.addEventListener('input', function () { runSearch('execution', execInput.value.trim(), execResults, execInput); });
+  planInput.addEventListener('input', function () { runSearch('test-plan', planInput.value.trim(), planResults, planInput); });
+
+  document.getElementById('cancel').addEventListener('click', function () {
+    show('idle');
+    window.__spec.post('publish', { type: 'cancel' });
+  });
+
+  document.getElementById('publish').addEventListener('click', function () {
+    errProject.textContent = '';
+    errSummary.textContent = '';
+    errExecution.textContent = '';
+    const attachments = selectedAttachments();
+    if (currentMode() === 'append') {
+      const executionKey = execInput.value.trim();
+      if (executionKey === '') { errExecution.textContent = 'Enter the execution key to append to.'; return; }
+      show('busy');
+      window.__spec.post('publish', { type: 'confirm', runId: selectedRunId, request: { mode: 'append', executionKey: executionKey }, attachments: attachments });
+      return;
+    }
+    const project = projectInput.value.trim();
+    if (project === '') { errProject.textContent = 'Enter the project key to create the execution in.'; return; }
+    const summary = summaryInput.value.trim();
+    if (summary === '') { errSummary.textContent = 'Enter a summary for the new execution.'; return; }
+    const environments = envInput.value.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s !== ''; });
+    const request = { mode: 'create-new', project: project, summary: summary };
+    const plan = planInput.value.trim();
+    if (plan !== '') { request.testPlanKey = plan; }
+    if (environments.length > 0) { request.environments = environments; }
+    show('busy');
+    window.__spec.post('publish', { type: 'confirm', runId: selectedRunId, request: request, attachments: attachments });
+  });
+
+  window.__spec.register('publish', function (msg) {
+    if (msg.type === 'model') {
+      applyModel(msg.model);
+    } else if (msg.type === 'settled') {
+      show('idle');
+    } else if (msg.type === 'search-result') {
       const listEl = msg.kind === 'execution' ? execResults : planResults;
       if (listEl.__token !== msg.token) { return; }
       renderResults(listEl, msg.error ? [] : msg.items);
@@ -467,147 +572,10 @@ function renderHtml(model: PublishDialogModel): string {
         if (msg.runId === selectedRunId) { renderBanners(run); }
       }
     }
-  });
+  });`;
 
-  document.getElementById('cancel').addEventListener('click', function () {
-    vscodeApi.postMessage({ type: 'cancel' });
-  });
-
-  document.getElementById('publish').addEventListener('click', function () {
-    errProject.textContent = '';
-    errSummary.textContent = '';
-    errExecution.textContent = '';
-    const attachments = selectedAttachments();
-    if (currentMode() === 'append') {
-      const executionKey = execInput.value.trim();
-      if (executionKey === '') { errExecution.textContent = 'Enter the execution key to append to.'; return; }
-      vscodeApi.postMessage({ type: 'confirm', runId: selectedRunId, request: { mode: 'append', executionKey: executionKey }, attachments: attachments });
-      return;
-    }
-    const project = projectInput.value.trim();
-    if (project === '') { errProject.textContent = 'Enter the project key to create the execution in.'; return; }
-    const summary = summaryInput.value.trim();
-    if (summary === '') { errSummary.textContent = 'Enter a summary for the new execution.'; return; }
-    const environments = envInput.value.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s !== ''; });
-    const request = { mode: 'create-new', project: project, summary: summary };
-    const plan = planInput.value.trim();
-    if (plan !== '') { request.testPlanKey = plan; }
-    if (environments.length > 0) { request.environments = environments; }
-    vscodeApi.postMessage({ type: 'confirm', runId: selectedRunId, request: request, attachments: attachments });
-  });
-</script>
-</body>
-</html>`;
-}
-
-// The View 3 publish dialog. Reuses the shared webview scaffolding (CSP, nonce, escapeHtml; no
-// secrets → no MASK). Owns run selection (newest-first dropdown), the republish and pending-attachment
-// banners, and the create/append form. Resolves to the user's `PublishDialogResult` (selected run +
-// request + kept attachments), or `undefined` on cancel/close — the flow makes zero transport calls for
-// an undefined result.
-export class PublishDialogPanel {
-  private readonly disposables: vscode.Disposable[] = [];
-  private searchController: AbortController | undefined;
-  private settled = false;
-
-  private constructor(
-    private readonly panel: vscode.WebviewPanel,
-    private readonly delegate: PublishDialogDelegate,
-    private readonly resolve: (result: PublishDialogResult | undefined) => void
-  ) {
-    this.disposables.push(
-      this.panel.onDidDispose(() => this.finish(undefined)),
-      this.panel.webview.onDidReceiveMessage((message) => this.handleMessage(message as IncomingMessage))
-    );
-  }
-
-  public static show(model: PublishDialogModel, delegate: PublishDialogDelegate): Promise<PublishDialogResult | undefined> {
-    const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Publish run results", vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [],
-    });
-    return new Promise<PublishDialogResult | undefined>((resolve) => {
-      const instance = new PublishDialogPanel(panel, delegate, resolve);
-      instance.render(model);
-    });
-  }
-
-  private render(model: PublishDialogModel): void {
-    this.panel.webview.html = renderHtml(model);
-  }
-
-  private handleMessage(message: IncomingMessage): void {
-    if (message.type === "cancel") {
-      this.finish(undefined);
-    } else if (message.type === "confirm") {
-      this.finish({ runId: message.runId, request: message.request, attachments: message.attachments });
-    } else if (message.type === "search") {
-      this.runSearch(message).catch(() => undefined);
-    } else if (message.type === "browse") {
-      this.runBrowse().catch(() => undefined);
-    } else if (message.type === "attachPending") {
-      this.runAttachPending(message).catch(() => undefined);
-    }
-  }
-
-  private async runBrowse(): Promise<void> {
-    const files = await this.delegate.browseFiles();
-    if (this.settled) {
-      return;
-    }
-    await this.post({ type: "browse-result", items: files.map((f) => ({ path: f.path, name: f.name, size: f.size })) });
-  }
-
-  private async runAttachPending(message: AttachPendingMessage): Promise<void> {
-    const result = await this.delegate.attachPending(message.runId);
-    if (this.settled) {
-      return;
-    }
-    await this.post({ type: "pending-result", runId: message.runId, remaining: result.remaining });
-  }
-
-  private async runSearch(message: SearchMessage): Promise<void> {
-    this.searchController?.abort();
-    const controller = new AbortController();
-    this.searchController = controller;
-    try {
-      const targets = await this.delegate.searchTargets(message.kind, message.query, controller.signal);
-      if (controller.signal.aborted || this.settled) {
-        return;
-      }
-      await this.post({
-        type: "search-result",
-        token: message.token,
-        kind: message.kind,
-        items: targets.map((t) => ({ key: t.ref.key, label: t.label })),
-      });
-    } catch (error) {
-      if (controller.signal.aborted || this.settled) {
-        return;
-      }
-      const reason = error instanceof Error ? error.message : String(error);
-      await this.post({ type: "search-result", token: message.token, kind: message.kind, items: [], error: reason });
-    }
-  }
-
-  private async post(message: OutgoingMessage): Promise<void> {
-    if (this.settled) {
-      return;
-    }
-    await this.panel.webview.postMessage(message);
-  }
-
-  private finish(result: PublishDialogResult | undefined): void {
-    if (this.settled) {
-      return;
-    }
-    this.settled = true;
-    this.searchController?.abort();
-    this.resolve(result);
-    while (this.disposables.length > 0) {
-      this.disposables.pop()?.dispose();
-    }
-    this.panel.dispose();
-  }
-}
+export const PUBLISH_FRAGMENT: SurfaceFragment = {
+  css: PUBLISH_CSS,
+  paneHtml: PUBLISH_PANE,
+  script: PUBLISH_SCRIPT,
+};

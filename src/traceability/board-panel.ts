@@ -9,6 +9,7 @@ import {
   filterBoardViewModel,
   filterExecutionRows,
 } from "./board-data";
+import { PUBLISH_FRAGMENT, PublishDialogDelegate, PublishSurface } from "./publish-dialog-panel";
 import { SurfaceHost, SurfaceName } from "./webview-host";
 
 const VIEW_TYPE = "playwrightBddRunner.coverageBoard";
@@ -53,6 +54,10 @@ export interface BoardPanelDeps {
   applyDrop(scenario: string, key: string): Promise<void>;
   // An Executions row's key link: routed through the host's browseIssue path.
   openExecution(key: string): void;
+  // The Publish tab's callbacks: the search/browse/attach delegate the surface calls into, and the
+  // command the shell fires when the tab is activated with no publish already underway.
+  readonly publishDelegate: PublishDialogDelegate;
+  startPublish(): void;
 }
 
 // The Mapping/Matrix/Executions surface. It paints all three board panes from one filtered view model
@@ -131,6 +136,7 @@ export class BoardPanel {
   private disposed = false;
   private activeTab: ShellTab = "mapping";
   private readonly surfaces: object[] = [];
+  public readonly publish: PublishSurface;
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -141,6 +147,7 @@ export class BoardPanel {
       this.panel.webview.onDidReceiveMessage((message) => this.handleInbound(message))
     );
     this.surfaces.push(new BoardSurface(this.hostFor("board"), deps));
+    this.publish = new PublishSurface(this.hostFor("publish"), deps.publishDelegate, deps.startPublish);
   }
 
   public static open(deps: BoardPanelDeps): BoardPanel {
@@ -190,6 +197,9 @@ export class BoardPanel {
       this.flush();
     } else if (msg.type === "tab" && msg.tab) {
       this.activateTab(msg.tab);
+      if (msg.tab === "publish") {
+        this.publish.onManualActivate();
+      }
     }
   }
 
@@ -598,9 +608,12 @@ const SHELL_SCRIPT = `
 
 function renderDocument(providerLabel: string): string {
   const nonce = createNonce();
-  const styles = [SHELL_CSS, BOARD_CSS].join("\n");
-  const panes = boardPanesHtml(providerLabel);
-  const scripts = [ROUTER_SCRIPT, SHELL_SCRIPT, BOARD_SCRIPT]
+  const styles = [SHELL_CSS, BOARD_CSS, PUBLISH_FRAGMENT.css].join("\n");
+  const panes = [
+    boardPanesHtml(providerLabel),
+    `    <section id="pane-publish" class="pane" data-tab="publish" hidden>\n      ${PUBLISH_FRAGMENT.paneHtml}\n    </section>`,
+  ].join("\n");
+  const scripts = [ROUTER_SCRIPT, SHELL_SCRIPT, BOARD_SCRIPT, PUBLISH_FRAGMENT.script]
     .map((script) => `<script nonce="${nonce}">${script}</script>`)
     .join("\n");
   return `<!DOCTYPE html>
@@ -620,6 +633,7 @@ function renderDocument(providerLabel: string): string {
       <button class="tab" data-tab="mapping" type="button">Mapping</button>
       <button class="tab" data-tab="matrix" type="button">Matrix</button>
       <button class="tab" data-tab="executions" type="button">Executions</button>
+      <button class="tab" data-tab="publish" type="button">Publish</button>
     </div>
     <div class="search"><input id="search" type="text" spellcheck="false" autocomplete="off" placeholder="Filter by key, tag, file…"></div>
   </header>

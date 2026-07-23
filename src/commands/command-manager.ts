@@ -25,7 +25,7 @@ import {
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
 import { LinkPickerPanel } from "../traceability/link-picker-panel";
 import { buildBoardViewModel, buildExecutionRows, resolveBoardDrop } from "../traceability/board-data";
-import { BoardPanel } from "../traceability/board-panel";
+import { BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
 import { linkedTestsForScenario, ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
 import {
@@ -45,7 +45,7 @@ import { BatchInvocation, resolveBatchSelection } from "../traceability/batch-se
 import { PreflightChoice, runPreflightFlow } from "../traceability/preflight-flow";
 import { isPublishable, publishableResults } from "../traceability/publish-core";
 import { AttachmentSuggestion, PublishAttachmentsModel, runPublishFlow } from "../traceability/publish-flow";
-import { PendingAttachmentsResult, PublishDialogPanel } from "../traceability/publish-dialog-panel";
+import { PendingAttachmentsResult, PublishDialogDelegate } from "../traceability/publish-dialog-panel";
 import { PublishLedger } from "../traceability/publish-ledger";
 import { makeFeatureStepResolver } from "../xray/feature-step-resolver";
 import { XrayImportError } from "../xray/execution-importers";
@@ -137,6 +137,8 @@ export class CommandManager {
   private traceabilitySubsystem: TraceabilitySubsystem | undefined;
   private publishLedger: PublishLedger | undefined;
   private syncInFlight: Promise<void> | undefined;
+  // The board's snapshot-change source when no subsystem is wired (unit rigs); it never fires.
+  private readonly boardChange = new vscode.EventEmitter<void>();
 
   public static create(context: PlaywrightBddExtensionContext): CommandManager {
     return new CommandManager(context);
@@ -845,42 +847,42 @@ export class CommandManager {
       vscode.window.showInformationMessage("Connect to your test tracker before publishing.");
       return;
     }
+    const board = BoardPanel.open(this.boardDeps());
     const rawSite = this.context.config.xraySiteUrl;
     const site = normalizeSiteUrl(rawSite);
     const credentials = await this.credentialStore?.getCredentials(rawSite);
     const jiraSearchAvailable = (await this.credentialStore?.hasJiraCredentials(rawSite)) ?? false;
     const resolveSteps = makeFeatureStepResolver(this.context.featureParser);
-    await runPublishFlow({
-      publishing,
-      runs: this.context.runArtifactStore?.list() ?? [],
-      ...(preselectId !== undefined ? { preselectId } : {}),
-      projectOf: adapter.keyGrammar.projectOf,
-      changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
-      defaultProjectKey: this.context.config.xrayDefaultProjectKey,
-      jiraSearchAvailable,
-      // Lazy — the flow calls this only after the no-runs gate, so an empty run list never fires the
-      // one allowed pre-confirm call (the attachment/meta probe).
-      attachments: () => this.buildPublishAttachments(rawSite),
-      priorEntryFor: (artifactId) => this.publishLedger?.find(artifactId, site),
-      presentDialog: (model) =>
-        PublishDialogPanel.show(model, {
-          searchTargets: (kind, query, signal) => publishing.searchTargets(kind, query, signal),
-          browseFiles: () => this.browsePublishFiles(),
-          attachPending: (runId) => this.attachPendingForRun(runId, site),
-        }),
-      attachFiles: (executionKey, files) => this.attachFiles(executionKey, files),
-      recordPublish: (entry) => this.publishLedger?.record(entry),
-      reportNoRuns: () => {
-        vscode.window.showInformationMessage("No local runs to publish yet — run a batch first.");
-      },
-      reportSuccess: (outcome, request, attachedCount) => this.reportPublishSuccess(outcome, request, attachedCount),
-      reportPartialAttachments: (outcome, request, attachedCount, failed, artifactId) =>
-        this.reportPartialAttachments(artifactId, site, outcome, request, attachedCount, failed),
-      reportFailure: (error) => this.reportPublishFailure(error),
-      site,
-      account: credentials?.clientId ?? "",
-      now: () => Date.now(),
-    });
+    try {
+      await runPublishFlow({
+        publishing,
+        runs: this.context.runArtifactStore?.list() ?? [],
+        ...(preselectId !== undefined ? { preselectId } : {}),
+        projectOf: adapter.keyGrammar.projectOf,
+        changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
+        defaultProjectKey: this.context.config.xrayDefaultProjectKey,
+        jiraSearchAvailable,
+        // Lazy — the flow calls this only after the no-runs gate, so an empty run list never fires the
+        // one allowed pre-confirm call (the attachment/meta probe).
+        attachments: () => this.buildPublishAttachments(rawSite),
+        priorEntryFor: (artifactId) => this.publishLedger?.find(artifactId, site),
+        presentDialog: (model) => board.publish.present(model),
+        attachFiles: (executionKey, files) => this.attachFiles(executionKey, files),
+        recordPublish: (entry) => this.publishLedger?.record(entry),
+        reportNoRuns: () => {
+          vscode.window.showInformationMessage("No local runs to publish yet — run a batch first.");
+        },
+        reportSuccess: (outcome, request, attachedCount) => this.reportPublishSuccess(outcome, request, attachedCount),
+        reportPartialAttachments: (outcome, request, attachedCount, failed, artifactId) =>
+          this.reportPartialAttachments(artifactId, site, outcome, request, attachedCount, failed),
+        reportFailure: (error) => this.reportPublishFailure(error),
+        site,
+        account: credentials?.clientId ?? "",
+        now: () => Date.now(),
+      });
+    } finally {
+      board.publish.markSettled();
+    }
   }
 
   // The pending-attachments banner's action: upload the run's ledgered pending files WITHOUT a reimport
@@ -1166,27 +1168,58 @@ export class CommandManager {
   private openBoard(): void {
     const subsystem = this.traceabilitySubsystem;
     // The subsystem is always wired, but its panel is off when the setting is disabled — with no live
-    // model the board would render permanently empty, so guide the user to enable it instead.
+    // model the board would render permanently empty, so guide the user to enable it instead. Publish
+    // and Link open the board without this gate: their own preconditions are the real check.
     if (!subsystem?.traceabilityPanelActive) {
       vscode.window.showInformationMessage("Enable the Traceability panel to open the Coverage Board.");
       return;
     }
+    BoardPanel.open(this.boardDeps());
+  }
+
+  // The board's dependencies, shared by openBoard, runPublish, and linkScenarioForRef. The board reads
+  // the subsystem live (empty when it's absent or the panel is off), owns the Publish tab's delegate,
+  // and fires runPublish when that tab is activated idle.
+  private boardDeps(): BoardPanelDeps {
+    const subsystem = this.traceabilitySubsystem;
     const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
     const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
-    BoardPanel.open({
-      providerLabel: subsystem.getActiveAdapter()?.label ?? "Xray",
+    return {
+      providerLabel: subsystem?.getActiveAdapter()?.label ?? "Xray",
       buildModel: () =>
-        buildBoardViewModel(subsystem.getSnapshot(), roots, subsystem.getActiveAdapter()?.keyGrammar.testPrefix ?? ""),
+        buildBoardViewModel(subsystem?.getSnapshot(), roots, subsystem?.getActiveAdapter()?.keyGrammar.testPrefix ?? ""),
       buildExecutions: () => buildExecutionRows(this.publishLedger?.entriesForSite(site) ?? []),
-      onDidChange: subsystem.onDidChangeSnapshot,
+      onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,
       applyDrop: (scenario, key) => this.applyBoardDrop(scenario, key),
       openExecution: (key) => {
-        const adapter = subsystem.getActiveAdapter() ?? this.context.traceabilityAdapter;
+        const adapter = subsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
         this.browseIssue(adapter, key).catch((error) => {
           this.logger.warn("Opening the execution issue failed", { error: errMsg(error) });
         });
       },
-    });
+      publishDelegate: this.publishDelegate(),
+      startPublish: () => {
+        this.runPublish().catch((error) => {
+          this.logger.warn("Publish from the board tab failed", { error: errMsg(error) });
+        });
+      },
+    };
+  }
+
+  // The Publish tab's delegate, reading the active adapter and site lazily so a board opened before a
+  // connection still searches/attaches correctly once one is present.
+  private publishDelegate(): PublishDialogDelegate {
+    return {
+      searchTargets: (kind, query, signal) => {
+        const publishing = this.traceabilitySubsystem?.getActiveAdapter()?.resultPublishing;
+        if (!publishing) {
+          return Promise.reject(new Error("Connect to your test tracker to search."));
+        }
+        return publishing.searchTargets(kind, query, signal);
+      },
+      browseFiles: () => this.browsePublishFiles(),
+      attachPending: (runId) => this.attachPendingForRun(runId, normalizeSiteUrl(this.context.config.xraySiteUrl)),
+    };
   }
 
   // A board drag-to-link drop: validate the {scenario, key} pair against the CURRENT snapshot (a drop
