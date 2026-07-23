@@ -31,7 +31,7 @@ test-results/**
 .vscodeignore
 .github/**
 .devcontainer/**
-.DS_Storeß
+.DS_Store
 node_modules/**
 package-lock.json
 

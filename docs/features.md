@@ -160,6 +160,9 @@ Limitations:
 - `<placeholder>` always maps to `{string}`, losing type info for numeric Scenario Outlines.
 - Newly-created files hardcode `import { createBdd } from "playwright-bdd"`. Projects that wrap `createBdd` need a manual edit to the import.
 
+<!-- Media placeholder: add ../images/step-generation.gif here.
+Show an unmatched-step diagnostic, the Generate Missing Step Definitions command, destination selection, and the generated typed stubs. -->
+
 ## Steps panel
 
 A **Specwright** container in the Activity Bar contributes a **Steps** tree view (id `playwrightBddRunner.stepsExplorer`), a read-only overview of the same indices that power step navigation and diagnostics. Two sections:
@@ -176,6 +179,9 @@ Inline actions:
 - On an **unmatched file** row — **Generate Missing Step Definitions**, scaffolding every unmatched step in that file.
 
 Controlled by `playwrightBddRunner.enableStepsPanel` (boolean, default `true`). Disabling disposes the panel and releases its share of the step-usage index.
+
+<!-- Media placeholder: add ../images/steps-panel-and-generation.gif here.
+Show the Steps panel's usage counts and unmatched-step action, then the generated definition. -->
 
 ## Inserting steps
 
@@ -194,9 +200,14 @@ Two commands (command palette, or the Steps-panel toolbar) write shareable Markd
 
 Markdown is the only export format; JSON/CSV and standalone HTML are out of scope.
 
-## Xray Traceability panel
+<!-- Media placeholder: add ../images/markdown-catalog-export.png here.
+Show a rendered scenario or step catalog with its summary, contents, and collapsible sections. -->
 
-A **Traceability** view (id `playwrightBddRunner.traceability`) stacks below the Steps view in the Specwright container. It maps scenarios to Jira Xray test and requirement keys using tags in the `.feature` files — entirely offline, from tags alone. This is the first phase of the Xray integration; syncing with Xray Cloud, the coverage board, and publishing run results arrive in later releases.
+## Experimental: Xray traceability
+
+> This capability is still under development and is not presented as a supported Specwright feature. Its behaviour and settings may change without notice. Do not rely on it for production traceability workflows yet.
+
+A **Traceability** view (id `playwrightBddRunner.traceability`) is being developed below the Steps view in the Specwright container. It currently maps scenarios to Jira Xray test and requirement keys using tags in the `.feature` files — entirely offline, from tags alone. Xray Cloud syncing, a coverage board, and publishing run results are not complete.
 
 ### Tag convention
 

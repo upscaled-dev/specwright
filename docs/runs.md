@@ -27,15 +27,15 @@ See [playwright.config.ts](../playwright.config.ts), [features/test.feature](../
 
 ## How runs are dispatched
 
-Targeting any scenario from the Test Explorer or CodeLens runs a shell command of the form:
+Targeting a scenario from the Test Explorer or CodeLens runs a shell command of the form:
 
 ```
-[<preRunCommand> &&] npx bddgen [--tags "<expr>"] && npx playwright test [--grep "<scenario>"] [--workers=N] [--list] [--reporter=…]
+[<preRunCommand> &&] npx bddgen [--tags "<expr>"] && npx playwright test [<generated-spec>:<line> | --grep "<scenario>"] [--workers=N] [--list] [--reporter=…]
 ```
 
 - **Pre-run hook.** When `playwrightBddRunner.preRunCommand` is set, the extension runs it before every Playwright invocation. A non-zero exit aborts the run and writes the captured stderr to the test output channel; nothing is sent to Playwright.
 - **Tag filtering** is pushed into `bddgen --tags` so only matching specs are generated.
-- **Scenario selection** uses `--grep` against the scenario name (Playwright doesn't support `.feature`-line addressing). A whole-Scenario-Outline run greps the outline name so every expanded example row is included.
+- **Precise scenario selection.** After `bddgen` runs, Specwright reads the generated spec's source map and, when possible, calls Playwright with `<generated-spec>:<line>`. This is what lets one Scenario Outline example row run by itself. Paths use forward slashes on every platform so Windows paths remain valid Playwright filters. If a generated spec or line cannot be resolved, Specwright falls back to a name-based `--grep` and reports the fallback in the output channel; an outline fallback runs every row in that outline.
 - **Feature-file selection** greps by the `Feature:` title (not the filename), so running one feature can't accidentally match another feature whose scenario titles happen to contain the filename.
 - **Result mapping** back to the Test Explorer reads the Playwright JSON reporter — the extension appends `--reporter=json` alongside whatever reporter you configured so the user-visible output isn't disturbed. Because playwright-bdd's report carries no `.feature` source line, the extension reads the `bddFileData` block embedded in each generated spec to map every result (including `Example #N` outline rows, which the report only labels by index) back to its exact `.feature` path and line. So status sticks to the right tree item even without source annotations.
 - **`bddgen` failures** are parsed for `feature_file:line` markers and republished as `Error`-severity diagnostics on the offending `.feature` line (source `Playwright-BDD`, code `bddgen-error`). These diagnostics clear automatically on the next successful run. When codegen is delegated to `defineBddProject` (so `bddgen` runs inside `playwright test` rather than as a separate step), those generation errors reach the Problems panel too.
@@ -64,10 +64,13 @@ The Test Explorer Run-button dropdown exposes three profiles:
 
 ### Scenario Outline rows
 
-Each row of every `Examples:` block is discovered as its own runnable item named `<index>: <outline name> - <header>: <value>, …`. Both Test Explorer and `--grep` can address rows individually.
+Each row of every `Examples:` block is discovered as its own runnable item named `<index>: <outline name> - <header>: <value>, …`. Specwright resolves the corresponding generated-test line so a row can run or debug independently, even immediately after the feature has been edited. If the generated mapping is unavailable, it clearly warns before falling back to an outline-name run, which includes every row.
 
 ![Scenario Outline examples expanded in the Test Explorer](../images/multi_scenario_outline_explorer.png)
 ![Running a single Scenario Outline example row](../images/running_example.gif)
+
+<!-- Media placeholder: add images/scenario-outline-single-row.gif when replacing or supplementing the GIF above.
+Show one Examples row selected, one browser/test execution, and only that row receiving the result. -->
 
 ### Cancelling a run
 
@@ -93,6 +96,9 @@ Caveats:
 - If your playwright-bdd `outputDir` isn't the default, set `playwrightBddRunner.featuresGenDir` to match. Otherwise the extension can't locate the generated spec and feature-file breakpoints are skipped for that session (step-definition breakpoints still work).
 
 Implemented in [src/core/breakpoint-mirror.ts](../src/core/breakpoint-mirror.ts) and [src/parsers/bdd-file-data-parser.ts](../src/parsers/bdd-file-data-parser.ts).
+
+<!-- Media placeholder: add images/debug-feature-breakpoint.gif here.
+Show a Gherkin breakpoint, Debug Scenario, and the debugger stopping in the generated spec or step definition. -->
 
 ## CodeLens
 
@@ -191,6 +197,6 @@ The Test Explorer view context also includes a Discover Tests entry.
 
 ## Known limitations
 
-- Playwright doesn't support `--grep` by file:line, so the extension targets scenarios by name and features by `Feature:` title. Two scenarios sharing a name in the same project will both run, and two features sharing a title would collide.
+- Specwright normally targets a scenario or Example row by generated-spec line. If the generated spec cannot be found or mapped, it falls back to a name-based `--grep`; duplicate scenario names can then run together, and an outline fallback runs all of its rows. The output channel explains when this happens.
 - Result-to-line mapping reads the generated spec's `bddFileData` (resolved via the report's `config.rootDir`). If a run fails *before* codegen produces specs, there's nothing to read and mapping falls back to name matching for that run.
 - A few details depend on playwright-bdd's exact output — the `bddFileData` shape, the `Missing step definitions:` wording, and Playwright's "no tests found" message. A major playwright-bdd/Playwright upgrade could change these; the [debug-test-mapping](../.claude/skills/debug-test-mapping/SKILL.md) skill covers re-diagnosing if mapping regresses.

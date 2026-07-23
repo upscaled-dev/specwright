@@ -1,8 +1,8 @@
 {
   "name": "specwright",
-  "displayName": "Specwright BDD - Playwright-BDD Test Explorer",
-  "description": "Run, debug & explore Playwright-BDD (playwright-bdd) Gherkin tests in the Test Explorer. Full .feature authoring: autocomplete, hover, go-to-definition, find references, diagnostics, snippets, tag filtering, parallel runs, and step-definition generation. Works alongside Cucumber.",
-  "version": "0.4.5",
+  "displayName": "Specwright - BDD Authoring for Playwright in VS Code",
+  "description": "A first-class BDD authoring experience for Playwright in VS Code. Write, navigate, validate, and generate Gherkin step definitions, then run and debug them in Test Explorer.",
+  "version": "0.4.18",
   "icon": "media/specwright-icon.png",
   "publisher": "upscaled-dev",
   "license": "MIT",
@@ -27,35 +27,35 @@
   ],
   "keywords": [
     "playwright-bdd",
+    "playwright bdd",
     "playwright",
     "playwright test",
+    "playwright extension",
+    "playwright test explorer",
+    "playwright debugging",
     "bdd",
-    "behavior driven development",
-    "typescript",
     "gherkin",
-    "gherkin syntax highlighting",
+    "gherkin extension",
+    "gherkin autocomplete",
+    "gherkin test runner",
     "cucumber",
+    "cucumber.js",
     "test explorer",
+    "vs code test explorer",
     "test runner",
-    "feature",
     "feature files",
-    "scenario",
     "scenario outline",
     "step definitions",
+    "step definition generator",
+    "generate step definitions",
+    "unmatched steps",
     "given when then",
-    "e2e",
-    "end-to-end",
-    "testing",
-    "test automation",
-    "acceptance testing",
-    "living documentation",
-    "qa",
-    "codelens",
-    "debug tests",
-    "tags",
-    "examples",
-    "cucumber.js",
-    "specwright"
+    "run gherkin tests",
+    "debug gherkin tests",
+    "bdd authoring",
+    "gherkin authoring",
+    "feature file editor",
+    "step definition navigation"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -977,36 +977,56 @@
             "id": "specwright.setupXray.site",
             "title": "Set your Xray site URL and region",
             "description": "Open the Xray setup panel and enter your Atlassian site (for example `your-team.atlassian.net`) and API region.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
-            "media": { "markdown": "media/walkthrough/site.md" },
-            "completionEvents": ["onCommand:playwrightBddRunner.traceability.connect"]
+            "media": {
+              "markdown": "media/walkthrough/site.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.traceability.connect"
+            ]
           },
           {
             "id": "specwright.setupXray.apiKey",
             "title": "Create an Xray API key",
             "description": "In Jira, open Xray → API Keys and create a key. You'll get a client id and client secret used only for authentication.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
-            "media": { "markdown": "media/walkthrough/api-key.md" },
-            "completionEvents": ["onCommand:playwrightBddRunner.traceability.connect"]
+            "media": {
+              "markdown": "media/walkthrough/api-key.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.traceability.connect"
+            ]
           },
           {
             "id": "specwright.setupXray.credentials",
             "title": "Paste your client id and secret",
             "description": "Paste the client id and client secret into the setup panel. Specwright validates them with a live connection test and stores them in the OS secret store — never in settings or the repo.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
-            "media": { "markdown": "media/walkthrough/credentials.md" },
-            "completionEvents": ["onCommand:playwrightBddRunner.traceability.connect"]
+            "media": {
+              "markdown": "media/walkthrough/credentials.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.traceability.connect"
+            ]
           },
           {
             "id": "specwright.setupXray.jira",
             "title": "Add Jira access (optional)",
             "description": "Add a Jira email and API token to unlock the real project view and issue attachments. This is optional — skip it to keep tag-derived project probes.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
-            "media": { "markdown": "media/walkthrough/jira.md" },
-            "completionEvents": ["onCommand:playwrightBddRunner.traceability.connect"]
+            "media": {
+              "markdown": "media/walkthrough/jira.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.traceability.connect"
+            ]
           },
           {
             "id": "specwright.setupXray.sync",
             "title": "Run your first Sync",
             "description": "Sync pulls remote test metadata, status, and coverage for your tagged scenarios. The Traceability tree then shows remote summaries, status badges, and orphan tests.\n[Sync with Xray](command:playwrightBddRunner.traceability.sync)",
-            "media": { "markdown": "media/walkthrough/sync.md" },
-            "completionEvents": ["onCommand:playwrightBddRunner.traceability.sync"]
+            "media": {
+              "markdown": "media/walkthrough/sync.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.traceability.sync"
+            ]
           }
         ]
       }

@@ -1,45 +1,45 @@
-# Specwright — Playwright-BDD Test Explorer
+# Specwright - BDD Authoring for Playwright in VS Code
 
-**Run, debug, and author [playwright-bdd](https://vitalets.github.io/playwright-bdd/) Gherkin tests without leaving your editor.**
+**A first-class BDD authoring experience for [playwright-bdd](https://vitalets.github.io/playwright-bdd/) in VS Code.**
 
 [![Install on VS Code Marketplace](https://img.shields.io/badge/Install-VS%20Code%20Marketplace-blue?logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=upscaled-dev.specwright)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Specwright integrates [playwright-bdd](https://vitalets.github.io/playwright-bdd/) with VS Code: scenarios appear in the Test Explorer like any other test, and `.feature` files get full language tooling — autocomplete, hover, go-to-definition, references, diagnostics, refactoring, and step-definition generation.
+Write, navigate, validate, and generate Gherkin step definitions without leaving VS Code. Specwright keeps authoring connected to execution: run or debug the scenario you are editing directly from the Test Explorer, CodeLens, or editor.
 
 ![Run / Debug from the Test Explorer and CodeLens](images/running_feature_code_lens.gif)
 
 ## Why Specwright?
 
-- **Results land on the right scenario.** Pass/fail maps back to the exact `.feature` line — including individual Scenario Outline example rows — instead of leaving you to scan terminal output.
-- **Real debugging.** Set a breakpoint in the `.feature` file itself or in your step-definition `.ts` file, hit the debug icon, and step through — no `--debug` inspector workarounds.
-- **Your steps are connected.** Autocomplete steps from your actual step definitions, hover to see the matching pattern, Ctrl+Click to jump to it, and see usage counts above every definition.
-- **No setup beyond playwright-bdd itself.** Discovery, `bddgen`, runs, and result mapping are all automatic.
+- **Run the exact test you mean.** Results return to the right feature, scenario, or Scenario Outline example row instead of getting lost in terminal output.
+- **Debug from the feature file.** Set breakpoints in Gherkin or TypeScript step definitions, then use VS Code's normal Debug action — no Playwright Inspector workflow required.
+- **Keep steps connected.** Autocomplete, hover, go to definition, references, usage counts, diagnostics, and generation all work from your real step definitions.
+- **Use your existing project.** Once playwright-bdd is configured, Specwright discovers features, runs `bddgen`, starts Playwright, and maps the results back for you.
 
 ## Quick start
 
 1. Open a workspace that has [playwright-bdd configured](docs/runs.md#prerequisites) and at least one `.feature` file.
-2. Open the Test Explorer (⇧⌘T / Ctrl+Shift+T). Scenarios appear, organized by feature.
-3. Click ▶ on a scenario to run, or 🐞 to debug. Status appears in the bottom-left status bar.
+2. Open the Testing view (beaker icon). Specwright discovers your scenarios automatically.
+3. Select **Run** or **Debug** on a scenario, outline, or individual Examples row.
 
 Only your playwright-bdd configuration is required. If your project layout differs from the defaults (step paths, package-manager commands, working directory), see [docs/settings.md](docs/settings.md).
 
 ## Features
 
-### Test Explorer integration
+### Run and debug tests
 
 - **Automatic discovery** of every `.feature` file, kept live by a file watcher — create, edit, or delete a feature and the tree updates without a reload.
-- **Three run profiles**: Run, Debug (breakpoints in `.feature` files and step-definition `.ts` files just work), and Run in Parallel (prompts once for a worker count, then remembers it).
+- **Three run profiles**: Run, Debug (including breakpoints in `.feature` files and step-definition `.ts` files), and Run in Parallel (prompts once for a worker count, then remembers it).
 - **Five organization strategies**, switchable on the fly: hierarchical by feature, by tag, by file, by scenario type, or flat.
 - **Scenario Outline rows as first-class items** — every `Examples:` row is individually runnable and individually reported.
-- **Exact result mapping** back to the right `.feature` line via playwright-bdd's embedded source data, so pass/fail status sticks to the correct tree item — even for outline example rows. Flaky tests that pass on retry map to passed; multi-project runs take the worst result.
+- **Exact result mapping** back to the right `.feature` line — including individual outline example rows. Flaky tests that pass on retry show as passed; multi-project runs show the worst outcome.
 - **Per-scenario durations** shown after a run, and a stop button that actually cancels — it kills the Playwright process tree and marks the rest skipped.
 
 ![Switching between tag, file, scenario-type, hierarchical, and flat views](images/views.gif)
 
 → [docs/runs.md](docs/runs.md)
 
-### Run and debug from anywhere
+### Run from the editor, explorer, or Test Explorer
 
 Wherever you're looking at a scenario, there's a way to run it:
 
@@ -60,6 +60,9 @@ Wherever you're looking at a scenario, there's a way to run it:
 Set breakpoints directly in the `.feature` file — the breakpoint gutter is enabled for Gherkin — or in your step-definition `.ts` files, then start any Debug action. The extension runs `bddgen` first, mirrors your feature-file breakpoints onto the matching lines of the generated spec (steps, `Scenario:` lines, and `Examples:` rows), launches VS Code's JS debugger, and removes the mirrored breakpoints when the session ends. While paused, the editor shows the generated spec (or your step definition once you step in), not the `.feature` file. If you customized playwright-bdd's `outputDir`, point `playwrightBddRunner.featuresGenDir` at it.
 
 → [docs/runs.md](docs/runs.md#debugging-with-breakpoints)
+
+<!-- Media placeholder: add images/debug-feature-breakpoint.gif here if the hero placement above is removed.
+Show: set a breakpoint in a Gherkin step → Debug Scenario → pause in the generated test or TypeScript step definition. -->
 
 ### Step intelligence
 
@@ -87,11 +90,8 @@ Toggle the panel with `playwrightBddRunner.enableStepsPanel`.
 
 → [docs/features.md#steps-panel](docs/features.md#steps-panel)
 
-### Xray traceability (new, preview)
-
-A **Traceability** view sits below Steps in the same container. Tag scenarios with `@TEST_CALC-1043` (and optionally `@REQ_CALC-900`) and the tree groups them by Jira Xray test key, lists untagged scenarios as coverage gaps, and shows pass/fail badges from the newest Playwright JSON report in the workspace. Right-click a key to open it in Jira or copy it. Offline and tag-only for now — nothing talks to Xray Cloud yet. Configure with the `playwrightBddRunner.traceability.*` settings (Xray provider chosen via `traceability.provider`; `xray.siteUrl` sets the browse host).
-
-→ [docs/features.md#xray-traceability-panel](docs/features.md#xray-traceability-panel)
+<!-- Media placeholder: add images/steps-panel-and-generation.gif here.
+Show: find an unmatched step in the Steps panel → create its definition → return to the feature with the diagnostic cleared. -->
 
 ### Authoring `.feature` files
 
@@ -113,6 +113,9 @@ Write the scenario first, then generate the code to match:
 
 → [docs/features.md](docs/features.md#step-definition-generation)
 
+<!-- Media placeholder: add images/markdown-catalog-export.png here.
+Show the rendered output of Export Steps or Export All Scenarios, including the summary and linked contents. -->
+
 ## Compatibility
 
 Works alongside [Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete). Every overlapping provider (autocomplete, hover, references, CodeLens, unused-step, literal promotion, table formatting) has an `auto`/`on`/`off` setting that defaults to `auto` and steps aside when cucumberautocomplete is installed — so your IntelliSense list, Problems panel, and References panel never show duplicates. See [docs/settings.md#cucumberautocomplete-coexistence](docs/settings.md#cucumberautocomplete-coexistence).
@@ -128,7 +131,7 @@ code --install-extension upscaled-dev.specwright
 ## Documentation
 
 - [docs/runs.md](docs/runs.md) — running tests, cancellation, status bar, CodeLens, parallel, pre-run hook
-- [docs/features.md](docs/features.md) — language-server features for `.feature` and step files, the Steps panel, and Markdown exports
+- [docs/features.md](docs/features.md) — language features, step generation, the Steps panel, and Markdown exports
 - [docs/settings.md](docs/settings.md) — full settings reference + compatibility behavior
 - [docs/development.md](docs/development.md) — building, testing, releasing, project layout
 - [CHANGELOG.md](CHANGELOG.md) — release notes
