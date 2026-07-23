@@ -16,7 +16,6 @@ export type ShellMessageType = "ready" | "tab" | "activate" | "linkTab";
 export interface SurfaceHost {
   post(message: object): void;
   onMessage(handler: (message: unknown) => void): void;
-  reveal(): void;
   activate(surface?: SurfaceName): void;
   onDidDispose(handler: () => void): void;
   isDisposed(): boolean;

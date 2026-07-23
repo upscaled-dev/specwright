@@ -177,7 +177,6 @@ export class BoardPanel {
       onMessage: (handler) => {
         this.surfaceHandlers.set(surface, handler);
       },
-      reveal: () => this.panel.reveal(),
       activate: (target) => this.activateTab(tabFor(target ?? surface)),
       onDidDispose: (handler) => {
         this.disposeHandlers.push(handler);

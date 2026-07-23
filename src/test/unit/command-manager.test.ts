@@ -1071,6 +1071,18 @@ describe("traceability publishLastRun — Publish tab", () => {
     expect(win.__webviewPanels).toHaveLength(0);
     expect(String(info.mock.calls[0]?.[0])).toContain("Connect");
   });
+
+  it("shows the no-runs toast without opening the board when nothing is publishable", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const store = { list: () => [] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem());
+
+    await (mgr as unknown as { runPublish: () => Promise<void> }).runPublish();
+
+    expect(win.__webviewPanels).toHaveLength(0);
+    expect(String(info.mock.calls[0]?.[0])).toContain("No local runs to publish");
+  });
 });
 
 describe("traceability coverage board contributions", () => {

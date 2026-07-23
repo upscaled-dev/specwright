@@ -110,6 +110,7 @@ const STRATEGY_TYPE_BY_VALUE: Record<string, string> = {
 };
 
 const CATEGORY = "Specwright";
+const NO_PUBLISHABLE_RUNS_MESSAGE = "No local runs to publish yet. Run a batch first.";
 
 function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
@@ -847,6 +848,13 @@ export class CommandManager {
       vscode.window.showInformationMessage("Connect to your test tracker before publishing.");
       return;
     }
+    // Peek the same gate the flow applies before opening the board, so Publish Last Run with nothing to
+    // publish shows the toast instead of popping an empty board.
+    const runs = this.context.runArtifactStore?.list() ?? [];
+    if (!runs.some((artifact) => isPublishable(artifact) && publishableResults(artifact).publishable.length > 0)) {
+      vscode.window.showInformationMessage(NO_PUBLISHABLE_RUNS_MESSAGE);
+      return;
+    }
     const board = BoardPanel.open(this.boardDeps());
     const rawSite = this.context.config.xraySiteUrl;
     const site = normalizeSiteUrl(rawSite);
@@ -856,7 +864,7 @@ export class CommandManager {
     try {
       await runPublishFlow({
         publishing,
-        runs: this.context.runArtifactStore?.list() ?? [],
+        runs,
         ...(preselectId !== undefined ? { preselectId } : {}),
         projectOf: adapter.keyGrammar.projectOf,
         changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
@@ -870,7 +878,7 @@ export class CommandManager {
         attachFiles: (executionKey, files) => this.attachFiles(executionKey, files),
         recordPublish: (entry) => this.publishLedger?.record(entry),
         reportNoRuns: () => {
-          vscode.window.showInformationMessage("No local runs to publish yet — run a batch first.");
+          vscode.window.showInformationMessage(NO_PUBLISHABLE_RUNS_MESSAGE);
         },
         reportSuccess: (outcome, request, attachedCount) => this.reportPublishSuccess(outcome, request, attachedCount),
         reportPartialAttachments: (outcome, request, attachedCount, failed, artifactId) =>
@@ -1052,7 +1060,7 @@ export class CommandManager {
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    this.logger.error("Publish failed");
+    this.logger.error("Publish failed", { message });
     vscode.window.showErrorMessage(`Publish failed: ${message}`);
   }
 

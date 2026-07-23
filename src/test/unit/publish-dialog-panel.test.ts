@@ -31,7 +31,6 @@ function fakeHost(): FakeHost {
     onMessage: (handler) => {
       messageHandler = handler;
     },
-    reveal: () => undefined,
     activate: (surface) => activations.push(surface),
     onDidDispose: (handler) => {
       disposeHandler = handler;
