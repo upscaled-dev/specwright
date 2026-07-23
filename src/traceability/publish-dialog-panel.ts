@@ -1,18 +1,32 @@
 import * as vscode from "vscode";
 import { contentSecurityPolicy, createNonce, escapeHtml } from "../utils/webview";
 import { PublishRequest, PublishTarget } from "./contracts";
-import { AttachmentSuggestion, PublishDialogModel, PublishDialogResult } from "./publish-flow";
+import {
+  AttachmentSuggestion,
+  PendingAttachmentsNotice,
+  PublishDialogModel,
+  PublishDialogResult,
+  PublishRunOption,
+  RepublishNotice,
+} from "./publish-flow";
 
 const VIEW_TYPE = "playwrightBddRunner.publishResults";
 const IMPORT_HINT = "Create → POST /import/execution/cucumber/multipart · Append → POST /import/execution";
 
+// The still-pending count after an in-dialog attach-pending action; 0 clears the banner.
+export interface PendingAttachmentsResult {
+  readonly remaining: number;
+}
+
 // The delegate the dialog calls back into. `searchTargets` rejects (NotSupportedError) without Jira
 // creds — the dialog only calls it when `jiraSearchAvailable`. `browseFiles` opens the native file
 // picker behind a mockable seam (the panel never imports `showOpenDialog` directly, so the unit rig
-// can drive it) and returns the picked files with their sizes.
+// can drive it) and returns the picked files with their sizes. `attachPending` uploads a run's ledgered
+// pending files WITHOUT a reimport and returns how many still failed.
 export interface PublishDialogDelegate {
   searchTargets(kind: "execution" | "test-plan", query: string, signal?: AbortSignal): Promise<readonly PublishTarget[]>;
   browseFiles(): Promise<readonly AttachmentSuggestion[]>;
+  attachPending(runId: string): Promise<PendingAttachmentsResult>;
 }
 
 interface SearchMessage {
@@ -26,13 +40,18 @@ interface BrowseMessage {
 }
 interface ConfirmMessage {
   type: "confirm";
+  runId: string;
   request: PublishRequest;
   attachments: string[];
+}
+interface AttachPendingMessage {
+  type: "attachPending";
+  runId: string;
 }
 interface CancelMessage {
   type: "cancel";
 }
-type IncomingMessage = SearchMessage | BrowseMessage | ConfirmMessage | CancelMessage;
+type IncomingMessage = SearchMessage | BrowseMessage | ConfirmMessage | AttachPendingMessage | CancelMessage;
 
 type OutgoingMessage =
   | {
@@ -45,20 +64,56 @@ type OutgoingMessage =
   | {
       type: "browse-result";
       items: ReadonlyArray<{ readonly path: string; readonly name: string; readonly size: number }>;
-    };
+    }
+  | { type: "pending-result"; runId: string; remaining: number };
 
 // Serialize a value for embedding inside a nonce'd <script> block — only `<` can break out (`</script>`).
 function embedJson(value: unknown): string {
   return JSON.stringify(value).replaceAll("<", "\\u003c");
 }
 
-function bannerHtml(model: PublishDialogModel): string {
-  if (model.alreadyPublished === undefined) {
-    return "";
+// The banner wording is shared with the webview JS (which rebuilds it when the dropdown changes), so
+// both must produce the same text; keep these in sync with `republishText`/`pendingText` in the script.
+function modeWord(mode: RepublishNotice["mode"]): string {
+  if (mode === "append") {
+    return "appended";
   }
-  const when = new Date(model.alreadyPublished.publishedAt).toLocaleString();
-  const text = `This run was already published to ${model.alreadyPublished.key} on ${when}. Publishing again creates a duplicate.`;
-  return `<div class="banner">${escapeHtml(text)}</div>`;
+  return mode === "create-new" ? "new execution" : "";
+}
+
+function republishBannerText(notice: RepublishNotice): string {
+  const when = new Date(notice.publishedAt).toLocaleString();
+  const mode = modeWord(notice.mode);
+  const modePart = mode ? ` (${mode})` : "";
+  return `Already published to ${notice.key} on ${when}${modePart}. Publishing again creates a duplicate.`;
+}
+
+function pendingBannerText(notice: PendingAttachmentsNotice): string {
+  const files = notice.count === 1 ? "file" : "files";
+  return `${notice.count} attachment ${files} from the last publish to ${notice.key} did not upload.`;
+}
+
+function bannersHtml(run: PublishRunOption): string {
+  const parts: string[] = [];
+  if (run.republish) {
+    parts.push(`<div class="banner">${escapeHtml(republishBannerText(run.republish))}</div>`);
+  }
+  if (run.pendingAttachments) {
+    parts.push(
+      `<div class="banner pending"><span>${escapeHtml(pendingBannerText(run.pendingAttachments))}</span>` +
+        `<button type="button" class="link" data-attach-pending>Attach pending files</button></div>`
+    );
+  }
+  return parts.join("\n");
+}
+
+function runOptionsHtml(runs: readonly PublishRunOption[], selectedRunId: string): string {
+  return runs
+    .map(
+      (run) =>
+        `<option value="${escapeHtml(run.id)}"${run.id === selectedRunId ? " selected" : ""}>${escapeHtml(run.label)}</option>`
+    )
+    .join("\n");
 }
 
 function evidenceStreamLine(stream: PublishDialogModel["attachments"]["evidenceStream"]): string {
@@ -77,7 +132,11 @@ function attachmentsHint(stream: PublishDialogModel["attachments"]["evidenceStre
 
 function renderHtml(model: PublishDialogModel): string {
   const nonce = createNonce();
-  const planValue = escapeHtml(model.prefillPlanKey ?? "");
+  const selected = model.runs.find((run) => run.id === model.selectedRunId) ?? model.runs[0];
+  if (selected === undefined) {
+    return "";
+  }
+  const planValue = escapeHtml(selected.prefillPlanKey ?? "");
   const attachModel = { ...model.attachments, hint: attachmentsHint(model.attachments.evidenceStream) };
   return `<!DOCTYPE html>
 <html lang="en">
@@ -95,7 +154,7 @@ function renderHtml(model: PublishDialogModel): string {
     max-width: 34rem;
   }
   h1 { font-size: 1.3rem; font-weight: 600; margin: 0 0 0.25rem; }
-  .subtitle { color: var(--vscode-descriptionForeground); margin: 0 0 1rem; }
+  .subtitle { color: var(--vscode-descriptionForeground); margin: 0.75rem 0 1rem; }
   .banner {
     color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
     background: var(--vscode-inputValidation-warningBackground, transparent);
@@ -104,11 +163,13 @@ function renderHtml(model: PublishDialogModel): string {
     padding: 0.5rem 0.65rem;
     margin: 0 0 1rem;
   }
+  .banner.pending { display: flex; align-items: center; gap: 0.6rem; }
+  .banner.pending span { flex: 1; }
   fieldset { border: none; margin: 0; padding: 0; }
   .radio-row { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.5rem; }
   label { display: block; margin-top: 1rem; font-weight: 600; }
   .radio-row label { display: inline; margin: 0; font-weight: 400; }
-  input[type="text"] {
+  input[type="text"], select {
     width: 100%;
     box-sizing: border-box;
     margin-top: 0.35rem;
@@ -117,8 +178,10 @@ function renderHtml(model: PublishDialogModel): string {
     background: var(--vscode-input-background);
     border: 1px solid var(--vscode-input-border, transparent);
     border-radius: 2px;
+    font-family: inherit;
+    font-size: inherit;
   }
-  input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  input:focus, select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .hint { color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-top: 0.25rem; }
   .field-error { color: var(--vscode-errorForeground); font-size: 0.85em; min-height: 1.1em; margin-top: 0.25rem; }
   .results { list-style: none; margin: 0.35rem 0 0; padding: 0; border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; }
@@ -137,14 +200,18 @@ function renderHtml(model: PublishDialogModel): string {
   button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
   button.primary:hover { background: var(--vscode-button-hoverBackground); }
   button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
-  button.link { background: none; color: var(--vscode-textLink-foreground); padding: 0.35rem 0; text-align: left; }
+  button.link { background: none; color: var(--vscode-textLink-foreground); padding: 0; text-align: left; flex: none; }
   .footer { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 1.25rem; }
 </style>
 </head>
 <body>
   <h1>${escapeHtml(model.title)}</h1>
-  <p class="subtitle">${escapeHtml(model.subtitle)}</p>
-  ${bannerHtml(model)}
+
+  <label for="run-select">Run</label>
+  <select id="run-select">${runOptionsHtml(model.runs, selected.id)}</select>
+
+  <p class="subtitle" id="subtitle">${escapeHtml(selected.subtitle)}</p>
+  <div id="banners">${bannersHtml(selected)}</div>
 
   <fieldset>
     <div class="radio-row">
@@ -159,11 +226,12 @@ function renderHtml(model: PublishDialogModel): string {
 
   <div id="create-fields">
     <label for="project">Project key</label>
-    <input id="project" type="text" spellcheck="false" autocapitalize="characters" value="${escapeHtml(model.defaultProjectKey)}">
+    <input id="project" type="text" spellcheck="false" autocapitalize="characters" value="${escapeHtml(selected.project.value)}">
+    <div class="hint" id="project-hint"${selected.project.fromDerivation ? "" : " hidden"}>from this run's test keys</div>
     <div id="err-project" class="field-error"></div>
 
     <label for="summary">Summary</label>
-    <input id="summary" type="text" value="${escapeHtml(model.defaultSummary)}">
+    <input id="summary" type="text" value="${escapeHtml(selected.defaultSummary)}">
 
     <label for="plan">Test Plan key (optional)</label>
     <input id="plan" type="text" spellcheck="false" autocapitalize="characters" value="${planValue}">
@@ -197,9 +265,15 @@ function renderHtml(model: PublishDialogModel): string {
   const vscodeApi = acquireVsCodeApi();
   const searchable = ${model.jiraSearchAvailable ? "true" : "false"};
   const attachModel = ${embedJson(attachModel)};
+  const runs = ${embedJson(model.runs)};
+  let selectedRunId = ${embedJson(selected.id)};
+  const runSelect = document.getElementById('run-select');
+  const subtitle = document.getElementById('subtitle');
+  const banners = document.getElementById('banners');
   const createFields = document.getElementById('create-fields');
   const appendFields = document.getElementById('append-fields');
   const projectInput = document.getElementById('project');
+  const projectHint = document.getElementById('project-hint');
   const summaryInput = document.getElementById('summary');
   const planInput = document.getElementById('plan');
   const envInput = document.getElementById('environments');
@@ -213,6 +287,59 @@ function renderHtml(model: PublishDialogModel): string {
   const attachList = document.getElementById('attach-list');
   const browseButton = document.getElementById('browse');
   const attachDisabled = document.getElementById('attach-disabled');
+
+  function findRun(id) { return runs.find(function (r) { return r.id === id; }); }
+
+  function republishText(n) {
+    const when = new Date(n.publishedAt).toLocaleString();
+    const mode = n.mode === 'append' ? 'appended' : (n.mode === 'create-new' ? 'new execution' : '');
+    const modePart = mode ? ' (' + mode + ')' : '';
+    return 'Already published to ' + n.key + ' on ' + when + modePart + '. Publishing again creates a duplicate.';
+  }
+  function pendingText(n) {
+    const files = n.count === 1 ? 'file' : 'files';
+    return n.count + ' attachment ' + files + ' from the last publish to ' + n.key + ' did not upload.';
+  }
+  function renderBanners(run) {
+    banners.textContent = '';
+    if (run.republish) {
+      const div = document.createElement('div');
+      div.className = 'banner';
+      div.textContent = republishText(run.republish);
+      banners.appendChild(div);
+    }
+    if (run.pendingAttachments) {
+      const div = document.createElement('div');
+      div.className = 'banner pending';
+      const span = document.createElement('span');
+      span.textContent = pendingText(run.pendingAttachments);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'link';
+      btn.textContent = 'Attach pending files';
+      btn.addEventListener('click', function () { vscodeApi.postMessage({ type: 'attachPending', runId: run.id }); });
+      div.appendChild(span);
+      div.appendChild(btn);
+      banners.appendChild(div);
+    }
+  }
+  // Switching runs re-derives everything the selected run owns: subtitle, project prefill + hint,
+  // the summary default, the plan prefill, and both banners (§ points 1–4).
+  function applyRun(run) {
+    subtitle.textContent = run.subtitle;
+    projectInput.value = run.project.value;
+    projectHint.hidden = !run.project.fromDerivation;
+    summaryInput.value = run.defaultSummary;
+    planInput.value = run.prefillPlanKey || '';
+    renderBanners(run);
+  }
+  runSelect.addEventListener('change', function () {
+    selectedRunId = runSelect.value;
+    const run = findRun(selectedRunId);
+    if (run) { applyRun(run); }
+  });
+  renderBanners(findRun(selectedRunId));
+
   execHint.textContent = searchable
     ? 'Type a project key to search its Test Executions, or type an execution key directly.'
     : 'Type the execution key to append to. Add Jira access in Xray setup to search instead.';
@@ -329,6 +456,14 @@ function renderHtml(model: PublishDialogModel): string {
       renderResults(listEl, msg.error ? [] : msg.items);
     } else if (msg.type === 'browse-result') {
       for (const file of msg.items) { addAttachmentRow(file); }
+    } else if (msg.type === 'pending-result') {
+      const run = findRun(msg.runId);
+      if (run) {
+        run.pendingAttachments = msg.remaining > 0 && run.pendingAttachments
+          ? { key: run.pendingAttachments.key, count: msg.remaining }
+          : undefined;
+        if (msg.runId === selectedRunId) { renderBanners(run); }
+      }
     }
   });
 
@@ -343,7 +478,7 @@ function renderHtml(model: PublishDialogModel): string {
     if (currentMode() === 'append') {
       const executionKey = execInput.value.trim();
       if (executionKey === '') { errExecution.textContent = 'Enter the execution key to append to.'; return; }
-      vscodeApi.postMessage({ type: 'confirm', request: { mode: 'append', executionKey: executionKey }, attachments: attachments });
+      vscodeApi.postMessage({ type: 'confirm', runId: selectedRunId, request: { mode: 'append', executionKey: executionKey }, attachments: attachments });
       return;
     }
     const project = projectInput.value.trim();
@@ -353,16 +488,18 @@ function renderHtml(model: PublishDialogModel): string {
     const plan = planInput.value.trim();
     if (plan !== '') { request.testPlanKey = plan; }
     if (environments.length > 0) { request.environments = environments; }
-    vscodeApi.postMessage({ type: 'confirm', request: request, attachments: attachments });
+    vscodeApi.postMessage({ type: 'confirm', runId: selectedRunId, request: request, attachments: attachments });
   });
 </script>
 </body>
 </html>`;
 }
 
-// The View 3 publish dialog. Reuses the setup-panel plumbing (CSP, theme-aware, nonce'd script, no
-// secrets → no MASK). Resolves to the user's `PublishDialogResult` (request + kept attachments), or
-// `undefined` on cancel/close — the flow makes zero transport calls for an undefined result.
+// The View 3 publish dialog. Reuses the shared webview scaffolding (CSP, nonce, escapeHtml; no
+// secrets → no MASK). Owns run selection (newest-first dropdown), the republish and pending-attachment
+// banners, and the create/append form. Resolves to the user's `PublishDialogResult` (selected run +
+// request + kept attachments), or `undefined` on cancel/close — the flow makes zero transport calls for
+// an undefined result.
 export class PublishDialogPanel {
   private readonly disposables: vscode.Disposable[] = [];
   private searchController: AbortController | undefined;
@@ -399,11 +536,13 @@ export class PublishDialogPanel {
     if (message.type === "cancel") {
       this.finish(undefined);
     } else if (message.type === "confirm") {
-      this.finish({ request: message.request, attachments: message.attachments });
+      this.finish({ runId: message.runId, request: message.request, attachments: message.attachments });
     } else if (message.type === "search") {
       this.runSearch(message).catch(() => undefined);
     } else if (message.type === "browse") {
       this.runBrowse().catch(() => undefined);
+    } else if (message.type === "attachPending") {
+      this.runAttachPending(message).catch(() => undefined);
     }
   }
 
@@ -413,6 +552,14 @@ export class PublishDialogPanel {
       return;
     }
     await this.post({ type: "browse-result", items: files.map((f) => ({ path: f.path, name: f.name, size: f.size })) });
+  }
+
+  private async runAttachPending(message: AttachPendingMessage): Promise<void> {
+    const result = await this.delegate.attachPending(message.runId);
+    if (this.settled) {
+      return;
+    }
+    await this.post({ type: "pending-result", runId: message.runId, remaining: result.remaining });
   }
 
   private async runSearch(message: SearchMessage): Promise<void> {

@@ -7,10 +7,13 @@ import {
 import { LedgerEntry } from "./publish-ledger";
 import {
   defaultPublishSummary,
+  derivePublishProject,
   isPublishable,
+  PublishableResult,
+  PublishProjectPrefill,
   publishableResults,
   publishDialogSubtitle,
-  PublishableResult,
+  publishRunLabel,
   summarizePublishable,
 } from "./publish-core";
 
@@ -33,57 +36,94 @@ export interface PublishAttachmentsModel {
   readonly evidenceStream: "evidence" | "issue" | "both";
 }
 
-// The View 3 dialog's data — assembled from the reconciled publishable set, never from the raw
-// artifact. `alreadyPublished` drives the in-dialog idempotency banner; the flow still enforces an
-// explicit modal re-confirm before any transport (informed duplicate — never silent, §2).
-export interface PublishDialogModel {
-  readonly title: string;
+// The already-published banner (§ point 3): the run carries a publish-ledger entry, so the dialog
+// states when it was published, the target key, and the mode BEFORE submit. There is no re-confirm
+// modal anymore — the banner is the whole notice and submit proceeds directly.
+export interface RepublishNotice {
+  readonly key: string;
+  readonly publishedAt: number;
+  readonly mode?: "create-new" | "append" | undefined;
+}
+
+// The pending-attachments banner (§ point 4): the run's prior publish left files that failed to
+// upload. The banner's action attaches them WITHOUT a reimport (the panel's `attachPending` delegate).
+export interface PendingAttachmentsNotice {
+  readonly key: string;
+  readonly count: number;
+}
+
+// One selectable run in the dialog's newest-first dropdown, carrying everything that re-derives when it
+// becomes the selection: subtitle, project prefill, default summary, plan prefill, and both banners.
+export interface PublishRunOption {
+  readonly id: string;
+  readonly label: string;
   readonly subtitle: string;
-  readonly defaultProjectKey: string;
+  readonly project: PublishProjectPrefill;
   readonly defaultSummary: string;
   readonly prefillPlanKey?: string | undefined;
+  readonly republish?: RepublishNotice | undefined;
+  readonly pendingAttachments?: PendingAttachmentsNotice | undefined;
+}
+
+// The View 3 dialog's data. `runs` is newest-first; the dialog opens on `selectedRunId` and re-derives
+// its project prefill and banners from whichever run the dropdown selects. `attachments` is workspace-
+// level (report globs), not per-run, so it lives once at the top.
+export interface PublishDialogModel {
+  readonly title: string;
+  readonly runs: readonly PublishRunOption[];
+  readonly selectedRunId: string;
   readonly jiraSearchAvailable: boolean;
-  readonly alreadyPublished?: { readonly key: string; readonly publishedAt: number } | undefined;
   readonly attachments: PublishAttachmentsModel;
 }
 
-// The dialog's confirmed output: the publish request plus the run-level attachment paths the user
-// kept. Both feed the flow — the request drives the import, the attachments the post-import upload.
+// The dialog's confirmed output: which run was selected, the publish request, and the run-level
+// attachment paths the user kept. The request drives the import, the attachments the post-import upload.
 export interface PublishDialogResult {
+  readonly runId: string;
   readonly request: PublishRequest;
   readonly attachments: readonly string[];
 }
 
 export interface PublishFlowDeps {
   publishing: ResultPublishingCapability;
+  // Candidate runs, newest-first (the run-artifact store's `list()`). The flow keeps only the publishable
+  // ones with something left after reconciliation; that filtered set is the dropdown.
+  runs: readonly RunArtifact[];
+  // The run to open on: Run Locally and Publish passes the run it just sealed; Publish Last Run omits it
+  // and the newest publishable run wins.
+  preselectId?: string | undefined;
+  // The grammar's project-of-key (Xray: `projectFromKey`); absent when the provider can't derive one.
+  projectOf?: ((key: string) => string) | undefined;
   // Publishable results whose source can no longer be resolved (create mode drops them). The command
   // wires this to the FeatureParser step resolver; a test passes a fixed count.
   changedSinceRun(results: readonly PublishableResult[]): number;
   defaultProjectKey: string;
   jiraSearchAvailable: boolean;
-  // Built lazily — only when the dialog is actually about to open (after the publishability gates), so
-  // a blocked/empty run never fires the one allowed pre-confirm call (the `attachment/meta` probe).
+  // Built lazily — only when the dialog is actually about to open (after the no-runs gate), so an
+  // empty run list never fires the one allowed pre-confirm call (the `attachment/meta` probe).
   attachments(): Promise<PublishAttachmentsModel>;
-  // A prior publish of THIS artifact on the current site (or undefined) — the ledger idempotency read.
-  priorEntry: LedgerEntry | undefined;
-  // Renders the dialog and returns the user's request + attachments, or undefined on cancel/close
-  // (→ zero transport).
+  // A prior publish of the given artifact on the current site (or undefined) — the ledger idempotency
+  // read, per run, feeding the republish and pending-attachments banners.
+  priorEntryFor(artifactId: string): LedgerEntry | undefined;
+  // Renders the dialog and returns the user's selected run + request + attachments, or undefined on
+  // cancel/close (→ zero transport).
   presentDialog(model: PublishDialogModel): Promise<PublishDialogResult | undefined>;
-  // The explicit re-confirm for an already-published artifact; false leaves the transport untouched.
-  confirmRepublish(entry: LedgerEntry): Promise<boolean>;
   // Uploads run-level picks + issue-routed evidence to the execution issue AFTER a successful import,
-  // returning which failed. The same routine backs toast-retry and publishLastRun resume.
+  // returning which failed. The same routine backs toast-retry and the pending-attachments banner.
   attachFiles(executionKey: string, files: readonly string[]): Promise<{ readonly failed: readonly string[] }>;
   recordPublish(entry: LedgerEntry): void;
-  reportBlocked(reason: string): void;
+  // No publishable run exists — the message/toast the caller shows instead of an empty dialog.
+  reportNoRuns(): void;
   reportSuccess(outcome: PublishOutcome, request: PublishRequest, attachedCount: number): void;
   // Import succeeded but some attachments failed — a resumable partial (§8-P3): the toast reports the
-  // count and offers Retry off the ledgered pending files. An import is never rolled back for this.
+  // count and offers Retry off the ledgered pending files (keyed by `artifactId`). An import is never
+  // rolled back for this.
   reportPartialAttachments(
     outcome: PublishOutcome,
     request: PublishRequest,
     attachedCount: number,
-    failed: readonly string[]
+    failed: readonly string[],
+    artifactId: string
   ): void;
   reportFailure(error: unknown): void;
   site: string;
@@ -91,52 +131,78 @@ export interface PublishFlowDeps {
   now(): number;
 }
 
-/**
- * The publish flow (vscode-free): gate on a publishable artifact, reconcile to the publishable set,
- * present the View 3 dialog, and — only after an explicit confirm (plus a re-confirm when the
- * artifact was already published) — hand the artifact + request to the publishing capability. The
- * capability's single import POST creates the execution WITH results; nothing runs remotely. Only
- * AFTER a successful import are run-level attachments and issue-routed evidence uploaded — a failed
- * upload records the pending files on the ledger and offers Retry, never rolling back the import.
- * Cancel/close, an empty publishable set, or a declined re-confirm all make ZERO transport calls.
- */
-export async function runPublishFlow(artifact: RunArtifact, deps: PublishFlowDeps): Promise<void> {
-  if (!isPublishable(artifact)) {
-    deps.reportBlocked(`This run is ${artifact.state} — only a complete run can be published.`);
-    return;
-  }
+function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps): PublishRunOption {
   const reconciled = publishableResults(artifact);
-  if (reconciled.publishable.length === 0) {
-    deps.reportBlocked("Nothing to publish — every result was excluded by preflight or is unmapped.");
-    return;
-  }
-
   const summary = summarizePublishable(reconciled);
   const planKey = artifact.selection.kind === "test-plan-derived" ? artifact.selection.planKey : undefined;
-  // Gates passed → the dialog will open, so this is the moment (and the only moment) the attachments
-  // model + its `attachment/meta` probe are built.
-  const attachments = await deps.attachments();
-  const model: PublishDialogModel = {
-    title: "Publish run results",
+  const prior = deps.priorEntryFor(artifact.id);
+  return {
+    id: artifact.id,
+    label: publishRunLabel(artifact.createdAt, artifact.selection.kind),
     subtitle: publishDialogSubtitle(summary, deps.changedSinceRun(reconciled.publishable)),
-    defaultProjectKey: deps.defaultProjectKey,
+    project: derivePublishProject(reconciled.publishable, deps.defaultProjectKey, deps.projectOf),
     defaultSummary: defaultPublishSummary(artifact.createdAt, reconciled.publishable.length),
     ...(planKey !== undefined && planKey !== "" ? { prefillPlanKey: planKey } : {}),
-    jiraSearchAvailable: deps.jiraSearchAvailable,
-    ...(deps.priorEntry
-      ? { alreadyPublished: { key: deps.priorEntry.executionRef, publishedAt: deps.priorEntry.publishedAt } }
+    ...(prior
+      ? {
+          republish: {
+            key: prior.executionRef,
+            publishedAt: prior.publishedAt,
+            ...(prior.mode ? { mode: prior.mode } : {}),
+          },
+        }
       : {}),
-    attachments,
+    ...(prior && prior.pendingAttachments.length > 0
+      ? { pendingAttachments: { key: prior.executionRef, count: prior.pendingAttachments.length } }
+      : {}),
   };
+}
 
-  const dialog = await deps.presentDialog(model);
+/**
+ * The publish flow (vscode-free): filter the runs to the publishable ones with something left after
+ * reconciliation, build the multi-run View 3 dialog (newest-first dropdown, per-run project prefill and
+ * banners), present it, and — on an explicit confirm — hand the SELECTED run + request to the publishing
+ * capability. The capability's single import POST creates the execution WITH results; nothing runs
+ * remotely. Only AFTER a successful import are run-level attachments and issue-routed evidence uploaded —
+ * a failed upload records the pending files on the ledger and offers Retry, never rolling back the import.
+ * A run already on the ledger shows an inline republish banner (no modal); submit proceeds directly.
+ * No publishable run, or cancel/close, makes ZERO transport calls.
+ */
+export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
+  const runnable = deps.runs.filter(
+    (artifact) => isPublishable(artifact) && publishableResults(artifact).publishable.length > 0
+  );
+  const newest = runnable[0];
+  if (newest === undefined) {
+    deps.reportNoRuns();
+    return;
+  }
+
+  // The runs gate passed → the dialog will open, so this is the moment (and only moment) the attachments
+  // model + its `attachment/meta` probe are built.
+  const attachments = await deps.attachments();
+  const options = runnable.map((artifact) => buildRunOption(artifact, deps));
+  const selectedRunId =
+    deps.preselectId !== undefined && runnable.some((artifact) => artifact.id === deps.preselectId)
+      ? deps.preselectId
+      : newest.id;
+
+  const dialog = await deps.presentDialog({
+    title: "Publish run results",
+    runs: options,
+    selectedRunId,
+    jiraSearchAvailable: deps.jiraSearchAvailable,
+    attachments,
+  });
   if (dialog === undefined) {
     return;
   }
-  if (deps.priorEntry !== undefined && !(await deps.confirmRepublish(deps.priorEntry))) {
+  const artifact = runnable.find((candidate) => candidate.id === dialog.runId);
+  if (artifact === undefined) {
     return;
   }
 
+  const summary = summarizePublishable(publishableResults(artifact));
   let outcome: PublishOutcome;
   try {
     outcome = await deps.publishing.publish(artifact, dialog.request);
@@ -176,7 +242,7 @@ export async function runPublishFlow(artifact: RunArtifact, deps: PublishFlowDep
 
   const attachedCount = files.length - failed.length;
   if (failed.length > 0) {
-    deps.reportPartialAttachments(outcome, dialog.request, attachedCount, failed);
+    deps.reportPartialAttachments(outcome, dialog.request, attachedCount, failed, artifact.id);
   } else {
     deps.reportSuccess(outcome, dialog.request, attachedCount);
   }

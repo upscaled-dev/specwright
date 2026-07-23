@@ -18,6 +18,7 @@ import {
   RunArtifactState,
 } from "../../traceability/contracts";
 import { ScenarioRef } from "../../traceability/scenario-ref";
+import { projectFromKey } from "../../xray/xray-adapter";
 
 const CREATED_AT = Date.UTC(2026, 6, 22, 9, 0, 0);
 
@@ -33,12 +34,24 @@ function mapped(name: string, testKey: string, outcome: RunArtifactOutcome = "pa
   return { ...result(name, { outcome }), testKey };
 }
 
-function artifact(
-  state: RunArtifactState,
-  results: RunArtifactResult[],
-  selection: BatchSelection = { kind: "all-mapped" }
-): RunArtifact {
-  return { id: "run-1", createdAt: CREATED_AT, results, shards: [], selection, preflight: [], state };
+interface ArtifactOptions {
+  id?: string;
+  createdAt?: number;
+  state?: RunArtifactState;
+  results?: RunArtifactResult[];
+  selection?: BatchSelection;
+}
+
+function artifact(opts: ArtifactOptions = {}): RunArtifact {
+  return {
+    id: opts.id ?? "run-1",
+    createdAt: opts.createdAt ?? CREATED_AT,
+    results: opts.results ?? [mapped("a", "CALC-1")],
+    shards: [],
+    selection: opts.selection ?? { kind: "all-mapped" },
+    preflight: [],
+    state: opts.state ?? "complete",
+  };
 }
 
 const OUTCOME: PublishOutcome = { ref: { kind: "execution", key: "XNP-100" }, imported: 1, warnings: [] };
@@ -62,27 +75,29 @@ const ATTACHMENTS_MODEL: PublishAttachmentsModel = {
   evidenceStream: "evidence",
 };
 
-// Wrap a bare request as the dialog's confirmed result (no run-level attachments picked by default).
-function dialogResult(request: PublishRequest, attachments: readonly string[] = []): PublishDialogResult {
-  return { request, attachments };
+// Wrap a bare request as the dialog's confirmed result (no run-level attachments picked by default,
+// and the single-run "run-1" selected).
+function dialogResult(request: PublishRequest, attachments: readonly string[] = [], runId = "run-1"): PublishDialogResult {
+  return { runId, request, attachments };
 }
 
-function deps(over: Partial<PublishFlowDeps> = {}): PublishFlowDeps {
+function deps(runs: readonly RunArtifact[], over: Partial<PublishFlowDeps> = {}): PublishFlowDeps {
   const publishing = over.publishing ?? spyPublishing().capability;
   return {
     publishing,
+    runs,
+    projectOf: projectFromKey,
     changedSinceRun: () => 0,
     defaultProjectKey: "",
     jiraSearchAvailable: false,
     attachments: () => Promise.resolve(ATTACHMENTS_MODEL),
-    priorEntry: undefined,
+    priorEntryFor: () => undefined,
     presentDialog: vi.fn<(m: PublishDialogModel) => Promise<PublishDialogResult | undefined>>(() =>
       Promise.resolve(undefined)
     ),
-    confirmRepublish: vi.fn(() => Promise.resolve(true)),
     attachFiles: vi.fn(() => Promise.resolve({ failed: [] })),
     recordPublish: vi.fn(),
-    reportBlocked: vi.fn(),
+    reportNoRuns: vi.fn(),
     reportSuccess: vi.fn(),
     reportPartialAttachments: vi.fn(),
     reportFailure: vi.fn(),
@@ -93,44 +108,64 @@ function deps(over: Partial<PublishFlowDeps> = {}): PublishFlowDeps {
   };
 }
 
-describe("runPublishFlow — gating", () => {
-  it("blocks a cancelled run: no dialog, no transport", async () => {
+// Capture the single model the dialog was shown.
+function captureModel(over: Partial<PublishFlowDeps> = {}): { models: PublishDialogModel[]; over: Partial<PublishFlowDeps> } {
+  const models: PublishDialogModel[] = [];
+  return {
+    models,
+    over: {
+      ...over,
+      presentDialog: vi.fn((m: PublishDialogModel) => {
+        models.push(m);
+        return Promise.resolve(undefined);
+      }),
+    },
+  };
+}
+
+describe("runPublishFlow — no publishable runs", () => {
+  it("reports no runs and opens no dialog for a cancelled-only list", async () => {
     const publishing = spyPublishing();
     const presentDialog = vi.fn(() => Promise.resolve(undefined));
-    const d = deps({ publishing: publishing.capability, presentDialog });
+    const d = deps([artifact({ state: "cancelled" })], { publishing: publishing.capability, presentDialog });
 
-    await runPublishFlow(artifact("cancelled", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
-    expect(d.reportBlocked).toHaveBeenCalledTimes(1);
+    expect(d.reportNoRuns).toHaveBeenCalledTimes(1);
     expect(presentDialog).not.toHaveBeenCalled();
     expect(publishing.publish).not.toHaveBeenCalled();
   });
 
-  it("blocks a partial run", async () => {
+  it("filters out a partial run", async () => {
     const publishing = spyPublishing();
-    const d = deps({ publishing: publishing.capability });
-    await runPublishFlow(artifact("partial", [mapped("a", "CALC-1")]), d);
-    expect(d.reportBlocked).toHaveBeenCalledTimes(1);
+    const d = deps([artifact({ state: "partial" })], { publishing: publishing.capability });
+    await runPublishFlow(d);
+    expect(d.reportNoRuns).toHaveBeenCalledTimes(1);
     expect(publishing.publish).not.toHaveBeenCalled();
   });
 
-  it("blocks when nothing survives reconciliation (all unmapped)", async () => {
+  it("filters out a complete run with nothing left after reconciliation (all unmapped)", async () => {
     const publishing = spyPublishing();
     const presentDialog = vi.fn(() => Promise.resolve(undefined));
-    const d = deps({ publishing: publishing.capability, presentDialog });
-    await runPublishFlow(artifact("complete", [result("a"), result("b")]), d);
-    expect(d.reportBlocked).toHaveBeenCalledTimes(1);
+    const d = deps([artifact({ results: [result("a"), result("b")] })], {
+      publishing: publishing.capability,
+      presentDialog,
+    });
+    await runPublishFlow(d);
+    expect(d.reportNoRuns).toHaveBeenCalledTimes(1);
     expect(presentDialog).not.toHaveBeenCalled();
     expect(publishing.publish).not.toHaveBeenCalled();
   });
 
-  it("never builds the attachments model (nor its attachment/meta probe) for a blocked run", async () => {
+  it("never builds the attachments model (nor its probe) when no run is publishable", async () => {
     const attachmentsSpy = vi.fn(() => Promise.resolve(ATTACHMENTS_MODEL));
     const presentDialog = vi.fn(() => Promise.resolve(undefined));
-    // A cancelled run is blocked before the dialog; the lazy attachments build must not fire.
-    await runPublishFlow(artifact("cancelled", [mapped("a", "CALC-1")]), deps({ attachments: attachmentsSpy, presentDialog }));
-    // The empty publishable set is also blocked pre-dialog.
-    await runPublishFlow(artifact("complete", [result("a")]), deps({ attachments: attachmentsSpy, presentDialog }));
+    await runPublishFlow(
+      deps([artifact({ state: "cancelled" }), artifact({ results: [result("a")] })], {
+        attachments: attachmentsSpy,
+        presentDialog,
+      })
+    );
     expect(attachmentsSpy).not.toHaveBeenCalled();
     expect(presentDialog).not.toHaveBeenCalled();
   });
@@ -138,21 +173,129 @@ describe("runPublishFlow — gating", () => {
   it("builds the attachments model exactly once, only when the dialog opens", async () => {
     const attachmentsSpy = vi.fn(() => Promise.resolve(ATTACHMENTS_MODEL));
     const presentDialog = vi.fn(() => Promise.resolve(undefined));
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), deps({ attachments: attachmentsSpy, presentDialog }));
+    await runPublishFlow(deps([artifact()], { attachments: attachmentsSpy, presentDialog }));
     expect(attachmentsSpy).toHaveBeenCalledTimes(1);
     expect(presentDialog).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("runPublishFlow — dropdown ordering and preselection", () => {
+  it("keeps the runs newest-first as passed and defaults the selection to the newest", async () => {
+    const cap = captureModel();
+    const runs = [artifact({ id: "new", createdAt: CREATED_AT + 1000 }), artifact({ id: "old", createdAt: CREATED_AT })];
+    await runPublishFlow(deps(runs, cap.over));
+    const model = cap.models[0]!;
+    expect(model.runs.map((r) => r.id)).toEqual(["new", "old"]);
+    expect(model.selectedRunId).toBe("new");
+  });
+
+  it("preselects the requested run (Run Locally and Publish hand-off)", async () => {
+    const cap = captureModel({ preselectId: "old" });
+    const runs = [artifact({ id: "new", createdAt: CREATED_AT + 1000 }), artifact({ id: "old", createdAt: CREATED_AT })];
+    await runPublishFlow(deps(runs, cap.over));
+    expect(cap.models[0]!.selectedRunId).toBe("old");
+  });
+
+  it("falls back to the newest run when the preselected id is not publishable", async () => {
+    const cap = captureModel({ preselectId: "gone" });
+    await runPublishFlow(deps([artifact({ id: "new" })], cap.over));
+    expect(cap.models[0]!.selectedRunId).toBe("new");
+  });
+
+  it("drops non-publishable runs from the dropdown", async () => {
+    const cap = captureModel();
+    const runs = [artifact({ id: "good" }), artifact({ id: "bad", state: "cancelled" })];
+    await runPublishFlow(deps(runs, cap.over));
+    expect(cap.models[0]!.runs.map((r) => r.id)).toEqual(["good"]);
+  });
+});
+
+describe("runPublishFlow — project prefill derivation", () => {
+  it("derives the single distinct project from the run's own keys and marks it a derivation", async () => {
+    const cap = captureModel({ defaultProjectKey: "PAY" });
+    const run = artifact({ results: [mapped("a", "CALC-1"), mapped("b", "CALC-2")] });
+    await runPublishFlow(deps([run], cap.over));
+    expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "CALC", fromDerivation: true });
+  });
+
+  it("falls back to xray.defaultProjectKey (no hint) when the run spans multiple projects", async () => {
+    const cap = captureModel({ defaultProjectKey: "PAY" });
+    const run = artifact({ results: [mapped("a", "CALC-1"), mapped("b", "SHOP-2")] });
+    await runPublishFlow(deps([run], cap.over));
+    expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "PAY", fromDerivation: false });
+  });
+
+  it("leaves the project empty (no hint) when multiple projects and no default setting", async () => {
+    const cap = captureModel({ defaultProjectKey: "" });
+    const run = artifact({ results: [mapped("a", "CALC-1"), mapped("b", "SHOP-2")] });
+    await runPublishFlow(deps([run], cap.over));
+    expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "", fromDerivation: false });
+  });
+});
+
+describe("runPublishFlow — banners", () => {
+  const priorEntry: LedgerEntry = {
+    artifactId: "run-1",
+    executionRef: "XNP-9",
+    site: "acme.atlassian.net",
+    account: "client-1",
+    publishedAt: 1_699_000_000_000,
+    pendingAttachments: [],
+    mode: "append",
+  };
+
+  it("surfaces the republish banner (target, time, mode) when the run is on the ledger", async () => {
+    const cap = captureModel({ priorEntryFor: () => priorEntry });
+    await runPublishFlow(deps([artifact()], cap.over));
+    expect(cap.models[0]!.runs[0]!.republish).toEqual({ key: "XNP-9", publishedAt: 1_699_000_000_000, mode: "append" });
+  });
+
+  it("surfaces the pending-attachments banner only when files are pending", async () => {
+    const cap = captureModel({ priorEntryFor: () => ({ ...priorEntry, pendingAttachments: ["/ws/a.zip", "/ws/b.zip"] }) });
+    await runPublishFlow(deps([artifact()], cap.over));
+    expect(cap.models[0]!.runs[0]!.pendingAttachments).toEqual({ key: "XNP-9", count: 2 });
+  });
+
+  it("shows no banners for a run that was never published", async () => {
+    const cap = captureModel();
+    await runPublishFlow(deps([artifact()], cap.over));
+    expect(cap.models[0]!.runs[0]!.republish).toBeUndefined();
+    expect(cap.models[0]!.runs[0]!.pendingAttachments).toBeUndefined();
+  });
+});
+
+describe("runPublishFlow — dialog model", () => {
+  it("builds the subtitle, summary default, and plan prefill per run", async () => {
+    const cap = captureModel({ defaultProjectKey: "CALC", changedSinceRun: () => 1 });
+    const run = artifact({
+      results: [mapped("a", "CALC-1", "passed"), mapped("b", "CALC-2", "failed"), result("c")],
+      selection: { kind: "test-plan-derived", planKey: "CALC-500" },
+    });
+    await runPublishFlow(deps([run], cap.over));
+    const option = cap.models[0]!.runs[0]!;
+    expect(option.subtitle).toBe(
+      "2 scenarios · 1 passed · 1 failed · 1 unmapped not publishable · 1 changed since run (create mode)"
+    );
+    expect(option.defaultSummary).toBe("Specwright run 2026-07-22 — 2 scenarios");
+    expect(option.prefillPlanKey).toBe("CALC-500");
+  });
+
+  it("omits the plan prefill when the selection is not test-plan-derived", async () => {
+    const cap = captureModel();
+    await runPublishFlow(deps([artifact()], cap.over));
+    expect(cap.models[0]!.runs[0]!.prefillPlanKey).toBeUndefined();
   });
 });
 
 describe("runPublishFlow — cancelled/closed dialog", () => {
   it("makes provably zero transport calls when the dialog is dismissed", async () => {
     const publishing = spyPublishing();
-    const d = deps({
+    const d = deps([artifact()], {
       publishing: publishing.capability,
       presentDialog: vi.fn(() => Promise.resolve(undefined)),
     });
 
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
     expect(publishing.publish).not.toHaveBeenCalled();
     expect(publishing.searchTargets).not.toHaveBeenCalled();
@@ -162,15 +305,15 @@ describe("runPublishFlow — cancelled/closed dialog", () => {
 });
 
 describe("runPublishFlow — publish", () => {
-  it("hands the artifact + request to the capability and records + reports success", async () => {
+  it("publishes the selected run and records + reports success (no re-confirm modal)", async () => {
     const publishing = spyPublishing();
-    const run = artifact("complete", [mapped("a", "CALC-1")]);
-    const d = deps({
+    const run = artifact();
+    const d = deps([run], {
       publishing: publishing.capability,
       presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
     });
 
-    await runPublishFlow(run, d);
+    await runPublishFlow(d);
 
     // The single import POST is the ONLY remote call — the flow has no runner and never triggers one.
     expect(publishing.publish).toHaveBeenCalledTimes(1);
@@ -190,53 +333,91 @@ describe("runPublishFlow — publish", () => {
       skipped: 0,
       total: 1,
     });
-    // No attachments picked and none issue-routed → attachedCount 0, no upload attempted.
     expect(d.attachFiles).not.toHaveBeenCalled();
     expect(d.reportSuccess).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 0);
   });
 
-  it("threads the publishable pass/fail/skip counts and total to the ledger append", async () => {
-    const run = artifact("complete", [
-      mapped("a", "CALC-1", "passed"),
-      mapped("b", "CALC-2", "failed"),
-      mapped("c", "CALC-3", "skipped"),
-      mapped("d", "CALC-4", "passed"),
-    ]);
-    const d = deps({ presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))) });
+  it("publishes the run the dropdown selected, not merely the newest", async () => {
+    const publishing = spyPublishing();
+    const newer = artifact({ id: "new", createdAt: CREATED_AT + 1000, results: [mapped("a", "NEW-1")] });
+    const older = artifact({ id: "old", createdAt: CREATED_AT, results: [mapped("b", "OLD-1")] });
+    const d = deps([newer, older], {
+      publishing: publishing.capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, [], "old"))),
+    });
 
-    await runPublishFlow(run, d);
+    await runPublishFlow(d);
+
+    expect(publishing.publish.mock.calls[0]![0]).toBe(older);
+    expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ artifactId: "old" }));
+  });
+
+  it("threads the publishable pass/fail/skip counts and total to the ledger append", async () => {
+    const run = artifact({
+      results: [
+        mapped("a", "CALC-1", "passed"),
+        mapped("b", "CALC-2", "failed"),
+        mapped("c", "CALC-3", "skipped"),
+        mapped("d", "CALC-4", "passed"),
+      ],
+    });
+    const d = deps([run], { presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))) });
+
+    await runPublishFlow(d);
 
     expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ passed: 2, failed: 1, skipped: 1, total: 4 }));
   });
 
   it("records a total that exceeds pass/fail/skip when a result timed out", async () => {
-    const run = artifact("complete", [mapped("a", "CALC-1", "passed"), mapped("b", "CALC-2", "timed-out")]);
-    const d = deps({ presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))) });
+    const run = artifact({ results: [mapped("a", "CALC-1", "passed"), mapped("b", "CALC-2", "timed-out")] });
+    const d = deps([run], { presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))) });
 
-    await runPublishFlow(run, d);
+    await runPublishFlow(d);
 
     expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ passed: 1, failed: 0, skipped: 0, total: 2 }));
   });
 
   it("records the append mode without a summary when appending to an existing execution", async () => {
     const append: PublishRequest = { mode: "append", executionKey: "XNP-9" };
-    const d = deps({ presentDialog: vi.fn(() => Promise.resolve(dialogResult(append))) });
+    const d = deps([artifact()], { presentDialog: vi.fn(() => Promise.resolve(dialogResult(append))) });
 
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
     const entry = (d.recordPublish as ReturnType<typeof vi.fn>).mock.calls[0]![0] as LedgerEntry;
     expect(entry.mode).toBe("append");
     expect(entry.summary).toBeUndefined();
   });
 
+  it("publishes directly for an already-published run — no re-confirm gate", async () => {
+    const publishing = spyPublishing();
+    const priorEntry: LedgerEntry = {
+      artifactId: "run-1",
+      executionRef: "XNP-9",
+      site: "acme.atlassian.net",
+      account: "client-1",
+      publishedAt: 1_699_000_000_000,
+      pendingAttachments: [],
+    };
+    const d = deps([artifact()], {
+      publishing: publishing.capability,
+      priorEntryFor: () => priorEntry,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
+    });
+
+    await runPublishFlow(d);
+
+    expect(publishing.publish).toHaveBeenCalledTimes(1);
+    expect(d.recordPublish).toHaveBeenCalledTimes(1);
+  });
+
   it("reports failure and records nothing when the import rejects", async () => {
     const publish = vi.fn(() => Promise.reject(new Error("HTTP 400: no results")));
-    const d = deps({
+    const d = deps([artifact()], {
       publishing: { publish, searchTargets: vi.fn(() => Promise.resolve([])) },
       presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
     });
 
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
     expect(d.reportFailure).toHaveBeenCalledTimes(1);
     expect(d.recordPublish).not.toHaveBeenCalled();
@@ -244,64 +425,19 @@ describe("runPublishFlow — publish", () => {
   });
 });
 
-describe("runPublishFlow — dialog model", () => {
-  it("builds the subtitle from the publishable set with honest not-publishable notes", async () => {
-    const captured: PublishDialogModel[] = [];
-    const run = artifact("complete", [
-      mapped("a", "CALC-1", "passed"),
-      mapped("b", "CALC-2", "failed"),
-      result("c"), // unmapped → not publishable
-    ]);
-    const d = deps({
-      defaultProjectKey: "CALC",
-      changedSinceRun: () => 1,
-      presentDialog: vi.fn((m: PublishDialogModel) => {
-        captured.push(m);
-        return Promise.resolve(undefined);
-      }),
-    });
-
-    await runPublishFlow(run, d);
-
-    expect(captured).toHaveLength(1);
-    const model = captured[0]!;
-    expect(model.subtitle).toBe(
-      "2 scenarios · 1 passed · 1 failed · 1 unmapped not publishable · 1 changed since run (create mode)"
-    );
-    expect(model.defaultProjectKey).toBe("CALC");
-    expect(model.defaultSummary).toBe("Specwright run 2026-07-22 — 2 scenarios");
-    expect(model.alreadyPublished).toBeUndefined();
-    expect(model.prefillPlanKey).toBeUndefined();
-  });
-
-  it("prefills the plan key from a test-plan-derived selection", async () => {
-    const captured: PublishDialogModel[] = [];
-    const run = artifact("complete", [mapped("a", "CALC-1")], { kind: "test-plan-derived", planKey: "CALC-500" });
-    const d = deps({
-      presentDialog: vi.fn((m: PublishDialogModel) => {
-        captured.push(m);
-        return Promise.resolve(undefined);
-      }),
-    });
-    await runPublishFlow(run, d);
-    expect(captured[0]!.prefillPlanKey).toBe("CALC-500");
-  });
-});
-
 describe("runPublishFlow — attachments", () => {
   it("uploads run-level picks after a successful import and reports the attached count", async () => {
     const publishing = spyPublishing();
     const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
-    const d = deps({
+    const d = deps([artifact()], {
       publishing: publishing.capability,
       presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
       attachFiles,
     });
 
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
     expect(publishing.publish).toHaveBeenCalledTimes(1);
-    // Upload runs AFTER the import, keyed off the created execution.
     expect(attachFiles).toHaveBeenCalledWith("XNP-100", ["/ws/report.zip"]);
     expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ pendingAttachments: [] }));
     expect(d.reportSuccess).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 1);
@@ -312,13 +448,13 @@ describe("runPublishFlow — attachments", () => {
     const outcome: PublishOutcome = { ...OUTCOME, issueEvidenceFiles: ["/ws/test-results/shot.png"] };
     const publishing = spyPublishing(outcome);
     const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
-    const d = deps({
+    const d = deps([artifact()], {
       publishing: publishing.capability,
       presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
       attachFiles,
     });
 
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
     expect(attachFiles).toHaveBeenCalledWith("XNP-100", ["/ws/report.zip", "/ws/test-results/shot.png"]);
   });
@@ -328,13 +464,13 @@ describe("runPublishFlow — attachments", () => {
     const outcome: PublishOutcome = { ...OUTCOME, issueEvidenceFiles: [shared] };
     const publishing = spyPublishing(outcome);
     const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
-    const d = deps({
+    const d = deps([artifact()], {
       publishing: publishing.capability,
       presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip", shared]))),
       attachFiles,
     });
 
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
     expect(attachFiles).toHaveBeenCalledWith("XNP-100", ["/ws/report.zip", shared]);
     expect(d.reportSuccess).toHaveBeenCalledWith(outcome, CREATE_REQUEST, 2);
@@ -343,103 +479,46 @@ describe("runPublishFlow — attachments", () => {
   it("records failed uploads as pendingAttachments and reports a partial (never rolls back the import)", async () => {
     const publishing = spyPublishing();
     const attachFiles = vi.fn(() => Promise.resolve({ failed: ["/ws/report.zip"] }));
-    const d = deps({
+    const d = deps([artifact()], {
       publishing: publishing.capability,
       presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip", "/ws/trace.zip"]))),
       attachFiles,
     });
 
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
-    // The import stands — recordPublish still fires, carrying the pending files.
     expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ pendingAttachments: ["/ws/report.zip"] }));
-    expect(d.reportPartialAttachments).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 1, ["/ws/report.zip"]);
+    expect(d.reportPartialAttachments).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 1, ["/ws/report.zip"], "run-1");
     expect(d.reportSuccess).not.toHaveBeenCalled();
   });
 
   it("treats a thrown attach routine as every file pending (import already landed)", async () => {
     const publishing = spyPublishing();
     const attachFiles = vi.fn(() => Promise.reject(new Error("Jira down")));
-    const d = deps({
+    const d = deps([artifact()], {
       publishing: publishing.capability,
       presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/a.zip", "/ws/b.zip"]))),
       attachFiles,
     });
 
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
     expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ pendingAttachments: ["/ws/a.zip", "/ws/b.zip"] }));
-    expect(d.reportPartialAttachments).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 0, ["/ws/a.zip", "/ws/b.zip"]);
+    expect(d.reportPartialAttachments).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 0, ["/ws/a.zip", "/ws/b.zip"], "run-1");
   });
 
   it("skips the upload entirely when there are no files (no attach call)", async () => {
     const publishing = spyPublishing();
     const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
-    const d = deps({
+    const d = deps([artifact()], {
       publishing: publishing.capability,
       presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
       attachFiles,
     });
 
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
+    await runPublishFlow(d);
 
     expect(attachFiles).not.toHaveBeenCalled();
     expect(d.reportSuccess).toHaveBeenCalledWith(OUTCOME, CREATE_REQUEST, 0);
-  });
-});
-
-describe("runPublishFlow — idempotency re-confirm", () => {
-  const priorEntry: LedgerEntry = {
-    artifactId: "run-1",
-    executionRef: "XNP-9",
-    site: "acme.atlassian.net",
-    account: "client-1",
-    publishedAt: 1_699_000_000_000,
-    pendingAttachments: [],
-  };
-
-  it("surfaces the already-published banner in the dialog model", async () => {
-    const captured: PublishDialogModel[] = [];
-    const d = deps({
-      priorEntry,
-      presentDialog: vi.fn((m: PublishDialogModel) => {
-        captured.push(m);
-        return Promise.resolve(undefined);
-      }),
-    });
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
-    expect(captured[0]!.alreadyPublished).toEqual({ key: "XNP-9", publishedAt: 1_699_000_000_000 });
-  });
-
-  it("requires the explicit re-confirm — a declined re-confirm makes zero transport calls", async () => {
-    const publishing = spyPublishing();
-    const confirmRepublish = vi.fn(() => Promise.resolve(false));
-    const d = deps({
-      publishing: publishing.capability,
-      priorEntry,
-      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
-      confirmRepublish,
-    });
-
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
-
-    expect(confirmRepublish).toHaveBeenCalledWith(priorEntry);
-    expect(publishing.publish).not.toHaveBeenCalled();
-    expect(d.recordPublish).not.toHaveBeenCalled();
-  });
-
-  it("publishes once the re-confirm is granted", async () => {
-    const publishing = spyPublishing();
-    const d = deps({
-      publishing: publishing.capability,
-      priorEntry,
-      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
-      confirmRepublish: vi.fn(() => Promise.resolve(true)),
-    });
-
-    await runPublishFlow(artifact("complete", [mapped("a", "CALC-1")]), d);
-
-    expect(publishing.publish).toHaveBeenCalledTimes(1);
-    expect(d.recordPublish).toHaveBeenCalledTimes(1);
   });
 });

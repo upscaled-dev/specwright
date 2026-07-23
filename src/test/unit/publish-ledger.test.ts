@@ -95,6 +95,17 @@ describe("withUpdatedPending", () => {
   it("is a no-op when nothing matches", () => {
     expect(withUpdatedPending(entries, "run-9", "acme.atlassian.net", [])).toEqual(entries);
   });
+
+  it("touches only the newest entry when the same run was published more than once", () => {
+    // recordPublish prepends, so index 0 is the newest publish of run-1 and index 1 the earlier one.
+    const republished = [
+      entry({ artifactId: "run-1", executionRef: "XNP-2", pendingAttachments: ["/new-a", "/new-b"] }),
+      entry({ artifactId: "run-1", executionRef: "XNP-1", pendingAttachments: ["/old-a"] }),
+    ];
+    const updated = withUpdatedPending(republished, "run-1", "acme.atlassian.net", ["/new-b"]);
+    expect(updated[0]!.pendingAttachments).toEqual(["/new-b"]);
+    expect(updated[1]!.pendingAttachments).toEqual(["/old-a"]);
+  });
 });
 
 describe("PublishLedger", () => {
@@ -185,5 +196,22 @@ describe("PublishLedger", () => {
     expect(ledger.find("run-1", "acme.atlassian.net")?.pendingAttachments).toEqual([]);
     const persisted = memento.store.get("specwright.publishLedger") as LedgerEntry[];
     expect(persisted[0]!.pendingAttachments).toEqual([]);
+  });
+
+  it("attach-pending on a republished run leaves the earlier publish's pending record intact", () => {
+    const memento = fakeMemento();
+    const ledger = new PublishLedger(memento, logger);
+    // Publish the same run twice: two entries, newest first, each with its own pending files.
+    ledger.record(entry({ artifactId: "run-1", executionRef: "XNP-1", publishedAt: 1000, pendingAttachments: ["/old-a"] }));
+    ledger.record(entry({ artifactId: "run-1", executionRef: "XNP-2", publishedAt: 2000, pendingAttachments: ["/new-a", "/new-b"] }));
+
+    // The banner's attach-pending action replays the newest publish's files.
+    ledger.setPendingAttachments("run-1", "acme.atlassian.net", ["/new-b"]);
+
+    const bySite = ledger.entriesForSite("acme.atlassian.net");
+    expect(bySite[0]!.executionRef).toBe("XNP-2");
+    expect(bySite[0]!.pendingAttachments).toEqual(["/new-b"]);
+    expect(bySite[1]!.executionRef).toBe("XNP-1");
+    expect(bySite[1]!.pendingAttachments).toEqual(["/old-a"]);
   });
 });

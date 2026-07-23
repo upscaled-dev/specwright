@@ -43,10 +43,10 @@ import {
 } from "../traceability/contracts";
 import { BatchInvocation, resolveBatchSelection } from "../traceability/batch-selection";
 import { PreflightChoice, runPreflightFlow } from "../traceability/preflight-flow";
-import { summarizeArtifact } from "../traceability/publish-core";
+import { isPublishable, publishableResults } from "../traceability/publish-core";
 import { AttachmentSuggestion, PublishAttachmentsModel, runPublishFlow } from "../traceability/publish-flow";
-import { PublishDialogPanel } from "../traceability/publish-dialog-panel";
-import { LedgerEntry, PublishLedger } from "../traceability/publish-ledger";
+import { PendingAttachmentsResult, PublishDialogPanel } from "../traceability/publish-dialog-panel";
+import { PublishLedger } from "../traceability/publish-ledger";
 import { makeFeatureStepResolver } from "../xray/feature-step-resolver";
 import { XrayImportError } from "../xray/execution-importers";
 import { fetchJiraAttachmentMeta, uploadJiraAttachments } from "../xray/jira-attachments";
@@ -813,61 +813,35 @@ export class CommandManager {
       vscode.window.showInformationMessage("Preflight cancelled — nothing was run.");
       return;
     }
-    // A cancelled or partial batch is gated by the flow's `isPublishable` check — it reports the run
-    // as blocked rather than opening the dialog, so an incomplete run can't be mistaken for one worth
-    // publishing.
+    // A cancelled/partial batch, or one with nothing left after reconciliation, is reported here with
+    // its specific reason rather than folded into the dialog's newest-run pick. A good run hands its id
+    // to the dialog, which opens on it with the other publishable runs in the dropdown.
     if (sealed) {
-      await this.runPublish(sealed);
+      if (!isPublishable(sealed)) {
+        vscode.window.showWarningMessage(`This run is ${sealed.state} — only a complete run can be published.`);
+      } else if (publishableResults(sealed).publishable.length === 0) {
+        vscode.window.showWarningMessage("Nothing to publish — every result was excluded by preflight or is unmapped.");
+      } else {
+        await this.runPublish(sealed.id);
+      }
     }
   }
 
-  // Publish Last Run… — pick one of the recent sealed artifacts and hand it to the publish flow.
+  // Publish Last Run… — open the dialog directly on the newest publishable run. The run-picker
+  // QuickPick and the pending-attachments modal are folded into the dialog (dropdown + banner).
   private async publishLastRun(): Promise<void> {
-    const artifacts = this.context.runArtifactStore?.list() ?? [];
-    if (artifacts.length === 0) {
-      vscode.window.showInformationMessage("No local runs to publish yet — run a batch first.");
-      return;
-    }
-    const items = artifacts.map((artifact) => {
-      const summary = summarizeArtifact(artifact);
-      return {
-        label: `${new Date(artifact.createdAt).toLocaleString()} · ${artifact.selection.kind}`,
-        description: `${summary.total} results · ${summary.passed} passed · ${summary.failed} failed · ${artifact.state}`,
-        artifact,
-      };
-    });
-    const picked = await vscode.window.showQuickPick(items, { placeHolder: "Select a run to publish" });
-    if (!picked) {return;}
-
-    // A ledgered run with unfinished attachment uploads offers a resume that skips the import entirely —
-    // re-importing would duplicate results, so "attach pending files" replays only the failed uploads.
-    const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
-    const entry = this.publishLedger?.find(picked.artifact.id, site);
-    if (entry !== undefined && entry.pendingAttachments.length > 0) {
-      const choice = await vscode.window.showWarningMessage(
-        `This run was published to ${entry.executionRef} with ${entry.pendingAttachments.length} attachment(s) still pending.`,
-        { modal: true },
-        "Attach pending files",
-        "Publish again"
-      );
-      if (choice === "Attach pending files") {
-        await this.retryAttachments(picked.artifact.id, site, entry.executionRef, entry.pendingAttachments);
-        return;
-      }
-      if (choice !== "Publish again") {
-        return;
-      }
-    }
-    await this.runPublish(picked.artifact);
+    await this.runPublish();
   }
 
-  // Wire the vscode-free publish flow to the UI: the View 3 webview dialog, the idempotency
-  // re-confirm modal, the success/failure/partial toasts, attachment uploads, and the persistent
-  // ledger. Nothing here runs a remote test — the flow's only write is the capability's single import
-  // POST; attachments upload only AFTER that import succeeds.
-  private async runPublish(artifact: RunArtifact): Promise<void> {
-    const publishing = this.traceabilitySubsystem?.getActiveAdapter()?.resultPublishing;
-    if (!publishing) {
+  // Wire the vscode-free publish flow to the UI: the View 3 webview dialog (run dropdown, republish and
+  // pending-attachment banners), the success/failure/partial toasts, attachment uploads, and the
+  // persistent ledger. `preselectId` opens the dialog on a specific run (the one Run Locally and Publish
+  // just sealed); omitted, the newest publishable run wins. Nothing here runs a remote test — the
+  // flow's only write is the capability's single import POST; attachments upload only AFTER it succeeds.
+  private async runPublish(preselectId?: string): Promise<void> {
+    const adapter = this.traceabilitySubsystem?.getActiveAdapter();
+    const publishing = adapter?.resultPublishing;
+    if (!adapter || !publishing) {
       vscode.window.showInformationMessage("Connect to your test tracker before publishing.");
       return;
     }
@@ -876,34 +850,55 @@ export class CommandManager {
     const credentials = await this.credentialStore?.getCredentials(rawSite);
     const jiraSearchAvailable = (await this.credentialStore?.hasJiraCredentials(rawSite)) ?? false;
     const resolveSteps = makeFeatureStepResolver(this.context.featureParser);
-    await runPublishFlow(artifact, {
+    await runPublishFlow({
       publishing,
+      runs: this.context.runArtifactStore?.list() ?? [],
+      ...(preselectId !== undefined ? { preselectId } : {}),
+      projectOf: adapter.keyGrammar.projectOf,
       changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
       defaultProjectKey: this.context.config.xrayDefaultProjectKey,
       jiraSearchAvailable,
-      // Lazy — the flow calls this only after its gates pass, so a blocked/empty run never fires the
+      // Lazy — the flow calls this only after the no-runs gate, so an empty run list never fires the
       // one allowed pre-confirm call (the attachment/meta probe).
       attachments: () => this.buildPublishAttachments(rawSite),
-      priorEntry: this.publishLedger?.find(artifact.id, site),
+      priorEntryFor: (artifactId) => this.publishLedger?.find(artifactId, site),
       presentDialog: (model) =>
         PublishDialogPanel.show(model, {
           searchTargets: (kind, query, signal) => publishing.searchTargets(kind, query, signal),
           browseFiles: () => this.browsePublishFiles(),
+          attachPending: (runId) => this.attachPendingForRun(runId, site),
         }),
-      confirmRepublish: (entry) => this.confirmRepublish(entry),
       attachFiles: (executionKey, files) => this.attachFiles(executionKey, files),
       recordPublish: (entry) => this.publishLedger?.record(entry),
-      reportBlocked: (reason) => {
-        vscode.window.showWarningMessage(reason);
+      reportNoRuns: () => {
+        vscode.window.showInformationMessage("No local runs to publish yet — run a batch first.");
       },
       reportSuccess: (outcome, request, attachedCount) => this.reportPublishSuccess(outcome, request, attachedCount),
-      reportPartialAttachments: (outcome, request, attachedCount, failed) =>
-        this.reportPartialAttachments(artifact.id, site, outcome, request, attachedCount, failed),
+      reportPartialAttachments: (outcome, request, attachedCount, failed, artifactId) =>
+        this.reportPartialAttachments(artifactId, site, outcome, request, attachedCount, failed),
       reportFailure: (error) => this.reportPublishFailure(error),
       site,
       account: credentials?.clientId ?? "",
       now: () => Date.now(),
     });
+  }
+
+  // The pending-attachments banner's action: upload the run's ledgered pending files WITHOUT a reimport
+  // (the execution already carries its results) and return how many still failed so the banner updates.
+  private async attachPendingForRun(artifactId: string, site: string): Promise<PendingAttachmentsResult> {
+    const entry = this.publishLedger?.find(artifactId, site);
+    if (entry === undefined || entry.pendingAttachments.length === 0) {
+      return { remaining: 0 };
+    }
+    const { failed } = await this.attachFiles(entry.executionRef, entry.pendingAttachments);
+    this.publishLedger?.setPendingAttachments(artifactId, site, failed);
+    const attached = entry.pendingAttachments.length - failed.length;
+    if (failed.length === 0) {
+      vscode.window.showInformationMessage(`${entry.executionRef} — ${attached} pending attachment(s) uploaded.`);
+    } else {
+      vscode.window.showWarningMessage(`${entry.executionRef} — ${failed.length} attachment(s) still failed.`);
+    }
+    return { remaining: failed.length };
   }
 
   // The Publish dialog's run-level attachments section — the vscode-free build + probe logic lives in
@@ -986,16 +981,6 @@ export class CommandManager {
     )
       .then((choice) => (choice === "Retry" ? this.retryAttachments(artifactId, site, executionKey, failed) : undefined))
       .catch(() => undefined);
-  }
-
-  private async confirmRepublish(entry: LedgerEntry): Promise<boolean> {
-    const when = new Date(entry.publishedAt).toLocaleString();
-    const choice = await vscode.window.showWarningMessage(
-      `This run was already published to ${entry.executionRef} on ${when}. Publish a duplicate?`,
-      { modal: true },
-      "Publish again"
-    );
-    return choice === "Publish again";
   }
 
   private reportPublishSuccess(outcome: PublishOutcome, request: PublishRequest, attachedCount: number): void {

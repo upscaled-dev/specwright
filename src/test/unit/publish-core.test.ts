@@ -2,13 +2,16 @@ import { describe, it, expect } from "vitest";
 import * as vscode from "vscode";
 import {
   defaultPublishSummary,
+  derivePublishProject,
   isPublishable,
   publishableResults,
   publishDialogSubtitle,
-  summarizeArtifact,
+  publishRunLabel,
   summarizePublishable,
+  type PublishableResult,
   type PublishableSummary,
 } from "../../traceability/publish-core";
+import { projectFromKey } from "../../xray/xray-adapter";
 import { buildArtifactResults } from "../../traceability/run-artifact-store";
 import { refIdentity, sameScenario, scenarioRefFromScenario } from "../../traceability/scenario-ref";
 import type {
@@ -191,20 +194,6 @@ describe("isPublishable", () => {
   });
 });
 
-describe("summarizeArtifact", () => {
-  it("tallies every outcome over the whole artifact (before reconciliation)", () => {
-    const summary = summarizeArtifact(
-      artifact([
-        makeResult(ref("f", 1, "a")),
-        makeResult(ref("f", 2, "b"), { flaky: true }),
-        makeResult(ref("f", 3, "c"), { outcome: "failed" }),
-        makeResult(ref("f", 4, "d"), { outcome: "timed-out" }),
-      ])
-    );
-    expect(summary).toEqual({ total: 4, passed: 2, failed: 1, skipped: 0, timedOut: 1, interrupted: 0, flaky: 1 });
-  });
-});
-
 describe("publishDialogSubtitle", () => {
   const base: PublishableSummary = {
     total: 3,
@@ -241,5 +230,58 @@ describe("defaultPublishSummary", () => {
   it("names the run date and the publishable count", () => {
     expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 4)).toBe("Specwright run 2026-07-22 — 4 scenarios");
     expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 1)).toBe("Specwright run 2026-07-22 — 1 scenario");
+  });
+});
+
+describe("publishRunLabel", () => {
+  it("pairs the run's local time with its batch scope", () => {
+    expect(publishRunLabel(Date.UTC(2026, 6, 22, 9, 0, 0), "all-mapped")).toContain("all-mapped");
+    expect(publishRunLabel(Date.UTC(2026, 6, 22, 9, 0, 0), "scenario")).toContain(" · scenario");
+  });
+});
+
+describe("derivePublishProject", () => {
+  function publishable(testKey: string): PublishableResult {
+    return {
+      scenario: { filePath: "/ws/a.feature", line: 1, name: testKey, kind: "scenario" },
+      outcome: "passed",
+      durationMs: 1,
+      attempts: 1,
+      flaky: false,
+      evidenceRefs: [],
+      testKey,
+    };
+  }
+
+  it("derives the single distinct project from the run's keys and marks it a derivation", () => {
+    expect(derivePublishProject([publishable("CALC-1"), publishable("CALC-2")], "PAY", projectFromKey)).toEqual({
+      value: "CALC",
+      fromDerivation: true,
+    });
+  });
+
+  it("falls back to the setting (no derivation) when the keys span multiple projects", () => {
+    expect(derivePublishProject([publishable("CALC-1"), publishable("SHOP-2")], "PAY", projectFromKey)).toEqual({
+      value: "PAY",
+      fromDerivation: false,
+    });
+  });
+
+  it("falls back to the setting (no derivation) when there are no keys to derive from", () => {
+    expect(derivePublishProject([], "PAY", projectFromKey)).toEqual({ value: "PAY", fromDerivation: false });
+  });
+
+  it("yields an empty, hintless value when multiple projects and no default setting", () => {
+    expect(derivePublishProject([publishable("CALC-1"), publishable("SHOP-2")], "", projectFromKey)).toEqual({
+      value: "",
+      fromDerivation: false,
+    });
+  });
+
+  it("cannot derive without a projectOf grammar, so it uses the setting", () => {
+    expect(derivePublishProject([publishable("CALC-1")], "PAY", undefined)).toEqual({
+      value: "PAY",
+      fromDerivation: false,
+    });
   });
 });

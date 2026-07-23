@@ -91,44 +91,6 @@ export function summarizePublishable(reconciled: PublishableResults): Publishabl
   };
 }
 
-export interface ArtifactSummary {
-  readonly total: number;
-  readonly passed: number;
-  readonly failed: number;
-  readonly skipped: number;
-  readonly timedOut: number;
-  readonly interrupted: number;
-  readonly flaky: number;
-}
-
-// A whole-artifact outcome tally (every result, before reconciliation) — the Publish Last Run picker
-// describes each candidate run with it.
-export function summarizeArtifact(artifact: RunArtifact): ArtifactSummary {
-  const tally: Record<RunArtifactOutcome, number> = {
-    passed: 0,
-    failed: 0,
-    skipped: 0,
-    "timed-out": 0,
-    interrupted: 0,
-  };
-  let flaky = 0;
-  for (const result of artifact.results) {
-    tally[result.outcome] += 1;
-    if (result.flaky) {
-      flaky += 1;
-    }
-  }
-  return {
-    total: artifact.results.length,
-    passed: tally.passed,
-    failed: tally.failed,
-    skipped: tally.skipped,
-    timedOut: tally["timed-out"],
-    interrupted: tally.interrupted,
-    flaky,
-  };
-}
-
 // The View 3 subtitle: the publishable-set outcome tally, then the honest not-publishable notes
 // ("N excluded by preflight · M unmapped not publishable · K changed since run (create mode)").
 // `changedSinceRun` is create-mode-only (scenarios whose source no longer resolves) — surfaced as a
@@ -167,4 +129,33 @@ export function defaultPublishSummary(createdAt: number, publishableCount: numbe
   const date = new Date(createdAt).toISOString().slice(0, 10);
   const plural = publishableCount === 1 ? "" : "s";
   return `Specwright run ${date} — ${publishableCount} scenario${plural}`;
+}
+
+// One run's label in the dialog's newest-first dropdown: its local time and batch scope.
+export function publishRunLabel(createdAt: number, selectionKind: string): string {
+  return `${new Date(createdAt).toLocaleString()} · ${selectionKind}`;
+}
+
+// Create-mode Project prefill (§ point 2). Priority: (a) the single distinct project the run's own
+// publishable test keys resolve to, via the grammar's `projectOf` — carries `fromDerivation: true` so
+// the dialog shows the "from this run's test keys" hint; (b) the `xray.defaultProjectKey` setting when
+// the run yields zero or multiple projects; (c) empty. Only (a) is a derivation, so only (a) hints.
+export interface PublishProjectPrefill {
+  readonly value: string;
+  readonly fromDerivation: boolean;
+}
+
+export function derivePublishProject(
+  results: readonly PublishableResult[],
+  defaultProjectKey: string,
+  projectOf: ((key: string) => string) | undefined
+): PublishProjectPrefill {
+  if (projectOf) {
+    const projects = new Set(results.map((result) => projectOf(result.testKey)));
+    const only = projects.size === 1 ? [...projects][0] : undefined;
+    if (only !== undefined) {
+      return { value: only, fromDerivation: true };
+    }
+  }
+  return { value: defaultProjectKey, fromDerivation: false };
 }

@@ -45,20 +45,18 @@ export function findLedgerEntry(
   return entries.find((entry) => entry.artifactId === artifactId && entry.site === site);
 }
 
-// Replaces the matching entry's `pendingAttachments` in place (order preserved) — the resume/retry
-// routine records which files are still pending after a replay. A no-op when nothing matches.
+// Replaces the pending list of the NEWEST matching entry only (order preserved) — the resume/retry
+// routine records which files are still pending after a replay. A republished run has one entry per
+// publish (recordPublish prepends), so touching only the first match keeps an earlier publish's
+// pending record intact. A no-op when nothing matches.
 export function withUpdatedPending(
   entries: readonly LedgerEntry[],
   artifactId: string,
   site: string,
   pendingAttachments: readonly string[]
 ): LedgerEntry[] {
-  return entries.map((entry) => {
-    if (entry.artifactId === artifactId && entry.site === site) {
-      return { ...entry, pendingAttachments };
-    }
-    return entry;
-  });
+  const newest = entries.findIndex((entry) => entry.artifactId === artifactId && entry.site === site);
+  return entries.map((entry, index) => (index === newest ? { ...entry, pendingAttachments } : entry));
 }
 
 function isOptional(value: unknown, guard: (value: unknown) => boolean): boolean {
