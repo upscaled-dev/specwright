@@ -15,7 +15,7 @@ import { SurfaceHost, SurfaceName } from "./webview-host";
 
 const VIEW_TYPE = "playwrightBddRunner.coverageBoard";
 
-export type BoardTab = "mapping" | "matrix" | "executions";
+type BoardTab = "mapping" | "matrix" | "executions";
 type ShellTab = BoardTab | "publish" | "link";
 
 interface SearchMessage {
@@ -273,7 +273,7 @@ function tabFor(surface: SurfaceName): ShellTab {
 const SHELL_CSS = `
   body { margin: 0; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); }
   header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding: 0.9rem 1.1rem 0.7rem; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
-  h1 { font-size: 1.2rem; font-weight: 600; margin: 0; }
+  header h1 { font-size: 1.2rem; font-weight: 600; margin: 0; }
   .tabs { display: inline-flex; border: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); border-radius: 4px; overflow: hidden; }
   .tab { padding: 0.35rem 0.8rem; background: transparent; color: var(--vscode-foreground); border: none; cursor: pointer; font-family: inherit; font-size: inherit; }
   .tab + .tab { border-left: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); }
