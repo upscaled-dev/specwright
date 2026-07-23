@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
+import { contentSecurityPolicy, createNonce, escapeHtml } from "../utils/webview";
 import {
   BoardScenarioCard,
   BoardTestCard,
@@ -62,24 +62,15 @@ export interface BoardPanelDeps {
   openExecution(key: string): void;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
 function renderHtml(providerLabel: string): string {
-  const nonce = randomBytes(16).toString("hex");
+  const nonce = createNonce();
   const testsHeading = escapeHtml(`${providerLabel} tests`);
   const testColumn = escapeHtml(`${providerLabel} test`);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Coverage Board</title>
 <style>

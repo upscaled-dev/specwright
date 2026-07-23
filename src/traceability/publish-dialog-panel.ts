@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
+import { contentSecurityPolicy, createNonce, escapeHtml } from "../utils/webview";
 import { PublishRequest, PublishTarget } from "./contracts";
 import { AttachmentSuggestion, PublishDialogModel, PublishDialogResult } from "./publish-flow";
 
@@ -47,15 +47,6 @@ type OutgoingMessage =
       items: ReadonlyArray<{ readonly path: string; readonly name: string; readonly size: number }>;
     };
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
 // Serialize a value for embedding inside a nonce'd <script> block — only `<` can break out (`</script>`).
 function embedJson(value: unknown): string {
   return JSON.stringify(value).replaceAll("<", "\\u003c");
@@ -85,14 +76,14 @@ function attachmentsHint(stream: PublishDialogModel["attachments"]["evidenceStre
 }
 
 function renderHtml(model: PublishDialogModel): string {
-  const nonce = randomBytes(16).toString("hex");
+  const nonce = createNonce();
   const planValue = escapeHtml(model.prefillPlanKey ?? "");
   const attachModel = { ...model.attachments, hint: attachmentsHint(model.attachments.evidenceStream) };
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Publish run results</title>
 <style>

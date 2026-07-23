@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
+import { contentSecurityPolicy, createNonce, escapeHtml } from "../utils/webview";
 import { normalizeSiteUrl } from "./xray-adapter";
 import { JiraProject } from "./jira-project-search";
 import { XrayConnectionOutcome, XrayProjectSummary } from "./xray-connection-test";
@@ -118,18 +118,9 @@ export function validateXraySetupInput(
   return Object.keys(errors).length > 0 ? errors : undefined;
 }
 
-function escapeAttr(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
 function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): string {
-  const nonce = randomBytes(16).toString("hex");
-  const siteValue = escapeAttr(site);
+  const nonce = createNonce();
+  const siteValue = escapeHtml(site);
   const credentialValue = hasCredentials ? MASK : "";
   const jiraValue = hasJira ? MASK : "";
   // Always emit the hint so the retained panel can un-hide it after a first-time save without a
@@ -143,7 +134,7 @@ function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): st
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Set up Xray</title>
 <style>
@@ -223,7 +214,7 @@ function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): st
   <p>Connect Specwright to your Jira/Xray Cloud site to map scenarios, view coverage, and publish run results.</p>
   <div class="conn">
     <span id="conn-dot" class="conn-dot${dotClass}"></span>
-    <span id="conn-label">${escapeAttr(statusLabel)}</span>
+    <span id="conn-label">${escapeHtml(statusLabel)}</span>
   </div>
   ${credHint}
   <label for="site">Site host</label>
