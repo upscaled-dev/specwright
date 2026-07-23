@@ -9,21 +9,16 @@ import {
   filterBoardViewModel,
   filterExecutionRows,
 } from "./board-data";
+import { SurfaceHost, SurfaceName } from "./webview-host";
 
 const VIEW_TYPE = "playwrightBddRunner.coverageBoard";
 
 export type BoardTab = "mapping" | "matrix" | "executions";
+type ShellTab = BoardTab | "publish" | "link";
 
-interface ReadyMessage {
-  type: "ready";
-}
 interface SearchMessage {
   type: "search";
   value: string;
-}
-interface TabMessage {
-  type: "tab";
-  tab: BoardTab;
 }
 interface DropMessage {
   type: "drop";
@@ -34,17 +29,15 @@ interface OpenMessage {
   type: "open";
   key: string;
 }
-type IncomingMessage = ReadyMessage | SearchMessage | TabMessage | DropMessage | OpenMessage;
+type BoardIncoming = SearchMessage | DropMessage | OpenMessage;
 
 interface RenderMessage {
   type: "render";
-  activeTab: BoardTab;
   scenarios: readonly BoardScenarioCard[];
   tests: readonly BoardTestCard[];
   matrix: readonly MatrixRow[];
   executions: readonly ExecutionRow[];
 }
-type OutgoingMessage = RenderMessage;
 
 // The board is a document-like surface, so its data source is the stable subsystem — not a one-shot
 // snapshot — letting it re-render across syncs and provider swaps while the panel stays open.
@@ -62,18 +55,209 @@ export interface BoardPanelDeps {
   openExecution(key: string): void;
 }
 
-function renderHtml(providerLabel: string): string {
-  const nonce = createNonce();
-  const testsHeading = escapeHtml(`${providerLabel} tests`);
-  const testColumn = escapeHtml(`${providerLabel} test`);
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Coverage Board</title>
-<style>
+// The Mapping/Matrix/Executions surface. It paints all three board panes from one filtered view model
+// (the shell owns which pane is visible), forwards drops and execution-link clicks, and re-renders on
+// the subsystem's snapshot-change event. Every render round-trips through the vscode-free
+// `filterBoardViewModel`, so the webview JS stays thin and untested.
+class BoardSurface {
+  private query = "";
+  private model: BoardViewModel;
+  private executions: readonly ExecutionRow[];
+
+  constructor(
+    private readonly host: SurfaceHost,
+    private readonly deps: BoardPanelDeps
+  ) {
+    this.model = deps.buildModel();
+    this.executions = deps.buildExecutions();
+    host.onMessage((message) => this.handle(message as BoardIncoming));
+    const subscription = deps.onDidChange(() => this.refresh());
+    host.onDidDispose(() => subscription.dispose());
+    this.render();
+  }
+
+  private handle(message: BoardIncoming): void {
+    if (message.type === "drop") {
+      // The write, its snapshot rebuild, and the follow-up re-render are the host's job. Nothing is
+      // posted back here: a valid drop re-renders via onDidChange, a stale one toasts and leaves the
+      // board as-is for a retry.
+      this.deps.applyDrop(message.scenario, message.key).catch(() => undefined);
+      return;
+    }
+    if (message.type === "open") {
+      this.deps.openExecution(message.key);
+      return;
+    }
+    this.query = message.value;
+    this.render();
+  }
+
+  private refresh(): void {
+    this.model = this.deps.buildModel();
+    this.executions = this.deps.buildExecutions();
+    this.render();
+  }
+
+  private render(): void {
+    const filtered = filterBoardViewModel(this.model, this.query);
+    const message: RenderMessage = {
+      type: "render",
+      scenarios: filtered.scenarios,
+      tests: filtered.tests,
+      matrix: filtered.matrix,
+      executions: filterExecutionRows(this.executions, this.query),
+    };
+    this.host.post(message);
+  }
+}
+
+/**
+ * The Coverage Board (View 2) — a singleton, document-like webview in the editor area (a second open
+ * reveals the existing panel). The board is one of several surfaces routed through a shared document:
+ * the shell owns the single WebviewPanel, one `acquireVsCodeApi()`, the tab strip, and a ready-gated
+ * outbound queue, then dispatches inbound messages by `surface`. The Mapping tab drags an untraced
+ * scenario onto a test card (and an orphan test onto a scenario) to write its `@TEST_` tag; the Matrix
+ * tab is the requirement/test/scenario/tag/result table; the Executions tab lists what this workspace
+ * has published. Every board render round-trips through the vscode-free `filterBoardViewModel`.
+ */
+export class BoardPanel {
+  private static current: BoardPanel | undefined;
+
+  private readonly disposables: vscode.Disposable[] = [];
+  private readonly disposeHandlers: Array<() => void> = [];
+  private readonly surfaceHandlers = new Map<SurfaceName, (message: unknown) => void>();
+  private readonly queue: object[] = [];
+  private ready = false;
+  private disposed = false;
+  private activeTab: ShellTab = "mapping";
+  private readonly surfaces: object[] = [];
+
+  private constructor(
+    private readonly panel: vscode.WebviewPanel,
+    deps: BoardPanelDeps
+  ) {
+    this.disposables.push(
+      this.panel.onDidDispose(() => this.dispose()),
+      this.panel.webview.onDidReceiveMessage((message) => this.handleInbound(message))
+    );
+    this.surfaces.push(new BoardSurface(this.hostFor("board"), deps));
+  }
+
+  public static open(deps: BoardPanelDeps): BoardPanel {
+    if (BoardPanel.current) {
+      // Reveal wherever it already lives — don't yank a board the user parked in another column.
+      BoardPanel.current.panel.reveal();
+      return BoardPanel.current;
+    }
+    const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Coverage Board", vscode.ViewColumn.Active, {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [],
+    });
+    const instance = new BoardPanel(panel, deps);
+    BoardPanel.current = instance;
+    panel.webview.html = renderDocument(deps.providerLabel);
+    instance.activateTab("mapping");
+    return instance;
+  }
+
+  private hostFor(surface: SurfaceName): SurfaceHost {
+    return {
+      post: (message) => this.postRaw({ ...message, surface }),
+      onMessage: (handler) => {
+        this.surfaceHandlers.set(surface, handler);
+      },
+      reveal: () => this.panel.reveal(),
+      activate: (target) => this.activateTab(tabFor(target ?? surface)),
+      onDidDispose: (handler) => {
+        this.disposeHandlers.push(handler);
+      },
+      isDisposed: () => this.disposed,
+      setTabVisible: (visible, title) => this.setLinkTabVisible(visible, title),
+    };
+  }
+
+  private handleInbound(message: unknown): void {
+    if (this.disposed) {
+      return;
+    }
+    const msg = message as { surface?: SurfaceName; type?: string; tab?: ShellTab };
+    if (msg.surface) {
+      this.surfaceHandlers.get(msg.surface)?.(message);
+      return;
+    }
+    if (msg.type === "ready") {
+      this.flush();
+    } else if (msg.type === "tab" && msg.tab) {
+      this.activateTab(msg.tab);
+    }
+  }
+
+  private activateTab(tab: ShellTab): void {
+    this.activeTab = tab;
+    this.postRaw({ type: "activate", tab });
+  }
+
+  private setLinkTabVisible(visible: boolean, title?: string): void {
+    this.postRaw({ type: "linkTab", visible, ...(title !== undefined ? { title } : {}) });
+    if (!visible && this.activeTab === "link") {
+      this.activateTab("mapping");
+    }
+  }
+
+  // Outbound posts are held until the webview announces `ready`, then flushed in order, so a render or
+  // activation queued during document construction can't race the script load.
+  private postRaw(message: object): void {
+    if (this.disposed) {
+      return;
+    }
+    if (!this.ready) {
+      this.queue.push(message);
+      return;
+    }
+    Promise.resolve(this.panel.webview.postMessage(message)).catch(() => undefined);
+  }
+
+  private flush(): void {
+    if (this.ready) {
+      return;
+    }
+    this.ready = true;
+    for (const message of this.queue) {
+      Promise.resolve(this.panel.webview.postMessage(message)).catch(() => undefined);
+    }
+    this.queue.length = 0;
+  }
+
+  public dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    if (BoardPanel.current === this) {
+      BoardPanel.current = undefined;
+    }
+    for (const handler of this.disposeHandlers) {
+      handler();
+    }
+    while (this.disposables.length > 0) {
+      this.disposables.pop()?.dispose();
+    }
+    this.panel.dispose();
+  }
+}
+
+function tabFor(surface: SurfaceName): ShellTab {
+  if (surface === "publish") {
+    return "publish";
+  }
+  if (surface === "link") {
+    return "link";
+  }
+  return "mapping";
+}
+
+const SHELL_CSS = `
   body { margin: 0; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); }
   header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding: 0.9rem 1.1rem 0.7rem; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
   h1 { font-size: 1.2rem; font-weight: 600; margin: 0; }
@@ -81,7 +265,9 @@ function renderHtml(providerLabel: string): string {
   .tab { padding: 0.35rem 0.8rem; background: transparent; color: var(--vscode-foreground); border: none; cursor: pointer; font-family: inherit; font-size: inherit; }
   .tab + .tab { border-left: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); }
   .tab.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .tab[hidden] { display: none; }
   .search { flex: 1; min-width: 12rem; }
+  .search[hidden] { display: none; }
   .search input {
     width: 100%;
     box-sizing: border-box;
@@ -93,52 +279,45 @@ function renderHtml(providerLabel: string): string {
   }
   .search input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   main { padding: 1rem 1.1rem; }
-  .pane[hidden] { display: none; }
-  .mapping-hint { margin: 0 0 1rem; padding: 0.5rem 0.7rem; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); color: var(--vscode-descriptionForeground); font-size: 0.85em; line-height: 1.4; }
-  .columns { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: start; }
-  .column h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); font-weight: 600; margin: 0 0 0.6rem; }
-  .count { color: var(--vscode-descriptionForeground); font-weight: 400; }
-  .cards { display: flex; flex-direction: column; gap: 0.5rem; }
-  .card {
+  .pane[hidden] { display: none; }`;
+
+const BOARD_CSS = `
+  .board-pane .mapping-hint { margin: 0 0 1rem; padding: 0.5rem 0.7rem; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); color: var(--vscode-descriptionForeground); font-size: 0.85em; line-height: 1.4; }
+  .board-pane .columns { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: start; }
+  .board-pane .column h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); font-weight: 600; margin: 0 0 0.6rem; }
+  .board-pane .count { color: var(--vscode-descriptionForeground); font-weight: 400; }
+  .board-pane .cards { display: flex; flex-direction: column; gap: 0.5rem; }
+  .board-pane .card {
     border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
     border-radius: 5px;
     padding: 0.55rem 0.65rem;
     background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   }
-  .card .title { font-weight: 600; word-break: break-word; }
-  .card .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
-  .card .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 0.2rem; word-break: break-all; }
-  .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
-  .pill { font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
-  .pill.orphan { background: var(--vscode-inputValidation-warningBackground, var(--vscode-badge-background)); color: var(--vscode-inputValidation-warningForeground, var(--vscode-badge-foreground)); }
-  .gutter { display: flex; align-items: center; justify-content: center; align-self: stretch; min-width: 5.5rem; }
-  .gutter span { color: var(--vscode-descriptionForeground); font-style: italic; font-size: 0.85em; text-align: center; }
-  .empty { color: var(--vscode-descriptionForeground); font-style: italic; padding: 0.4rem 0; }
-  .muted { color: var(--vscode-descriptionForeground); font-style: italic; }
-  .card[draggable="true"] { cursor: grab; }
-  .card.drop-target { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -2px; }
-  .matrix-scroll { overflow: auto; max-height: calc(100vh - 9rem); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; }
-  table.matrix { border-collapse: collapse; width: 100%; font-size: 0.9em; }
-  table.matrix th, table.matrix td { text-align: left; padding: 0.4rem 0.6rem; white-space: nowrap; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
-  table.matrix thead th { position: sticky; top: 0; z-index: 1; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); font-weight: 600; }
-  table.matrix td.hole { background: var(--vscode-inputValidation-warningBackground, transparent); }
-  table.matrix .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
-  table.matrix a.link { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
-  table.matrix a.link:hover { text-decoration: underline; }
-</style>
-</head>
-<body>
-  <header>
-    <h1>Coverage Board</h1>
-    <div class="tabs" role="tablist">
-      <button class="tab" data-tab="mapping" type="button">Mapping</button>
-      <button class="tab" data-tab="matrix" type="button">Matrix</button>
-      <button class="tab" data-tab="executions" type="button">Executions</button>
-    </div>
-    <div class="search"><input id="search" type="text" spellcheck="false" autocomplete="off" placeholder="Filter by key, tag, file…"></div>
-  </header>
-  <main>
-    <section id="pane-mapping" class="pane" hidden>
+  .board-pane .card .title { font-weight: 600; word-break: break-word; }
+  .board-pane .card .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
+  .board-pane .card .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 0.2rem; word-break: break-all; }
+  .board-pane .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
+  .board-pane .pill { font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+  .board-pane .pill.orphan { background: var(--vscode-inputValidation-warningBackground, var(--vscode-badge-background)); color: var(--vscode-inputValidation-warningForeground, var(--vscode-badge-foreground)); }
+  .board-pane .gutter { display: flex; align-items: center; justify-content: center; align-self: stretch; min-width: 5.5rem; }
+  .board-pane .gutter span { color: var(--vscode-descriptionForeground); font-style: italic; font-size: 0.85em; text-align: center; }
+  .board-pane .empty { color: var(--vscode-descriptionForeground); font-style: italic; padding: 0.4rem 0; }
+  .board-pane .muted { color: var(--vscode-descriptionForeground); font-style: italic; }
+  .board-pane .card[draggable="true"] { cursor: grab; }
+  .board-pane .card.drop-target { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -2px; }
+  .board-pane .matrix-scroll { overflow: auto; max-height: calc(100vh - 9rem); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; }
+  .board-pane table.matrix { border-collapse: collapse; width: 100%; font-size: 0.9em; }
+  .board-pane table.matrix th, .board-pane table.matrix td { text-align: left; padding: 0.4rem 0.6rem; white-space: nowrap; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
+  .board-pane table.matrix thead th { position: sticky; top: 0; z-index: 1; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); font-weight: 600; }
+  .board-pane table.matrix td.hole { background: var(--vscode-inputValidation-warningBackground, transparent); }
+  .board-pane table.matrix .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
+  .board-pane table.matrix a.link { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
+  .board-pane table.matrix a.link:hover { text-decoration: underline; }`;
+
+function boardPanesHtml(providerLabel: string): string {
+  const testsHeading = escapeHtml(`${providerLabel} tests`);
+  const testColumn = escapeHtml(`${providerLabel} test`);
+  return `    <section id="pane-mapping" class="pane board-pane" data-tab="mapping" hidden>
       <p class="mapping-hint">Drag a scenario from the left onto a test on the right to link them. Orphaned tests can also be dragged onto a scenario.</p>
       <div class="columns">
         <div class="column">
@@ -152,7 +331,7 @@ function renderHtml(providerLabel: string): string {
         </div>
       </div>
     </section>
-    <section id="pane-matrix" class="pane" hidden>
+    <section id="pane-matrix" class="pane board-pane" data-tab="matrix" hidden>
       <div class="matrix-scroll">
         <table class="matrix">
           <thead>
@@ -162,7 +341,7 @@ function renderHtml(providerLabel: string): string {
         </table>
       </div>
     </section>
-    <section id="pane-executions" class="pane" hidden>
+    <section id="pane-executions" class="pane board-pane" data-tab="executions" hidden>
       <div id="executions-empty" class="empty" hidden>Publishes from this workspace appear here.</div>
       <div id="executions-scroll" class="matrix-scroll">
         <table class="matrix">
@@ -172,10 +351,10 @@ function renderHtml(providerLabel: string): string {
           <tbody id="executions-rows"></tbody>
         </table>
       </div>
-    </section>
-  </main>
-<script nonce="${nonce}">
-  const vscodeApi = acquireVsCodeApi();
+    </section>`;
+}
+
+const BOARD_SCRIPT = `
   const search = document.getElementById('search');
   const scenarioCards = document.getElementById('scenario-cards');
   const testCards = document.getElementById('test-cards');
@@ -185,12 +364,6 @@ function renderHtml(providerLabel: string): string {
   const executionsRows = document.getElementById('executions-rows');
   const executionsEmpty = document.getElementById('executions-empty');
   const executionsScroll = document.getElementById('executions-scroll');
-  const tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
-  const panes = {
-    mapping: document.getElementById('pane-mapping'),
-    matrix: document.getElementById('pane-matrix'),
-    executions: document.getElementById('pane-executions'),
-  };
 
   // A scenario card carries kind 'scenario' + its location; a test card kind 'test' + its key. A drop
   // is valid only across kinds, so a scenario lands on any test card and an orphan test on a scenario,
@@ -223,7 +396,7 @@ function renderHtml(providerLabel: string): string {
       el.classList.remove('drop-target');
       const scenario = dragged.kind === 'scenario' ? dragged.id : id;
       const key = dragged.kind === 'scenario' ? id : dragged.id;
-      vscodeApi.postMessage({ type: 'drop', scenario: scenario, key: key });
+      window.__spec.post('board', { type: 'drop', scenario: scenario, key: key });
       dragged = null;
     });
   }
@@ -352,7 +525,7 @@ function renderHtml(providerLabel: string): string {
       link.textContent = row.key;
       link.addEventListener('click', function (e) {
         e.preventDefault();
-        vscodeApi.postMessage({ type: 'open', key: row.key });
+        window.__spec.post('board', { type: 'open', key: row.key });
       });
       keyTd.appendChild(link);
       tr.appendChild(keyTd);
@@ -366,143 +539,94 @@ function renderHtml(providerLabel: string): string {
     }
   }
 
-  function showTab(tab) {
-    for (const t of tabs) { t.classList.toggle('active', t.dataset.tab === tab); }
-    for (const name of Object.keys(panes)) { panes[name].hidden = name !== tab; }
-  }
+  search.addEventListener('input', function () { window.__spec.post('board', { type: 'search', value: search.value }); });
 
-  for (const t of tabs) {
-    t.addEventListener('click', function () { vscodeApi.postMessage({ type: 'tab', tab: t.dataset.tab }); });
-  }
-  search.addEventListener('input', function () { vscodeApi.postMessage({ type: 'search', value: search.value }); });
-
-  window.addEventListener('message', function (event) {
-    const msg = event.data;
+  window.__spec.register('board', function (msg) {
     if (msg.type === 'render') {
-      showTab(msg.activeTab);
       renderScenarios(msg.scenarios || []);
       renderTests(msg.tests || []);
       renderMatrix(msg.matrix || []);
       renderExecutions(msg.executions || []);
     }
-  });
+  });`;
 
-  vscodeApi.postMessage({ type: 'ready' });
-</script>
+const ROUTER_SCRIPT = `
+  (function () {
+    const vscodeApi = acquireVsCodeApi();
+    const handlers = {};
+    let shellHandler = null;
+    window.__spec = {
+      post: function (surface, msg) { msg.surface = surface; vscodeApi.postMessage(msg); },
+      postShell: function (msg) { vscodeApi.postMessage(msg); },
+      register: function (surface, handler) { handlers[surface] = handler; },
+      registerShell: function (handler) { shellHandler = handler; },
+    };
+    window.addEventListener('message', function (event) {
+      const msg = event.data;
+      if (msg && msg.surface) { const handler = handlers[msg.surface]; if (handler) { handler(msg); } }
+      else if (shellHandler) { shellHandler(msg); }
+    });
+  })();`;
+
+const SHELL_SCRIPT = `
+  (function () {
+    const tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+    const panes = Array.prototype.slice.call(document.querySelectorAll('.pane'));
+    const searchBox = document.querySelector('.search');
+    const boardTabs = { mapping: true, matrix: true, executions: true };
+
+    function showTab(tab) {
+      tabButtons.forEach(function (btn) { btn.classList.toggle('active', btn.dataset.tab === tab); });
+      panes.forEach(function (pane) { pane.hidden = pane.dataset.tab !== tab; });
+      if (searchBox) { searchBox.hidden = !boardTabs[tab]; }
+    }
+
+    tabButtons.forEach(function (btn) {
+      btn.addEventListener('click', function () { window.__spec.postShell({ type: 'tab', tab: btn.dataset.tab }); });
+    });
+
+    window.__spec.registerShell(function (msg) {
+      if (msg.type === 'activate') { showTab(msg.tab); }
+      else if (msg.type === 'linkTab') {
+        const linkBtn = document.querySelector('.tab[data-tab="link"]');
+        if (linkBtn) { linkBtn.hidden = !msg.visible; if (msg.title) { linkBtn.title = msg.title; } }
+      }
+    });
+
+    window.__spec.postShell({ type: 'ready' });
+  })();`;
+
+function renderDocument(providerLabel: string): string {
+  const nonce = createNonce();
+  const styles = [SHELL_CSS, BOARD_CSS].join("\n");
+  const panes = boardPanesHtml(providerLabel);
+  const scripts = [ROUTER_SCRIPT, SHELL_SCRIPT, BOARD_SCRIPT]
+    .map((script) => `<script nonce="${nonce}">${script}</script>`)
+    .join("\n");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Coverage Board</title>
+<style>${styles}
+</style>
+</head>
+<body>
+  <header>
+    <h1>Coverage Board</h1>
+    <div class="tabs" role="tablist">
+      <button class="tab" data-tab="mapping" type="button">Mapping</button>
+      <button class="tab" data-tab="matrix" type="button">Matrix</button>
+      <button class="tab" data-tab="executions" type="button">Executions</button>
+    </div>
+    <div class="search"><input id="search" type="text" spellcheck="false" autocomplete="off" placeholder="Filter by key, tag, file…"></div>
+  </header>
+  <main>
+${panes}
+  </main>
+${scripts}
 </body>
 </html>`;
-}
-
-/**
- * The Coverage Board (View 2) — a singleton, document-like webview in the editor area (a second open
- * reveals the existing panel, unlike the modal dialogs). The Mapping tab lets an untraced scenario be
- * dragged onto a test card (and an orphan test onto a scenario) to write its `@TEST_` tag; the Matrix
- * tab is the requirement/test/scenario/tag/result table; the Executions tab lists what this workspace
- * has published, read from the publish ledger, each key linking out through browseIssue. Header
- * search, tab state, and drop validation live here (the extension host) so the webview JS stays thin
- * and untested; every render round-trips through the vscode-free
- * `buildBoardViewModel`/`filterBoardViewModel`, and a drop routes to `applyDrop`. The panel re-renders
- * on the subsystem's snapshot-change event and disposes that subscription with itself.
- */
-export class BoardPanel {
-  private static current: BoardPanel | undefined;
-
-  private readonly disposables: vscode.Disposable[] = [];
-  private disposed = false;
-  private activeTab: BoardTab = "mapping";
-  private query = "";
-  private model: BoardViewModel;
-  private executions: readonly ExecutionRow[];
-
-  private constructor(
-    private readonly panel: vscode.WebviewPanel,
-    private readonly deps: BoardPanelDeps
-  ) {
-    this.model = deps.buildModel();
-    this.executions = deps.buildExecutions();
-    this.disposables.push(
-      this.panel.onDidDispose(() => this.dispose()),
-      this.panel.webview.onDidReceiveMessage((message) => this.handleMessage(message as IncomingMessage)),
-      this.deps.onDidChange(() => this.refresh())
-    );
-  }
-
-  public static open(deps: BoardPanelDeps): BoardPanel {
-    if (BoardPanel.current) {
-      // Reveal wherever it already lives — don't yank a board the user parked in another column.
-      BoardPanel.current.panel.reveal();
-      return BoardPanel.current;
-    }
-    const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Coverage Board", vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [],
-    });
-    const instance = new BoardPanel(panel, deps);
-    BoardPanel.current = instance;
-    panel.webview.html = renderHtml(deps.providerLabel);
-    return instance;
-  }
-
-  private handleMessage(message: IncomingMessage): void {
-    if (this.disposed) {
-      return;
-    }
-    if (message.type === "drop") {
-      // The write, its snapshot rebuild, and the follow-up re-render are the host's job. Nothing is
-      // posted back here: a valid drop re-renders via onDidChange, a stale one toasts and leaves the
-      // board as-is for a retry.
-      this.deps.applyDrop(message.scenario, message.key).catch(() => undefined);
-      return;
-    }
-    if (message.type === "open") {
-      this.deps.openExecution(message.key);
-      return;
-    }
-    if (message.type === "search") {
-      this.query = message.value;
-    } else if (message.type === "tab") {
-      this.activeTab = message.tab;
-    }
-    this.post(this.renderMessage());
-  }
-
-  private refresh(): void {
-    this.model = this.deps.buildModel();
-    this.executions = this.deps.buildExecutions();
-    this.post(this.renderMessage());
-  }
-
-  private renderMessage(): RenderMessage {
-    const filtered = filterBoardViewModel(this.model, this.query);
-    return {
-      type: "render",
-      activeTab: this.activeTab,
-      scenarios: filtered.scenarios,
-      tests: filtered.tests,
-      matrix: filtered.matrix,
-      executions: filterExecutionRows(this.executions, this.query),
-    };
-  }
-
-  private post(message: OutgoingMessage): void {
-    if (this.disposed) {
-      return;
-    }
-    Promise.resolve(this.panel.webview.postMessage(message)).catch(() => undefined);
-  }
-
-  public dispose(): void {
-    if (this.disposed) {
-      return;
-    }
-    this.disposed = true;
-    if (BoardPanel.current === this) {
-      BoardPanel.current = undefined;
-    }
-    while (this.disposables.length > 0) {
-      this.disposables.pop()?.dispose();
-    }
-    this.panel.dispose();
-  }
 }
