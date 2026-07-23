@@ -23,7 +23,6 @@ import {
   scenarioGherkinSlice,
 } from "../traceability/link-scenario";
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
-import { LinkPickerPanel } from "../traceability/link-picker-panel";
 import { buildBoardViewModel, buildExecutionRows, resolveBoardDrop } from "../traceability/board-data";
 import { BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
 import { linkedTestsForScenario, ScenarioRef } from "../traceability/traceability-model";
@@ -601,7 +600,8 @@ export class CommandManager {
       ...(link.meta?.summary !== undefined ? { summary: link.meta.summary } : {}),
       ...(link.remoteMissing ? { remoteMissing: true } : {}),
     }));
-    const ui = LinkPickerPanel.open({
+    const board = BoardPanel.open(this.boardDeps());
+    const ui = board.link.begin({
       title: `Link scenario to ${adapter.label} test`,
       searchPlaceholder: `Search ${adapter.label} tests`,
     });

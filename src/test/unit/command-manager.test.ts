@@ -509,7 +509,12 @@ describe("traceability panel connection UX contributions", () => {
 
 describe("traceability linkScenario command", () => {
   const win = vscode.window as unknown as {
-    __webviewPanels: Array<{ __receive: (message: unknown) => Promise<void>; dispose: () => void }>;
+    __webviewPanels: Array<{
+      title: string;
+      webview: { __posted: Array<{ type: string; visible?: boolean }> };
+      __receive: (message: unknown) => Promise<void>;
+      dispose: () => void;
+    }>;
     __resetWebviewPanels: () => void;
   };
 
@@ -523,10 +528,10 @@ describe("traceability linkScenario command", () => {
     item: { scenario: { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" } },
   };
 
-  // The command opens the webview picker and awaits the flow; drive a confirm on the last-opened
-  // panel, then await the handler so the tag-write side effect has run.
+  // The command opens the board and begins a Link session on it; drive a link-tagged confirm on the
+  // board panel, then await the handler so the tag-write side effect has run.
   async function confirmLink(pending: Promise<void>, id: string): Promise<void> {
-    await win.__webviewPanels.at(-1)!.__receive({ type: "confirm", id });
+    await win.__webviewPanels.at(-1)!.__receive({ surface: "link", type: "confirm", id });
     await pending;
   }
 
@@ -579,6 +584,19 @@ describe("traceability linkScenario command", () => {
     expect(applied).toHaveLength(1);
     expect(applied[0]!.__entries).toHaveLength(1);
     expect(applied[0]!.__entries[0]).toMatchObject({ op: "insert", text: "@TC-5\n" });
+  });
+
+  it("opens the Coverage Board and reveals the contextual Link tab", async () => {
+    const adapter = await syncedAdapter();
+    const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
+    const pending = handlers.get("playwrightBddRunner.traceability.linkScenario")!(untracedNode);
+
+    const board = win.__webviewPanels.at(-1)!;
+    expect(board.title).toBe("Coverage Board");
+    await board.__receive({ type: "ready" });
+    expect(board.webview.__posted.find((m) => m.type === "linkTab" && m.visible === true)).toBeDefined();
+
+    await confirmLink(pending, "5");
   });
 
   interface EditEntry {

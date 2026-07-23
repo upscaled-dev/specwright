@@ -1,8 +1,10 @@
-import * as vscode from "vscode";
-import { contentSecurityPolicy, createNonce, escapeHtml } from "../utils/webview";
 import { LinkedRow, LinkPickerRow, LinkPickerUi } from "./link-picker-flow";
+import { SurfaceFragment, SurfaceHost } from "./webview-host";
 
-const VIEW_TYPE = "playwrightBddRunner.linkScenario";
+export interface LinkPickerPanelOptions {
+  readonly title: string;
+  readonly searchPlaceholder: string;
+}
 
 interface SearchMessage {
   type: "search";
@@ -15,9 +17,6 @@ interface ConfirmMessage {
 interface CancelMessage {
   type: "cancel";
 }
-interface ReadyMessage {
-  type: "ready";
-}
 interface OpenLinkedMessage {
   type: "openLinked";
   key: string;
@@ -26,69 +25,156 @@ interface UnlinkMessage {
   type: "unlink";
   key: string;
 }
-type IncomingMessage =
-  | SearchMessage
-  | ConfirmMessage
-  | CancelMessage
-  | ReadyMessage
-  | OpenLinkedMessage
-  | UnlinkMessage;
+type LinkIncoming = SearchMessage | ConfirmMessage | CancelMessage | OpenLinkedMessage | UnlinkMessage;
 
-interface RowsMessage {
-  type: "rows";
-  rows: readonly LinkPickerRow[];
-}
-interface LinkedMessage {
-  type: "linked";
-  rows: readonly LinkedRow[];
-}
-interface BusyMessage {
-  type: "busy";
-  busy: boolean;
-}
-type OutgoingMessage = RowsMessage | LinkedMessage | BusyMessage;
+// One live link-picker session on the board's contextual Link tab. It implements the vscode-free
+// `LinkPickerUi` port so `runLinkPickerFlow` drives it; the webview JS stays thin (render + keyboard +
+// forward intent). `settled` guards the terminal confirm/cancel; `closed` stops posts once the flow
+// closes it.
+class LinkSession implements LinkPickerUi {
+  private searchHandler: ((value: string) => void) | undefined;
+  private confirmHandler: ((id: string) => void) | undefined;
+  private cancelHandler: (() => void) | undefined;
+  private openLinkedHandler: ((key: string) => void) | undefined;
+  private unlinkHandler: ((key: string) => void) | undefined;
+  private settled = false;
+  private closed = false;
 
-export interface LinkPickerPanelOptions {
-  readonly title: string;
-  readonly searchPlaceholder: string;
-}
+  constructor(
+    private readonly host: SurfaceHost,
+    private readonly onClose: () => void
+  ) {}
 
-function renderHtml(options: LinkPickerPanelOptions): string {
-  const nonce = createNonce();
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${escapeHtml(options.title)}</title>
-<style>
-  body { margin: 0; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); }
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    padding-top: 12vh;
-    background: rgba(0, 0, 0, 0.4);
+  public setRows(rows: readonly LinkPickerRow[]): void {
+    this.post({ type: "rows", rows });
   }
-  .card {
-    width: min(90vw, 34rem);
-    box-sizing: border-box;
-    padding: 1.1rem 1.25rem 1rem;
-    background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-    border: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder));
-    border-radius: 6px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  public setLinked(rows: readonly LinkedRow[]): void {
+    this.post({ type: "linked", rows });
   }
-  h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.75rem; }
-  h2.section-title { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); margin: 0 0 0.4rem; }
-  h2.section-title.spaced { margin-top: 0.9rem; }
-  .linked-list { list-style: none; margin: 0 0 0.2rem; padding: 0; }
-  .linked-row { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.35rem 0.5rem; border-radius: 3px; }
-  .linked-row .actions { margin-left: auto; display: flex; gap: 0.4rem; flex: none; }
-  .linked-row button {
+
+  public setBusy(busy: boolean): void {
+    this.post({ type: "busy", busy });
+  }
+
+  public onSearch(handler: (value: string) => void): void {
+    this.searchHandler = handler;
+  }
+
+  public onConfirm(handler: (id: string) => void): void {
+    this.confirmHandler = handler;
+  }
+
+  public onCancel(handler: () => void): void {
+    this.cancelHandler = handler;
+  }
+
+  public onOpenLinked(handler: (key: string) => void): void {
+    this.openLinkedHandler = handler;
+  }
+
+  public onUnlink(handler: (key: string) => void): void {
+    this.unlinkHandler = handler;
+  }
+
+  // Marks the session settled, hides the contextual Link tab (the shell returns to Mapping), and drops
+  // the session from the surface. It does not dispose the shared document.
+  public close(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.host.setTabVisible(false);
+    this.onClose();
+  }
+
+  public handle(message: LinkIncoming): void {
+    if (message.type === "confirm") {
+      this.fireConfirm(message.id);
+      return;
+    }
+    if (message.type === "cancel") {
+      this.fireCancel();
+      return;
+    }
+    if (this.settled) {
+      return;
+    }
+    if (message.type === "search") {
+      this.searchHandler?.(message.value);
+    } else if (message.type === "openLinked") {
+      this.openLinkedHandler?.(message.key);
+    } else if (message.type === "unlink") {
+      this.unlinkHandler?.(message.key);
+    }
+  }
+
+  public fireCancel(): void {
+    if (this.settled) {
+      return;
+    }
+    this.settled = true;
+    this.cancelHandler?.();
+  }
+
+  private fireConfirm(id: string): void {
+    if (this.settled) {
+      return;
+    }
+    this.settled = true;
+    this.confirmHandler?.(id);
+  }
+
+  private post(message: object): void {
+    if (this.closed || this.host.isDisposed()) {
+      return;
+    }
+    this.host.post(message);
+  }
+}
+
+/**
+ * The Link Scenario picker, hosted on the board's contextual Link tab. Constructed once with a
+ * `SurfaceHost`; `begin` supersedes any live session (firing its cancel), resets the pane, reveals the
+ * Link tab, and returns a fresh `LinkPickerUi` session for `runLinkPickerFlow` to drive. Closing a
+ * session hides the tab and returns to Mapping without tearing down the shared document.
+ */
+export class LinkSurface {
+  private session: LinkSession | undefined;
+
+  constructor(private readonly host: SurfaceHost) {
+    host.onMessage((message) => this.session?.handle(message as LinkIncoming));
+    host.onDidDispose(() => this.session?.fireCancel());
+  }
+
+  public begin(options: LinkPickerPanelOptions): LinkPickerUi {
+    this.session?.fireCancel();
+    const session = new LinkSession(this.host, () => {
+      if (this.session === session) {
+        this.session = undefined;
+      }
+    });
+    this.session = session;
+    this.host.post({ type: "reset", title: options.title, searchPlaceholder: options.searchPlaceholder });
+    this.host.setTabVisible(true, options.title);
+    this.host.activate();
+    return session;
+  }
+
+  public dispose(): void {
+    this.session?.fireCancel();
+  }
+}
+
+const LINK_CSS = `
+  #pane-link { max-width: 40rem; }
+  #pane-link h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.75rem; }
+  #pane-link h2.section-title { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); margin: 0 0 0.4rem; }
+  #pane-link h2.section-title.spaced { margin-top: 0.9rem; }
+  #pane-link .linked-list { list-style: none; margin: 0 0 0.2rem; padding: 0; }
+  #pane-link .linked-row { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.35rem 0.5rem; border-radius: 3px; }
+  #pane-link .linked-row .actions { margin-left: auto; display: flex; gap: 0.4rem; flex: none; }
+  #pane-link .linked-row button {
     font-family: var(--vscode-font-family);
     font-size: 0.85em;
     color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
@@ -98,9 +184,9 @@ function renderHtml(options: LinkPickerPanelOptions): string {
     padding: 0.15rem 0.5rem;
     cursor: pointer;
   }
-  .linked-row button:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
-  .warn { color: var(--vscode-list-warningForeground, var(--vscode-editorWarning-foreground)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  input {
+  #pane-link .linked-row button:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
+  #pane-link .warn { color: var(--vscode-list-warningForeground, var(--vscode-editorWarning-foreground)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #pane-link input {
     width: 100%;
     box-sizing: border-box;
     padding: 0.5rem 0.6rem;
@@ -109,43 +195,39 @@ function renderHtml(options: LinkPickerPanelOptions): string {
     border: 1px solid var(--vscode-input-border, transparent);
     border-radius: 3px;
   }
-  input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-  .results { list-style: none; margin: 0.6rem 0 0; padding: 0; max-height: 45vh; overflow-y: auto; }
-  .row { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.35rem 0.5rem; cursor: pointer; border-radius: 3px; }
-  .row.active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-  .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); white-space: nowrap; }
-  .row.active .key { color: inherit; }
-  .summary { color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row.active .summary { color: inherit; }
-  .create .create-label { font-style: italic; color: var(--vscode-textLink-foreground); }
-  .row.active .create-label { color: inherit; }
-  .hint-row { cursor: default; color: var(--vscode-descriptionForeground); font-style: italic; }
-  .footer { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin: 0.75rem 0 0; }
-  .busy { font-style: italic; }
-  [hidden] { display: none !important; }
-</style>
-</head>
-<body>
-  <div class="backdrop">
-    <div class="card" role="dialog" aria-label="${escapeHtml(options.title)}">
-      <h1>${escapeHtml(options.title)}</h1>
-      <div id="linkedSection" hidden>
+  #pane-link input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  #pane-link .results { list-style: none; margin: 0.6rem 0 0; padding: 0; max-height: 45vh; overflow-y: auto; }
+  #pane-link .row { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.35rem 0.5rem; cursor: pointer; border-radius: 3px; }
+  #pane-link .row.active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  #pane-link .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); white-space: nowrap; }
+  #pane-link .row.active .key { color: inherit; }
+  #pane-link .summary { color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #pane-link .row.active .summary { color: inherit; }
+  #pane-link .create .create-label { font-style: italic; color: var(--vscode-textLink-foreground); }
+  #pane-link .row.active .create-label { color: inherit; }
+  #pane-link .hint-row { cursor: default; color: var(--vscode-descriptionForeground); font-style: italic; }
+  #pane-link .footer { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin: 0.75rem 0 0; }
+  #pane-link .busy { font-style: italic; }
+  #pane-link [hidden] { display: none !important; }`;
+
+const LINK_PANE = `<h1 id="link-title"></h1>
+      <div id="link-linked-section" hidden>
         <h2 class="section-title">Linked</h2>
-        <ul id="linked" class="linked-list"></ul>
+        <ul id="link-linked" class="linked-list"></ul>
         <h2 class="section-title spaced">Link another test</h2>
       </div>
-      <input id="search" type="text" spellcheck="false" autocomplete="off" placeholder="${escapeHtml(options.searchPlaceholder)}" autofocus>
-      <ul id="results" class="results"></ul>
-      <p class="footer">Enter to confirm · Esc to cancel <span id="busy" class="busy" hidden>· Searching…</span></p>
-    </div>
-  </div>
-<script nonce="${nonce}">
-  const vscodeApi = acquireVsCodeApi();
-  const search = document.getElementById('search');
-  const results = document.getElementById('results');
-  const linkedSection = document.getElementById('linkedSection');
-  const linkedList = document.getElementById('linked');
-  const busy = document.getElementById('busy');
+      <input id="link-search" type="text" spellcheck="false" autocomplete="off" placeholder="">
+      <ul id="link-results" class="results"></ul>
+      <p class="footer">Enter to confirm · Esc to cancel <span id="link-busy" class="busy" hidden>· Searching…</span></p>`;
+
+const LINK_SCRIPT = `
+  const linkPane = document.getElementById('pane-link');
+  const title = document.getElementById('link-title');
+  const search = document.getElementById('link-search');
+  const results = document.getElementById('link-results');
+  const linkedSection = document.getElementById('link-linked-section');
+  const linkedList = document.getElementById('link-linked');
+  const busy = document.getElementById('link-busy');
   let rows = [];
   let linkedRows = [];
   let highlightedId = null;
@@ -179,11 +261,11 @@ function renderHtml(options: LinkPickerPanelOptions): string {
       const open = document.createElement('button');
       open.type = 'button';
       open.textContent = 'Open in Jira';
-      open.addEventListener('click', function () { vscodeApi.postMessage({ type: 'openLinked', key: row.key }); });
+      open.addEventListener('click', function () { window.__spec.post('link', { type: 'openLinked', key: row.key }); });
       const unlink = document.createElement('button');
       unlink.type = 'button';
       unlink.textContent = 'Unlink';
-      unlink.addEventListener('click', function () { vscodeApi.postMessage({ type: 'unlink', key: row.key }); });
+      unlink.addEventListener('click', function () { window.__spec.post('link', { type: 'unlink', key: row.key }); });
       actions.appendChild(open);
       actions.appendChild(unlink);
       li.appendChild(actions);
@@ -256,7 +338,7 @@ function renderHtml(options: LinkPickerPanelOptions): string {
 
   function confirmRow(index) {
     const row = rows[index];
-    if (row && row.kind !== 'hint') { vscodeApi.postMessage({ type: 'confirm', id: row.id }); }
+    if (row && row.kind !== 'hint') { window.__spec.post('link', { type: 'confirm', id: row.id }); }
   }
 
   function move(delta) {
@@ -273,19 +355,31 @@ function renderHtml(options: LinkPickerPanelOptions): string {
   }
 
   search.addEventListener('input', function () {
-    vscodeApi.postMessage({ type: 'search', value: search.value });
+    window.__spec.post('link', { type: 'search', value: search.value });
   });
 
   document.addEventListener('keydown', function (event) {
+    if (linkPane.hidden) { return; }
     if (event.key === 'ArrowDown') { event.preventDefault(); move(1); }
     else if (event.key === 'ArrowUp') { event.preventDefault(); move(-1); }
     else if (event.key === 'Enter') { event.preventDefault(); confirmRow(highlightedIndex); }
-    else if (event.key === 'Escape') { event.preventDefault(); vscodeApi.postMessage({ type: 'cancel' }); }
+    else if (event.key === 'Escape') { event.preventDefault(); window.__spec.post('link', { type: 'cancel' }); }
   });
 
-  window.addEventListener('message', function (event) {
-    const msg = event.data;
-    if (msg.type === 'rows') {
+  window.__spec.register('link', function (msg) {
+    if (msg.type === 'reset') {
+      title.textContent = msg.title;
+      search.placeholder = msg.searchPlaceholder;
+      search.value = '';
+      rows = [];
+      linkedRows = [];
+      highlightedId = null;
+      highlightedIndex = -1;
+      busy.hidden = true;
+      renderLinked();
+      render();
+      setTimeout(function () { search.focus(); }, 0);
+    } else if (msg.type === 'rows') {
       rows = msg.rows || [];
       render();
     } else if (msg.type === 'linked') {
@@ -294,145 +388,10 @@ function renderHtml(options: LinkPickerPanelOptions): string {
     } else if (msg.type === 'busy') {
       busy.hidden = !msg.busy;
     }
-  });
+  });`;
 
-  search.focus();
-  vscodeApi.postMessage({ type: 'ready' });
-</script>
-</body>
-</html>`;
-}
-
-/**
- * The Link Scenario picker webview — a centered modal card over a dimmed backdrop. Reuses the publish
- * dialog's plumbing (CSP, nonce'd script, theme-aware, no secrets → no MASK) and implements the
- * vscode-free `LinkPickerUi` port so the flow drives it. The webview JS is deliberately thin (render +
- * keyboard + forward intent); every decision lives in `runLinkPickerFlow`, so it is not unit-tested.
- */
-export class LinkPickerPanel implements LinkPickerUi {
-  private readonly disposables: vscode.Disposable[] = [];
-  private searchHandler: ((value: string) => void) | undefined;
-  private confirmHandler: ((id: string) => void) | undefined;
-  private cancelHandler: (() => void) | undefined;
-  private openLinkedHandler: ((key: string) => void) | undefined;
-  private unlinkHandler: ((key: string) => void) | undefined;
-  private settled = false;
-  private disposed = false;
-  private lastRows: readonly LinkPickerRow[] = [];
-  private lastLinked: readonly LinkedRow[] = [];
-  private lastBusy = false;
-
-  private constructor(private readonly panel: vscode.WebviewPanel) {
-    this.disposables.push(
-      this.panel.onDidDispose(() => this.fireCancel()),
-      this.panel.webview.onDidReceiveMessage((message) => this.handleMessage(message as IncomingMessage))
-    );
-  }
-
-  public static open(options: LinkPickerPanelOptions): LinkPickerPanel {
-    const panel = vscode.window.createWebviewPanel(VIEW_TYPE, options.title, vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [],
-    });
-    const instance = new LinkPickerPanel(panel);
-    panel.webview.html = renderHtml(options);
-    return instance;
-  }
-
-  public setRows(rows: readonly LinkPickerRow[]): void {
-    this.lastRows = rows;
-    this.post({ type: "rows", rows });
-  }
-
-  public setLinked(rows: readonly LinkedRow[]): void {
-    this.lastLinked = rows;
-    this.post({ type: "linked", rows });
-  }
-
-  public setBusy(busy: boolean): void {
-    this.lastBusy = busy;
-    this.post({ type: "busy", busy });
-  }
-
-  public onSearch(handler: (value: string) => void): void {
-    this.searchHandler = handler;
-  }
-
-  public onConfirm(handler: (id: string) => void): void {
-    this.confirmHandler = handler;
-  }
-
-  public onCancel(handler: () => void): void {
-    this.cancelHandler = handler;
-  }
-
-  public onOpenLinked(handler: (key: string) => void): void {
-    this.openLinkedHandler = handler;
-  }
-
-  public onUnlink(handler: (key: string) => void): void {
-    this.unlinkHandler = handler;
-  }
-
-  public close(): void {
-    if (this.disposed) {
-      return;
-    }
-    this.disposed = true;
-    while (this.disposables.length > 0) {
-      this.disposables.pop()?.dispose();
-    }
-    this.panel.dispose();
-  }
-
-  // The webview attaches its message listener before it can receive anything, then announces `ready`;
-  // replaying the last state here closes the window where a row/busy post could race the load.
-  private handleMessage(message: IncomingMessage): void {
-    if (message.type === "ready") {
-      this.post({ type: "linked", rows: this.lastLinked });
-      this.post({ type: "rows", rows: this.lastRows });
-      if (this.lastBusy) {
-        this.post({ type: "busy", busy: true });
-      }
-      return;
-    }
-    if (this.settled) {
-      return;
-    }
-    if (message.type === "search") {
-      this.searchHandler?.(message.value);
-    } else if (message.type === "confirm") {
-      this.fireConfirm(message.id);
-    } else if (message.type === "cancel") {
-      this.fireCancel();
-    } else if (message.type === "openLinked") {
-      this.openLinkedHandler?.(message.key);
-    } else if (message.type === "unlink") {
-      this.unlinkHandler?.(message.key);
-    }
-  }
-
-  private fireConfirm(id: string): void {
-    if (this.settled) {
-      return;
-    }
-    this.settled = true;
-    this.confirmHandler?.(id);
-  }
-
-  private fireCancel(): void {
-    if (this.settled) {
-      return;
-    }
-    this.settled = true;
-    this.cancelHandler?.();
-  }
-
-  private post(message: OutgoingMessage): void {
-    if (this.disposed) {
-      return;
-    }
-    Promise.resolve(this.panel.webview.postMessage(message)).catch(() => undefined);
-  }
-}
+export const LINK_FRAGMENT: SurfaceFragment = {
+  css: LINK_CSS,
+  paneHtml: LINK_PANE,
+  script: LINK_SCRIPT,
+};

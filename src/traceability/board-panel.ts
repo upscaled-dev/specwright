@@ -9,6 +9,7 @@ import {
   filterBoardViewModel,
   filterExecutionRows,
 } from "./board-data";
+import { LINK_FRAGMENT, LinkSurface } from "./link-picker-panel";
 import { PUBLISH_FRAGMENT, PublishDialogDelegate, PublishSurface } from "./publish-dialog-panel";
 import { SurfaceHost, SurfaceName } from "./webview-host";
 
@@ -137,6 +138,7 @@ export class BoardPanel {
   private activeTab: ShellTab = "mapping";
   private readonly surfaces: object[] = [];
   public readonly publish: PublishSurface;
+  public readonly link: LinkSurface;
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -148,6 +150,7 @@ export class BoardPanel {
     );
     this.surfaces.push(new BoardSurface(this.hostFor("board"), deps));
     this.publish = new PublishSurface(this.hostFor("publish"), deps.publishDelegate, deps.startPublish);
+    this.link = new LinkSurface(this.hostFor("link"));
   }
 
   public static open(deps: BoardPanelDeps): BoardPanel {
@@ -608,12 +611,13 @@ const SHELL_SCRIPT = `
 
 function renderDocument(providerLabel: string): string {
   const nonce = createNonce();
-  const styles = [SHELL_CSS, BOARD_CSS, PUBLISH_FRAGMENT.css].join("\n");
+  const styles = [SHELL_CSS, BOARD_CSS, PUBLISH_FRAGMENT.css, LINK_FRAGMENT.css].join("\n");
   const panes = [
     boardPanesHtml(providerLabel),
     `    <section id="pane-publish" class="pane" data-tab="publish" hidden>\n      ${PUBLISH_FRAGMENT.paneHtml}\n    </section>`,
+    `    <section id="pane-link" class="pane" data-tab="link" hidden>\n      ${LINK_FRAGMENT.paneHtml}\n    </section>`,
   ].join("\n");
-  const scripts = [ROUTER_SCRIPT, SHELL_SCRIPT, BOARD_SCRIPT, PUBLISH_FRAGMENT.script]
+  const scripts = [ROUTER_SCRIPT, SHELL_SCRIPT, BOARD_SCRIPT, PUBLISH_FRAGMENT.script, LINK_FRAGMENT.script]
     .map((script) => `<script nonce="${nonce}">${script}</script>`)
     .join("\n");
   return `<!DOCTYPE html>
@@ -634,6 +638,7 @@ function renderDocument(providerLabel: string): string {
       <button class="tab" data-tab="matrix" type="button">Matrix</button>
       <button class="tab" data-tab="executions" type="button">Executions</button>
       <button class="tab" data-tab="publish" type="button">Publish</button>
+      <button class="tab" data-tab="link" type="button" hidden>Link</button>
     </div>
     <div class="search"><input id="search" type="text" spellcheck="false" autocomplete="off" placeholder="Filter by key, tag, file…"></div>
   </header>

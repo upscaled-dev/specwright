@@ -1,173 +1,193 @@
-import { describe, it, expect, afterEach } from "vitest";
-import * as vscode from "vscode";
-import { LinkPickerPanel } from "../../traceability/link-picker-panel";
-import { LinkedRow, LinkPickerRow } from "../../traceability/link-picker-flow";
+import { describe, it, expect } from "vitest";
+import { LinkSurface } from "../../traceability/link-picker-panel";
+import { LinkedRow, LinkPickerRow, LinkPickerUi } from "../../traceability/link-picker-flow";
+import { SurfaceHost, SurfaceName } from "../../traceability/webview-host";
 
-// The panel drives the real `vscode.window.createWebviewPanel` stub: `__receive` delivers an inbound
-// webview message, `webview.__posted` records outbound ones, and `dispose()` fires the onDidDispose
-// seam — the same rig the publish-dialog-panel tests use. The webview JS itself is not exercised (it
-// carries no decision logic; that all lives in runLinkPickerFlow).
-interface StubPanel {
-  webview: { html: string; __posted: unknown[] };
+// A fake SurfaceHost driving LinkSurface in isolation: `receive` delivers an inbound (webview) message
+// to the surface's handler, `posted` records outbound ones, `tabVisible` records setTabVisible calls,
+// `activations` records `activate` targets, and `dispose` fires the onDidDispose seam.
+interface FakeHost {
+  host: SurfaceHost;
+  posted: Array<{ type: string; [key: string]: unknown }>;
+  tabVisible: Array<{ visible: boolean; title: string | undefined }>;
+  activations: Array<SurfaceName | undefined>;
+  receive: (message: unknown) => void;
   dispose: () => void;
-  __receive: (message: unknown) => Promise<void>;
 }
 
-const win = vscode.window as unknown as {
-  __webviewPanels: StubPanel[];
-  __resetWebviewPanels: () => void;
-};
-
-afterEach(() => win.__resetWebviewPanels());
+function fakeHost(): FakeHost {
+  let messageHandler: ((message: unknown) => void) | undefined;
+  let disposeHandler: (() => void) | undefined;
+  let disposed = false;
+  const posted: Array<{ type: string; [key: string]: unknown }> = [];
+  const tabVisible: Array<{ visible: boolean; title: string | undefined }> = [];
+  const activations: Array<SurfaceName | undefined> = [];
+  const host: SurfaceHost = {
+    post: (message) => posted.push(message as { type: string }),
+    onMessage: (handler) => {
+      messageHandler = handler;
+    },
+    reveal: () => undefined,
+    activate: (surface) => activations.push(surface),
+    onDidDispose: (handler) => {
+      disposeHandler = handler;
+    },
+    isDisposed: () => disposed,
+    setTabVisible: (visible, title) => tabVisible.push({ visible, title }),
+  };
+  return {
+    host,
+    posted,
+    tabVisible,
+    activations,
+    receive: (message) => messageHandler?.(message),
+    dispose: () => {
+      disposed = true;
+      disposeHandler?.();
+    },
+  };
+}
 
 const OPTS = { title: "Link scenario to Xray test", searchPlaceholder: "Search Xray tests" };
 const ROW: LinkPickerRow = { id: "CALC-1", key: "CALC-1", summary: "Login", kind: "test" };
 const LINKED: LinkedRow[] = [{ key: "CALC-1", summary: "Login" }, { key: "CALC-2", remoteMissing: true }];
 
-describe("LinkPickerPanel", () => {
-  it("forwards search/confirm/cancel webview messages to the registered handlers", async () => {
-    const ui = LinkPickerPanel.open(OPTS);
+function begin(rig: FakeHost): { surface: LinkSurface; ui: LinkPickerUi } {
+  const surface = new LinkSurface(rig.host);
+  const ui = surface.begin(OPTS);
+  return { surface, ui };
+}
+
+describe("LinkSurface", () => {
+  it("reveals the Link tab, resets the pane, and activates the Link tab on begin", () => {
+    const rig = fakeHost();
+    begin(rig);
+
+    expect(rig.tabVisible).toContainEqual({ visible: true, title: OPTS.title });
+    expect(rig.posted).toContainEqual({ type: "reset", title: OPTS.title, searchPlaceholder: OPTS.searchPlaceholder });
+    expect(rig.activations).toContain(undefined);
+  });
+
+  it("forwards search/confirm/cancel webview messages to the registered handlers", () => {
+    const rig = fakeHost();
+    const { ui } = begin(rig);
     const searches: string[] = [];
     const confirms: string[] = [];
     let cancels = 0;
     ui.onSearch((value) => searches.push(value));
     ui.onConfirm((id) => confirms.push(id));
     ui.onCancel(() => { cancels += 1; });
-    const panel = win.__webviewPanels[0]!;
 
-    await panel.__receive({ type: "search", value: "CAL" });
-    await panel.__receive({ type: "confirm", id: "CALC-1" });
+    rig.receive({ type: "search", value: "CAL" });
+    rig.receive({ type: "confirm", id: "CALC-1" });
 
     expect(searches).toEqual(["CAL"]);
     expect(confirms).toEqual(["CALC-1"]);
 
-    // A confirm settles the panel — a later cancel message is dropped.
-    await panel.__receive({ type: "cancel" });
+    // A confirm settles the session — a later cancel message is dropped.
+    rig.receive({ type: "cancel" });
     expect(cancels).toBe(0);
   });
 
-  it("posts row and busy updates to the webview", async () => {
-    const ui = LinkPickerPanel.open(OPTS);
+  it("posts row, linked, and busy updates to the webview", () => {
+    const rig = fakeHost();
+    const { ui } = begin(rig);
     ui.setRows([ROW]);
+    ui.setLinked(LINKED);
     ui.setBusy(true);
-    const panel = win.__webviewPanels[0]!;
 
-    expect(panel.webview.__posted).toContainEqual({ type: "rows", rows: [ROW] });
-    expect(panel.webview.__posted).toContainEqual({ type: "busy", busy: true });
+    expect(rig.posted).toContainEqual({ type: "rows", rows: [ROW] });
+    expect(rig.posted).toContainEqual({ type: "linked", rows: LINKED });
+    expect(rig.posted).toContainEqual({ type: "busy", busy: true });
   });
 
-  it("replays the last rows when the webview signals it is ready", async () => {
-    const ui = LinkPickerPanel.open(OPTS);
-    ui.setRows([ROW]);
-    const panel = win.__webviewPanels[0]!;
-    panel.webview.__posted.length = 0;
-
-    await panel.__receive({ type: "ready" });
-
-    expect(panel.webview.__posted).toContainEqual({ type: "rows", rows: [ROW] });
-  });
-
-  it("fires cancel when the panel is disposed (window closed)", async () => {
-    const ui = LinkPickerPanel.open(OPTS);
-    let cancels = 0;
-    ui.onCancel(() => { cancels += 1; });
-
-    win.__webviewPanels[0]!.dispose();
-
-    expect(cancels).toBe(1);
-  });
-
-  it("drops webview messages after a terminal confirm (dispose-safety)", async () => {
-    const ui = LinkPickerPanel.open(OPTS);
-    const searches: string[] = [];
-    ui.onSearch((value) => searches.push(value));
-    ui.onConfirm(() => { /* settle */ });
-    const panel = win.__webviewPanels[0]!;
-
-    await panel.__receive({ type: "confirm", id: "CALC-1" });
-    await panel.__receive({ type: "search", value: "late" });
-
-    expect(searches).toEqual([]);
-  });
-
-  it("close() is idempotent and stops posting to the webview", async () => {
-    const ui = LinkPickerPanel.open(OPTS);
-    const panel = win.__webviewPanels[0]!;
-    ui.setRows([ROW]);
-    const count = panel.webview.__posted.length;
-
-    ui.close();
-    ui.setRows([ROW]);
-
-    expect(panel.webview.__posted).toHaveLength(count);
-    expect(() => ui.close()).not.toThrow();
-  });
-
-  it("renders the title, placeholder, and footer hint into the html", () => {
-    LinkPickerPanel.open(OPTS);
-    const panel = win.__webviewPanels[0]!;
-
-    expect(panel.webview.html).toContain("Link scenario to Xray test");
-    expect(panel.webview.html).toContain("Search Xray tests");
-    expect(panel.webview.html).toContain("Enter to confirm");
-    expect(panel.webview.html).toContain("Esc to cancel");
-  });
-
-  it("carries the Linked and Link another test section scaffolding in the html", () => {
-    LinkPickerPanel.open(OPTS);
-    const panel = win.__webviewPanels[0]!;
-
-    expect(panel.webview.html).toContain("Linked");
-    expect(panel.webview.html).toContain("Link another test");
-    expect(panel.webview.html).toContain('id="linkedSection"');
-  });
-
-  it("posts linked-row updates to the webview", () => {
-    const ui = LinkPickerPanel.open(OPTS);
-    ui.setLinked(LINKED);
-    const panel = win.__webviewPanels[0]!;
-
-    expect(panel.webview.__posted).toContainEqual({ type: "linked", rows: LINKED });
-  });
-
-  it("replays the last linked rows when the webview signals it is ready", async () => {
-    const ui = LinkPickerPanel.open(OPTS);
-    ui.setLinked(LINKED);
-    const panel = win.__webviewPanels[0]!;
-    panel.webview.__posted.length = 0;
-
-    await panel.__receive({ type: "ready" });
-
-    expect(panel.webview.__posted).toContainEqual({ type: "linked", rows: LINKED });
-  });
-
-  it("forwards openLinked and unlink webview messages to their handlers", async () => {
-    const ui = LinkPickerPanel.open(OPTS);
+  it("forwards openLinked and unlink webview messages to their handlers", () => {
+    const rig = fakeHost();
+    const { ui } = begin(rig);
     const opened: string[] = [];
     const unlinked: string[] = [];
     ui.onOpenLinked((key) => opened.push(key));
     ui.onUnlink((key) => unlinked.push(key));
-    const panel = win.__webviewPanels[0]!;
 
-    await panel.__receive({ type: "openLinked", key: "CALC-1" });
-    await panel.__receive({ type: "unlink", key: "CALC-2" });
+    rig.receive({ type: "openLinked", key: "CALC-1" });
+    rig.receive({ type: "unlink", key: "CALC-2" });
 
     expect(opened).toEqual(["CALC-1"]);
     expect(unlinked).toEqual(["CALC-2"]);
   });
 
-  it("keeps the picker live after a linked-row action (open/unlink never settle it)", async () => {
-    const ui = LinkPickerPanel.open(OPTS);
+  it("keeps the session live after a linked-row action (open/unlink never settle it)", () => {
+    const rig = fakeHost();
+    const { ui } = begin(rig);
     const searches: string[] = [];
     ui.onSearch((value) => searches.push(value));
     ui.onOpenLinked(() => { /* informational */ });
     ui.onUnlink(() => { /* informational */ });
-    const panel = win.__webviewPanels[0]!;
 
-    await panel.__receive({ type: "openLinked", key: "CALC-1" });
-    await panel.__receive({ type: "unlink", key: "CALC-2" });
-    await panel.__receive({ type: "search", value: "still typing" });
+    rig.receive({ type: "openLinked", key: "CALC-1" });
+    rig.receive({ type: "unlink", key: "CALC-2" });
+    rig.receive({ type: "search", value: "still typing" });
 
     expect(searches).toEqual(["still typing"]);
+  });
+
+  it("close hides the Link tab and drops the session; it is idempotent and stops posting", () => {
+    const rig = fakeHost();
+    const { ui } = begin(rig);
+    ui.setRows([ROW]);
+    const count = rig.posted.length;
+
+    ui.close();
+    expect(rig.tabVisible).toContainEqual({ visible: false, title: undefined });
+
+    ui.setRows([ROW]);
+    expect(rig.posted).toHaveLength(count);
+    expect(() => ui.close()).not.toThrow();
+  });
+
+  it("re-begin supersedes a live session by firing its cancel, then reveals a fresh tab", () => {
+    const rig = fakeHost();
+    const surface = new LinkSurface(rig.host);
+    const first = surface.begin(OPTS);
+    let firstCancelled = 0;
+    // The flow's onCancel settles then closes; mirror that so the supersede path can settle the tab.
+    first.onCancel(() => { firstCancelled += 1; first.close(); });
+
+    surface.begin({ title: "Link scenario to Jira test", searchPlaceholder: "Search Jira tests" });
+
+    expect(firstCancelled).toBe(1);
+    expect(rig.tabVisible).toContainEqual({ visible: true, title: "Link scenario to Jira test" });
+  });
+
+  it("fires the active session's cancel when the panel is disposed", () => {
+    const rig = fakeHost();
+    const { ui } = begin(rig);
+    let cancels = 0;
+    ui.onCancel(() => { cancels += 1; });
+
+    rig.dispose();
+
+    expect(cancels).toBe(1);
+  });
+
+  it("drops webview messages after a terminal confirm (settle-safety)", () => {
+    const rig = fakeHost();
+    const { ui } = begin(rig);
+    const searches: string[] = [];
+    ui.onSearch((value) => searches.push(value));
+    ui.onConfirm(() => { /* settle */ });
+
+    rig.receive({ type: "confirm", id: "CALC-1" });
+    rig.receive({ type: "search", value: "late" });
+
+    expect(searches).toEqual([]);
+  });
+
+  it("exposes the Link fragment (title/placeholder scaffolding) for the shell document", () => {
+    // The pane is hydrated on begin, so the static skeleton carries the section scaffolding, not the
+    // dialog text — the title and placeholder ride the reset message instead.
+    const rig = fakeHost();
+    begin(rig);
+    expect(rig.posted[0]).toMatchObject({ type: "reset", title: OPTS.title, searchPlaceholder: OPTS.searchPlaceholder });
   });
 });
