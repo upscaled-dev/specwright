@@ -131,6 +131,36 @@ describe("createXrayResultPublishing — reconcile filter (cross-seam)", () => {
   });
 });
 
+describe("createXrayResultPublishing — publish guards (fail fast before any import)", () => {
+  it("rejects an empty create summary and posts nothing", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport }));
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "CALC", summary: "" })
+    ).rejects.toThrow("Enter a summary for the new execution before publishing.");
+    expect(t.postMultipart).not.toHaveBeenCalled();
+    expect(t.postJson).not.toHaveBeenCalled();
+  });
+
+  it("rejects a whitespace-only create summary and posts nothing", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport }));
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "CALC", summary: "   " })
+    ).rejects.toThrow("Enter a summary for the new execution before publishing.");
+    expect(t.postMultipart).not.toHaveBeenCalled();
+  });
+
+  it("rejects a create publish when every scenario was dropped, surfacing the guard through the failure path", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport }));
+    await expect(
+      publishing.publish(artifact([mapped("gone", "CALC-9")]), { mode: "create-new", project: "CALC", summary: "Run" })
+    ).rejects.toThrow("match the current feature files");
+    expect(t.postMultipart).not.toHaveBeenCalled();
+  });
+});
+
 // ---- Evidence resolution + attachTo routing ----
 
 const shard = (workingDir: string): ShardInfo => ({ workingDir, command: "run", exitCode: 0, success: true });

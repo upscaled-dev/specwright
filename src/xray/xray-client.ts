@@ -511,6 +511,7 @@ export class XrayClient {
       }),
       signal
     );
+    this.deps.logger.info(`POST ${path} → ${response.status}`);
     return { status: response.status, ok: response.ok, body: parseBody(response.bodyText) };
   }
 
@@ -527,6 +528,7 @@ export class XrayClient {
       },
       signal
     );
+    this.deps.logger.info(`POST ${path} → ${response.status}`);
     return { status: response.status, ok: response.ok, body: parseBody(response.bodyText) };
   }
 

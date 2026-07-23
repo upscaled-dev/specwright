@@ -53,6 +53,15 @@ export class XrayImportError extends Error {
   }
 }
 
+// The import payload came out empty (every scenario dropped on the create path, or nothing publishable
+// on append), so there is nothing to send. Thrown before any network call; the message is user-facing.
+export class EmptyImportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EmptyImportError";
+  }
+}
+
 // Allowlisted fields of the import response — id/key/self are wanted diagnostics (§9.3).
 export interface ExecutionImportResponse {
   readonly id?: string | undefined;
@@ -215,6 +224,9 @@ export class XrayJsonImporter implements ExecutionImporter<XrayJsonInput, XrayJs
     payload: XrayJsonPayload,
     signal?: AbortSignal
   ): Promise<ExecutionImportResponse> {
+    if (payload.tests.length === 0) {
+      throw new EmptyImportError("This run has no test results to add to the execution. Re-run the tests, then publish again.");
+    }
     return handleImportResponse(await transport.postJson(IMPORT_EXECUTION_PATH, payload, signal));
   }
 }
@@ -439,6 +451,11 @@ export class CucumberMultipartImporter
     payload: CucumberMultipartPayload,
     signal?: AbortSignal
   ): Promise<ExecutionImportResponse> {
+    if (payload.results.length === 0) {
+      throw new EmptyImportError(
+        "None of the scenarios from this run match the current feature files, so there is nothing to publish. Re-run the tests, then publish again."
+      );
+    }
     const parts = { results: JSON.stringify(payload.results), info: JSON.stringify(payload.info) };
     return handleImportResponse(await transport.postMultipart(CUCUMBER_MULTIPART_PATH, parts, signal));
   }

@@ -232,6 +232,7 @@ function renderHtml(model: PublishDialogModel): string {
 
     <label for="summary">Summary</label>
     <input id="summary" type="text" value="${escapeHtml(selected.defaultSummary)}">
+    <div id="err-summary" class="field-error"></div>
 
     <label for="plan">Test Plan key (optional)</label>
     <input id="plan" type="text" spellcheck="false" autocapitalize="characters" value="${planValue}">
@@ -281,6 +282,7 @@ function renderHtml(model: PublishDialogModel): string {
   const execResults = document.getElementById('exec-results');
   const planResults = document.getElementById('plan-results');
   const errProject = document.getElementById('err-project');
+  const errSummary = document.getElementById('err-summary');
   const errExecution = document.getElementById('err-execution');
   const execHint = document.getElementById('exec-hint');
   const attachHint = document.getElementById('attach-hint');
@@ -473,6 +475,7 @@ function renderHtml(model: PublishDialogModel): string {
 
   document.getElementById('publish').addEventListener('click', function () {
     errProject.textContent = '';
+    errSummary.textContent = '';
     errExecution.textContent = '';
     const attachments = selectedAttachments();
     if (currentMode() === 'append') {
@@ -483,8 +486,10 @@ function renderHtml(model: PublishDialogModel): string {
     }
     const project = projectInput.value.trim();
     if (project === '') { errProject.textContent = 'Enter the project key to create the execution in.'; return; }
+    const summary = summaryInput.value.trim();
+    if (summary === '') { errSummary.textContent = 'Enter a summary for the new execution.'; return; }
     const environments = envInput.value.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s !== ''; });
-    const request = { mode: 'create-new', project: project, summary: summaryInput.value.trim() };
+    const request = { mode: 'create-new', project: project, summary: summary };
     const plan = planInput.value.trim();
     if (plan !== '') { request.testPlanKey = plan; }
     if (environments.length > 0) { request.environments = environments; }

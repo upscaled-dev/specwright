@@ -1041,11 +1041,11 @@ export class CommandManager {
       .catch(() => undefined);
   }
 
-  // The server error message goes to the toast verbatim (UI is not a log); the output channel keeps
-  // the allowlist (status only — never the request body or the server message text).
+  // The server's own error text is the diagnostic that makes a 400 legible, so it rides both the
+  // toast (verbatim) and the log. The request body, headers, and token never do.
   private reportPublishFailure(error: unknown): void {
     if (error instanceof XrayImportError) {
-      this.logger.error("Publish failed", { status: error.status });
+      this.logger.error("Publish failed", { status: error.status, message: error.serverMessage ?? error.message });
       vscode.window.showErrorMessage(`Publish failed: ${error.serverMessage ?? `HTTP ${error.status}`}`);
       return;
     }

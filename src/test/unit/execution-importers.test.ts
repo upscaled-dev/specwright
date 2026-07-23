@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   CucumberMultipartImporter,
+  EmptyImportError,
   XrayImportError,
   XrayJsonImporter,
   buildCucumberMultipartPayload,
@@ -593,6 +594,36 @@ describe("import() error seam", () => {
     const outcome = await new XrayJsonImporter().import(rec.transport, payload);
     expect(outcome.id).toBe("10200");
     expect(outcome.key).toBe("XNP-24");
+  });
+});
+
+// ---- Empty-payload guard (fails fast before any network call) ----
+
+describe("empty-payload guard", () => {
+  it("throws EmptyImportError and posts nothing when every create scenario was dropped", async () => {
+    const rec = recordingTransport();
+    const payload = buildCucumberMultipartPayload({
+      artifact: refArtifact(),
+      results: [pub(ref("features/calc.feature", 3, "Gone"), "CALC-1")],
+      request: CREATE_REQUEST,
+      resolveSteps: () => undefined,
+    });
+    expect(payload.results).toHaveLength(0);
+
+    const error = await new CucumberMultipartImporter().import(rec.transport, payload).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(EmptyImportError);
+    expect((error as EmptyImportError).message).toContain("match the current feature files");
+    expect(rec.multipart).toHaveLength(0);
+  });
+
+  it("throws EmptyImportError and posts nothing when the append payload has no tests", async () => {
+    const rec = recordingTransport();
+    const payload = buildXrayJsonPayload({ artifact: refArtifact(), results: [], request: { mode: "append", executionKey: "X-1" } });
+    expect(payload.tests).toHaveLength(0);
+
+    const error = await new XrayJsonImporter().import(rec.transport, payload).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(EmptyImportError);
+    expect(rec.json).toHaveLength(0);
   });
 });
 

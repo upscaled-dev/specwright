@@ -152,6 +152,9 @@ async function publishCreate(
   signal: AbortSignal | undefined,
   jiraAvailable: boolean
 ): Promise<PublishOutcome> {
+  if (request.summary.trim() === "") {
+    throw new Error("Enter a summary for the new execution before publishing.");
+  }
   const plan = planEvidence(artifact, results, deps, jiraAvailable);
   const payload = cucumberImporter.buildPayload({
     artifact,
