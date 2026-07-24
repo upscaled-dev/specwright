@@ -28,7 +28,8 @@ import {
   StepResolver,
   XrayJsonImporter,
 } from "./execution-importers";
-import { JiraIssueKind, searchJiraIssues, JiraIssueSearchResult } from "./jira-issue-search";
+import { ISSUE_TYPE_NAME, JiraIssueKind, searchJiraIssues, JiraIssueSearchResult } from "./jira-issue-search";
+import { IssueTypeResolution, resolveExecutionIssueType } from "./jira-issue-types";
 
 export type AttachTo = "evidence" | "issue" | "both";
 
@@ -40,6 +41,14 @@ export type IssueSearcher = (deps: {
   logger: Logger;
   signal?: AbortSignal | undefined;
 }) => Promise<JiraIssueSearchResult>;
+
+export type IssueTypeResolver = (deps: {
+  site: string;
+  credentials: XrayJiraCredentials;
+  projectKey: string;
+  logger: Logger;
+  signal?: AbortSignal | undefined;
+}) => Promise<IssueTypeResolution>;
 
 export interface XrayResultPublishingDeps {
   transport: ImportTransport;
@@ -57,6 +66,7 @@ export interface XrayResultPublishingDeps {
   // Injectable for tests; default to the live fs / Jira issue search.
   evidenceFs?: EvidenceFs | undefined;
   searchIssues?: IssueSearcher | undefined;
+  resolveIssueType?: IssueTypeResolver | undefined;
 }
 
 const cucumberImporter = new CucumberMultipartImporter();
@@ -144,18 +154,46 @@ function planEvidence(
   return { evidenceFor: (result) => perResult.get(result) ?? [], issueFiles, notes };
 }
 
+// A successful createmeta listing that lacks the execution type is proof the create would 400
+// (`issuetype: Specify a valid issue type`), so it fails fast with the project's actual types; an
+// `unknown` resolution (transient fault) never blocks a publish that might still succeed.
+function unavailableIssueTypeMessage(projectKey: string, availableNames: string[]): string {
+  const remedy = "Enable Xray for this project in Jira, or publish to a project that has the Xray issue types.";
+  if (availableNames.length === 0) {
+    return `Project ${projectKey} has no "${ISSUE_TYPE_NAME.execution}" issue type, and no issue types are available to your account in this project. ${remedy}`;
+  }
+  return `Project ${projectKey} has no "${ISSUE_TYPE_NAME.execution}" issue type. Its issue types are: ${availableNames.join(", ")}. ${remedy}`;
+}
+
 async function publishCreate(
   deps: XrayResultPublishingDeps,
+  resolveIssueType: IssueTypeResolver,
   artifact: RunArtifact,
   results: readonly PublishableResult[],
   request: Extract<PublishRequest, { mode: "create-new" }>,
   signal: AbortSignal | undefined,
-  jiraAvailable: boolean
+  credentials: XrayJiraCredentials | undefined
 ): Promise<PublishOutcome> {
   if (request.summary.trim() === "") {
     throw new Error("Enter a summary for the new execution before publishing.");
   }
-  const plan = planEvidence(artifact, results, deps, jiraAvailable);
+  let issueTypeName: string | undefined;
+  if (credentials !== undefined) {
+    const resolution = await resolveIssueType({
+      site: deps.site(),
+      credentials,
+      projectKey: request.project,
+      logger: deps.logger,
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    if (resolution.kind === "unavailable") {
+      throw new Error(unavailableIssueTypeMessage(request.project, resolution.availableNames));
+    }
+    if (resolution.kind === "resolved") {
+      issueTypeName = resolution.name;
+    }
+  }
+  const plan = planEvidence(artifact, results, deps, credentials !== undefined);
   const payload = cucumberImporter.buildPayload({
     artifact,
     results,
@@ -163,6 +201,7 @@ async function publishCreate(
     resolveSteps: deps.resolveSteps,
     workspaceRootFor: deps.workspaceRootFor,
     evidenceFor: plan.evidenceFor,
+    issueTypeName,
   });
   const response = await cucumberImporter.import(deps.transport, payload, signal);
   const ref: ExecutionRef = { kind: "execution", key: executionKeyOf(response, request) };
@@ -202,6 +241,7 @@ async function publishAppend(
  */
 export function createXrayResultPublishing(deps: XrayResultPublishingDeps): ResultPublishingCapability {
   const searchIssues = deps.searchIssues ?? searchJiraIssues;
+  const resolveIssueType = deps.resolveIssueType ?? resolveExecutionIssueType;
   return {
     async searchTargets(kind, query, signal): Promise<readonly PublishTarget[]> {
       const credentials = await deps.jiraCredentials();
@@ -222,12 +262,13 @@ export function createXrayResultPublishing(deps: XrayResultPublishingDeps): Resu
     },
     async publish(artifact, request, signal): Promise<PublishOutcome> {
       const results = publishableResults(artifact).publishable;
-      // Jira creds are the issue-attachment destination's only key — read once here so `planEvidence`
-      // can fall the issue stream back to payload embedding when they are absent (never a lost blob).
-      const jiraAvailable = (await deps.jiraCredentials()) !== undefined;
+      // Jira creds are both the issue-attachment destination's only key AND the createmeta resolver's
+      // credential, so the object itself (not just its presence) flows into the create path. `planEvidence`
+      // still only needs presence, to fall the issue stream back to payload embedding (never a lost blob).
+      const credentials = await deps.jiraCredentials();
       return request.mode === "create-new"
-        ? publishCreate(deps, artifact, results, request, signal, jiraAvailable)
-        : publishAppend(deps, artifact, results, request, signal, jiraAvailable);
+        ? publishCreate(deps, resolveIssueType, artifact, results, request, signal, credentials)
+        : publishAppend(deps, artifact, results, request, signal, credentials !== undefined);
     },
   };
 }

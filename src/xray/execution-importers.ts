@@ -302,6 +302,9 @@ export interface CucumberMultipartInput {
   // a given path → that path is forward-slashed but left as-is.
   readonly workspaceRootFor?: ((filePath: string) => string | undefined) | undefined;
   readonly evidenceFor?: EvidenceForResult | undefined;
+  // The execution issue type name resolved from the target project's createmeta. Absent → the shared
+  // ISSUE_TYPE_NAME.execution default (the publish flow only threads this when it has Jira access).
+  readonly issueTypeName?: string | undefined;
 }
 
 interface FeatureDraft {
@@ -338,7 +341,7 @@ export function buildCucumberMultipartPayload(input: CucumberMultipartInput): Cu
 
   return {
     results: drafts.map((draft) => ({ uri: draft.uri, keyword: "Feature", name: draft.name, elements: draft.elements })),
-    info: buildCucumberInfo(request),
+    info: buildCucumberInfo(request, input.issueTypeName),
     droppedChangedCount,
   };
 }
@@ -427,7 +430,10 @@ function featureUri(filePath: string, workspaceRoot: string | undefined): string
   return rel !== "" && !rel.startsWith("..") ? rel : normalized;
 }
 
-function buildCucumberInfo(request: Extract<PublishRequest, { mode: "create-new" }>): CucumberInfo {
+function buildCucumberInfo(
+  request: Extract<PublishRequest, { mode: "create-new" }>,
+  issueTypeName: string | undefined
+): CucumberInfo {
   const xrayFields: { testPlanKey?: string; environments?: readonly string[] } = {};
   if (request.testPlanKey !== undefined && request.testPlanKey !== "") {
     xrayFields.testPlanKey = request.testPlanKey;
@@ -436,14 +442,16 @@ function buildCucumberInfo(request: Extract<PublishRequest, { mode: "create-new"
     xrayFields.environments = request.environments;
   }
   // `fields` uses the Jira create-issue shape: the endpoint runs full create-issue validation and 400s
-  // without issuetype ("issuetype: Specify an issue type", verified live 2026-07-25). Its name is
-  // site-configurable and is the one the JQL container search relies on, hence the shared ISSUE_TYPE_NAME.
-  // `environments` (not `testEnvironments`) is the multipart xrayFields key (§5).
+  // without issuetype ("issuetype: Specify an issue type", verified live 2026-07-25). It also 400s with
+  // a name the target project does not accept ("issuetype: Specify a valid issue type", verified live
+  // 2026-07-25). The name is site AND project configurable, so the publish flow resolves it upstream
+  // from the project's createmeta and passes it here, falling back to the shared ISSUE_TYPE_NAME when
+  // it could not. `environments` (not `testEnvironments`) is the multipart xrayFields key (§5).
   return {
     fields: {
       project: { key: request.project },
       summary: request.summary,
-      issuetype: { name: ISSUE_TYPE_NAME.execution },
+      issuetype: { name: issueTypeName ?? ISSUE_TYPE_NAME.execution },
     },
     xrayFields,
   };

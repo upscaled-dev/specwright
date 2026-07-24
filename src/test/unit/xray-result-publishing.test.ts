@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import * as path from "node:path";
-import { createXrayResultPublishing, IssueSearcher, XrayResultPublishingDeps } from "../../xray/xray-result-publishing";
+import { createXrayResultPublishing, IssueSearcher, IssueTypeResolver, XrayResultPublishingDeps } from "../../xray/xray-result-publishing";
 import { ImportResponse, ImportTransport, StepResolver } from "../../xray/execution-importers";
 import { NotSupportedError, PreflightDecision, RunArtifact, RunArtifactResult, ShardInfo } from "../../traceability/contracts";
 import { EvidenceFs } from "../../traceability/evidence-resolution";
@@ -300,6 +300,95 @@ describe("createXrayResultPublishing — evidence resolution + attachTo", () => 
     const body = t.postJson.mock.calls[0]![1] as { tests: Array<{ evidence?: unknown[] }> };
     expect(body.tests[0]!.evidence).toHaveLength(1);
     expect(outcome.issueEvidenceFiles).toEqual([]);
+  });
+});
+
+describe("createXrayResultPublishing — create-mode issue type resolution", () => {
+  const JIRA = { email: "a@b.c", token: "t" };
+  const infoOf = (postMultipart: ReturnType<typeof spyTransport>["postMultipart"]): { fields: { issuetype: { name: string } } } =>
+    JSON.parse((postMultipart.mock.calls[0]![1] as { info: string }).info) as { fields: { issuetype: { name: string } } };
+
+  it("threads a resolved issue type name into the create payload's issuetype.name", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() => Promise.resolve({ kind: "resolved", name: "Xray Test Execution" }));
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "CALC", summary: "Run" });
+
+    expect(resolveIssueType).toHaveBeenCalledTimes(1);
+    expect(resolveIssueType.mock.calls[0]![0]).toMatchObject({ projectKey: "CALC", site: "acme.atlassian.net" });
+    expect(infoOf(t.postMultipart).fields.issuetype.name).toBe("Xray Test Execution");
+  });
+
+  it("rejects with the project's actual types when the execution type is unavailable, before any import", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"] })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "SCRATCH", summary: "Run" })
+    ).rejects.toThrow(
+      'Project SCRATCH has no "Test Execution" issue type. Its issue types are: Bug, Story, Task. Enable Xray for this project in Jira, or publish to a project that has the Xray issue types.'
+    );
+    expect(t.postMultipart).not.toHaveBeenCalled();
+    expect(t.postJson).not.toHaveBeenCalled();
+  });
+
+  it("rejects with the empty-project variant when the account sees no issue types", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() => Promise.resolve({ kind: "unavailable", availableNames: [] }));
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "SCRATCH", summary: "Run" })
+    ).rejects.toThrow("no issue types are available to your account in this project");
+    expect(t.postMultipart).not.toHaveBeenCalled();
+  });
+
+  it("publishes with the default issue type name when resolution is unknown", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() => Promise.resolve({ kind: "unknown" }));
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "CALC", summary: "Run" });
+
+    expect(resolveIssueType).toHaveBeenCalledTimes(1);
+    expect(infoOf(t.postMultipart).fields.issuetype.name).toBe("Test Execution");
+  });
+
+  it("never calls the resolver without Jira creds and publishes with the default name", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() => Promise.resolve({ kind: "unknown" }));
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(undefined), resolveIssueType })
+    );
+
+    await publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "CALC", summary: "Run" });
+
+    expect(resolveIssueType).not.toHaveBeenCalled();
+    expect(infoOf(t.postMultipart).fields.issuetype.name).toBe("Test Execution");
+  });
+
+  it("never calls the resolver on the append path", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() => Promise.resolve({ kind: "unknown" }));
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "append", executionKey: "XNP-7" });
+
+    expect(resolveIssueType).not.toHaveBeenCalled();
   });
 });
 

@@ -378,6 +378,27 @@ describe("buildCucumberMultipartPayload", () => {
     });
     expect(payload.info.xrayFields).toEqual({});
   });
+
+  it("uses an explicit issueTypeName over the default when the project renamed the type", () => {
+    const payload = buildCucumberMultipartPayload({
+      artifact: refArtifact(),
+      results: [pub(ref("f", 1, "a"), "C-1")],
+      request: CREATE_REQUEST,
+      resolveSteps: () => ({ steps: ["Given x"] }),
+      issueTypeName: "Xray Test Execution",
+    });
+    expect(payload.info.fields.issuetype.name).toBe("Xray Test Execution");
+  });
+
+  it("falls back to the default issuetype name when issueTypeName is absent", () => {
+    const payload = buildCucumberMultipartPayload({
+      artifact: refArtifact(),
+      results: [pub(ref("f", 1, "a"), "C-1")],
+      request: CREATE_REQUEST,
+      resolveSteps: () => ({ steps: ["Given x"] }),
+    });
+    expect(payload.info.fields.issuetype.name).toBe("Test Execution");
+  });
 });
 
 // ---- Evidence embedding ----
