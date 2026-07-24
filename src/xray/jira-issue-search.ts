@@ -16,7 +16,7 @@ const BACKOFF_CAP_MS = 8_000;
 export type JiraIssueKind = "execution" | "test-plan";
 
 // The Jira issuetype names Xray provisions for each container kind (verify at F5 — site-configurable).
-const ISSUE_TYPE_NAME: Record<JiraIssueKind, string> = {
+export const ISSUE_TYPE_NAME: Record<JiraIssueKind, string> = {
   execution: "Test Execution",
   "test-plan": "Test Plan",
 };

@@ -3,6 +3,7 @@ import type { PublishRequest, RunArtifact, RunArtifactIteration, RunArtifactOutc
 import type { PublishableResult } from "../traceability/publish-core";
 import type { EmbeddedEvidence } from "../traceability/evidence-resolution";
 import { normalizePath, type ScenarioRef } from "../traceability/scenario-ref";
+import { ISSUE_TYPE_NAME } from "./jira-issue-search";
 
 // Resolves a publishable result's evidence to base64-embeddable blobs (empty when none applies for the
 // active `xray.attachTo` mode). The Xray capability supplies it; `buildPayload` never touches disk.
@@ -275,6 +276,7 @@ export interface CucumberInfo {
   readonly fields: {
     readonly project: { readonly key: string };
     readonly summary: string;
+    readonly issuetype: { readonly name: string };
   };
   readonly xrayFields: {
     readonly testPlanKey?: string | undefined;
@@ -433,10 +435,18 @@ function buildCucumberInfo(request: Extract<PublishRequest, { mode: "create-new"
   if (request.environments !== undefined && request.environments.length > 0) {
     xrayFields.environments = request.environments;
   }
-  // `fields` uses the Jira create-issue shape; issuetype is omitted — the endpoint always creates a Test
-  // Execution and the site's issuetype name is unverified (live). `environments` (not `testEnvironments`)
-  // is the multipart xrayFields key (§5).
-  return { fields: { project: { key: request.project }, summary: request.summary }, xrayFields };
+  // `fields` uses the Jira create-issue shape: the endpoint runs full create-issue validation and 400s
+  // without issuetype ("issuetype: Specify an issue type", verified live 2026-07-25). Its name is
+  // site-configurable and is the one the JQL container search relies on, hence the shared ISSUE_TYPE_NAME.
+  // `environments` (not `testEnvironments`) is the multipart xrayFields key (§5).
+  return {
+    fields: {
+      project: { key: request.project },
+      summary: request.summary,
+      issuetype: { name: ISSUE_TYPE_NAME.execution },
+    },
+    xrayFields,
+  };
 }
 
 export class CucumberMultipartImporter

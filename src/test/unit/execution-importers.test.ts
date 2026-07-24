@@ -175,7 +175,7 @@ const CUCUMBER_RESOLVER: StepResolver = (scenario) => {
 };
 
 const EXPECTED_CUCUMBER_INFO = {
-  fields: { project: { key: "CALC" }, summary: "Specwright run" },
+  fields: { project: { key: "CALC" }, summary: "Specwright run", issuetype: { name: "Test Execution" } },
   xrayFields: { testPlanKey: "CALC-100", environments: ["Chrome", "Windows"] },
 };
 
@@ -362,9 +362,10 @@ describe("buildCucumberMultipartPayload", () => {
       resolveSteps: () => ({ steps: ["Given x"] }),
     });
     expect(payload.info).toEqual({
-      fields: { project: { key: "CALC" }, summary: "My run" },
+      fields: { project: { key: "CALC" }, summary: "My run", issuetype: { name: "Test Execution" } },
       xrayFields: { testPlanKey: "CALC-9", environments: ["Chrome"] },
     });
+    expect(payload.info.fields.issuetype.name).toBe("Test Execution");
     expect(JSON.stringify(payload.info)).not.toContain("testEnvironments");
   });
 
