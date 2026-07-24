@@ -28,6 +28,7 @@ interface RenderMessage {
   type: "render";
   scenarios: Array<{ name: string }>;
   tests: Array<{ key: string }>;
+  mapped: Array<{ file: string; scenarios: Array<{ name: string; links: Array<{ key: string }> }> }>;
   matrix: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }>;
   executions: Array<{ key: string; summary: string }>;
 }
@@ -53,6 +54,14 @@ const MODEL: BoardViewModel = {
     { key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"] },
     { key: "PAY-9", pills: ["orphan"] },
   ],
+  mapped: [
+    {
+      file: "features/cart.feature",
+      scenarios: [
+        { name: "Checkout", location: "features/cart.feature:12", links: [{ key: "CALC-1", unlinkId: "id-checkout", result: "passed" }] },
+      ],
+    },
+  ],
   matrix: [
     { requirement: "REQ-7", test: "CALC-1", scenario: "Checkout", tag: "@TEST_CALC-1", result: "passed" },
     { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage" },
@@ -71,6 +80,7 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     buildExecutions: () => EXECUTIONS,
     onDidChange: new vscode.EventEmitter<void>().event,
     applyDrop: () => Promise.resolve(),
+    applyUnlink: () => Promise.resolve(),
     openExecution: () => undefined,
     publishDelegate: noopDelegate,
     startPublish: () => undefined,
@@ -242,6 +252,34 @@ describe("BoardPanel", () => {
     expect(applyDrop).toHaveBeenCalledWith("features/login.feature:5", "PAY-9");
   });
 
+  it("forwards the mapped tree on the initial render", async () => {
+    const { panel } = await openReady();
+
+    const render = lastRender(panel)!;
+    expect(render.mapped.map((group) => group.file)).toEqual(["features/cart.feature"]);
+    expect(render.mapped[0]!.scenarios[0]!.links.map((leaf) => leaf.key)).toEqual(["CALC-1"]);
+  });
+
+  it("re-forwards the mapped tree when a snapshot-change event rebuilds the model", async () => {
+    let current = MODEL;
+    const changes = new vscode.EventEmitter<void>();
+    const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
+
+    current = { ...MODEL, mapped: [{ file: "features/new.feature", scenarios: [{ name: "New", location: "features/new.feature:1", links: [{ key: "NEW-1", unlinkId: "id-new", result: "no run" }] }] }] };
+    changes.fire();
+
+    expect(lastRender(panel)!.mapped.map((group) => group.file)).toEqual(["features/new.feature"]);
+  });
+
+  it("routes an unlink message to applyUnlink with the scenario id and key", async () => {
+    const applyUnlink = vi.fn(() => Promise.resolve());
+    const { panel } = await openReady({ applyUnlink });
+
+    await panel.__receive({ surface: "board", type: "unlink", scenario: "id-checkout", key: "CALC-1" });
+
+    expect(applyUnlink).toHaveBeenCalledWith("id-checkout", "CALC-1");
+  });
+
   it("posts no render on a drop — the snapshot rebuild drives the next render, so a stale drop leaves the board untouched", async () => {
     const applyDrop = vi.fn(() => Promise.resolve());
     const { panel } = await openReady({ applyDrop });
@@ -276,7 +314,7 @@ describe("BoardPanel", () => {
     const changes = new vscode.EventEmitter<void>();
     const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
 
-    current = { scenarios: [], tests: [{ key: "NEW-1", pills: ["orphan"] }], matrix: [] };
+    current = { scenarios: [], tests: [{ key: "NEW-1", pills: ["orphan"] }], mapped: [], matrix: [] };
     changes.fire();
 
     expect(lastRender(panel)!.tests.map((t) => t.key)).toEqual(["NEW-1"]);

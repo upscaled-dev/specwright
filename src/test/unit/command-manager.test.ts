@@ -1215,3 +1215,79 @@ describe("traceability board drag-to-link drop handler", () => {
     expect(error).toHaveBeenCalledOnce();
   });
 });
+
+describe("traceability board unlink handler", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const SOURCE = "Feature: F\n\n@TC-1 @TC-2\nScenario: A\n  Given x\n";
+  const A: ScenarioRef = { filePath: "/ws/a.feature", line: 4, name: "A", kind: "scenario" };
+
+  function unlinkSnapshot(): TraceabilitySnapshot {
+    return {
+      links: [
+        { testKey: "1", scenario: A, reqKeys: [] },
+        { testKey: "2", scenario: A, reqKeys: [] },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeness: "complete",
+      errors: [],
+    };
+  }
+
+  function harness(snapshot: TraceabilitySnapshot) {
+    const adapter = new InMemoryTraceabilityAdapter();
+    const lines = SOURCE.split("\n");
+    const doc = {
+      uri: vscode.Uri.file("/ws/a.feature"),
+      eol: vscode.EndOfLine.LF,
+      getText: () => SOURCE,
+      lineAt: (n: number) => ({ text: lines[n] ?? "", rangeIncludingLineBreak: new vscode.Range(n, 0, n + 1, 0) }),
+      save: () => Promise.resolve(true),
+    };
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(doc as unknown as vscode.TextDocument);
+    const applied: Array<{ __entries: Array<{ op: string; text: string }> }> = [];
+    vi.spyOn(vscode.workspace, "applyEdit").mockImplementation((edit) => {
+      applied.push(edit as unknown as { __entries: Array<{ op: string; text: string }> });
+      return Promise.resolve(true);
+    });
+    const mgr = CommandManager.create(makeContext({ traceabilityAdapter: adapter }));
+    mgr.setTraceabilitySubsystem({
+      getActiveAdapter: () => adapter,
+      getSnapshot: () => snapshot,
+    } as unknown as TraceabilitySubsystem);
+    return { mgr, applied };
+  }
+
+  const unlink = (mgr: CommandManager, dropId: string, key: string): Promise<void> =>
+    (mgr as unknown as { applyBoardUnlink: (d: string, k: string) => Promise<void> }).applyBoardUnlink(dropId, key);
+
+  it("routes a valid pair through applyTagRemove with the exact ref and key", async () => {
+    const { mgr } = harness(unlinkSnapshot());
+    const remove = vi.spyOn(
+      mgr as unknown as { applyTagRemove: (...a: unknown[]) => Promise<unknown> },
+      "applyTagRemove"
+    );
+    await unlink(mgr, scenarioDropId(A), "1");
+    expect(remove).toHaveBeenCalledOnce();
+    expect(remove.mock.calls[0]![0]).toMatchObject({ filePath: "/ws/a.feature", line: 4 });
+    expect(remove.mock.calls[0]![1]).toBe("1");
+  });
+
+  it("removes only the named key from a two-link scenario, leaving the other tag", async () => {
+    const { mgr, applied } = harness(unlinkSnapshot());
+    await unlink(mgr, scenarioDropId(A), "1");
+    expect(applied).toHaveLength(1);
+    expect(applied[0]!.__entries).toHaveLength(1);
+    expect(applied[0]!.__entries[0]).toMatchObject({ op: "replace", text: "@TC-2" });
+  });
+
+  it("rejects a stale pair with a toast and no edit when no live link matches", async () => {
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const { mgr, applied } = harness(unlinkSnapshot());
+    await unlink(mgr, scenarioDropId({ ...A, line: 999 }), "1");
+    expect(applied).toHaveLength(0);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+});

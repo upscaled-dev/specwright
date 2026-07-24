@@ -5,6 +5,7 @@ import {
   BoardTestCard,
   BoardViewModel,
   ExecutionRow,
+  MappedFeatureGroup,
   MatrixRow,
   filterBoardViewModel,
   filterExecutionRows,
@@ -27,16 +28,22 @@ interface DropMessage {
   scenario: string;
   key: string;
 }
+interface UnlinkMessage {
+  type: "unlink";
+  scenario: string;
+  key: string;
+}
 interface OpenMessage {
   type: "open";
   key: string;
 }
-type BoardIncoming = SearchMessage | DropMessage | OpenMessage;
+type BoardIncoming = SearchMessage | DropMessage | UnlinkMessage | OpenMessage;
 
 interface RenderMessage {
   type: "render";
   scenarios: readonly BoardScenarioCard[];
   tests: readonly BoardTestCard[];
+  mapped: readonly MappedFeatureGroup[];
   matrix: readonly MatrixRow[];
   executions: readonly ExecutionRow[];
 }
@@ -53,6 +60,9 @@ export interface BoardPanelDeps {
   buildExecutions(): readonly ExecutionRow[];
   readonly onDidChange: vscode.Event<void>;
   applyDrop(scenario: string, key: string): Promise<void>;
+  // The unlink seam: the webview posts a Mapped-tree {scenario, key} and the host validates and removes
+  // just that `@TEST_` tag, then the snapshot rebuild re-renders (no hand-patching here).
+  applyUnlink(scenario: string, key: string): Promise<void>;
   // An Executions row's key link: routed through the host's browseIssue path.
   openExecution(key: string): void;
   // The Publish tab's callbacks: the search/browse/attach delegate the surface calls into, and the
@@ -90,6 +100,10 @@ class BoardSurface {
       this.deps.applyDrop(message.scenario, message.key).catch(() => undefined);
       return;
     }
+    if (message.type === "unlink") {
+      this.deps.applyUnlink(message.scenario, message.key).catch(() => undefined);
+      return;
+    }
     if (message.type === "open") {
       this.deps.openExecution(message.key);
       return;
@@ -110,6 +124,7 @@ class BoardSurface {
       type: "render",
       scenarios: filtered.scenarios,
       tests: filtered.tests,
+      mapped: filtered.mapped,
       matrix: filtered.matrix,
       executions: filterExecutionRows(this.executions, this.query),
     };
@@ -317,6 +332,23 @@ const BOARD_CSS = `
   .board-pane .muted { color: var(--vscode-descriptionForeground); font-style: italic; }
   .board-pane .card[draggable="true"] { cursor: grab; }
   .board-pane .card.drop-target { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -2px; }
+  .board-pane .column.unlink-ready { outline: 2px dashed var(--vscode-focusBorder); outline-offset: 4px; border-radius: 5px; }
+  .board-pane .column.unlink-over { background: var(--vscode-list-dropBackground, var(--vscode-editorWidget-background)); }
+  .board-pane .mapped-section { margin-top: 1.6rem; }
+  .board-pane .mapped-section h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); font-weight: 600; margin: 0 0 0.4rem; }
+  .board-pane .mapped-hint { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin: 0 0 0.7rem; }
+  .board-pane .mapped-group { border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; margin-bottom: 0.6rem; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); }
+  .board-pane .mapped-group > summary { cursor: pointer; padding: 0.5rem 0.65rem; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.85em; color: var(--vscode-descriptionForeground); }
+  .board-pane .mapped-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.7rem; padding: 0.45rem 0.65rem; border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
+  .board-pane .mapped-name { display: flex; flex-direction: column; min-width: 12rem; flex: 1; }
+  .board-pane .mapped-name .title { font-weight: 600; word-break: break-word; }
+  .board-pane .mapped-name .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; word-break: break-all; }
+  .board-pane .mapped-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .board-pane .mapped-chip { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.15rem 0.35rem 0.15rem 0.55rem; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 999px; background: var(--vscode-badge-background); cursor: grab; }
+  .board-pane .mapped-chip .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); font-size: 0.8rem; }
+  .board-pane .mapped-chip .result { color: var(--vscode-descriptionForeground); font-size: 0.72rem; }
+  .board-pane .mapped-chip .unlink { font-family: inherit; font-size: 0.72rem; padding: 0.05rem 0.45rem; border: none; border-radius: 999px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
+  .board-pane .mapped-chip .unlink:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
   .board-pane .matrix-scroll { overflow: auto; max-height: calc(100vh - 9rem); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; }
   .board-pane table.matrix { border-collapse: collapse; width: 100%; font-size: 0.9em; }
   .board-pane table.matrix th, .board-pane table.matrix td { text-align: left; padding: 0.4rem 0.6rem; white-space: nowrap; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
@@ -332,7 +364,7 @@ function boardPanesHtml(providerLabel: string): string {
   return `    <section id="pane-mapping" class="pane board-pane" data-tab="mapping" hidden>
       <p class="mapping-hint">Drag a scenario from the left onto a test on the right to link them. Orphaned tests can also be dragged onto a scenario.</p>
       <div class="columns">
-        <div class="column">
+        <div id="untraced-column" class="column">
           <h2>Untraced scenarios <span id="scenario-count" class="count"></span></h2>
           <div id="scenario-cards" class="cards"></div>
         </div>
@@ -341,6 +373,11 @@ function boardPanesHtml(providerLabel: string): string {
           <h2>${testsHeading} <span id="test-count" class="count"></span></h2>
           <div id="test-cards" class="cards"></div>
         </div>
+      </div>
+      <div class="mapped-section">
+        <h2>Mapped <span id="mapped-count" class="count"></span></h2>
+        <p class="mapped-hint">Drag a test back onto the untraced column, or use its Unlink button, to remove just that link.</p>
+        <div id="mapped-groups"></div>
       </div>
     </section>
     <section id="pane-matrix" class="pane board-pane" data-tab="matrix" hidden>
@@ -372,18 +409,28 @@ const BOARD_SCRIPT = `
   const testCards = document.getElementById('test-cards');
   const scenarioCount = document.getElementById('scenario-count');
   const testCount = document.getElementById('test-count');
+  const untracedColumn = document.getElementById('untraced-column');
+  const mappedGroups = document.getElementById('mapped-groups');
+  const mappedCount = document.getElementById('mapped-count');
   const matrixRows = document.getElementById('matrix-rows');
   const executionsRows = document.getElementById('executions-rows');
   const executionsEmpty = document.getElementById('executions-empty');
   const executionsScroll = document.getElementById('executions-scroll');
 
-  // A scenario card carries kind 'scenario' + its location; a test card kind 'test' + its key. A drop
-  // is valid only across kinds, so a scenario lands on any test card and an orphan test on a scenario,
-  // never like on like. The drop normalizes both directions to {scenario, key}.
+  // A scenario card carries kind 'scenario' + its location; a test card kind 'test' + its key; a mapped
+  // chip kind 'mapped' + its unlink id and key. A LINK drop is valid only across the scenario/test
+  // kinds, so a scenario lands on any test card and an orphan test on a scenario, never like on like and
+  // never a mapped chip (that only unlinks). The link drop normalizes both directions to {scenario, key}.
   let dragged = null;
   function clearDropTargets() {
     const marked = document.querySelectorAll('.drop-target');
     for (const el of Array.prototype.slice.call(marked)) { el.classList.remove('drop-target'); }
+  }
+  function clearUnlinkZone() {
+    if (untracedColumn) { untracedColumn.classList.remove('unlink-ready', 'unlink-over'); }
+  }
+  function isLinkDrag(kind) {
+    return dragged && dragged.kind !== 'mapped' && dragged.kind !== kind;
   }
   function wireCardDrag(el, kind, id, draggable) {
     if (draggable) {
@@ -395,7 +442,7 @@ const BOARD_SCRIPT = `
       el.addEventListener('dragend', function () { dragged = null; clearDropTargets(); });
     }
     el.addEventListener('dragover', function (e) {
-      if (dragged && dragged.kind !== kind) {
+      if (isLinkDrag(kind)) {
         e.preventDefault();
         if (e.dataTransfer) { e.dataTransfer.dropEffect = 'link'; }
         el.classList.add('drop-target');
@@ -403,13 +450,34 @@ const BOARD_SCRIPT = `
     });
     el.addEventListener('dragleave', function () { el.classList.remove('drop-target'); });
     el.addEventListener('drop', function (e) {
-      if (!dragged || dragged.kind === kind) { return; }
+      if (!isLinkDrag(kind)) { return; }
       e.preventDefault();
       el.classList.remove('drop-target');
       const scenario = dragged.kind === 'scenario' ? dragged.id : id;
       const key = dragged.kind === 'scenario' ? id : dragged.id;
       window.__spec.post('board', { type: 'drop', scenario: scenario, key: key });
       dragged = null;
+    });
+  }
+
+  // The untraced column is the sole unlink drop target: a mapped chip dropped here posts its unlink and
+  // the snapshot rebuild re-renders. It only ever accepts kind 'mapped', so a scenario/test link drag
+  // passes it by. The 'unlink-ready' outline is shown for the whole flight so the target reads as live.
+  if (untracedColumn) {
+    untracedColumn.addEventListener('dragover', function (e) {
+      if (dragged && dragged.kind === 'mapped') {
+        e.preventDefault();
+        if (e.dataTransfer) { e.dataTransfer.dropEffect = 'move'; }
+        untracedColumn.classList.add('unlink-over');
+      }
+    });
+    untracedColumn.addEventListener('dragleave', function () { untracedColumn.classList.remove('unlink-over'); });
+    untracedColumn.addEventListener('drop', function (e) {
+      if (!dragged || dragged.kind !== 'mapped') { return; }
+      e.preventDefault();
+      window.__spec.post('board', { type: 'unlink', scenario: dragged.id, key: dragged.key });
+      dragged = null;
+      clearUnlinkZone();
     });
   }
 
@@ -480,6 +548,84 @@ const BOARD_SCRIPT = `
       el.appendChild(pillsEl(card.pills));
       wireCardDrag(el, 'test', card.key, card.pills.indexOf('orphan') !== -1);
       testCards.appendChild(el);
+    }
+  }
+
+  // A mapped test chip: drag it back to the untraced column, or click Unlink, to remove just this link.
+  // The drag carries kind 'mapped' with the scenario's unlink id and the test key; the untraced column
+  // owns the drop, and link targets ignore it. Highlighting the untraced column starts at dragstart.
+  function mappedChip(leaf) {
+    const chip = document.createElement('div');
+    chip.className = 'mapped-chip';
+    chip.title = 'Removes only this test link.';
+    chip.draggable = true;
+    chip.addEventListener('dragstart', function (e) {
+      dragged = { kind: 'mapped', id: leaf.unlinkId, key: leaf.key };
+      if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; }
+      if (untracedColumn) { untracedColumn.classList.add('unlink-ready'); }
+    });
+    chip.addEventListener('dragend', function () { dragged = null; clearUnlinkZone(); });
+    const key = document.createElement('span');
+    key.className = 'key';
+    key.textContent = leaf.key;
+    chip.appendChild(key);
+    if (leaf.result) {
+      const result = document.createElement('span');
+      result.className = 'result';
+      result.textContent = leaf.result;
+      chip.appendChild(result);
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'unlink';
+    btn.textContent = 'Unlink';
+    btn.addEventListener('click', function () {
+      window.__spec.post('board', { type: 'unlink', scenario: leaf.unlinkId, key: leaf.key });
+    });
+    chip.appendChild(btn);
+    return chip;
+  }
+
+  function renderMapped(groups) {
+    mappedGroups.textContent = '';
+    let leaves = 0;
+    for (const group of groups) { for (const scenario of group.scenarios) { leaves += scenario.links.length; } }
+    mappedCount.textContent = '(' + leaves + ')';
+    if (groups.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No mapped scenarios yet.';
+      mappedGroups.appendChild(empty);
+      return;
+    }
+    for (const group of groups) {
+      const details = document.createElement('details');
+      details.className = 'mapped-group';
+      details.open = true;
+      const summary = document.createElement('summary');
+      summary.textContent = group.file;
+      details.appendChild(summary);
+      for (const scenario of group.scenarios) {
+        const row = document.createElement('div');
+        row.className = 'mapped-row';
+        const name = document.createElement('div');
+        name.className = 'mapped-name';
+        const title = document.createElement('span');
+        title.className = 'title';
+        title.textContent = scenario.name;
+        name.appendChild(title);
+        const loc = document.createElement('span');
+        loc.className = 'meta';
+        loc.textContent = scenario.location;
+        name.appendChild(loc);
+        row.appendChild(name);
+        const chips = document.createElement('div');
+        chips.className = 'mapped-chips';
+        for (const leaf of scenario.links) { chips.appendChild(mappedChip(leaf)); }
+        row.appendChild(chips);
+        details.appendChild(row);
+      }
+      mappedGroups.appendChild(details);
     }
   }
 
@@ -557,6 +703,7 @@ const BOARD_SCRIPT = `
     if (msg.type === 'render') {
       renderScenarios(msg.scenarios || []);
       renderTests(msg.tests || []);
+      renderMapped(msg.mapped || []);
       renderMatrix(msg.matrix || []);
       renderExecutions(msg.executions || []);
     }

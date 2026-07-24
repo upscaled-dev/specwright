@@ -23,7 +23,7 @@ import {
   scenarioGherkinSlice,
 } from "../traceability/link-scenario";
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
-import { buildBoardViewModel, buildExecutionRows, resolveBoardDrop } from "../traceability/board-data";
+import { BoardDropResolution, buildBoardViewModel, buildExecutionRows, resolveBoardDrop, resolveBoardUnlink } from "../traceability/board-data";
 import { BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
 import { linkedTestsForScenario, ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
@@ -1199,6 +1199,7 @@ export class CommandManager {
       buildExecutions: () => buildExecutionRows(this.publishLedger?.entriesForSite(site) ?? []),
       onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,
       applyDrop: (scenario, key) => this.applyBoardDrop(scenario, key),
+      applyUnlink: (scenario, key) => this.applyBoardUnlink(scenario, key),
       openExecution: (key) => {
         const adapter = subsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
         this.browseIssue(adapter, key).catch((error) => {
@@ -1241,16 +1242,59 @@ export class CommandManager {
     if (!subsystem || !adapter) {
       return;
     }
-    const resolved = resolveBoardDrop(subsystem.getSnapshot(), dropId, key);
+    await this.applyBoardMutation(
+      resolveBoardDrop(subsystem.getSnapshot(), dropId, key),
+      adapter.keyGrammar,
+      (ref, k, grammar) => this.applyTagInsert(ref, k, grammar),
+      {
+        stale: "That link is out of date because the board changed. Try the drag again.",
+        failLog: "Board drag-to-link write failed",
+        failToast: (k, error) => `Could not link ${k}: ${error}`,
+      }
+    );
+  }
+
+  // A board unlink (a Mapped-tree chip dragged back to the untraced column or its inline button):
+  // validate the {scenario, key} pair against the CURRENT snapshot and, when a live link matches both,
+  // strip just that `@TEST_<key>` tag through the same applyTagRemove path the link dialog uses. The
+  // watcher rebuild re-renders the board, so nothing here patches the view model.
+  private async applyBoardUnlink(dropId: string, key: string): Promise<void> {
+    const subsystem = this.traceabilitySubsystem;
+    const adapter = subsystem?.getActiveAdapter();
+    if (!subsystem || !adapter) {
+      return;
+    }
+    await this.applyBoardMutation(
+      resolveBoardUnlink(subsystem.getSnapshot(), dropId, key),
+      adapter.keyGrammar,
+      (ref, k, grammar) => this.applyTagRemove(ref, k, grammar),
+      {
+        stale: "That link is out of date because the board changed. Try again.",
+        failLog: "Board unlink write failed",
+        failToast: (k, error) => `Could not unlink ${k}: ${error}`,
+      }
+    );
+  }
+
+  // The shared body behind applyBoardDrop and applyBoardUnlink: an unmatched resolve (the pair went
+  // stale against the current snapshot) toasts and leaves the board untouched for a retry; otherwise the
+  // tag write runs through `apply`, surfacing a failure as an error toast rather than throwing back into
+  // the panel callback.
+  private async applyBoardMutation(
+    resolved: BoardDropResolution | undefined,
+    grammar: KeyGrammar,
+    apply: (ref: ScenarioRef, key: string, grammar: KeyGrammar) => Promise<unknown>,
+    messages: { stale: string; failLog: string; failToast: (key: string, error: string) => string }
+  ): Promise<void> {
     if (!resolved) {
-      vscode.window.showWarningMessage("That link is out of date because the board changed. Try the drag again.");
+      vscode.window.showWarningMessage(messages.stale);
       return;
     }
     try {
-      await this.applyTagInsert(resolved.ref, resolved.key, adapter.keyGrammar);
+      await apply(resolved.ref, resolved.key, grammar);
     } catch (error) {
-      this.logger.error("Board drag-to-link write failed", { error: errMsg(error) });
-      vscode.window.showErrorMessage(`Could not link ${resolved.key}: ${errMsg(error)}`);
+      this.logger.error(messages.failLog, { error: errMsg(error) });
+      vscode.window.showErrorMessage(messages.failToast(resolved.key, errMsg(error)));
     }
   }
 
