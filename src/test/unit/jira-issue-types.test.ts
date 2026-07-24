@@ -102,7 +102,7 @@ describe("resolveExecutionIssueType", () => {
         { id: "5", name: "Story", subtask: false },
       ])));
     const result = await resolve(fetchImpl, logger);
-    expect(result).toEqual({ kind: "unavailable", availableNames: ["Story"] });
+    expect(result).toEqual({ kind: "unavailable", availableNames: ["Story"], teamManaged: false });
   });
 
   it("returns unavailable with the non-subtask names when nothing matches", async () => {
@@ -115,14 +115,47 @@ describe("resolveExecutionIssueType", () => {
         { id: "4", name: "Task", subtask: false },
       ])));
     const result = await resolve(fetchImpl, logger);
-    expect(result).toEqual({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"] });
+    expect(result).toEqual({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"], teamManaged: false });
   });
 
   it("returns unavailable with an empty list when the project exposes no issue types", async () => {
     const { logger } = capturingLogger();
     const fetchImpl: FetchLike = () => Promise.resolve(response(200, meta([])));
     const result = await resolve(fetchImpl, logger);
-    expect(result).toEqual({ kind: "unavailable", availableNames: [] });
+    expect(result).toEqual({ kind: "unavailable", availableNames: [], teamManaged: false });
+  });
+
+  it("flags team-managed when any entry carries a PROJECT scope", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(200, meta([
+        { id: "1", name: "Bug", subtask: false },
+        { id: "2", name: "Story", subtask: false, scope: { type: "PROJECT", project: { id: "10000" } } },
+      ])));
+    const result = await resolve(fetchImpl, logger);
+    expect(result).toEqual({ kind: "unavailable", availableNames: ["Bug", "Story"], teamManaged: true });
+  });
+
+  it("flags team-managed even when only a subtask entry carries the PROJECT scope", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(200, meta([
+        { id: "1", name: "Bug", subtask: false },
+        { id: "2", name: "Sub-task", subtask: true, scope: { type: "PROJECT", project: { id: "10000" } } },
+      ])));
+    const result = await resolve(fetchImpl, logger);
+    expect(result).toEqual({ kind: "unavailable", availableNames: ["Bug"], teamManaged: true });
+  });
+
+  it("does not flag team-managed for a TEMPLATE scope or a missing scope", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(200, meta([
+        { id: "1", name: "Bug", subtask: false, scope: { type: "TEMPLATE" } },
+        { id: "2", name: "Story", subtask: false },
+      ])));
+    const result = await resolve(fetchImpl, logger);
+    expect(result).toEqual({ kind: "unavailable", availableNames: ["Bug", "Story"], teamManaged: false });
   });
 
   it("url-encodes a project key with reserved characters", async () => {

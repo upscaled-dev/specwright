@@ -325,7 +325,7 @@ describe("createXrayResultPublishing — create-mode issue type resolution", () 
   it("rejects with the project's actual types when the execution type is unavailable, before any import", async () => {
     const t = spyTransport();
     const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
-      Promise.resolve({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"] })
+      Promise.resolve({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"], teamManaged: false })
     );
     const publishing = createXrayResultPublishing(
       makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
@@ -340,9 +340,29 @@ describe("createXrayResultPublishing — create-mode issue type resolution", () 
     expect(t.postJson).not.toHaveBeenCalled();
   });
 
+  it("rejects with the team-managed remedy when the unavailable project is team-managed", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"], teamManaged: true })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "SCRATCH", summary: "Run" })
+    ).rejects.toThrow(
+      'Project SCRATCH has no "Test Execution" issue type. Its issue types are: Bug, Story, Task. This is a team-managed project: create a "Test Execution" work type in its project settings, map it under Xray Settings > Work Types Mapping, then retry.'
+    );
+    expect(t.postMultipart).not.toHaveBeenCalled();
+    expect(t.postJson).not.toHaveBeenCalled();
+  });
+
   it("rejects with the empty-project variant when the account sees no issue types", async () => {
     const t = spyTransport();
-    const resolveIssueType = vi.fn<IssueTypeResolver>(() => Promise.resolve({ kind: "unavailable", availableNames: [] }));
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({ kind: "unavailable", availableNames: [], teamManaged: false })
+    );
     const publishing = createXrayResultPublishing(
       makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
     );

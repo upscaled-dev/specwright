@@ -157,10 +157,13 @@ function planEvidence(
 // A successful createmeta listing that lacks the execution type is proof the create would 400
 // (`issuetype: Specify a valid issue type`), so it fails fast with the project's actual types; an
 // `unknown` resolution (transient fault) never blocks a publish that might still succeed.
-function unavailableIssueTypeMessage(projectKey: string, availableNames: string[]): string {
+function unavailableIssueTypeMessage(projectKey: string, availableNames: string[], teamManaged: boolean): string {
   const remedy = "Enable Xray for this project in Jira, or publish to a project that has the Xray issue types.";
   if (availableNames.length === 0) {
     return `Project ${projectKey} has no "${ISSUE_TYPE_NAME.execution}" issue type, and no issue types are available to your account in this project. ${remedy}`;
+  }
+  if (teamManaged) {
+    return `Project ${projectKey} has no "${ISSUE_TYPE_NAME.execution}" issue type. Its issue types are: ${availableNames.join(", ")}. This is a team-managed project: create a "${ISSUE_TYPE_NAME.execution}" work type in its project settings, map it under Xray Settings > Work Types Mapping, then retry.`;
   }
   return `Project ${projectKey} has no "${ISSUE_TYPE_NAME.execution}" issue type. Its issue types are: ${availableNames.join(", ")}. ${remedy}`;
 }
@@ -187,7 +190,7 @@ async function publishCreate(
       ...(signal !== undefined ? { signal } : {}),
     });
     if (resolution.kind === "unavailable") {
-      throw new Error(unavailableIssueTypeMessage(request.project, resolution.availableNames));
+      throw new Error(unavailableIssueTypeMessage(request.project, resolution.availableNames, resolution.teamManaged));
     }
     if (resolution.kind === "resolved") {
       issueTypeName = resolution.name;

@@ -15,7 +15,7 @@ const BACKOFF_CAP_MS = 8_000;
 // authoritative proof the create would 400, so the caller can fail fast instead of guessing.
 export type IssueTypeResolution =
   | { readonly kind: "resolved"; readonly name: string }
-  | { readonly kind: "unavailable"; readonly availableNames: string[] }
+  | { readonly kind: "unavailable"; readonly availableNames: string[]; readonly teamManaged: boolean }
   | { readonly kind: "unknown" };
 
 export interface IssueTypeResolverDeps {
@@ -76,6 +76,7 @@ interface IssueTypeEntry {
   name: string;
   untranslatedName: string | undefined;
   subtask: boolean;
+  projectScoped: boolean;
 }
 
 function parseIssueTypes(body: unknown): IssueTypeEntry[] {
@@ -90,6 +91,7 @@ function parseIssueTypes(body: unknown): IssueTypeEntry[] {
       name,
       untranslatedName: readString((entry as { untranslatedName?: unknown } | null)?.untranslatedName),
       subtask: (entry as { subtask?: unknown } | null)?.subtask === true,
+      projectScoped: readString((entry as { scope?: { type?: unknown } } | null)?.scope?.type) === "PROJECT",
     });
   }
   return entries;
@@ -101,7 +103,11 @@ function parseIssueTypes(body: unknown): IssueTypeEntry[] {
 function resolveFrom(entries: IssueTypeEntry[]): IssueTypeResolution {
   const target = ISSUE_TYPE_NAME.execution.toLowerCase();
   const availableNames: string[] = [];
+  let teamManaged = false;
   for (const entry of entries) {
+    if (entry.projectScoped) {
+      teamManaged = true;
+    }
     if (entry.subtask) {
       continue;
     }
@@ -110,7 +116,7 @@ function resolveFrom(entries: IssueTypeEntry[]): IssueTypeResolution {
     }
     availableNames.push(entry.name);
   }
-  return { kind: "unavailable", availableNames };
+  return { kind: "unavailable", availableNames, teamManaged };
 }
 
 class IssueTypeResolver {
@@ -210,7 +216,8 @@ class IssueTypeResolver {
  * `GET /rest/api/3/issue/createmeta/{projectKey}/issuetypes` (basic auth). Returns a total
  * {@link IssueTypeResolution}: `resolved` with the project's verbatim name when a non-subtask type
  * matches {@link ISSUE_TYPE_NAME.execution} case-insensitively (by `name` or `untranslatedName`),
- * `unavailable` with the project's non-subtask type names when the listing succeeds but lacks it, and
+ * `unavailable` with the project's non-subtask type names plus a `teamManaged` flag (true when any
+ * listed type carries a `PROJECT`-scoped entry) when the listing succeeds but lacks it, and
  * `unknown` on any HTTP error, network fault, timeout, or unparseable body. Never throws. Diagnostics
  * are allowlisted status/shape only: the token and the basic-auth header never reach the logger.
  */
