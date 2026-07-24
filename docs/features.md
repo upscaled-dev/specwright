@@ -243,6 +243,13 @@ Test-key and scenario nodes show pass/fail/skipped badges from the most recent *
 
 Important caveat: runs launched from the Test Explorer do **not** produce badges — the extension's own runs write their JSON report to a temp file and delete it after parsing. Badges appear only for runs whose Playwright config writes a JSON report to one of the paths above (for example a plain `npx playwright test` with a `['json', { outputFile: 'results.json' }]` reporter). Deeper integration with the extension's own runs lands in a later phase. The panel watches the report paths, so badges refresh when a report is written and clear when it is deleted.
 
+### Jira project prerequisites
+
+Publishing test results writes a **Test Execution** issue to the target Jira project, so that project needs a "Test Execution" issue type before a publish can succeed.
+
+- **Company-managed projects** get it through Xray's own setup: the "Add Xray Issue Types" action in Xray settings, or membership in an issue type scheme that includes it.
+- **Team-managed projects** need it added by hand. Create a work type named "Test Execution" in the project settings, then map it under Xray Settings > Work Types Mapping. A team-managed project only has the Xray work types someone created, so it can carry Test, Test Set and others yet still lack Test Execution.
+
 ### Settings
 
 Controlled by `playwrightBddRunner.traceability.enablePanel` (boolean, default `true`) — disabling hides the view and tears down its watchers. The `traceability.*` settings (plus `xray.siteUrl`) are in [settings.md](settings.md).
