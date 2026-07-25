@@ -198,6 +198,26 @@ describe("PublishLedger", () => {
     expect(persisted[0]!.pendingAttachments).toEqual([]);
   });
 
+  it("clear drops every site's entries, persists the empty list, and reports how many went", () => {
+    const memento = fakeMemento([
+      entry({ artifactId: "a", site: "acme.atlassian.net" }),
+      entry({ artifactId: "b", site: "other.atlassian.net" }),
+    ]);
+    const ledger = new PublishLedger(memento, logger);
+
+    expect(ledger.clear()).toBe(2);
+    expect(ledger.entriesForSite("acme.atlassian.net")).toEqual([]);
+    expect(ledger.entriesForSite("other.atlassian.net")).toEqual([]);
+    expect(memento.store.get("specwright.publishLedger")).toEqual([]);
+    expect(new PublishLedger(memento, logger).find("a", "acme.atlassian.net")).toBeUndefined();
+  });
+
+  it("clear on an empty ledger reports nothing removed", () => {
+    const ledger = new PublishLedger(fakeMemento(), logger);
+    expect(ledger.clear()).toBe(0);
+    expect(ledger.entriesForSite("acme.atlassian.net")).toEqual([]);
+  });
+
   it("attach-pending on a republished run leaves the earlier publish's pending record intact", () => {
     const memento = fakeMemento();
     const ledger = new PublishLedger(memento, logger);

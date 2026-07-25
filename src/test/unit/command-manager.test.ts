@@ -18,6 +18,7 @@ import { XrayAdapter } from "../../xray/xray-adapter";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
+import { PublishLedger } from "../../traceability/publish-ledger";
 import { scenarioDropId } from "../../traceability/board-data";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
@@ -39,6 +40,15 @@ function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): Playwr
     traceabilityAdapter: new XrayAdapter(config),
   };
   return { ...base, ...(overrides ?? {}) };
+}
+
+function memento(): Memento {
+  const store = new Map<string, unknown>();
+  return {
+    keys: () => [...store.keys()],
+    get: (k: string, d?: unknown) => (store.has(k) ? store.get(k) : d),
+    update: (k: string, v: unknown) => { store.set(k, JSON.parse(JSON.stringify(v))); return Promise.resolve(); },
+  } as unknown as Memento;
 }
 
 function writeTempFeature(content: string): string {
@@ -354,6 +364,11 @@ describe("command contributions ↔ handler registrations parity", () => {
     for (const command of ["playwrightBddRunner.traceability.openIssue", "playwrightBddRunner.traceability.copyKey"]) {
       expect(palette.find((e) => e.command === command)?.when).toBe("false");
     }
+  });
+
+  it("leaves clear-run-history in the palette unconditionally (the stores fill with the panel off)", () => {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    expect(palette.find((e) => e.command === "playwrightBddRunner.traceability.clearLocalRunHistory")).toBeUndefined();
   });
 
   it("puts the manage-connection gear in the traceability view title bar", () => {
@@ -827,15 +842,6 @@ describe("traceability sync contributions", () => {
 describe("traceability runAndPublish — preflight batch flow", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  function memento(): Memento {
-    const store = new Map<string, unknown>();
-    return {
-      keys: () => [...store.keys()],
-      get: (k: string, d?: unknown) => (store.has(k) ? store.get(k) : d),
-      update: (k: string, v: unknown) => { store.set(k, JSON.parse(JSON.stringify(v))); return Promise.resolve(); },
-    } as unknown as Memento;
-  }
-
   const A: ScenarioRef = { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" };
   const B: ScenarioRef = { filePath: "/ws/a.feature", line: 8, name: "B", kind: "scenario" };
   const READY_LINK: TraceLink = { testKey: "CALC-1", scenario: A, reqKeys: [], meta: { key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } } };
@@ -1289,5 +1295,107 @@ describe("traceability board unlink handler", () => {
     await unlink(mgr, scenarioDropId({ ...A, line: 999 }), "1");
     expect(applied).toHaveLength(0);
     expect(warn).toHaveBeenCalledOnce();
+  });
+});
+
+describe("traceability clearLocalRunHistory", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const SITE = "acme.atlassian.net";
+
+  function harness(runs = 2, ledgerEntries = 1) {
+    const store = new RunArtifactStore(memento(), Logger.create());
+    for (let i = 0; i < runs; i += 1) {
+      store.append({ id: `run-${i}`, createdAt: i, results: [], shards: [], selection: { kind: "all-mapped" }, preflight: [], state: "complete" });
+    }
+    const ledger = new PublishLedger(memento(), Logger.create());
+    for (let i = 0; i < ledgerEntries; i += 1) {
+      ledger.record({ artifactId: `run-${i}`, executionRef: `XNP-${i}`, site: SITE, account: "id", publishedAt: i, pendingAttachments: [] });
+    }
+    const rebuildNow = vi.fn(() => Promise.resolve());
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setPublishLedger(ledger);
+    mgr.setTraceabilitySubsystem({ rebuildNow } as unknown as TraceabilitySubsystem);
+    return { mgr, store, ledger, rebuildNow };
+  }
+
+  const clear = (mgr: CommandManager): Promise<void> =>
+    (mgr as unknown as { clearLocalRunHistory: () => Promise<void> }).clearLocalRunHistory();
+
+  it("clears nothing when the confirm is dismissed", async () => {
+    const { mgr, store, ledger } = harness();
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
+    await clear(mgr);
+    expect(store.list()).toHaveLength(2);
+    expect(ledger.entriesForSite(SITE)).toHaveLength(1);
+  });
+
+  it("asks once, with the consequences in the modal detail and both clear actions", async () => {
+    const { mgr } = harness();
+    const warn = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
+    await clear(mgr);
+    expect(warn).toHaveBeenCalledWith(
+      "Clear this workspace's local run history?",
+      {
+        modal: true,
+        detail: expect.stringContaining("forfeits those warnings for past executions"),
+      },
+      "Clear runs",
+      "Clear runs and ledger"
+    );
+  });
+
+  it("wipes the runs only on Clear runs, keeping the ledger's republish warnings", async () => {
+    const { mgr, store, ledger, rebuildNow } = harness();
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Clear runs" as never);
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    await clear(mgr);
+    expect(store.list()).toEqual([]);
+    expect(ledger.entriesForSite(SITE)).toHaveLength(1);
+    expect(info).toHaveBeenCalledWith("Cleared 2 local runs.");
+    // The board repaints off the subsystem's snapshot-change event, which this rebuild fires.
+    expect(rebuildNow).toHaveBeenCalledOnce();
+  });
+
+  it("wipes both stores on Clear runs and ledger", async () => {
+    const { mgr, store, ledger } = harness();
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Clear runs and ledger" as never);
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    await clear(mgr);
+    expect(store.list()).toEqual([]);
+    expect(ledger.entriesForSite(SITE)).toEqual([]);
+    expect(info).toHaveBeenCalledWith("Cleared 2 local runs and 1 ledger entry.");
+  });
+
+  it("names the ledger alone when there were no local runs to clear", async () => {
+    const { mgr, ledger, rebuildNow } = harness(0, 1);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Clear runs and ledger" as never);
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    await clear(mgr);
+    expect(ledger.entriesForSite(SITE)).toEqual([]);
+    expect(info).toHaveBeenCalledWith("Cleared 1 ledger entry.");
+    expect(rebuildNow).toHaveBeenCalledOnce();
+  });
+
+  it("reports an already-empty history and skips the board refresh", async () => {
+    const { mgr, rebuildNow } = harness(0, 0);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Clear runs and ledger" as never);
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    await clear(mgr);
+    expect(info).toHaveBeenCalledWith("Local run history is already empty.");
+    expect(rebuildNow).not.toHaveBeenCalled();
+  });
+
+  it("reports the clear even when the board refresh fails", async () => {
+    const { mgr, store } = harness();
+    mgr.setTraceabilitySubsystem({
+      rebuildNow: () => Promise.reject(new Error("discovery down")),
+    } as unknown as TraceabilitySubsystem);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Clear runs" as never);
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+
+    await expect(clear(mgr)).resolves.toBeUndefined();
+    expect(store.list()).toEqual([]);
+    expect(info).toHaveBeenCalledWith("Cleared 2 local runs.");
   });
 });

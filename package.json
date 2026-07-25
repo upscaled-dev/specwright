@@ -619,6 +619,11 @@
         "command": "playwrightBddRunner.traceability.switchDefaultProject",
         "title": "Switch Default Project…",
         "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.clearLocalRunHistory",
+        "title": "Clear Local Run History…",
+        "category": "Specwright"
       }
     ],
     "viewsContainers": {

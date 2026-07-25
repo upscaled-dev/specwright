@@ -263,6 +263,35 @@ describe("RunArtifactStore", () => {
     expect(store.list()).toHaveLength(10);
     expect(store.latest()?.id).toBe("run-0");
   });
+
+  it("clear empties the buffer, persists the empty list, and reports how many went", () => {
+    const memento = fakeMemento();
+    const store = new RunArtifactStore(memento, logger);
+    store.append(artifact({ id: "a" }));
+    store.append(artifact({ id: "b" }));
+
+    expect(store.clear()).toBe(2);
+    expect(store.list()).toEqual([]);
+    expect(store.latest()).toBeUndefined();
+    expect(memento.get("specwright.runArtifacts")).toEqual([]);
+    expect(new RunArtifactStore(memento, logger).list()).toEqual([]);
+  });
+
+  it("clear on an empty store reports nothing removed", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    expect(store.clear()).toBe(0);
+    expect(store.list()).toEqual([]);
+  });
+
+  it("clear leaves an open batch alone, so it seals and appends afterwards", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    const batch = store.beginBatch(FEATURE_SEL);
+    store.clear();
+    store.contributeShard(batch, shard({ details: [scenario()] }));
+
+    expect(store.sealBatch(batch, false)?.results).toHaveLength(1);
+    expect(store.list()).toHaveLength(1);
+  });
 });
 
 describe("testKey threading and preflight decisions", () => {

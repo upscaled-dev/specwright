@@ -122,6 +122,15 @@ export class PublishLedger {
     this.persist();
   }
 
+  // Drops every site's entries and returns how many went. Site-wide on purpose: this is machine-local
+  // history, and the command that calls it asks for the whole ledger explicitly.
+  public clear(): number {
+    const removed = this.entries.length;
+    this.entries = [];
+    this.persist();
+    return removed;
+  }
+
   private persist(): void {
     Promise.resolve(this.memento.update(PublishLedger.STORAGE_KEY, this.entries)).catch((error: unknown) => {
       this.logger.warn("Failed to persist the publish ledger", { error: String(error) });

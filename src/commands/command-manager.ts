@@ -116,8 +116,16 @@ function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
-function plural(count: number, word: string): string {
-  return count === 1 ? word : `${word}s`;
+function plural(count: number, word: string, many = `${word}s`): string {
+  return count === 1 ? word : many;
+}
+
+// The clear-run-history toast, naming only what was actually removed.
+function clearedHistoryMessage(runs: number, entries: number): string {
+  const parts: string[] = [];
+  if (runs > 0) {parts.push(`${runs} local ${plural(runs, "run")}`);}
+  if (entries > 0) {parts.push(`${entries} ledger ${plural(entries, "entry", "entries")}`);}
+  return parts.length === 0 ? "Local run history is already empty." : `Cleared ${parts.join(" and ")}.`;
 }
 
 export class CommandManager {
@@ -242,6 +250,7 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.hidePanel", title: "Hide Traceability Panel", category: CATEGORY, handler: this.hideTraceabilityPanel.bind(this) },
         { command: "playwrightBddRunner.traceability.toggleGrouping", title: "Toggle Grouping", category: CATEGORY, handler: this.toggleGrouping.bind(this) },
         { command: "playwrightBddRunner.traceability.switchDefaultProject", title: "Switch Default Project…", category: CATEGORY, handler: this.switchDefaultProject.bind(this) },
+        { command: "playwrightBddRunner.traceability.clearLocalRunHistory", title: "Clear Local Run History…", category: CATEGORY, handler: this.clearLocalRunHistory.bind(this) },
       ];
 
       for (const cmd of commands) {
@@ -890,6 +899,40 @@ export class CommandManager {
       });
     } finally {
       board.publish.markSettled();
+    }
+  }
+
+  // Clear Local Run History: wipes the two machine-local stores behind the publish surfaces. Nothing
+  // remote is touched. The ledger goes only through the second button, since losing it also loses the
+  // republish warning for every past execution.
+  private async clearLocalRunHistory(): Promise<void> {
+    const choice = await vscode.window.showWarningMessage(
+      "Clear this workspace's local run history?",
+      {
+        modal: true,
+        detail:
+          "Local runs feed the Publish tab. The publish ledger drives the Executions tab and warns you before republishing a run. Clearing the ledger forfeits those warnings for past executions.",
+      },
+      "Clear runs",
+      "Clear runs and ledger"
+    );
+    if (choice !== "Clear runs" && choice !== "Clear runs and ledger") {
+      return;
+    }
+    const runs = this.context.runArtifactStore?.clear() ?? 0;
+    const entries = choice === "Clear runs and ledger" ? (this.publishLedger?.clear() ?? 0) : 0;
+    // Report before refreshing: the wipe has already happened, so a failing rebuild must not turn a
+    // completed clear into a command failure.
+    vscode.window.showInformationMessage(clearedHistoryMessage(runs, entries));
+    if (runs === 0 && entries === 0) {
+      return;
+    }
+    // An open board repaints on the subsystem's snapshot-change event, which a forced rebuild fires, so
+    // the Executions tab drops the wiped runs without a reopen.
+    try {
+      await this.traceabilitySubsystem?.rebuildNow();
+    } catch (error) {
+      this.logger.warn("Refreshing the board after clearing run history failed", { error: errMsg(error) });
     }
   }
 
