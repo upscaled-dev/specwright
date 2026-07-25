@@ -30,6 +30,7 @@ import {
 } from "./execution-importers";
 import { ISSUE_TYPE_NAME, JiraIssueKind, searchJiraIssues, JiraIssueSearchResult } from "./jira-issue-search";
 import { IssueTypeResolution, resolveExecutionIssueType } from "./jira-issue-types";
+import { JiraProjectSearchResult, searchJiraProjects } from "./jira-project-search";
 
 export type AttachTo = "evidence" | "issue" | "both";
 
@@ -41,6 +42,14 @@ export type IssueSearcher = (deps: {
   logger: Logger;
   signal?: AbortSignal | undefined;
 }) => Promise<JiraIssueSearchResult>;
+
+export type ProjectSearcher = (deps: {
+  site: string;
+  credentials: XrayJiraCredentials;
+  query: string;
+  logger: Logger;
+  signal?: AbortSignal | undefined;
+}) => Promise<JiraProjectSearchResult>;
 
 export type IssueTypeResolver = (deps: {
   site: string;
@@ -66,6 +75,7 @@ export interface XrayResultPublishingDeps {
   // Injectable for tests; default to the live fs / Jira issue search.
   evidenceFs?: EvidenceFs | undefined;
   searchIssues?: IssueSearcher | undefined;
+  searchProjects?: ProjectSearcher | undefined;
   resolveIssueType?: IssueTypeResolver | undefined;
 }
 
@@ -83,7 +93,7 @@ function executionKeyOf(response: ExecutionImportResponse, request: PublishReque
 }
 
 function toPublishTarget(issue: { key: string; summary: string }): PublishTarget {
-  return { id: issue.key, label: `${issue.key} — ${issue.summary}`, ref: { key: issue.key } };
+  return { id: issue.key, label: `${issue.key} · ${issue.summary}`, ref: { key: issue.key } };
 }
 
 interface EvidencePlan {
@@ -244,14 +254,27 @@ async function publishAppend(
  */
 export function createXrayResultPublishing(deps: XrayResultPublishingDeps): ResultPublishingCapability {
   const searchIssues = deps.searchIssues ?? searchJiraIssues;
+  const searchProjects = deps.searchProjects ?? searchJiraProjects;
   const resolveIssueType = deps.resolveIssueType ?? resolveExecutionIssueType;
   return {
     async searchTargets(kind, query, signal): Promise<readonly PublishTarget[]> {
       const credentials = await deps.jiraCredentials();
       if (credentials === undefined) {
         throw new NotSupportedError(
-          "Searching Xray executions needs Jira credentials — add them in Xray setup, or type the key directly."
+          "Searching Jira needs credentials, add them in Xray setup, or type the key directly."
         );
+      }
+      // Projects have no JQL query: the endpoint's own `query` parameter narrows on key and name, so
+      // the match happens server-side and a hit past the project cap is still found.
+      if (kind === "project") {
+        const result = await searchProjects({
+          site: deps.site(),
+          credentials,
+          query,
+          logger: deps.logger,
+          ...(signal !== undefined ? { signal } : {}),
+        });
+        return result.projects.map((project) => toPublishTarget({ key: project.key, summary: project.name }));
       }
       const result = await searchIssues({
         site: deps.site(),

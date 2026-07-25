@@ -1077,11 +1077,12 @@ describe("traceability publishLastRun — Publish tab", () => {
     };
   }
 
-  function connectedSubsystem(): TraceabilitySubsystem {
+  function connectedSubsystem(catalogueProjects: string[] = []): TraceabilitySubsystem {
     const adapter = {
       id: "xray",
       label: "Xray",
       keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", projectOf: (k: string) => k.split("-")[0] },
+      metadata: { snapshot: () => ({ catalogueProjects }) },
       resultPublishing: {
         searchTargets: () => Promise.resolve([]),
         publish: () => Promise.resolve({ ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [] }),
@@ -1109,6 +1110,33 @@ describe("traceability publishLastRun — Publish tab", () => {
     expect(panel.webview.__posted.find((m) => m.surface === "publish" && m.type === "model")).toBeDefined();
 
     // Cancel resolves the present so the flow (and its finally) unwinds.
+    await panel.__receive({ surface: "publish", type: "cancel" });
+    await promise;
+  });
+
+  it("seeds the dialog's project keys from the sync config, the catalogue snapshot and the default key", async () => {
+    const workspaceConfig = {
+      get: (key: string, fallback: unknown) => {
+        if (key === "xray.syncProjectKeys") { return ["calc", "shop"]; }
+        return key === "xray.defaultProjectKey" ? " pay " : fallback;
+      },
+    } as unknown as vscode.WorkspaceConfiguration;
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(
+      makeContext({ runArtifactStore: store, config: ExtensionConfig.create(workspaceConfig, false) })
+    );
+    mgr.setTraceabilitySubsystem(connectedSubsystem(["SHOP", "MATH"]));
+
+    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    await flush();
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+
+    const model = panel.webview.__posted.find((m) => m.surface === "publish" && m.type === "model") as unknown as {
+      model: { knownProjectKeys: string[] };
+    };
+    expect(model.model.knownProjectKeys).toEqual(["CALC", "MATH", "PAY", "SHOP"]);
+
     await panel.__receive({ surface: "publish", type: "cancel" });
     await promise;
   });

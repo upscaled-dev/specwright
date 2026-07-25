@@ -329,12 +329,12 @@ export interface RemoteSearchCapability {
 }
 
 export interface ResultPublishingCapability {
-  // Search the tracker for existing containers — executions to append to, test plans to associate a
-  // new execution with. Requires provider credentials for the query API; rejects with a
-  // `NotSupportedError` when they are absent, and the dialog falls back to a plain key input (the
-  // import response is then the only validator).
+  // Search the tracker for the targets a publish can name: executions to append to, test plans to
+  // associate a new execution with, projects to create one in. Requires provider credentials for the
+  // query API; rejects with a `NotSupportedError` when they are absent, and the dialog falls back to a
+  // plain key input (the import response is then the only validator).
   searchTargets(
-    kind: "execution" | "test-plan",
+    kind: "execution" | "test-plan" | "project",
     query: string,
     signal?: AbortSignal
   ): Promise<readonly PublishTarget[]>;

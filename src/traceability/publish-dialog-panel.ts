@@ -17,7 +17,11 @@ export interface PendingAttachmentsResult {
 // can drive it) and returns the picked files with their sizes. `attachPending` uploads a run's ledgered
 // pending files WITHOUT a reimport and returns how many still failed.
 export interface PublishDialogDelegate {
-  searchTargets(kind: "execution" | "test-plan", query: string, signal?: AbortSignal): Promise<readonly PublishTarget[]>;
+  searchTargets(
+    kind: "execution" | "test-plan" | "project",
+    query: string,
+    signal?: AbortSignal
+  ): Promise<readonly PublishTarget[]>;
   browseFiles(): Promise<readonly AttachmentSuggestion[]>;
   attachPending(runId: string): Promise<PendingAttachmentsResult>;
 }
@@ -25,7 +29,7 @@ export interface PublishDialogDelegate {
 interface SearchMessage {
   type: "search";
   token: number;
-  kind: "execution" | "test-plan";
+  kind: "execution" | "test-plan" | "project";
   query: string;
 }
 interface BrowseMessage {
@@ -252,6 +256,7 @@ const PUBLISH_PANE = `<div id="publish-idle" class="idle">${escapeHtml(IDLE_HINT
         <div id="create-fields">
           <label for="project">Project key</label>
           <input id="project" type="text" spellcheck="false" autocapitalize="characters">
+          <ul id="project-results" class="results"></ul>
           <div class="hint" id="project-hint" hidden>from this run's test keys</div>
           <div id="err-project" class="field-error"></div>
 
@@ -306,6 +311,7 @@ const PUBLISH_SCRIPT = `
   const execInput = document.getElementById('execution');
   const execResults = document.getElementById('exec-results');
   const planResults = document.getElementById('plan-results');
+  const projectResults = document.getElementById('project-results');
   const errProject = document.getElementById('err-project');
   const errSummary = document.getElementById('err-summary');
   const errExecution = document.getElementById('err-execution');
@@ -319,6 +325,7 @@ const PUBLISH_SCRIPT = `
   let runs = [];
   let selectedRunId = null;
   let searchable = false;
+  let knownKeys = [];
   let attachModel = { available: false, suggestions: [], uploadLimitBytes: 0, evidenceStream: 'evidence' };
   let seenPaths = new Set();
   let token = 0;
@@ -375,6 +382,7 @@ const PUBLISH_SCRIPT = `
     projectHint.hidden = !run.project.fromDerivation;
     summaryInput.value = run.defaultSummary;
     planInput.value = run.prefillPlanKey || '';
+    clearResults(projectResults);
     renderBanners(run);
   }
 
@@ -445,17 +453,48 @@ const PUBLISH_SCRIPT = `
     listEl.__input = targetInput;
   }
 
+  // A cleared list also retires its token, so a debounced response still in flight cannot repaint a
+  // field the user has already committed or dismissed.
+  function clearResults(listEl) {
+    listEl.textContent = '';
+    listEl.__token = -1;
+  }
+
   function renderResults(listEl, items) {
     listEl.textContent = '';
     for (const item of items) {
       const li = document.createElement('li');
       li.textContent = item.label;
-      li.addEventListener('click', function () {
+      // mousedown, not click: the list must commit before the input's blur can dismiss it.
+      li.addEventListener('mousedown', function () {
         listEl.__input.value = item.key;
-        listEl.textContent = '';
+        clearResults(listEl);
       });
       listEl.appendChild(li);
     }
+  }
+
+  function matchingKnownKeys(query) {
+    const needle = query.toLowerCase();
+    return knownKeys.filter(function (key) { return needle === '' || key.toLowerCase().indexOf(needle) >= 0; });
+  }
+
+  // Known project keys are local data, so this list renders with or without Jira search; a live result
+  // for the same query merges over it when one arrives.
+  function showKnownKeys(query) {
+    projectResults.__input = projectInput;
+    renderResults(projectResults, matchingKnownKeys(query).map(function (key) { return { key: key, label: key }; }));
+  }
+
+  // A remote hit wins its slot; the local keys the site did not return still follow, so a project known
+  // only from the workspace's own config stays reachable.
+  function mergedProjectItems(items) {
+    const merged = items.slice();
+    const seen = new Set(items.map(function (item) { return item.key; }));
+    for (const key of matchingKnownKeys(projectInput.value.trim())) {
+      if (!seen.has(key)) { merged.push({ key: key, label: key }); }
+    }
+    return merged;
   }
 
   function show(which) {
@@ -470,6 +509,7 @@ const PUBLISH_SCRIPT = `
     runs = model.runs || [];
     selectedRunId = model.selectedRunId;
     searchable = !!model.jiraSearchAvailable;
+    knownKeys = model.knownProjectKeys || [];
     attachModel = model.attachments;
     seenPaths = new Set();
     titleEl.textContent = model.title;
@@ -487,8 +527,9 @@ const PUBLISH_SCRIPT = `
     errExecution.textContent = '';
     execInput.value = '';
     envInput.value = '';
-    execResults.textContent = '';
-    planResults.textContent = '';
+    clearResults(execResults);
+    clearResults(planResults);
+    clearResults(projectResults);
     modeCreate.checked = true;
     applyMode();
     execHint.textContent = searchable
@@ -521,6 +562,16 @@ const PUBLISH_SCRIPT = `
   }
   execInput.addEventListener('input', function () { runSearch('execution', execInput.value.trim(), execResults, execInput); });
   planInput.addEventListener('input', function () { runSearch('test-plan', planInput.value.trim(), planResults, planInput); });
+  projectInput.addEventListener('focus', function () { showKnownKeys(''); });
+  projectInput.addEventListener('input', function () {
+    const query = projectInput.value.trim();
+    showKnownKeys(query);
+    runSearch('project', query, projectResults, projectInput);
+  });
+  projectInput.addEventListener('blur', function () { clearResults(projectResults); });
+  projectInput.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') { clearResults(projectResults); }
+  });
 
   document.getElementById('cancel').addEventListener('click', function () {
     show('idle');
@@ -558,9 +609,10 @@ const PUBLISH_SCRIPT = `
     } else if (msg.type === 'settled') {
       show('idle');
     } else if (msg.type === 'search-result') {
-      const listEl = msg.kind === 'execution' ? execResults : planResults;
+      const listEl = msg.kind === 'execution' ? execResults : (msg.kind === 'project' ? projectResults : planResults);
       if (listEl.__token !== msg.token) { return; }
-      renderResults(listEl, msg.error ? [] : msg.items);
+      const items = msg.error ? [] : msg.items;
+      renderResults(listEl, msg.kind === 'project' ? mergedProjectItems(items) : items);
     } else if (msg.type === 'browse-result') {
       for (const file of msg.items) { addAttachmentRow(file); }
     } else if (msg.type === 'pending-result') {

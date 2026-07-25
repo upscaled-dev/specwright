@@ -90,6 +90,7 @@ function deps(runs: readonly RunArtifact[], over: Partial<PublishFlowDeps> = {})
     changedSinceRun: () => 0,
     defaultProjectKey: "",
     jiraSearchAvailable: false,
+    knownProjectKeys: [],
     attachments: () => Promise.resolve(ATTACHMENTS_MODEL),
     priorEntryFor: () => undefined,
     presentDialog: vi.fn<(m: PublishDialogModel) => Promise<PublishDialogResult | undefined>>(() =>
@@ -230,6 +231,20 @@ describe("runPublishFlow — project prefill derivation", () => {
     const run = artifact({ results: [mapped("a", "CALC-1"), mapped("b", "SHOP-2")] });
     await runPublishFlow(deps([run], cap.over));
     expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "", fromDerivation: false });
+  });
+});
+
+describe("runPublishFlow: known project keys", () => {
+  it("drops empties, dedupes and sorts the seeded keys onto the model, leaving casing to the caller", async () => {
+    const cap = captureModel({ knownProjectKeys: ["SHOP", "CALC", "CALC", "", "PAY"] });
+    await runPublishFlow(deps([artifact()], cap.over));
+    expect(cap.models[0]!.knownProjectKeys).toEqual(["CALC", "PAY", "SHOP"]);
+  });
+
+  it("passes an empty list through when nothing is known locally", async () => {
+    const cap = captureModel({ knownProjectKeys: [] });
+    await runPublishFlow(deps([artifact()], cap.over));
+    expect(cap.models[0]!.knownProjectKeys).toEqual([]);
   });
 });
 

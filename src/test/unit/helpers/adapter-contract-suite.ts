@@ -152,5 +152,20 @@ export function runAdapterContractTests(makeHarness: () => AdapterContractHarnes
       const targets = await publishing!.searchTargets("execution", "");
       expect(targets.some((t) => t.ref.key === outcome.ref.key)).toBe(true);
     });
+
+    // The kinds are distinct target spaces: a provider with no project concept answers empty, but
+    // none may answer one kind with another kind's targets.
+    (supportsPublishing ? it : it.skip)("never answers the project kind with execution targets", async () => {
+      const harness = makeHarness();
+      await harness.connect();
+      const publishing = harness.adapter.resultPublishing!;
+      await publishing.publish(harness.makeArtifact(), harness.publishRequest);
+
+      const executions = await publishing.searchTargets("execution", "");
+      const projects = await publishing.searchTargets("project", "");
+
+      expect(executions.length).toBeGreaterThan(0);
+      expect(projects.some((target) => executions.some((execution) => execution.ref.key === target.ref.key))).toBe(false);
+    });
   });
 }

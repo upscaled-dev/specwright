@@ -31,9 +31,13 @@ export interface JiraProjectSearchDeps {
   site: string;
   credentials: XrayJiraCredentials;
   logger: Logger;
+  // Endpoint-side filter, matched case-insensitively against key AND name by Jira. Absent = the whole
+  // accessible list, so a filtered search still sees matches beyond the MAX_PROJECTS cap.
+  query?: string | undefined;
   fetchImpl?: FetchLike | undefined;
   sleep?: ((ms: number) => Promise<void>) | undefined;
   random?: (() => number) | undefined;
+  signal?: AbortSignal | undefined;
 }
 
 // Non-retryable Jira access failure (bad credentials, forbidden, not found). Carries a value-free,
@@ -146,7 +150,9 @@ class JiraProjectSearch {
 
   public async run(): Promise<JiraProjectSearchResult> {
     const projects: JiraProject[] = [];
-    let url = `https://${this.deps.site}/rest/api/3/project/search?startAt=0&maxResults=${PAGE_SIZE}`;
+    const query = this.deps.query?.trim() ?? "";
+    const filter = query === "" ? "" : `&query=${encodeURIComponent(query)}`;
+    let url = `https://${this.deps.site}/rest/api/3/project/search?startAt=0&maxResults=${PAGE_SIZE}${filter}`;
     for (let requested = 0; requested < MAX_PAGES; requested++) {
       const page = await this.requestPage(url);
       for (const project of page.projects) {
@@ -215,6 +221,8 @@ class JiraProjectSearch {
   private async timedFetch(url: string): Promise<TimedResponse> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const onAbort = (): void => controller.abort();
+    this.deps.signal?.addEventListener("abort", onAbort);
     try {
       const response = await this.fetchImpl(url, {
         method: "GET",
@@ -233,13 +241,15 @@ class JiraProjectSearch {
       throw new RetryableError(scrubJwtLike(errorMessage(error)));
     } finally {
       clearTimeout(timer);
+      this.deps.signal?.removeEventListener("abort", onAbort);
     }
   }
 }
 
 /**
  * Lists the Jira projects the supplied credentials can access via `GET /rest/api/3/project/search`
- * (basic auth, `values[].{key,name}`, paginated by `isLast`/`nextPage`, capped at {@link MAX_PROJECTS}).
+ * (basic auth, `values[].{key,name}`, paginated by `isLast`/`nextPage`, capped at {@link MAX_PROJECTS}),
+ * narrowed server-side by the optional `query` (Jira matches key and name, case-insensitively).
  * Returns `{ projects, truncated }` — `truncated` is true when the cap cut the list short, so callers
  * never treat absence from a partial list as proof a project is missing. Throws {@link JiraAccessError}
  * with a value-free message on a terminal failure. Diagnostics are allowlisted shape/status/count only

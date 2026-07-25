@@ -40,7 +40,11 @@ function page(values: Array<{ key: string; name: string }>, extra: Record<string
   return { startAt: 0, maxResults: 50, total: values.length, isLast: true, values, ...extra };
 }
 
-function run(fetchImpl: FetchLike, logger: Logger): Promise<JiraProjectSearchResult> {
+function run(
+  fetchImpl: FetchLike,
+  logger: Logger,
+  over: { query?: string; signal?: AbortSignal } = {}
+): Promise<JiraProjectSearchResult> {
   return searchJiraProjects({
     site: SITE,
     credentials: { email: EMAIL, token: TOKEN },
@@ -48,6 +52,7 @@ function run(fetchImpl: FetchLike, logger: Logger): Promise<JiraProjectSearchRes
     fetchImpl,
     sleep: () => Promise.resolve(),
     random: () => 0,
+    ...over,
   });
 }
 
@@ -75,6 +80,48 @@ describe("searchJiraProjects", () => {
     expect(requestedUrl).toBe(`https://${SITE}${SEARCH_PATH}?startAt=0&maxResults=50`);
     const expected = `Basic ${Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64")}`;
     expect(authHeader).toBe(expected);
+  });
+
+  it("narrows the request with the endpoint's own query parameter, url-encoded", async () => {
+    const { logger } = capturingLogger();
+    let requestedUrl = "";
+    const fetchImpl: FetchLike = (url) => {
+      requestedUrl = url;
+      return Promise.resolve(response(200, page([{ key: "CALC", name: "Calculator" }])));
+    };
+
+    await run(fetchImpl, logger, { query: "  my calc  " });
+
+    expect(requestedUrl).toBe(`https://${SITE}${SEARCH_PATH}?startAt=0&maxResults=50&query=my%20calc`);
+  });
+
+  it("omits the query parameter entirely when no query is given", async () => {
+    const { logger } = capturingLogger();
+    let requestedUrl = "";
+    const fetchImpl: FetchLike = (url) => {
+      requestedUrl = url;
+      return Promise.resolve(response(200, page([])));
+    };
+
+    await run(fetchImpl, logger, { query: "   " });
+
+    expect(requestedUrl).not.toContain("query=");
+  });
+
+  it("threads the caller's abort signal into the fetch, so an abort cancels the request", async () => {
+    const { logger } = capturingLogger();
+    const controller = new AbortController();
+    let aborted: boolean | undefined;
+    const fetchImpl: FetchLike = (_url, init) => {
+      const signal = init.signal as AbortSignal;
+      controller.abort();
+      aborted = signal.aborted;
+      return Promise.resolve(response(200, page([{ key: "CALC", name: "Calculator" }])));
+    };
+
+    await run(fetchImpl, logger, { signal: controller.signal });
+
+    expect(aborted).toBe(true);
   });
 
   it("follows nextPage until isLast and aggregates every page", async () => {

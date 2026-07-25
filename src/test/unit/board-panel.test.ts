@@ -182,6 +182,7 @@ describe("BoardPanel", () => {
       runs: [],
       selectedRunId: "",
       jiraSearchAvailable: false,
+      knownProjectKeys: [],
       attachments: { available: false, suggestions: [], uploadLimitBytes: 0, evidenceStream: "evidence" },
     });
     await panel.__receive({ type: "tab", tab: "publish" });

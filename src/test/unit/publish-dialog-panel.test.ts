@@ -73,13 +73,14 @@ function makeModel(over: Partial<PublishDialogModel> = {}): PublishDialogModel {
     runs: [runOption()],
     selectedRunId: "run-1",
     jiraSearchAvailable: true,
+    knownProjectKeys: [],
     attachments: attachmentsModel(),
     ...over,
   };
 }
 
 interface DeferredCall {
-  kind: "execution" | "test-plan";
+  kind: "execution" | "test-plan" | "project";
   query: string;
   signal: AbortSignal | undefined;
   resolve: (targets: readonly PublishTarget[]) => void;
@@ -325,6 +326,24 @@ describe("PublishSurface — search", () => {
     await flush();
 
     expect(rig.posted.filter((m) => m.type === "search-result")).toHaveLength(0);
+  });
+
+  it("carries the project kind through to the delegate and back on the response", async () => {
+    const { delegate, calls } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    void publish.present(makeModel());
+
+    rig.receive({ type: "search", token: 7, kind: "project", query: "ca" });
+    expect(calls[0]).toMatchObject({ kind: "project", query: "ca" });
+
+    calls[0]!.resolve([target("CALC", "CALC · Calculator")]);
+    await flush();
+
+    expect(rig.posted.filter((m) => m.type === "search-result")[0]).toMatchObject({
+      token: 7,
+      kind: "project",
+      items: [{ key: "CALC", label: "CALC · Calculator" }],
+    });
   });
 });
 

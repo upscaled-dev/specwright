@@ -879,6 +879,11 @@ export class CommandManager {
         changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
         defaultProjectKey: this.context.config.xrayDefaultProjectKey,
         jiraSearchAvailable,
+        knownProjectKeys: [
+          ...this.context.config.xraySyncProjectKeys,
+          ...(adapter.metadata?.snapshot().catalogueProjects ?? []),
+          this.context.config.xrayDefaultProjectKey,
+        ].map((key) => key.trim().toUpperCase()),
         // Lazy — the flow calls this only after the no-runs gate, so an empty run list never fires the
         // one allowed pre-confirm call (the attachment/meta probe).
         attachments: () => this.buildPublishAttachments(rawSite),

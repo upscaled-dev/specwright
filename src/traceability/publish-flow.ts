@@ -73,6 +73,7 @@ export interface PublishDialogModel {
   readonly runs: readonly PublishRunOption[];
   readonly selectedRunId: string;
   readonly jiraSearchAvailable: boolean;
+  readonly knownProjectKeys: readonly string[];
   readonly attachments: PublishAttachmentsModel;
 }
 
@@ -99,6 +100,9 @@ export interface PublishFlowDeps {
   changedSinceRun(results: readonly PublishableResult[]): number;
   defaultProjectKey: string;
   jiraSearchAvailable: boolean;
+  // Keys already known locally (sync config, snapshot catalogue), in the provider's own casing, seeding
+  // the dialog's project dropdown. The flow only drops empties, dedupes, and sorts.
+  knownProjectKeys: readonly string[];
   // Built lazily — only when the dialog is actually about to open (after the no-runs gate), so an
   // empty run list never fires the one allowed pre-confirm call (the `attachment/meta` probe).
   attachments(): Promise<PublishAttachmentsModel>;
@@ -187,11 +191,16 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
       ? deps.preselectId
       : newest.id;
 
+  const knownProjectKeys = [...new Set(deps.knownProjectKeys.filter((key) => key !== ""))].sort((a, b) =>
+    a.localeCompare(b)
+  );
+
   const dialog = await deps.presentDialog({
     title: "Publish run results",
     runs: options,
     selectedRunId,
     jiraSearchAvailable: deps.jiraSearchAvailable,
+    knownProjectKeys,
     attachments,
   });
   if (dialog === undefined) {

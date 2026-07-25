@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
 import * as path from "node:path";
-import { createXrayResultPublishing, IssueSearcher, IssueTypeResolver, XrayResultPublishingDeps } from "../../xray/xray-result-publishing";
+import {
+  createXrayResultPublishing,
+  IssueSearcher,
+  IssueTypeResolver,
+  ProjectSearcher,
+  XrayResultPublishingDeps,
+} from "../../xray/xray-result-publishing";
 import { ImportResponse, ImportTransport, StepResolver } from "../../xray/execution-importers";
 import { NotSupportedError, PreflightDecision, RunArtifact, RunArtifactResult, ShardInfo } from "../../traceability/contracts";
 import { EvidenceFs } from "../../traceability/evidence-resolution";
@@ -440,8 +446,67 @@ describe("createXrayResultPublishing — searchTargets", () => {
     expect(searchIssues).toHaveBeenCalledTimes(1);
     expect(searchIssues.mock.calls[0]![0]).toMatchObject({ kind: "execution", query: "XNP", site: "acme.atlassian.net" });
     expect(targets).toEqual([
-      { id: "XNP-1", label: "XNP-1 — Nightly", ref: { key: "XNP-1" } },
-      { id: "XNP-2", label: "XNP-2 — Smoke", ref: { key: "XNP-2" } },
+      { id: "XNP-1", label: "XNP-1 · Nightly", ref: { key: "XNP-1" } },
+      { id: "XNP-2", label: "XNP-2 · Smoke", ref: { key: "XNP-2" } },
     ]);
+  });
+});
+
+describe("createXrayResultPublishing: searchTargets (project kind)", () => {
+  const JIRA = { email: "a@b.c", token: "t" };
+  const PROJECTS = [
+    { key: "CALC", name: "Calculator" },
+    { key: "SHOP", name: "Storefront" },
+  ];
+
+  it("maps the site's projects to publish targets and never calls the issue search", async () => {
+    const searchProjects = vi.fn<ProjectSearcher>(() => Promise.resolve({ projects: PROJECTS, truncated: false }));
+    const searchIssues = vi.fn<IssueSearcher>(() => Promise.resolve({ issues: [], truncated: false }));
+    const publishing = createXrayResultPublishing(
+      makeDeps({ jiraCredentials: () => Promise.resolve(JIRA), searchProjects, searchIssues })
+    );
+
+    const targets = await publishing.searchTargets("project", "");
+
+    expect(searchProjects.mock.calls[0]![0]).toMatchObject({ site: "acme.atlassian.net" });
+    expect(searchIssues).not.toHaveBeenCalled();
+    expect(targets).toEqual([
+      { id: "CALC", label: "CALC · Calculator", ref: { key: "CALC" } },
+      { id: "SHOP", label: "SHOP · Storefront", ref: { key: "SHOP" } },
+    ]);
+  });
+
+  it("forwards the query and the abort signal so the match happens server-side", async () => {
+    const searchProjects = vi.fn<ProjectSearcher>(() => Promise.resolve({ projects: PROJECTS, truncated: false }));
+    const publishing = createXrayResultPublishing(
+      makeDeps({ jiraCredentials: () => Promise.resolve(JIRA), searchProjects })
+    );
+    const controller = new AbortController();
+
+    const targets = await publishing.searchTargets("project", "ca", controller.signal);
+
+    expect(searchProjects.mock.calls[0]![0]).toMatchObject({ query: "ca", signal: controller.signal });
+    // Whatever the endpoint returned is the answer: nothing is filtered a second time here.
+    expect(targets.map((t) => t.ref.key)).toEqual(["CALC", "SHOP"]);
+  });
+
+  it("labels a project whose name fell back to its key with the key twice", async () => {
+    const publishing = createXrayResultPublishing(
+      makeDeps({
+        jiraCredentials: () => Promise.resolve(JIRA),
+        searchProjects: () => Promise.resolve({ projects: [{ key: "SOLO", name: "SOLO" }], truncated: false }),
+      })
+    );
+    const targets = await publishing.searchTargets("project", "SOLO");
+    expect(targets).toEqual([{ id: "SOLO", label: "SOLO · SOLO", ref: { key: "SOLO" } }]);
+  });
+
+  it("rejects with NotSupportedError when Jira credentials are absent, without listing projects", async () => {
+    const searchProjects = vi.fn<ProjectSearcher>(() => Promise.resolve({ projects: PROJECTS, truncated: false }));
+    const publishing = createXrayResultPublishing(
+      makeDeps({ jiraCredentials: () => Promise.resolve(undefined), searchProjects })
+    );
+    await expect(publishing.searchTargets("project", "CALC")).rejects.toBeInstanceOf(NotSupportedError);
+    expect(searchProjects).not.toHaveBeenCalled();
   });
 });

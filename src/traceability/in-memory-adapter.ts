@@ -92,7 +92,7 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
       sync: (scope, signal) => this.sync(scope, signal),
     };
     this.resultPublishing = {
-      searchTargets: (_kind, query) => Promise.resolve(this.searchTargets(query)),
+      searchTargets: (kind, query) => Promise.resolve(this.searchTargets(kind, query)),
       publish: (artifact, request) => this.publish(artifact, request),
     };
   }
@@ -173,7 +173,12 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
     return Promise.resolve();
   }
 
-  private searchTargets(query: string): PublishTarget[] {
+  // The fixture holds executions only, so the project kind is honestly empty rather than answering
+  // with targets of the wrong kind.
+  private searchTargets(kind: "execution" | "test-plan" | "project", query: string): PublishTarget[] {
+    if (kind === "project") {
+      return [];
+    }
     const needle = query.trim().toLowerCase();
     return needle === ""
       ? [...this.targets]
