@@ -19,7 +19,7 @@ import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapte
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
 import { PublishLedger } from "../../traceability/publish-ledger";
-import { scenarioDropId } from "../../traceability/board-data";
+import { BoardViewModel, scenarioDropId } from "../../traceability/board-data";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { PreflightChoice } from "../../traceability/preflight-flow";
@@ -807,6 +807,49 @@ describe("traceability sync command handler", () => {
 
     // The second invoke joined the in-flight run rather than starting a second sync.
     expect(sync).toHaveBeenCalledTimes(1);
+  });
+
+  it("wires the board's Sync now button to the serialized sync, so two clicks share one run", async () => {
+    let resolveSync!: () => void;
+    const sync = vi.fn(() => new Promise<void>((resolve) => { resolveSync = resolve; }));
+    const adapter = {
+      metadata: {
+        sync,
+        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], verifiedAbsentKeys: [], stale: false, completeness: "unknown", errors: [] }),
+      },
+    };
+    const subsystem = {
+      getActiveAdapter: () => adapter,
+      knownTestKeys: () => [],
+    } as unknown as TraceabilitySubsystem;
+
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(subsystem);
+    const { runSync } = (mgr as unknown as { boardDeps: () => { runSync: () => Promise<void> } }).boardDeps();
+
+    const first = runSync();
+    const second = runSync();
+    resolveSync();
+    await Promise.all([first, second]);
+
+    // Rewiring the button to the unserialized command path would start a second, overlapping sync.
+    expect(sync).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the configured sync scope into the board model, so the empty available group says the right thing", () => {
+    const built = (projectKeys: string[]): BoardViewModel => {
+      const workspaceConfig = {
+        get: (key: string, fallback: unknown) => (key === "xray.syncProjectKeys" ? projectKeys : fallback),
+      } as unknown as vscode.WorkspaceConfiguration;
+      const mgr = CommandManager.create(makeContext({ config: ExtensionConfig.create(workspaceConfig, false) }));
+      return (mgr as unknown as { boardDeps: () => { buildModel: () => BoardViewModel } }).boardDeps().buildModel();
+    };
+
+    // Either half catches an inverted scope bit at the call site, since it flips both branches at once.
+    expect(built(["CALC"])).toMatchObject({ availableEmptyText: "No synced tests yet.", offerSync: true });
+    const unset = built([]);
+    expect(unset.availableEmptyText).toContain("playwrightBddRunner.xray.syncProjectKeys");
+    expect(unset.offerSync).toBe(false);
   });
 });
 

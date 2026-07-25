@@ -1238,11 +1238,17 @@ export class CommandManager {
     return {
       providerLabel: subsystem?.getActiveAdapter()?.label ?? "Xray",
       buildModel: () =>
-        buildBoardViewModel(subsystem?.getSnapshot(), roots, subsystem?.getActiveAdapter()?.keyGrammar.testPrefix ?? ""),
+        buildBoardViewModel(
+          subsystem?.getSnapshot(),
+          roots,
+          subsystem?.getActiveAdapter()?.keyGrammar.testPrefix ?? "",
+          this.context.config.xraySyncProjectKeys.length > 0
+        ),
       buildExecutions: () => buildExecutionRows(this.publishLedger?.entriesForSite(site) ?? []),
       onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,
       applyDrop: (scenario, key) => this.applyBoardDrop(scenario, key),
       applyUnlink: (scenario, key) => this.applyBoardUnlink(scenario, key),
+      runSync: () => this.syncTraceability(),
       openExecution: (key) => {
         const adapter = subsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
         this.browseIssue(adapter, key).catch((error) => {

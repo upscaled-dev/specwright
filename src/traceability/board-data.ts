@@ -29,9 +29,9 @@ export interface BoardTestLink {
   readonly unlinkId: string;
 }
 
-// A remote test rendered as a card in the board's right column. `summary` is the synced remote
-// summary when present. An orphan (no local scenario maps to it) carries the "orphan" pill and no
-// links; a mapped test carries its linked-scenario count and one row per linked scenario.
+// A remote test rendered as a card in one of the right column's two groups. `summary` is the synced
+// remote summary when present. An available test (no local scenario maps to it) carries no pills and
+// no links; a mapped test carries its linked-scenario count and one row per linked scenario.
 export interface BoardTestCard {
   readonly key: string;
   readonly summary?: string | undefined;
@@ -53,11 +53,34 @@ export interface MatrixRow {
 
 export interface BoardViewModel {
   readonly scenarios: readonly BoardScenarioCard[];
-  readonly tests: readonly BoardTestCard[];
+  readonly available: readonly BoardTestCard[];
+  readonly mapped: readonly BoardTestCard[];
   readonly matrix: readonly MatrixRow[];
+  // What the right column says when the available group is empty, and whether that emptiness is worth
+  // offering a sync over (see `availableEmptyState`).
+  readonly availableEmptyText: string;
+  readonly offerSync: boolean;
 }
 
-const EMPTY: BoardViewModel = { scenarios: [], tests: [], matrix: [] };
+// The available group's empty state, by what the user can do about it. Without sync scope no sync
+// helps, since completeness never reaches "complete" without project keys. With scope but no complete
+// catalogue, a sync is the fix. A complete catalogue that yields nothing has nothing to offer, and
+// saying every test is mapped would be a lie when the sync catalogued no tests at all.
+function availableEmptyState(
+  syncScopeConfigured: boolean,
+  completeness: TraceabilitySnapshot["completeness"] | undefined
+): { availableEmptyText: string; offerSync: boolean } {
+  if (!syncScopeConfigured) {
+    return {
+      availableEmptyText: "Add project keys to playwrightBddRunner.xray.syncProjectKeys to list available tests.",
+      offerSync: false,
+    };
+  }
+  if (completeness !== "complete") {
+    return { availableEmptyText: "No synced tests yet.", offerSync: true };
+  }
+  return { availableEmptyText: "No unmapped tests in the last sync.", offerSync: false };
+}
 
 // Best-fit workspace-relative path with forward slashes (a Playwright grep/path regex never sees a
 // backslash — see the regex-path gotcha). Picks the root that contains the file; falls back to the
@@ -148,7 +171,7 @@ function mappedTestCards(links: readonly TraceLink[], roots: readonly string[]):
       ...(summary !== undefined ? { summary } : {}),
     });
   }
-  return cards;
+  return cards.sort((a, b) => a.key.localeCompare(b.key));
 }
 
 function linkResult(link: TraceLink): string {
@@ -199,32 +222,41 @@ function matrixRows(snapshot: TraceabilitySnapshot, testTagPrefix: string): Matr
 
 /**
  * Assemble the read-only Coverage Board view-model from the traceability snapshot: the untraced
- * scenarios become the left column's cards, and the mapped tests (grouped by key, with their linked
- * scenario count and one unlinkable row per linked scenario) plus the orphan tests (no local scenario)
- * become the right column's cards. The matrix rows join requirement, test, scenario, the in-file
+ * scenarios become the left column's cards, and the right column's two groups are the available tests
+ * (no local scenario maps to them, so they are what a scenario can be dropped onto) shown first and the
+ * mapped tests (grouped by key, with their linked scenario count and one unlinkable row per linked
+ * scenario) shown below, each key-sorted. The matrix rows join requirement, test, scenario, the in-file
  * `@<prefix><key>` tag, and last result, one row per link, untraced scenario, and orphan. Renders
  * offline from tags alone — with no remote sync, `orphans` is empty and mapped cards carry no summary.
- * An undefined snapshot (panel off or still building) yields empty columns.
+ * An undefined snapshot (panel off or still building) yields empty columns, still with the available
+ * group's empty state so the board explains itself before the first sync.
  */
 export function buildBoardViewModel(
   snapshot: TraceabilitySnapshot | undefined,
   workspaceRoots: readonly string[],
-  testTagPrefix: string
+  testTagPrefix: string,
+  syncScopeConfigured: boolean
 ): BoardViewModel {
+  const emptyState = availableEmptyState(syncScopeConfigured, snapshot?.completeness);
   if (!snapshot) {
-    return EMPTY;
+    return { scenarios: [], available: [], mapped: [], matrix: [], ...emptyState };
   }
   const scenarios = snapshot.untraced
     .map((item) => scenarioCard(item, workspaceRoots))
     .sort((a, b) => a.name.localeCompare(b.name));
-  const orphanCards = snapshot.orphans.map((orphan): BoardTestCard => {
-    const summary = nonEmptySummary(orphan.meta.summary);
-    return { key: orphan.testKey, pills: ["orphan"], links: [], ...(summary !== undefined ? { summary } : {}) };
-  });
-  const tests = [...mappedTestCards(snapshot.links, workspaceRoots), ...orphanCards].sort((a, b) =>
-    a.key.localeCompare(b.key)
-  );
-  return { scenarios, tests, matrix: matrixRows(snapshot, testTagPrefix) };
+  const available = snapshot.orphans
+    .map((orphan): BoardTestCard => {
+      const summary = nonEmptySummary(orphan.meta.summary);
+      return { key: orphan.testKey, pills: [], links: [], ...(summary !== undefined ? { summary } : {}) };
+    })
+    .sort((a, b) => a.key.localeCompare(b.key));
+  return {
+    scenarios,
+    available,
+    mapped: mappedTestCards(snapshot.links, workspaceRoots),
+    matrix: matrixRows(snapshot, testTagPrefix),
+    ...emptyState,
+  };
 }
 
 export interface BoardDropResolution {
@@ -356,14 +388,18 @@ export function filterExecutionRows(rows: readonly ExecutionRow[], query: string
 
 // The header search: case-insensitive substring over a test's key/summary and any of its linked
 // scenario rows (name or location), over a scenario card's name, its workspace-relative location (the
-// file path), and its requirement tags, plus a match across all five matrix columns. A matched test
-// card keeps all its rows. One function the panel calls on every keystroke; an empty query returns the
-// model untouched.
+// file path), and its requirement tags, plus a match across all five matrix columns. Both test groups
+// take the same predicate, and a matched test card keeps all its rows. One function the panel calls on
+// every keystroke; an empty query returns the model untouched.
 export function filterBoardViewModel(model: BoardViewModel, query: string): BoardViewModel {
   const needle = query.trim().toLowerCase();
   if (needle === "") {
     return model;
   }
+  const matchesTest = (card: BoardTestCard): boolean =>
+    card.key.toLowerCase().includes(needle) ||
+    (card.summary ?? "").toLowerCase().includes(needle) ||
+    card.links.some((row) => row.name.toLowerCase().includes(needle) || row.location.toLowerCase().includes(needle));
   return {
     scenarios: model.scenarios.filter(
       (card) =>
@@ -371,16 +407,12 @@ export function filterBoardViewModel(model: BoardViewModel, query: string): Boar
         card.location.toLowerCase().includes(needle) ||
         card.reqKeys.some((key) => key.toLowerCase().includes(needle))
     ),
-    tests: model.tests.filter(
-      (card) =>
-        card.key.toLowerCase().includes(needle) ||
-        (card.summary ?? "").toLowerCase().includes(needle) ||
-        card.links.some(
-          (row) => row.name.toLowerCase().includes(needle) || row.location.toLowerCase().includes(needle)
-        )
-    ),
+    available: model.available.filter(matchesTest),
+    mapped: model.mapped.filter(matchesTest),
     matrix: model.matrix.filter((row) =>
       [row.requirement, row.test, row.scenario, row.tag, row.result].some((cell) => cell.toLowerCase().includes(needle))
     ),
+    availableEmptyText: model.availableEmptyText,
+    offerSync: model.offerSync,
   };
 }

@@ -21,8 +21,12 @@ import type { ScenarioRef } from "../../traceability/scenario-ref";
 const ROOTS = ["/ws"];
 const PREFIX = "TEST_";
 
-function build(snapshot: TraceabilitySnapshot | undefined, roots: readonly string[] = ROOTS): BoardViewModel {
-  return buildBoardViewModel(snapshot, roots, PREFIX);
+function build(
+  snapshot: TraceabilitySnapshot | undefined,
+  roots: readonly string[] = ROOTS,
+  syncScopeConfigured = true
+): BoardViewModel {
+  return buildBoardViewModel(snapshot, roots, PREFIX, syncScopeConfigured);
 }
 
 function ref(over: Partial<ScenarioRef> = {}): ScenarioRef {
@@ -59,7 +63,7 @@ function orphan(over: Partial<OrphanTest> = {}): OrphanTest {
 
 describe("buildBoardViewModel — untraced scenario cards", () => {
   it("returns empty columns for an undefined snapshot", () => {
-    expect(build(undefined, ROOTS)).toEqual({ scenarios: [], tests: [], matrix: [] });
+    expect(build(undefined, ROOTS)).toMatchObject({ scenarios: [], available: [], mapped: [], matrix: [] });
   });
 
   it("renders a plain untraced scenario with a workspace-relative location and a 'no tag' pill", () => {
@@ -134,6 +138,7 @@ describe("buildBoardViewModel — workspace-relative paths", () => {
 
 describe("buildBoardViewModel — test cards", () => {
   const loginRow = { name: "Log in", location: "features/login.feature:5", unlinkId: scenarioDropId(ref()) };
+  const SCOPE_HINT = "Add project keys to playwrightBddRunner.xray.syncProjectKeys to list available tests.";
 
   it("groups mapped links by key into one card carrying the linked-scenario count and a row per link", () => {
     const model = build(
@@ -145,7 +150,7 @@ describe("buildBoardViewModel — test cards", () => {
       }),
       ROOTS
     );
-    expect(model.tests).toEqual([
+    expect(model.mapped).toEqual([
       {
         key: "CALC-1",
         pills: ["2 scenarios"],
@@ -159,7 +164,7 @@ describe("buildBoardViewModel — test cards", () => {
 
   it("singularizes a single mapped scenario", () => {
     const model = build(snapshot({ links: [link()] }), ROOTS);
-    expect(model.tests[0]!.pills).toEqual(["1 scenario"]);
+    expect(model.mapped[0]!.pills).toEqual(["1 scenario"]);
   });
 
   it("gives a scenario linked to two tests its own row on each card", () => {
@@ -167,7 +172,7 @@ describe("buildBoardViewModel — test cards", () => {
       snapshot({ links: [link({ testKey: "CALC-1" }), link({ testKey: "CALC-2" })] }),
       ROOTS
     );
-    expect(model.tests.map((card) => card.links)).toEqual([[loginRow], [loginRow]]);
+    expect(model.mapped.map((card) => card.links)).toEqual([[loginRow], [loginRow]]);
   });
 
   it("keeps one row per Examples block, counts them all in the pill, and unlinks each back to its block", () => {
@@ -175,7 +180,7 @@ describe("buildBoardViewModel — test cards", () => {
     const snap = snapshot({
       links: [link({ testKey: "CALC-1", scenario: small }), link({ testKey: "CALC-1", scenario: examplesBlock(15, "Adding — large") })],
     });
-    const card = build(snap, ROOTS).tests[0]!;
+    const card = build(snap, ROOTS).mapped[0]!;
     // Each block owns its own tag, so each is its own row and the pill counts what the card lists.
     expect(card.pills).toEqual(["2 scenarios"]);
     expect(card.links.map((row) => row.name)).toEqual(["Adding — large", "Adding — small"]);
@@ -190,7 +195,7 @@ describe("buildBoardViewModel — test cards", () => {
     const snap = snapshot({
       links: [link({ testKey: "CALC-1", scenario: second }), link({ testKey: "CALC-1", scenario: first })],
     });
-    const card = build(snap, ROOTS).tests[0]!;
+    const card = build(snap, ROOTS).mapped[0]!;
     expect(card.links.map((row) => row.location)).toEqual(["features/calc.feature:10", "features/calc.feature:15"]);
     expect(resolveBoardUnlink(snap, card.links[0]!.unlinkId, "CALC-1")).toEqual({ ref: first, key: "CALC-1" });
     expect(resolveBoardUnlink(snap, card.links[1]!.unlinkId, "CALC-1")).toEqual({ ref: second, key: "CALC-1" });
@@ -201,12 +206,12 @@ describe("buildBoardViewModel — test cards", () => {
       snapshot({ links: [link({ meta: { key: "CALC-1", summary: "Add two numbers" } })] }),
       ROOTS
     );
-    expect(model.tests[0]).toEqual({ key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"], links: [loginRow] });
+    expect(model.mapped[0]).toEqual({ key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"], links: [loginRow] });
   });
 
   it("omits the summary on a mapped card with no metadata (offline)", () => {
     const model = build(snapshot({ links: [link()] }), ROOTS);
-    expect(model.tests[0]).not.toHaveProperty("summary");
+    expect(model.mapped[0]).not.toHaveProperty("summary");
   });
 
   it("treats an empty remote summary as absent", () => {
@@ -214,32 +219,58 @@ describe("buildBoardViewModel — test cards", () => {
       snapshot({ links: [link({ meta: { key: "CALC-1", summary: "" } })] }),
       ROOTS
     );
-    expect(model.tests[0]).not.toHaveProperty("summary");
+    expect(model.mapped[0]).not.toHaveProperty("summary");
   });
 
-  it("renders orphan tests with an 'orphan' pill and their summary", () => {
+  it("renders an available test with its summary and no pills", () => {
     const model = build(
       snapshot({ orphans: [orphan({ testKey: "CALC-9", meta: { key: "CALC-9", summary: "Stray" } })] }),
       ROOTS
     );
-    expect(model.tests).toEqual([{ key: "CALC-9", summary: "Stray", pills: ["orphan"], links: [] }]);
+    expect(model.available).toEqual([{ key: "CALC-9", summary: "Stray", pills: [], links: [] }]);
   });
 
-  it("omits the summary on an orphan with none and gives it no rows", () => {
+  it("omits the summary on an available test with none and gives it no rows", () => {
     const model = build(snapshot({ orphans: [orphan()] }), ROOTS);
-    expect(model.tests[0]).toEqual({ key: "CALC-9", pills: ["orphan"], links: [] });
+    expect(model.available[0]).toEqual({ key: "CALC-9", pills: [], links: [] });
   });
 
-  it("sorts mapped and orphan test cards together by key", () => {
+  it("sorts each group by key on its own, keeping mapped tests out of the available one", () => {
     const model = build(
       snapshot({
-        links: [link({ testKey: "CALC-2" })],
-        orphans: [orphan({ testKey: "CALC-1", meta: { key: "CALC-1" } }), orphan({ testKey: "CALC-3", meta: { key: "CALC-3" } })],
+        links: [
+          link({ testKey: "CALC-2" }),
+          link({ testKey: "CALC-1", scenario: ref({ line: 9, name: "Other" }) }),
+        ],
+        orphans: [orphan({ testKey: "PAY-9", meta: { key: "PAY-9" } }), orphan({ testKey: "PAY-1", meta: { key: "PAY-1" } })],
       }),
       ROOTS
     );
-    expect(model.tests.map((c) => c.key)).toEqual(["CALC-1", "CALC-2", "CALC-3"]);
-    expect(model.tests.map((c) => c.pills[0])).toEqual(["orphan", "1 scenario", "orphan"]);
+    expect(model.mapped.map((c) => c.key)).toEqual(["CALC-1", "CALC-2"]);
+    expect(model.available.map((c) => c.key)).toEqual(["PAY-1", "PAY-9"]);
+  });
+
+  it("points the empty available group at the sync scope setting when no project keys are configured, snapshot or not", () => {
+    // No sync can help here: completeness never reaches "complete" without a project scope.
+    expect(build(undefined, ROOTS, false)).toMatchObject({ availableEmptyText: SCOPE_HINT, offerSync: false });
+    expect(build(snapshot({ completeness: "complete" }), ROOTS, false)).toMatchObject({
+      availableEmptyText: SCOPE_HINT,
+      offerSync: false,
+    });
+  });
+
+  it("offers a sync when the scope is configured but no complete catalogue has landed", () => {
+    const expected = { availableEmptyText: "No synced tests yet.", offerSync: true };
+    expect(build(undefined, ROOTS, true)).toMatchObject(expected);
+    expect(build(snapshot({ completeness: "partial" }), ROOTS, true)).toMatchObject(expected);
+    expect(build(snapshot({ completeness: "unknown" }), ROOTS, true)).toMatchObject(expected);
+  });
+
+  it("offers nothing once a complete sync simply turned up no unmapped tests", () => {
+    expect(build(snapshot({ completeness: "complete" }), ROOTS, true)).toMatchObject({
+      availableEmptyText: "No unmapped tests in the last sync.",
+      offerSync: false,
+    });
   });
 });
 
@@ -249,7 +280,8 @@ describe("filterBoardViewModel", () => {
       { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: ["no tag"], reqKeys: ["REQ-7"] },
       { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: ["no tag"], reqKeys: [] },
     ],
-    tests: [
+    available: [{ key: "PAY-9", pills: [], links: [] }],
+    mapped: [
       {
         key: "CALC-1",
         summary: "Add two numbers",
@@ -259,31 +291,33 @@ describe("filterBoardViewModel", () => {
           { name: "Add small numbers", location: "features/calc.feature:3", unlinkId: "id-add-small" },
         ],
       },
-      { key: "PAY-9", pills: ["orphan"], links: [] },
     ],
     matrix: [
       { requirement: "REQ-7", test: "CALC-1", scenario: "Log in", tag: "@TEST_CALC-1", result: "passed" },
       { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage" },
     ],
+    availableEmptyText: "No unmapped tests in the last sync.",
+    offerSync: false,
   };
 
   it("returns the model untouched for an empty query", () => {
     expect(filterBoardViewModel(model, "   ")).toBe(model);
   });
 
-  it("matches a test through a linked scenario's name and keeps all of that card's rows", () => {
+  it("matches a mapped test through a linked scenario's name and keeps all of that card's rows", () => {
     const out = filterBoardViewModel(model, "add small");
-    expect(out.tests.map((t) => t.key)).toEqual(["CALC-1"]);
-    expect(out.tests[0]!.links.map((row) => row.name)).toEqual(["Add large numbers", "Add small numbers"]);
+    expect(out.mapped.map((t) => t.key)).toEqual(["CALC-1"]);
+    expect(out.mapped[0]!.links.map((row) => row.name)).toEqual(["Add large numbers", "Add small numbers"]);
   });
 
-  it("matches a test through a linked scenario's location", () => {
-    expect(filterBoardViewModel(model, "calc.feature").tests.map((t) => t.key)).toEqual(["CALC-1"]);
+  it("matches a mapped test through a linked scenario's location", () => {
+    expect(filterBoardViewModel(model, "calc.feature").mapped.map((t) => t.key)).toEqual(["CALC-1"]);
   });
 
-  it("matches a test by key", () => {
+  it("runs the same predicate over both groups, so a key match narrows one and empties the other", () => {
     const out = filterBoardViewModel(model, "pay");
-    expect(out.tests.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(out.available.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(out.mapped).toEqual([]);
     expect(out.scenarios).toEqual([]);
   });
 
@@ -295,7 +329,7 @@ describe("filterBoardViewModel", () => {
   });
 
   it("matches a test by summary", () => {
-    expect(filterBoardViewModel(model, "two numbers").tests.map((t) => t.key)).toEqual(["CALC-1"]);
+    expect(filterBoardViewModel(model, "two numbers").mapped.map((t) => t.key)).toEqual(["CALC-1"]);
   });
 
   it("matches a scenario by name", () => {
@@ -311,7 +345,16 @@ describe("filterBoardViewModel", () => {
   });
 
   it("is case-insensitive", () => {
-    expect(filterBoardViewModel(model, "CALC-1").tests.map((t) => t.key)).toEqual(["CALC-1"]);
+    expect(filterBoardViewModel(model, "CALC-1").mapped.map((t) => t.key)).toEqual(["CALC-1"]);
+  });
+
+  it("passes the available group's empty state through untouched", () => {
+    // A query that empties the group must not restate it as a remote that was never synced.
+    const out = filterBoardViewModel(model, "calc-1");
+    expect(out.available).toEqual([]);
+    expect(out.availableEmptyText).toBe(model.availableEmptyText);
+    expect(out.offerSync).toBe(false);
+    expect(filterBoardViewModel({ ...model, offerSync: true }, "calc-1").offerSync).toBe(true);
   });
 });
 

@@ -27,9 +27,13 @@ interface RenderMessage {
   surface: "board";
   type: "render";
   scenarios: Array<{ name: string }>;
-  tests: Array<{ key: string; links: Array<{ name: string; location: string; unlinkId: string }> }>;
+  available: Array<{ key: string; links: Array<{ name: string; location: string; unlinkId: string }> }>;
+  mapped: Array<{ key: string; links: Array<{ name: string; location: string; unlinkId: string }> }>;
   matrix: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }>;
   executions: Array<{ key: string; summary: string }>;
+  availableEmptyText: string;
+  offerSync: boolean;
+  filtering: boolean;
 }
 interface ActivateMessage {
   type: "activate";
@@ -49,19 +53,21 @@ const MODEL: BoardViewModel = {
     { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: ["no tag"], reqKeys: [] },
     { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: ["no tag"], reqKeys: ["REQ-7"] },
   ],
-  tests: [
+  available: [{ key: "PAY-9", pills: [], links: [] }],
+  mapped: [
     {
       key: "CALC-1",
       summary: "Add two numbers",
       pills: ["1 scenario"],
       links: [{ name: "Add two numbers", location: "features/calc.feature:3", unlinkId: "id-add" }],
     },
-    { key: "PAY-9", pills: ["orphan"], links: [] },
   ],
   matrix: [
     { requirement: "REQ-7", test: "CALC-1", scenario: "Checkout", tag: "@TEST_CALC-1", result: "passed" },
     { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage" },
   ],
+  availableEmptyText: "No unmapped tests in the last sync.",
+  offerSync: false,
 };
 
 const EXECUTIONS: ExecutionRow[] = [
@@ -77,6 +83,7 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     onDidChange: new vscode.EventEmitter<void>().event,
     applyDrop: () => Promise.resolve(),
     applyUnlink: () => Promise.resolve(),
+    runSync: () => Promise.resolve(),
     openExecution: () => undefined,
     publishDelegate: noopDelegate,
     startPublish: () => undefined,
@@ -111,7 +118,9 @@ describe("BoardPanel", () => {
     expect(panel.webview.html).toContain("Executions");
     expect(panel.webview.html).toContain("Filter by key, tag, file");
     expect(panel.webview.html).toContain("drag to link");
-    expect(panel.webview.html).toContain("Drag a scenario from the left onto a test on the right to link them.");
+    expect(panel.webview.html).toContain(
+      "Drag a scenario from the left onto a test on the right to link them. An available test can also be dragged onto a scenario."
+    );
     expect(panel.webview.html).toContain("Xray tests");
     expect(panel.webview.html).toContain("Requirement");
     expect(panel.webview.html).toContain("Xray test");
@@ -119,6 +128,18 @@ describe("BoardPanel", () => {
     expect(panel.webview.html).toContain("Last result");
     expect(panel.webview.html).toContain("Pass rate");
     expect(panel.webview.html).toContain("Publishes from this workspace appear here.");
+  });
+
+  it("splits the mapping pane's test column into an available group and a mapped group", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("Available Xray tests");
+    expect(html).toContain('id="available-count"');
+    expect(html).toContain('id="available-cards"');
+    expect(html).toContain("Mapped Xray tests");
+    expect(html).toContain('id="mapped-count"');
+    expect(html).toContain('id="mapped-cards"');
   });
 
   it("carries no Mapped tree markup and no drag-to-unlink drop zone", () => {
@@ -193,7 +214,8 @@ describe("BoardPanel", () => {
     expect(render.surface).toBe("board");
     expect(lastActivate(panel)).toBe("mapping");
     expect(render.scenarios.map((s) => s.name)).toEqual(["Log in", "Checkout"]);
-    expect(render.tests.map((t) => t.key)).toEqual(["CALC-1", "PAY-9"]);
+    expect(render.available.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(render.mapped.map((t) => t.key)).toEqual(["CALC-1"]);
     expect(render.matrix.map((r) => r.test)).toEqual(["CALC-1", "PAY-9"]);
   });
 
@@ -233,7 +255,8 @@ describe("BoardPanel", () => {
 
     const render = lastRender(panel)!;
     expect(render.scenarios.map((s) => s.name)).toEqual(["Checkout"]);
-    expect(render.tests).toEqual([]);
+    expect(render.available).toEqual([]);
+    expect(render.mapped).toEqual([]);
   });
 
   it("filters the matrix rows alongside the cards", async () => {
@@ -243,7 +266,8 @@ describe("BoardPanel", () => {
 
     const render = lastRender(panel)!;
     expect(render.matrix.map((r) => r.test)).toEqual(["PAY-9"]);
-    expect(render.tests.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(render.available.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(render.mapped).toEqual([]);
   });
 
   it("routes a drop to applyDrop with the normalized scenario and key", async () => {
@@ -255,14 +279,59 @@ describe("BoardPanel", () => {
     expect(applyDrop).toHaveBeenCalledWith("features/login.feature:5", "PAY-9");
   });
 
+  it("routes a sync message to runSync so the empty available group can load tests", async () => {
+    const runSync = vi.fn(() => Promise.resolve());
+    const { panel } = await openReady({ runSync });
+
+    await panel.__receive({ surface: "board", type: "sync" });
+
+    expect(runSync).toHaveBeenCalledOnce();
+  });
+
+  it("repaints once a sync settles, even when it rejects, so the button never strands the group", async () => {
+    const runSync = vi.fn(() => Promise.reject(new Error("offline")));
+    const { panel } = await openReady({ runSync });
+    const renders = (): number => panel.webview.__posted.filter(isRender).length;
+    const before = renders();
+
+    await panel.__receive({ surface: "board", type: "sync" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(renders()).toBe(before + 1);
+  });
+
+  it("forwards the available group's empty state on every render", async () => {
+    let current = MODEL;
+    const changes = new vscode.EventEmitter<void>();
+    const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
+    expect(lastRender(panel)!).toMatchObject({ availableEmptyText: MODEL.availableEmptyText, offerSync: false });
+
+    current = { ...MODEL, availableEmptyText: "No synced tests yet.", offerSync: true };
+    changes.fire();
+
+    expect(lastRender(panel)!).toMatchObject({ availableEmptyText: "No synced tests yet.", offerSync: true });
+  });
+
+  it("marks a render as filtering only while a query is active, so a filtered-empty group keeps its Sync now off", async () => {
+    const { panel } = await openReady();
+    expect(lastRender(panel)!.filtering).toBe(false);
+
+    await panel.__receive({ surface: "board", type: "search", value: "cart.feature" });
+    expect(lastRender(panel)!.filtering).toBe(true);
+
+    await panel.__receive({ surface: "board", type: "search", value: "   " });
+
+    expect(lastRender(panel)!.filtering).toBe(false);
+  });
+
   it("forwards each mapped test card's linked scenario rows on the initial render", async () => {
     const { panel } = await openReady();
 
     const render = lastRender(panel)!;
-    expect(render.tests[0]!.links).toEqual([
+    expect(render.mapped[0]!.links).toEqual([
       { name: "Add two numbers", location: "features/calc.feature:3", unlinkId: "id-add" },
     ]);
-    expect(render.tests[1]!.links).toEqual([]);
+    expect(render.available[0]!.links).toEqual([]);
   });
 
   it("routes an unlink message to applyUnlink with the scenario id and key", async () => {
@@ -322,7 +391,7 @@ describe("BoardPanel", () => {
     await panel.__receive({ surface: "board", type: "search", value: "CALC" });
 
     expect(lastActivate(panel)).toBe("executions");
-    expect(lastRender(panel)!.tests.map((t) => t.key)).toEqual(["CALC-1"]);
+    expect(lastRender(panel)!.mapped.map((t) => t.key)).toEqual(["CALC-1"]);
   });
 
   it("rebuilds the model and re-renders on a snapshot-change event", async () => {
@@ -330,10 +399,11 @@ describe("BoardPanel", () => {
     const changes = new vscode.EventEmitter<void>();
     const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
 
-    current = { scenarios: [], tests: [{ key: "NEW-1", pills: ["orphan"], links: [] }], matrix: [] };
+    current = { ...MODEL, available: [{ key: "NEW-1", pills: [], links: [] }], mapped: [], matrix: [] };
     changes.fire();
 
-    expect(lastRender(panel)!.tests.map((t) => t.key)).toEqual(["NEW-1"]);
+    expect(lastRender(panel)!.available.map((t) => t.key)).toEqual(["NEW-1"]);
+    expect(lastRender(panel)!.mapped).toEqual([]);
   });
 
   it("clears the singleton on dispose and stops posting; dispose is idempotent", async () => {

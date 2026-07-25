@@ -36,14 +36,23 @@ interface OpenMessage {
   type: "open";
   key: string;
 }
-type BoardIncoming = SearchMessage | DropMessage | UnlinkMessage | OpenMessage;
+interface SyncMessage {
+  type: "sync";
+}
+type BoardIncoming = SearchMessage | DropMessage | UnlinkMessage | OpenMessage | SyncMessage;
 
 interface RenderMessage {
   type: "render";
   scenarios: readonly BoardScenarioCard[];
-  tests: readonly BoardTestCard[];
+  available: readonly BoardTestCard[];
+  mapped: readonly BoardTestCard[];
   matrix: readonly MatrixRow[];
   executions: readonly ExecutionRow[];
+  availableEmptyText: string;
+  offerSync: boolean;
+  // Whether these lists came out of a query. The webview cannot read this off its own search box: a
+  // snapshot-driven render can land before the host has processed a keystroke or a clear.
+  filtering: boolean;
 }
 
 // The board is a document-like surface, so its data source is the stable subsystem — not a one-shot
@@ -61,6 +70,10 @@ export interface BoardPanelDeps {
   // The unlink seam: the webview posts a test card row's {scenario, key} and the host validates and
   // removes just that `@TEST_` tag, then the snapshot rebuild re-renders (no hand-patching here).
   applyUnlink(scenario: string, key: string): Promise<void>;
+  // The Sync now button on an empty available group: the same traceability sync the palette runs. A
+  // successful run re-renders through the snapshot rebuild; the settled promise is what repaints after
+  // a failure, so the button never stays stuck on "Syncing".
+  runSync(): Promise<void>;
   // An Executions row's key link: routed through the host's browseIssue path.
   openExecution(key: string): void;
   // The Publish tab's callbacks: the search/browse/attach delegate the surface calls into, and the
@@ -117,6 +130,13 @@ class BoardSurface {
       this.deps.openExecution(message.key);
       return;
     }
+    if (message.type === "sync") {
+      this.deps
+        .runSync()
+        .finally(() => this.render())
+        .catch(() => undefined);
+      return;
+    }
     this.query = message.value;
     this.render();
   }
@@ -132,9 +152,13 @@ class BoardSurface {
     const message: RenderMessage = {
       type: "render",
       scenarios: filtered.scenarios,
-      tests: filtered.tests,
+      available: filtered.available,
+      mapped: filtered.mapped,
       matrix: filtered.matrix,
       executions: filterExecutionRows(this.executions, this.query),
+      availableEmptyText: filtered.availableEmptyText,
+      offerSync: filtered.offerSync,
+      filtering: this.query.trim() !== "",
     };
     this.host.post(message);
   }
@@ -145,9 +169,10 @@ class BoardSurface {
  * reveals the existing panel). The board is one of several surfaces routed through a shared document:
  * the shell owns the single WebviewPanel, one `acquireVsCodeApi()`, the tab strip, and a ready-gated
  * outbound queue, then dispatches inbound messages by `surface`. The Mapping tab drags an untraced
- * scenario onto a test card (and an orphan test onto a scenario) to write its `@TEST_` tag; the Matrix
- * tab is the requirement/test/scenario/tag/result table; the Executions tab lists what this workspace
- * has published. Every board render round-trips through the vscode-free `filterBoardViewModel`.
+ * scenario onto a test card (and an available test onto a scenario) to write its `@TEST_` tag; the
+ * Matrix tab is the requirement/test/scenario/tag/result table; the Executions tab lists what this
+ * workspace has published. Every board render round-trips through the vscode-free
+ * `filterBoardViewModel`.
  */
 export class BoardPanel {
   private static current: BoardPanel | undefined;
@@ -333,10 +358,13 @@ const BOARD_CSS = `
   .board-pane .card .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 0.2rem; word-break: break-all; }
   .board-pane .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
   .board-pane .pill { font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
-  .board-pane .pill.orphan { background: var(--vscode-inputValidation-warningBackground, var(--vscode-badge-background)); color: var(--vscode-inputValidation-warningForeground, var(--vscode-badge-foreground)); }
+  .board-pane .group + .group { margin-top: 1.2rem; }
   .board-pane .gutter { display: flex; align-items: center; justify-content: center; align-self: stretch; min-width: 5.5rem; }
   .board-pane .gutter span { color: var(--vscode-descriptionForeground); font-style: italic; font-size: 0.85em; text-align: center; }
   .board-pane .empty { color: var(--vscode-descriptionForeground); font-style: italic; padding: 0.4rem 0; }
+  .board-pane .empty .sync-now { display: block; margin-top: 0.4rem; font-family: inherit; font-size: 0.72rem; padding: 0.05rem 0.45rem; border: none; border-radius: 999px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
+  .board-pane .empty .sync-now:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
+  .board-pane .empty .sync-now:disabled { cursor: default; background: var(--vscode-button-secondaryBackground, transparent); }
   .board-pane .card[draggable="true"] { cursor: grab; }
   .board-pane .card.drop-target { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -2px; }
   .board-pane .link-row { display: flex; align-items: flex-start; gap: 0.5rem; padding-top: 0.4rem; margin-top: 0.45rem; border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
@@ -353,10 +381,11 @@ const BOARD_CSS = `
   .board-pane table.matrix a.link:hover { text-decoration: underline; }`;
 
 function boardPanesHtml(providerLabel: string): string {
-  const testsHeading = escapeHtml(`${providerLabel} tests`);
+  const availableHeading = escapeHtml(`Available ${providerLabel} tests`);
+  const mappedHeading = escapeHtml(`Mapped ${providerLabel} tests`);
   const testColumn = escapeHtml(`${providerLabel} test`);
   return `    <section id="pane-mapping" class="pane board-pane" data-tab="mapping" hidden>
-      <p class="mapping-hint">Drag a scenario from the left onto a test on the right to link them. Orphaned tests can also be dragged onto a scenario.</p>
+      <p class="mapping-hint">Drag a scenario from the left onto a test on the right to link them. An available test can also be dragged onto a scenario.</p>
       <div class="columns">
         <div class="column">
           <h2>Untraced scenarios <span id="scenario-count" class="count"></span></h2>
@@ -364,8 +393,14 @@ function boardPanesHtml(providerLabel: string): string {
         </div>
         <div class="gutter"><span>drag to link</span></div>
         <div class="column">
-          <h2>${testsHeading} <span id="test-count" class="count"></span></h2>
-          <div id="test-cards" class="cards"></div>
+          <div class="group">
+            <h2>${availableHeading} <span id="available-count" class="count"></span></h2>
+            <div id="available-cards" class="cards"></div>
+          </div>
+          <div class="group">
+            <h2>${mappedHeading} <span id="mapped-count" class="count"></span></h2>
+            <div id="mapped-cards" class="cards"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -395,16 +430,18 @@ function boardPanesHtml(providerLabel: string): string {
 const BOARD_SCRIPT = `
   const search = document.getElementById('search');
   const scenarioCards = document.getElementById('scenario-cards');
-  const testCards = document.getElementById('test-cards');
+  const availableCards = document.getElementById('available-cards');
+  const mappedCards = document.getElementById('mapped-cards');
   const scenarioCount = document.getElementById('scenario-count');
-  const testCount = document.getElementById('test-count');
+  const availableCount = document.getElementById('available-count');
+  const mappedCount = document.getElementById('mapped-count');
   const matrixRows = document.getElementById('matrix-rows');
   const executionsRows = document.getElementById('executions-rows');
   const executionsEmpty = document.getElementById('executions-empty');
   const executionsScroll = document.getElementById('executions-scroll');
 
   // A scenario card carries kind 'scenario' + its drop id; a test card kind 'test' + its key. A drop is
-  // valid only across the two kinds, so a scenario lands on any test card and an orphan test on a
+  // valid only across the two kinds, so a scenario lands on any test card and an available test on a
   // scenario, never like on like. The drop normalizes both directions to {scenario, key}.
   let dragged = null;
   function clearDropTargets() {
@@ -444,7 +481,7 @@ const BOARD_SCRIPT = `
 
   function pillEl(text) {
     const el = document.createElement('span');
-    el.className = text === 'orphan' ? 'pill orphan' : 'pill';
+    el.className = 'pill';
     el.textContent = text;
     return el;
   }
@@ -456,14 +493,24 @@ const BOARD_SCRIPT = `
     return wrap;
   }
 
+  // Carried by the render, not read off the search box: the host filtered these lists against its own
+  // query, and a snapshot-driven render can arrive before a keystroke or a clear reaches it.
+  let filtering = false;
+
+  // A column or group's empty line. Under a query the group is empty because of the filter, not because
+  // there is nothing there, so say that instead of its own empty text.
+  function emptyEl(text) {
+    const el = document.createElement('div');
+    el.className = 'empty';
+    el.textContent = filtering ? 'No matches.' : text;
+    return el;
+  }
+
   function renderScenarios(cards) {
     scenarioCards.textContent = '';
     scenarioCount.textContent = '(' + cards.length + ')';
     if (cards.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'empty';
-      empty.textContent = 'No untraced scenarios.';
-      scenarioCards.appendChild(empty);
+      scenarioCards.appendChild(emptyEl('No untraced scenarios.'));
       return;
     }
     for (const card of cards) {
@@ -508,14 +555,29 @@ const BOARD_SCRIPT = `
     return row;
   }
 
-  function renderTests(cards) {
-    testCards.textContent = '';
-    testCount.textContent = '(' + cards.length + ')';
+  // The empty available group's way into the sync the palette also runs, so nobody has to leave the
+  // board to load tests. The host owns the run; the disabled state lasts until the next repaint, which
+  // rebuilds the group either way.
+  function syncButton() {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sync-now';
+    btn.textContent = 'Sync now';
+    btn.addEventListener('click', function () {
+      btn.disabled = true;
+      btn.textContent = 'Syncing';
+      window.__spec.post('board', { type: 'sync' });
+    });
+    return btn;
+  }
+
+  // One group of the right column. Only the available group's cards drag onto a scenario; every card,
+  // available or mapped, still accepts a dropped scenario, since a test can carry several.
+  function renderTestGroup(container, count, cards, draggable, empty) {
+    container.textContent = '';
+    count.textContent = '(' + cards.length + ')';
     if (cards.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'empty';
-      empty.textContent = 'No tests.';
-      testCards.appendChild(empty);
+      container.appendChild(empty);
       return;
     }
     for (const card of cards) {
@@ -531,11 +593,18 @@ const BOARD_SCRIPT = `
         meta.textContent = card.summary;
         el.appendChild(meta);
       }
-      el.appendChild(pillsEl(card.pills));
+      if (card.pills.length > 0) { el.appendChild(pillsEl(card.pills)); }
       for (const link of card.links) { el.appendChild(linkRow(link, card.key)); }
-      wireCardDrag(el, 'test', card.key, card.pills.indexOf('orphan') !== -1);
-      testCards.appendChild(el);
+      wireCardDrag(el, 'test', card.key, draggable);
+      container.appendChild(el);
     }
+  }
+
+  function renderTests(available, mapped, availableEmptyText, offerSync) {
+    const availableEmpty = emptyEl(availableEmptyText);
+    if (offerSync && !filtering) { availableEmpty.appendChild(syncButton()); }
+    renderTestGroup(availableCards, availableCount, available, true, availableEmpty);
+    renderTestGroup(mappedCards, mappedCount, mapped, false, emptyEl('No mapped tests yet.'));
   }
 
   function matrixCell(text, isKey) {
@@ -610,8 +679,9 @@ const BOARD_SCRIPT = `
 
   window.__spec.register('board', function (msg) {
     if (msg.type === 'render') {
+      filtering = msg.filtering === true;
       renderScenarios(msg.scenarios || []);
-      renderTests(msg.tests || []);
+      renderTests(msg.available || [], msg.mapped || [], msg.availableEmptyText || '', msg.offerSync === true);
       renderMatrix(msg.matrix || []);
       renderExecutions(msg.executions || []);
     }
