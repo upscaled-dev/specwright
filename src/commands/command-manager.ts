@@ -1297,8 +1297,8 @@ export class CommandManager {
     );
   }
 
-  // A board unlink (a Mapped-tree chip dragged back to the untraced column or its inline button):
-  // validate the {scenario, key} pair against the CURRENT snapshot and, when a live link matches both,
+  // A board unlink (the Unlink button on a mapped test card's scenario row): validate the
+  // {scenario, key} pair against the CURRENT snapshot and, when a live link matches both,
   // strip just that `@TEST_<key>` tag through the same applyTagRemove path the link dialog uses. The
   // watcher rebuild re-renders the board, so nothing here patches the view model.
   private async applyBoardUnlink(dropId: string, key: string): Promise<void> {

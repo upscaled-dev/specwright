@@ -27,8 +27,7 @@ interface RenderMessage {
   surface: "board";
   type: "render";
   scenarios: Array<{ name: string }>;
-  tests: Array<{ key: string }>;
-  mapped: Array<{ file: string; scenarios: Array<{ name: string; links: Array<{ key: string }> }> }>;
+  tests: Array<{ key: string; links: Array<{ name: string; location: string; unlinkId: string }> }>;
   matrix: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }>;
   executions: Array<{ key: string; summary: string }>;
 }
@@ -51,16 +50,13 @@ const MODEL: BoardViewModel = {
     { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: ["no tag"], reqKeys: ["REQ-7"] },
   ],
   tests: [
-    { key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"] },
-    { key: "PAY-9", pills: ["orphan"] },
-  ],
-  mapped: [
     {
-      file: "features/cart.feature",
-      scenarios: [
-        { name: "Checkout", location: "features/cart.feature:12", links: [{ key: "CALC-1", unlinkId: "id-checkout", result: "passed" }] },
-      ],
+      key: "CALC-1",
+      summary: "Add two numbers",
+      pills: ["1 scenario"],
+      links: [{ name: "Add two numbers", location: "features/calc.feature:3", unlinkId: "id-add" }],
     },
+    { key: "PAY-9", pills: ["orphan"], links: [] },
   ],
   matrix: [
     { requirement: "REQ-7", test: "CALC-1", scenario: "Checkout", tag: "@TEST_CALC-1", result: "passed" },
@@ -123,6 +119,13 @@ describe("BoardPanel", () => {
     expect(panel.webview.html).toContain("Last result");
     expect(panel.webview.html).toContain("Pass rate");
     expect(panel.webview.html).toContain("Publishes from this workspace appear here.");
+  });
+
+  it("carries no Mapped tree markup and no drag-to-unlink drop zone", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+    expect(html).not.toContain("mapped-groups");
+    expect(html).not.toContain("unlink-ready");
   });
 
   it("acquires the vscode api exactly once (the router owns the single acquireVsCodeApi)", () => {
@@ -252,32 +255,45 @@ describe("BoardPanel", () => {
     expect(applyDrop).toHaveBeenCalledWith("features/login.feature:5", "PAY-9");
   });
 
-  it("forwards the mapped tree on the initial render", async () => {
+  it("forwards each mapped test card's linked scenario rows on the initial render", async () => {
     const { panel } = await openReady();
 
     const render = lastRender(panel)!;
-    expect(render.mapped.map((group) => group.file)).toEqual(["features/cart.feature"]);
-    expect(render.mapped[0]!.scenarios[0]!.links.map((leaf) => leaf.key)).toEqual(["CALC-1"]);
-  });
-
-  it("re-forwards the mapped tree when a snapshot-change event rebuilds the model", async () => {
-    let current = MODEL;
-    const changes = new vscode.EventEmitter<void>();
-    const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
-
-    current = { ...MODEL, mapped: [{ file: "features/new.feature", scenarios: [{ name: "New", location: "features/new.feature:1", links: [{ key: "NEW-1", unlinkId: "id-new", result: "no run" }] }] }] };
-    changes.fire();
-
-    expect(lastRender(panel)!.mapped.map((group) => group.file)).toEqual(["features/new.feature"]);
+    expect(render.tests[0]!.links).toEqual([
+      { name: "Add two numbers", location: "features/calc.feature:3", unlinkId: "id-add" },
+    ]);
+    expect(render.tests[1]!.links).toEqual([]);
   });
 
   it("routes an unlink message to applyUnlink with the scenario id and key", async () => {
     const applyUnlink = vi.fn(() => Promise.resolve());
     const { panel } = await openReady({ applyUnlink });
 
-    await panel.__receive({ surface: "board", type: "unlink", scenario: "id-checkout", key: "CALC-1" });
+    await panel.__receive({ surface: "board", type: "unlink", scenario: "id-add", key: "CALC-1" });
 
-    expect(applyUnlink).toHaveBeenCalledWith("id-checkout", "CALC-1");
+    expect(applyUnlink).toHaveBeenCalledWith("id-add", "CALC-1");
+  });
+
+  it("ignores a repeat unlink for a row already in flight, but not one for another key, and re-arms once it settles", async () => {
+    const settlers: Array<() => void> = [];
+    const applyUnlink = vi.fn(() => new Promise<void>((resolve) => settlers.push(resolve)));
+    const { panel } = await openReady({ applyUnlink });
+    const unlink = (key: string): Promise<void> => panel.__receive({ surface: "board", type: "unlink", scenario: "id-add", key });
+
+    await unlink("CALC-1");
+    await unlink("CALC-1");
+    expect(applyUnlink).toHaveBeenCalledOnce();
+
+    await unlink("CALC-2");
+    expect(applyUnlink).toHaveBeenCalledTimes(2);
+
+    for (const settle of settlers) {
+      settle();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await unlink("CALC-1");
+
+    expect(applyUnlink).toHaveBeenCalledTimes(3);
   });
 
   it("posts no render on a drop — the snapshot rebuild drives the next render, so a stale drop leaves the board untouched", async () => {
@@ -314,7 +330,7 @@ describe("BoardPanel", () => {
     const changes = new vscode.EventEmitter<void>();
     const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
 
-    current = { scenarios: [], tests: [{ key: "NEW-1", pills: ["orphan"] }], mapped: [], matrix: [] };
+    current = { scenarios: [], tests: [{ key: "NEW-1", pills: ["orphan"], links: [] }], matrix: [] };
     changes.fire();
 
     expect(lastRender(panel)!.tests.map((t) => t.key)).toEqual(["NEW-1"]);

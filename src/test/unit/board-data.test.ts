@@ -29,6 +29,10 @@ function ref(over: Partial<ScenarioRef> = {}): ScenarioRef {
   return { filePath: "/ws/features/login.feature", line: 5, name: "Log in", kind: "scenario", ...over };
 }
 
+function examplesBlock(line: number, name: string): ScenarioRef {
+  return { filePath: "/ws/features/calc.feature", line, name, kind: "examplesBlock", outlineName: "Adding" };
+}
+
 function snapshot(over: Partial<TraceabilitySnapshot> = {}): TraceabilitySnapshot {
   return {
     links: [],
@@ -55,7 +59,7 @@ function orphan(over: Partial<OrphanTest> = {}): OrphanTest {
 
 describe("buildBoardViewModel — untraced scenario cards", () => {
   it("returns empty columns for an undefined snapshot", () => {
-    expect(build(undefined, ROOTS)).toEqual({ scenarios: [], tests: [], mapped: [], matrix: [] });
+    expect(build(undefined, ROOTS)).toEqual({ scenarios: [], tests: [], matrix: [] });
   });
 
   it("renders a plain untraced scenario with a workspace-relative location and a 'no tag' pill", () => {
@@ -129,17 +133,28 @@ describe("buildBoardViewModel — workspace-relative paths", () => {
 });
 
 describe("buildBoardViewModel — test cards", () => {
-  it("groups mapped links by key into a plain card carrying the linked-scenario count", () => {
+  const loginRow = { name: "Log in", location: "features/login.feature:5", unlinkId: scenarioDropId(ref()) };
+
+  it("groups mapped links by key into one card carrying the linked-scenario count and a row per link", () => {
     const model = build(
       snapshot({
         links: [
-          link({ testKey: "CALC-1", scenario: ref({ line: 5, name: "A" }) }),
           link({ testKey: "CALC-1", scenario: ref({ line: 9, name: "B" }) }),
+          link({ testKey: "CALC-1", scenario: ref({ line: 5, name: "A" }) }),
         ],
       }),
       ROOTS
     );
-    expect(model.tests).toEqual([{ key: "CALC-1", pills: ["2 scenarios"] }]);
+    expect(model.tests).toEqual([
+      {
+        key: "CALC-1",
+        pills: ["2 scenarios"],
+        links: [
+          { name: "A", location: "features/login.feature:5", unlinkId: scenarioDropId(ref({ line: 5, name: "A" })) },
+          { name: "B", location: "features/login.feature:9", unlinkId: scenarioDropId(ref({ line: 9, name: "B" })) },
+        ],
+      },
+    ]);
   });
 
   it("singularizes a single mapped scenario", () => {
@@ -147,24 +162,38 @@ describe("buildBoardViewModel — test cards", () => {
     expect(model.tests[0]!.pills).toEqual(["1 scenario"]);
   });
 
-  it("counts one outline's multiple Examples blocks as a single covered scenario", () => {
-    const block = (line: number, name: string): ScenarioRef => ({
-      filePath: "/ws/features/calc.feature",
-      line,
-      name,
-      kind: "examplesBlock",
-      outlineName: "Adding",
-    });
+  it("gives a scenario linked to two tests its own row on each card", () => {
     const model = build(
-      snapshot({
-        links: [
-          link({ testKey: "CALC-1", scenario: block(10, "Adding — small") }),
-          link({ testKey: "CALC-1", scenario: block(15, "Adding — large") }),
-        ],
-      }),
+      snapshot({ links: [link({ testKey: "CALC-1" }), link({ testKey: "CALC-2" })] }),
       ROOTS
     );
-    expect(model.tests[0]!.pills).toEqual(["1 scenario"]);
+    expect(model.tests.map((card) => card.links)).toEqual([[loginRow], [loginRow]]);
+  });
+
+  it("keeps one row per Examples block, counts them all in the pill, and unlinks each back to its block", () => {
+    const small = examplesBlock(10, "Adding — small");
+    const snap = snapshot({
+      links: [link({ testKey: "CALC-1", scenario: small }), link({ testKey: "CALC-1", scenario: examplesBlock(15, "Adding — large") })],
+    });
+    const card = build(snap, ROOTS).tests[0]!;
+    // Each block owns its own tag, so each is its own row and the pill counts what the card lists.
+    expect(card.pills).toEqual(["2 scenarios"]);
+    expect(card.links.map((row) => row.name)).toEqual(["Adding — large", "Adding — small"]);
+    expect(resolveBoardUnlink(snap, card.links[1]!.unlinkId, "CALC-1")).toEqual({ ref: small, key: "CALC-1" });
+  });
+
+  it("keeps same-named Examples blocks apart, ordered by location, each unlinking to its own block", () => {
+    // An unnamed Examples block falls back to the outline's name, so both rows read the same and only
+    // the location tie-break holds their order.
+    const first = examplesBlock(10, "Adding");
+    const second = examplesBlock(15, "Adding");
+    const snap = snapshot({
+      links: [link({ testKey: "CALC-1", scenario: second }), link({ testKey: "CALC-1", scenario: first })],
+    });
+    const card = build(snap, ROOTS).tests[0]!;
+    expect(card.links.map((row) => row.location)).toEqual(["features/calc.feature:10", "features/calc.feature:15"]);
+    expect(resolveBoardUnlink(snap, card.links[0]!.unlinkId, "CALC-1")).toEqual({ ref: first, key: "CALC-1" });
+    expect(resolveBoardUnlink(snap, card.links[1]!.unlinkId, "CALC-1")).toEqual({ ref: second, key: "CALC-1" });
   });
 
   it("shows the remote summary on a mapped card when the link carries metadata", () => {
@@ -172,7 +201,7 @@ describe("buildBoardViewModel — test cards", () => {
       snapshot({ links: [link({ meta: { key: "CALC-1", summary: "Add two numbers" } })] }),
       ROOTS
     );
-    expect(model.tests[0]).toEqual({ key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"] });
+    expect(model.tests[0]).toEqual({ key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"], links: [loginRow] });
   });
 
   it("omits the summary on a mapped card with no metadata (offline)", () => {
@@ -193,12 +222,12 @@ describe("buildBoardViewModel — test cards", () => {
       snapshot({ orphans: [orphan({ testKey: "CALC-9", meta: { key: "CALC-9", summary: "Stray" } })] }),
       ROOTS
     );
-    expect(model.tests).toEqual([{ key: "CALC-9", summary: "Stray", pills: ["orphan"] }]);
+    expect(model.tests).toEqual([{ key: "CALC-9", summary: "Stray", pills: ["orphan"], links: [] }]);
   });
 
-  it("omits the summary on an orphan with none", () => {
+  it("omits the summary on an orphan with none and gives it no rows", () => {
     const model = build(snapshot({ orphans: [orphan()] }), ROOTS);
-    expect(model.tests[0]).toEqual({ key: "CALC-9", pills: ["orphan"] });
+    expect(model.tests[0]).toEqual({ key: "CALC-9", pills: ["orphan"], links: [] });
   });
 
   it("sorts mapped and orphan test cards together by key", () => {
@@ -214,78 +243,6 @@ describe("buildBoardViewModel — test cards", () => {
   });
 });
 
-describe("buildBoardViewModel — mapped tree", () => {
-  it("groups mapped links by feature file, sorting groups by file, scenarios by name, leaves by key", () => {
-    const model = build(
-      snapshot({
-        links: [
-          link({ testKey: "CALC-2", scenario: ref({ filePath: "/ws/features/calc.feature", line: 3, name: "Add" }) }),
-          link({ testKey: "CALC-1", scenario: ref({ filePath: "/ws/features/calc.feature", line: 3, name: "Add" }) }),
-          link({ testKey: "AUTH-1", scenario: ref({ filePath: "/ws/features/auth.feature", line: 9, name: "Sign out" }) }),
-          link({ testKey: "AUTH-2", scenario: ref({ filePath: "/ws/features/auth.feature", line: 4, name: "Sign in" }) }),
-        ],
-      }),
-      ROOTS
-    );
-    expect(model.mapped.map((group) => group.file)).toEqual(["features/auth.feature", "features/calc.feature"]);
-    expect(model.mapped[0]!.scenarios.map((scenario) => scenario.name)).toEqual(["Sign in", "Sign out"]);
-    expect(model.mapped[1]!.scenarios[0]!.links.map((leaf) => leaf.key)).toEqual(["CALC-1", "CALC-2"]);
-  });
-
-  it("yields one scenario node with two leaves for a two-link scenario", () => {
-    const model = build(
-      snapshot({
-        links: [
-          link({ testKey: "CALC-1", scenario: ref({ line: 5, name: "Log in" }) }),
-          link({ testKey: "CALC-2", scenario: ref({ line: 5, name: "Log in" }) }),
-        ],
-      }),
-      ROOTS
-    );
-    expect(model.mapped[0]!.scenarios).toHaveLength(1);
-    const node = model.mapped[0]!.scenarios[0]!;
-    expect(node.name).toBe("Log in");
-    expect(node.location).toBe("features/login.feature:5");
-    expect(node.links.map((leaf) => leaf.key)).toEqual(["CALC-1", "CALC-2"]);
-  });
-
-  it("carries the leaf's last run as its result, defaulting an unrun link to 'no run'", () => {
-    const model = build(
-      snapshot({
-        links: [
-          link({ testKey: "CALC-1", scenario: ref({ name: "Log in" }), lastResult: "passed" }),
-          link({ testKey: "CALC-2", scenario: ref({ name: "Log in" }) }),
-        ],
-      }),
-      ROOTS
-    );
-    expect(model.mapped[0]!.scenarios[0]!.links).toEqual([
-      { key: "CALC-1", unlinkId: scenarioDropId(ref()), result: "passed" },
-      { key: "CALC-2", unlinkId: scenarioDropId(ref()), result: "no run" },
-    ]);
-  });
-
-  it("keys an examples-block scenario on scenarioDropId, so its leaf round-trips and distinct blocks stay apart", () => {
-    const block = (line: number, name: string): ScenarioRef => ({
-      filePath: "/ws/features/calc.feature",
-      line,
-      name,
-      kind: "examplesBlock",
-      outlineName: "Adding",
-    });
-    const small = block(10, "Adding — small");
-    const large = block(15, "Adding — large");
-    const snap = snapshot({ links: [link({ testKey: "CALC-1", scenario: small }), link({ testKey: "CALC-1", scenario: large })] });
-    const model = build(snap, ROOTS);
-    // scenarioDropId pins line and name, so the two Examples blocks never collapse the way the test
-    // cards' scenarioIdentity does — one node each.
-    expect(model.mapped[0]!.scenarios.map((scenario) => scenario.name)).toEqual(["Adding — large", "Adding — small"]);
-    const leaf = model.mapped[0]!.scenarios[1]!.links[0]!;
-    expect(leaf.unlinkId).toBe(scenarioDropId(small));
-    expect(resolveBoardUnlink(snap, leaf.unlinkId, "CALC-1")).toEqual({ ref: small, key: "CALC-1" });
-  });
-});
-
 describe("filterBoardViewModel", () => {
   const model: BoardViewModel = {
     scenarios: [
@@ -293,29 +250,16 @@ describe("filterBoardViewModel", () => {
       { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: ["no tag"], reqKeys: [] },
     ],
     tests: [
-      { key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"] },
-      { key: "PAY-9", pills: ["orphan"] },
-    ],
-    mapped: [
       {
-        file: "features/login.feature",
-        scenarios: [
-          {
-            name: "Log in",
-            location: "features/login.feature:5",
-            links: [
-              { key: "CALC-1", unlinkId: "id-login", result: "passed" },
-              { key: "PAY-9", unlinkId: "id-login", result: "no run" },
-            ],
-          },
+        key: "CALC-1",
+        summary: "Add two numbers",
+        pills: ["2 scenarios"],
+        links: [
+          { name: "Add large numbers", location: "features/calc.feature:9", unlinkId: "id-add-large" },
+          { name: "Add small numbers", location: "features/calc.feature:3", unlinkId: "id-add-small" },
         ],
       },
-      {
-        file: "features/cart.feature",
-        scenarios: [
-          { name: "Checkout", location: "features/cart.feature:12", links: [{ key: "SHOP-3", unlinkId: "id-checkout", result: "failed" }] },
-        ],
-      },
+      { key: "PAY-9", pills: ["orphan"], links: [] },
     ],
     matrix: [
       { requirement: "REQ-7", test: "CALC-1", scenario: "Log in", tag: "@TEST_CALC-1", result: "passed" },
@@ -327,27 +271,14 @@ describe("filterBoardViewModel", () => {
     expect(filterBoardViewModel(model, "   ")).toBe(model);
   });
 
-  it("keeps only the mapped leaves whose test key matches and prunes emptied scenarios and groups", () => {
-    const out = filterBoardViewModel(model, "pay");
-    expect(out.mapped).toEqual([
-      {
-        file: "features/login.feature",
-        scenarios: [
-          { name: "Log in", location: "features/login.feature:5", links: [{ key: "PAY-9", unlinkId: "id-login", result: "no run" }] },
-        ],
-      },
-    ]);
+  it("matches a test through a linked scenario's name and keeps all of that card's rows", () => {
+    const out = filterBoardViewModel(model, "add small");
+    expect(out.tests.map((t) => t.key)).toEqual(["CALC-1"]);
+    expect(out.tests[0]!.links.map((row) => row.name)).toEqual(["Add large numbers", "Add small numbers"]);
   });
 
-  it("keeps every leaf of a mapped scenario matched by name", () => {
-    const out = filterBoardViewModel(model, "log in");
-    expect(out.mapped[0]!.scenarios[0]!.links.map((leaf) => leaf.key)).toEqual(["CALC-1", "PAY-9"]);
-  });
-
-  it("keeps every leaf of a mapped scenario matched by location", () => {
-    const out = filterBoardViewModel(model, "cart.feature");
-    expect(out.mapped.map((group) => group.file)).toEqual(["features/cart.feature"]);
-    expect(out.mapped[0]!.scenarios[0]!.links.map((leaf) => leaf.key)).toEqual(["SHOP-3"]);
+  it("matches a test through a linked scenario's location", () => {
+    expect(filterBoardViewModel(model, "calc.feature").tests.map((t) => t.key)).toEqual(["CALC-1"]);
   });
 
   it("matches a test by key", () => {

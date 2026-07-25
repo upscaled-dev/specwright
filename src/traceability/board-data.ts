@@ -20,13 +20,23 @@ export interface BoardScenarioCard {
   readonly reqKeys: readonly string[];
 }
 
+// One linked scenario shown as a row on a mapped test card: its name and workspace-relative
+// "path:line" for display, plus `unlinkId` — the scenario's `scenarioDropId` — the handle the row's
+// Unlink button posts back so the removal resolves to exactly this scenario.
+export interface BoardTestLink {
+  readonly name: string;
+  readonly location: string;
+  readonly unlinkId: string;
+}
+
 // A remote test rendered as a card in the board's right column. `summary` is the synced remote
-// summary when present. An orphan (no local scenario maps to it) carries the "orphan" pill; a mapped
-// test carries its linked-scenario count instead.
+// summary when present. An orphan (no local scenario maps to it) carries the "orphan" pill and no
+// links; a mapped test carries its linked-scenario count and one row per linked scenario.
 export interface BoardTestCard {
   readonly key: string;
   readonly summary?: string | undefined;
   readonly pills: readonly string[];
+  readonly links: readonly BoardTestLink[];
 }
 
 // One row of the Matrix tab, columns left to right. A coverage hole is an empty string: a requirement
@@ -41,38 +51,13 @@ export interface MatrixRow {
   readonly result: string;
 }
 
-// One mapped scenario-to-test link as a chip in the Mapped tree. `key` is the test; `unlinkId` is the
-// scenario's `scenarioDropId`, carried so a drag-back-to-untraced or the inline button resolves back to
-// exactly this scenario for the tag removal; `result` is the link's last run (or "no run").
-export interface MappedTestLeaf {
-  readonly key: string;
-  readonly unlinkId: string;
-  readonly result?: string | undefined;
-}
-
-// A mapped scenario row: its name, its workspace-relative "path:line" location, and one leaf per test
-// it links (a multi-link scenario carries several leaves).
-export interface MappedScenarioNode {
-  readonly name: string;
-  readonly location: string;
-  readonly links: readonly MappedTestLeaf[];
-}
-
-// The Mapped tree grouped by feature file: `file` is the workspace-relative path shown as the group's
-// summary, `scenarios` its mapped scenario rows.
-export interface MappedFeatureGroup {
-  readonly file: string;
-  readonly scenarios: readonly MappedScenarioNode[];
-}
-
 export interface BoardViewModel {
   readonly scenarios: readonly BoardScenarioCard[];
   readonly tests: readonly BoardTestCard[];
-  readonly mapped: readonly MappedFeatureGroup[];
   readonly matrix: readonly MatrixRow[];
 }
 
-const EMPTY: BoardViewModel = { scenarios: [], tests: [], mapped: [], matrix: [] };
+const EMPTY: BoardViewModel = { scenarios: [], tests: [], matrix: [] };
 
 // Best-fit workspace-relative path with forward slashes (a Playwright grep/path regex never sees a
 // backslash — see the regex-path gotcha). Picks the root that contains the file; falls back to the
@@ -132,14 +117,19 @@ function nonEmptySummary(summary: string | undefined): string | undefined {
   return summary !== undefined && summary !== "" ? summary : undefined;
 }
 
-// Collapse an outline's per-Examples-block links (each a distinct block line) onto the outline, so a
-// multi-block outline counts as one covered scenario; a plain scenario keys off its own file+line.
-function scenarioIdentity(scenario: ScenarioRef): string {
-  const local = scenario.outlineName ?? `${scenario.line}`;
-  return `${scenario.filePath}::${local}`;
+// One row per linked scenario, keyed by `scenarioDropId` so the row round-trips back to exactly that
+// scenario. An outline's Examples blocks stay apart, each owning its own tag. Sorted by name, then by
+// location so blocks sharing a name (an unnamed block falls back to the outline's) hold their order.
+function cardLinks(group: readonly TraceLink[], roots: readonly string[]): BoardTestLink[] {
+  const rows = new Map<string, BoardTestLink>();
+  for (const link of group) {
+    const unlinkId = scenarioDropId(link.scenario);
+    rows.set(unlinkId, { name: link.scenario.name, location: scenarioLocation(link.scenario, roots), unlinkId });
+  }
+  return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name) || a.location.localeCompare(b.location));
 }
 
-function mappedTestCards(links: readonly TraceLink[]): BoardTestCard[] {
+function mappedTestCards(links: readonly TraceLink[], roots: readonly string[]): BoardTestCard[] {
   const byKey = new Map<string, TraceLink[]>();
   for (const link of links) {
     const list = byKey.get(link.testKey) ?? [];
@@ -148,11 +138,13 @@ function mappedTestCards(links: readonly TraceLink[]): BoardTestCard[] {
   }
   const cards: BoardTestCard[] = [];
   for (const [key, group] of byKey) {
-    const scenarios = new Set(group.map((link) => scenarioIdentity(link.scenario)));
+    const rows = cardLinks(group, roots);
     const summary = nonEmptySummary(group[0]?.meta?.summary);
     cards.push({
       key,
-      pills: [countLabel(scenarios.size, "scenario")],
+      // The pill counts the rows, so the card's headline and the list under it can never disagree.
+      pills: [countLabel(rows.length, "scenario")],
+      links: rows,
       ...(summary !== undefined ? { summary } : {}),
     });
   }
@@ -164,41 +156,6 @@ function linkResult(link: TraceLink): string {
     return `${link.iterations.passed}/${link.iterations.total}`;
   }
   return link.lastResult ?? "no run";
-}
-
-interface MappedScenarioAccum {
-  name: string;
-  location: string;
-  leaves: MappedTestLeaf[];
-}
-
-// Group the links into the Mapped tree: by workspace-relative feature file, then by the scenario's
-// round-trippable `scenarioDropId` (so a multi-block outline collapses to one row while same-named
-// twins stay apart), one leaf per test key. The leaf's `unlinkId` is that scenario id, the removal's
-// only handle back to the source. Groups sort by file, scenarios by name, leaves by key.
-function buildMappedTree(links: readonly TraceLink[], roots: readonly string[]): MappedFeatureGroup[] {
-  const groups = new Map<string, Map<string, MappedScenarioAccum>>();
-  for (const link of links) {
-    const rel = toWorkspaceRelative(link.scenario.filePath, roots);
-    const dropId = scenarioDropId(link.scenario);
-    const scenarios = groups.get(rel) ?? new Map<string, MappedScenarioAccum>();
-    groups.set(rel, scenarios);
-    const node = scenarios.get(dropId) ?? { name: link.scenario.name, location: scenarioLocation(link.scenario, roots), leaves: [] };
-    scenarios.set(dropId, node);
-    node.leaves.push({ key: link.testKey, unlinkId: dropId, result: linkResult(link) });
-  }
-  return [...groups.entries()]
-    .map(([file, scenarios]): MappedFeatureGroup => ({
-      file,
-      scenarios: [...scenarios.values()]
-        .map((node): MappedScenarioNode => ({
-          name: node.name,
-          location: node.location,
-          links: [...node.leaves].sort((a, b) => a.key.localeCompare(b.key)),
-        }))
-        .sort((a, b) => a.name.localeCompare(b.name)),
-    }))
-    .sort((a, b) => a.file.localeCompare(b.file));
 }
 
 // Empty cells sort last so a column's filled values group ahead of its holes. Rows read requirement,
@@ -243,12 +200,11 @@ function matrixRows(snapshot: TraceabilitySnapshot, testTagPrefix: string): Matr
 /**
  * Assemble the read-only Coverage Board view-model from the traceability snapshot: the untraced
  * scenarios become the left column's cards, and the mapped tests (grouped by key, with their linked
- * scenario count) plus the orphan tests (no local scenario) become the right column's cards. The
- * mapped tree groups the same links by feature file and scenario for the unlink surface below. The
- * matrix rows join requirement, test, scenario, the in-file `@<prefix><key>` tag, and last result, one
- * row per link, untraced scenario, and orphan. Renders offline from tags alone — with no remote sync,
- * `orphans` is empty and mapped cards carry no summary. An undefined snapshot (panel off or still
- * building) yields empty columns.
+ * scenario count and one unlinkable row per linked scenario) plus the orphan tests (no local scenario)
+ * become the right column's cards. The matrix rows join requirement, test, scenario, the in-file
+ * `@<prefix><key>` tag, and last result, one row per link, untraced scenario, and orphan. Renders
+ * offline from tags alone — with no remote sync, `orphans` is empty and mapped cards carry no summary.
+ * An undefined snapshot (panel off or still building) yields empty columns.
  */
 export function buildBoardViewModel(
   snapshot: TraceabilitySnapshot | undefined,
@@ -263,15 +219,12 @@ export function buildBoardViewModel(
     .sort((a, b) => a.name.localeCompare(b.name));
   const orphanCards = snapshot.orphans.map((orphan): BoardTestCard => {
     const summary = nonEmptySummary(orphan.meta.summary);
-    return { key: orphan.testKey, pills: ["orphan"], ...(summary !== undefined ? { summary } : {}) };
+    return { key: orphan.testKey, pills: ["orphan"], links: [], ...(summary !== undefined ? { summary } : {}) };
   });
-  const tests = [...mappedTestCards(snapshot.links), ...orphanCards].sort((a, b) => a.key.localeCompare(b.key));
-  return {
-    scenarios,
-    tests,
-    mapped: buildMappedTree(snapshot.links, workspaceRoots),
-    matrix: matrixRows(snapshot, testTagPrefix),
-  };
+  const tests = [...mappedTestCards(snapshot.links, workspaceRoots), ...orphanCards].sort((a, b) =>
+    a.key.localeCompare(b.key)
+  );
+  return { scenarios, tests, matrix: matrixRows(snapshot, testTagPrefix) };
 }
 
 export interface BoardDropResolution {
@@ -308,10 +261,10 @@ export function resolveBoardDrop(
 }
 
 /**
- * The unlink twin of `resolveBoardDrop`: validate a Mapped-tree unlink against the CURRENT snapshot and
- * resolve the scenario+key pair to a `ScenarioRef` for the tag removal. `dropId` is the leaf's
- * `unlinkId` (the scenario's `scenarioDropId`); `key` is the leaf's test. Returns undefined when no
- * live link matches both (a rebuild dropped that link, or the leaf named a stale card) so the caller
+ * The unlink twin of `resolveBoardDrop`: validate a test card's unlink against the CURRENT snapshot and
+ * resolve the scenario+key pair to a `ScenarioRef` for the tag removal. `dropId` is the row's
+ * `unlinkId` (the scenario's `scenarioDropId`); `key` is the card's test. Returns undefined when no
+ * live link matches both (a rebuild dropped that link, or the row named a stale scenario) so the caller
  * rejects it instead of removing blind.
  */
 export function resolveBoardUnlink(
@@ -401,11 +354,11 @@ export function filterExecutionRows(rows: readonly ExecutionRow[], query: string
   return rows.filter((row) => row.key.toLowerCase().includes(needle) || row.summary.toLowerCase().includes(needle));
 }
 
-// The header search: case-insensitive substring over a test's key/summary and a scenario's name, its
-// workspace-relative location (the file path), and its requirement tags, plus a match across all five
-// matrix columns and the Mapped tree (a leaf on its key, a scenario on its name or location, pruning
-// empty scenarios and groups). One function the panel calls on every keystroke; an empty query returns
-// the model untouched.
+// The header search: case-insensitive substring over a test's key/summary and any of its linked
+// scenario rows (name or location), over a scenario card's name, its workspace-relative location (the
+// file path), and its requirement tags, plus a match across all five matrix columns. A matched test
+// card keeps all its rows. One function the panel calls on every keystroke; an empty query returns the
+// model untouched.
 export function filterBoardViewModel(model: BoardViewModel, query: string): BoardViewModel {
   const needle = query.trim().toLowerCase();
   if (needle === "") {
@@ -419,26 +372,13 @@ export function filterBoardViewModel(model: BoardViewModel, query: string): Boar
         card.reqKeys.some((key) => key.toLowerCase().includes(needle))
     ),
     tests: model.tests.filter(
-      (card) => card.key.toLowerCase().includes(needle) || (card.summary ?? "").toLowerCase().includes(needle)
+      (card) =>
+        card.key.toLowerCase().includes(needle) ||
+        (card.summary ?? "").toLowerCase().includes(needle) ||
+        card.links.some(
+          (row) => row.name.toLowerCase().includes(needle) || row.location.toLowerCase().includes(needle)
+        )
     ),
-    mapped: model.mapped
-      .map((group): MappedFeatureGroup => ({
-        file: group.file,
-        scenarios: group.scenarios
-          .map((scenario): MappedScenarioNode => {
-            const scenarioMatches =
-              scenario.name.toLowerCase().includes(needle) || scenario.location.toLowerCase().includes(needle);
-            return {
-              name: scenario.name,
-              location: scenario.location,
-              links: scenarioMatches
-                ? scenario.links
-                : scenario.links.filter((leaf) => leaf.key.toLowerCase().includes(needle)),
-            };
-          })
-          .filter((scenario) => scenario.links.length > 0),
-      }))
-      .filter((group) => group.scenarios.length > 0),
     matrix: model.matrix.filter((row) =>
       [row.requirement, row.test, row.scenario, row.tag, row.result].some((cell) => cell.toLowerCase().includes(needle))
     ),
