@@ -23,6 +23,7 @@ import { BoardViewModel, scenarioDropId } from "../../traceability/board-data";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { PreflightChoice } from "../../traceability/preflight-flow";
+import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
 import type { Memento } from "vscode";
 
 function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): PlaywrightBddExtensionContext {
@@ -601,6 +602,23 @@ describe("traceability linkScenario command", () => {
     expect(applied[0]!.__entries[0]).toMatchObject({ op: "insert", text: "@TC-5\n" });
   });
 
+  it("reports an error rather than a link when the workspace refuses the tag edit", async () => {
+    const adapter = await syncedAdapter();
+    const doc = {
+      uri: vscode.Uri.file("/ws/a.feature"),
+      getText: () => "Feature: F\n\nScenario: A\n  Given x\n",
+      save: () => Promise.resolve(true),
+    };
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(doc as unknown as vscode.TextDocument);
+    vi.spyOn(vscode.workspace, "applyEdit").mockResolvedValue(false);
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+
+    const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
+    await confirmLink(handlers.get("playwrightBddRunner.traceability.linkScenario")!(untracedNode), "5");
+
+    expect(error.mock.calls[0]?.[0]).toBe("Could not link 5: the feature file edit was not applied.");
+  });
+
   it("opens the Coverage Board and reveals the contextual Link tab", async () => {
     const adapter = await syncedAdapter();
     const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
@@ -613,13 +631,6 @@ describe("traceability linkScenario command", () => {
 
     await confirmLink(pending, "5");
   });
-
-  interface EditEntry {
-    op: string;
-    range?: { start: { line: number }; end?: { line: number } };
-    position?: { line: number };
-    text: string;
-  }
 
   function fakeDoc(text: string): vscode.TextDocument {
     const sep = text.includes("\r\n") ? "\r\n" : "\n";
@@ -635,53 +646,6 @@ describe("traceability linkScenario command", () => {
       save: () => Promise.resolve(true),
     } as unknown as vscode.TextDocument;
   }
-
-  function applyWsEdit(text: string, entries: EditEntry[]): string {
-    const eol = text.includes("\r\n") ? "\r\n" : "\n";
-    const parts = text.split(eol);
-    for (const e of entries) {
-      if (e.op === "insert" && e.position) {
-        const content = e.text.endsWith(eol) ? e.text.slice(0, -eol.length) : e.text;
-        parts.splice(e.position.line, 0, content);
-      } else if (e.op === "replace" && e.range) {
-        parts[e.range.start.line] = e.text;
-      } else if (e.op === "delete" && e.range?.end) {
-        parts.splice(e.range.start.line, e.range.end.line - e.range.start.line);
-      }
-    }
-    return parts.join(eol);
-  }
-
-  async function unlinkTag(feature: string, key: string, line: number): Promise<{ op: string; result: string }> {
-    const adapter = new InMemoryTraceabilityAdapter();
-    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(fakeDoc(feature));
-    const applied: EditEntry[][] = [];
-    vi.spyOn(vscode.workspace, "applyEdit").mockImplementation((edit) => {
-      applied.push((edit as unknown as { __entries: EditEntry[] }).__entries);
-      return Promise.resolve(true);
-    });
-    const mgr = CommandManager.create(makeContext({ traceabilityAdapter: adapter }));
-    const scenario: ScenarioRef = { filePath: "/ws/a.feature", line, name: "A", kind: "scenario" };
-    await (mgr as unknown as {
-      applyTagRemove: (s: ScenarioRef, k: string, g: unknown) => Promise<string>;
-    }).applyTagRemove(scenario, key, adapter.keyGrammar);
-    expect(applied).toHaveLength(1);
-    expect(applied[0]!).toHaveLength(1);
-    return { op: applied[0]![0]!.op, result: applyWsEdit(feature, applied[0]!) };
-  }
-
-  it("deletes a lone tag line via a WorkspaceEdit when unlinking removes the scenario's only tag", async () => {
-    const out = await unlinkTag("Feature: F\n\n@TC-9\nScenario: A\n  Given x\n", "9", 4);
-    expect(out.op).toBe("delete");
-    expect(out.result).toBe("Feature: F\n\nScenario: A\n  Given x\n");
-  });
-
-  it("replaces the line to drop just the test tag when other tags remain, keeping the EOL", async () => {
-    const out = await unlinkTag("Feature: F\r\n\r\n@smoke @TC-9\r\nScenario: A\r\n  Given x\r\n", "9", 4);
-    expect(out.op).toBe("replace");
-    expect(out.result).toBe("Feature: F\r\n\r\n@smoke\r\nScenario: A\r\n  Given x\r\n");
-    expect(out.result).not.toContain("\r\r");
-  });
 
   async function reMap(feature: string): Promise<string> {
     const adapter = new InMemoryTraceabilityAdapter();
@@ -1290,6 +1254,16 @@ describe("traceability board drag-to-link drop handler", () => {
 
     await expect(drop(mgr, scenarioDropId(A), "5")).resolves.toBeUndefined();
     expect(error).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces a refused write, which resolves rather than throwing, as an error toast", async () => {
+    const { mgr } = harness(dropSnapshot());
+    vi.spyOn(vscode.workspace, "applyEdit").mockResolvedValue(false);
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+
+    await drop(mgr, scenarioDropId(A), "5");
+
+    expect(error.mock.calls[0]?.[0]).toBe("Could not link 5: the feature file edit was not applied");
   });
 });
 

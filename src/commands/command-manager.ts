@@ -17,10 +17,11 @@ import type { XrayProbe } from "../xray/xray-connection-test";
 import {
   authorScenarioTest,
   AuthorScenarioTestUi,
+  buildTestTag,
   linkScenarioPicks,
   scenarioGherkinSlice,
 } from "../traceability/link-scenario";
-import { applyTagInsert, applyTagRemove } from "../traceability/tag-edit";
+import { applyTagInsert, applyTagRemove, TagWrite } from "../traceability/tag-edit";
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
 import { BoardDropResolution, buildBoardViewModel, buildExecutionRows, resolveBoardDrop, resolveBoardUnlink } from "../traceability/board-data";
 import { BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
@@ -52,6 +53,13 @@ import { buildAttachmentsModel } from "../xray/publish-attachment-support";
 import { JiraAccessError, JiraProject, searchJiraProjects } from "../xray/jira-project-search";
 import { normalizeSiteUrl } from "../xray/xray-adapter";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
+
+// VS Code refusing an edit or a save is silent, so every tag-write caller says the same thing about it.
+const REJECTED_WRITE = "the feature file edit was not applied";
+
+// Carries its own toast text out of the create flow: the remote test exists, so the generic "could not
+// create" wording would be false and would invite a duplicate-creating retry.
+class TagWriteRejected extends Error {}
 
 const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
   "ready": "ready",
@@ -630,10 +638,16 @@ export class CommandManager {
         });
       },
       unlink: async (key) => {
-        await this.applyTagRemove(scenario, key, adapter.keyGrammar);
+        if ((await this.applyTagRemove(scenario, key, adapter.keyGrammar)) === "rejected") {
+          // Reject so the picker keeps the row: the tag is still on the scenario.
+          throw new Error(REJECTED_WRITE);
+        }
       },
       logSearchError: (error) => this.logger.warn("Xray remote search failed", { error: errMsg(error) }),
-      logUnlinkError: (error) => this.logger.warn("Unlinking the scenario's test tag failed", { error: errMsg(error) }),
+      logUnlinkError: (error) => {
+        this.logger.warn("Unlinking the scenario's test tag failed", { error: errMsg(error) });
+        vscode.window.showErrorMessage(`Could not unlink the test tag: ${errMsg(error)}`);
+      },
     });
   }
 
@@ -651,6 +665,10 @@ export class CommandManager {
       vscode.window.showInformationMessage(`Scenario already linked to ${key}.`);
       return;
     }
+    if (outcome === "rejected") {
+      vscode.window.showErrorMessage(`Could not link ${key}: ${REJECTED_WRITE}.`);
+      return;
+    }
     if (!synced && adapter.remoteSearch) {
       adapter.remoteSearch.mergeKeys([key]).catch((error) => {
         this.logger.warn("Xray metadata merge for a newly linked test failed", { error: errMsg(error) });
@@ -658,11 +676,11 @@ export class CommandManager {
     }
   }
 
-  private applyTagInsert(scenario: ScenarioRef, key: string, grammar: KeyGrammar): Promise<"inserted" | "unchanged"> {
+  private applyTagInsert(scenario: ScenarioRef, key: string, grammar: KeyGrammar): Promise<TagWrite<"inserted">> {
     return applyTagInsert(scenario, key, grammar);
   }
 
-  private applyTagRemove(scenario: ScenarioRef, key: string, grammar: KeyGrammar): Promise<"removed" | "unchanged"> {
+  private applyTagRemove(scenario: ScenarioRef, key: string, grammar: KeyGrammar): Promise<TagWrite<"removed">> {
     return applyTagRemove(scenario, key, grammar);
   }
 
@@ -692,21 +710,30 @@ export class CommandManager {
         vscode.window.showErrorMessage(message);
       },
     };
+    const merge = (key: string): void => {
+      adapter.remoteSearch?.mergeKeys([key]).catch((error) => {
+        this.logger.warn("Xray metadata merge for a newly created test failed", { error: errMsg(error) });
+      });
+    };
     try {
       await authorScenarioTest(spec, adapter.label, ui, {
         createTest: (input, signal) => authoring.createTest(input, signal),
         insertTag: async (key) => {
-          await this.applyTagInsert(scenario, key, adapter.keyGrammar);
+          if ((await this.applyTagInsert(scenario, key, adapter.keyGrammar)) === "rejected") {
+            // The remote test exists; merging it anyway lets the picker re-link it without a sync.
+            merge(key);
+            throw new TagWriteRejected(
+              `${key} was created, but ${REJECTED_WRITE}. Add ${buildTestTag(adapter.keyGrammar, key)} to the scenario by hand, or link it to ${key} from the picker.`
+            );
+          }
         },
-        merge: (key) => {
-          adapter.remoteSearch?.mergeKeys([key]).catch((error) => {
-            this.logger.warn("Xray metadata merge for a newly created test failed", { error: errMsg(error) });
-          });
-        },
+        merge,
       });
     } catch (error) {
       this.logger.error("Create test from scenario failed", { error: errMsg(error) });
-      vscode.window.showErrorMessage(`Could not create the ${adapter.label} test: ${errMsg(error)}`);
+      vscode.window.showErrorMessage(
+        error instanceof TagWriteRejected ? error.message : `Could not create the ${adapter.label} test: ${errMsg(error)}`
+      );
     }
   }
 
@@ -1291,7 +1318,7 @@ export class CommandManager {
   private async applyBoardMutation(
     resolved: BoardDropResolution | undefined,
     grammar: KeyGrammar,
-    apply: (ref: ScenarioRef, key: string, grammar: KeyGrammar) => Promise<unknown>,
+    apply: (ref: ScenarioRef, key: string, grammar: KeyGrammar) => Promise<TagWrite<"inserted" | "removed">>,
     messages: { stale: string; failLog: string; failToast: (key: string, error: string) => string }
   ): Promise<void> {
     if (!resolved) {
@@ -1299,7 +1326,10 @@ export class CommandManager {
       return;
     }
     try {
-      await apply(resolved.ref, resolved.key, grammar);
+      if ((await apply(resolved.ref, resolved.key, grammar)) === "rejected") {
+        // A refusal is silent, so raise it into the same failure path a thrown write already takes.
+        throw new Error(REJECTED_WRITE);
+      }
     } catch (error) {
       this.logger.error(messages.failLog, { error: errMsg(error) });
       vscode.window.showErrorMessage(messages.failToast(resolved.key, errMsg(error)));
