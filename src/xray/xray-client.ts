@@ -284,9 +284,10 @@ export interface XrayCreateTestSpec {
   readonly gherkin: string;
 }
 
-// The created test read back from the SAME mutation response (§ mutation extract): `CreateTestResult
-// { test { issueId jira(fields:["key"]) } warnings }`. `key` is absent when the response carried no
-// readable one — the create still happened remotely, so the caller must not silently drop it.
+// The created issue read back from the SAME mutation response (§ mutation extract): `CreateTestResult
+// { test { issueId jira(fields:["key"]) } warnings }`, and the identical pair under `testSet`/`testPlan`
+// for the container creates. `key` is absent when the response carried no readable one — the create
+// still happened remotely, so the caller must not silently drop it.
 export interface XrayCreatedTest {
   readonly key?: string | undefined;
   readonly issueId?: string | undefined;
@@ -303,16 +304,36 @@ function createTestMutation(spec: XrayCreateTestSpec): string {
   return `mutation { createTest(testType: { name: "Cucumber" }, gherkin: ${gherkin}, jira: { fields: { project: { key: ${project} }, summary: ${summary} } }) { test { issueId jira(fields: ["key"]) } warnings } }`;
 }
 
-function parseCreatedTest(body: unknown): XrayCreatedTest {
-  const createTest =
+// `createTestSet(testIssueIds: [String], jira: JSON!)` and `createTestPlan(savedFilter, testIssueIds,
+// jira: JSON!)` take the same `jira` literal `createTestMutation` builds. `savedFilter` is never passed:
+// it is mutually exclusive with `testIssueIds`. The selection stops at the created issue: `tests(...)` is
+// a connection needing its own limit, so reading the members back would burn item budget for nothing.
+function createContainerMutation(
+  mutation: string,
+  field: string,
+  project: string,
+  summary: string,
+  testIssueIds: readonly string[]
+): string {
+  const ids = testIssueIds.map((id) => JSON.stringify(id)).join(", ");
+  return `mutation { ${mutation}(testIssueIds: [${ids}], jira: { fields: { project: { key: ${JSON.stringify(project)} }, summary: ${JSON.stringify(summary)} } }) { ${field} { issueId jira(fields: ["key"]) } warnings } }`;
+}
+
+// One parser for every create mutation: `mutation` names the field under `data`, `field` the created
+// issue under it (test/testSet/testPlan). The containers expose the same `issueId` + `jira(fields)` pair
+// as Test, so only those two names differ.
+function parseCreated(body: unknown, mutation: string, field: string): XrayCreatedTest {
+  const data =
     body !== null && typeof body === "object"
-      ? (body as { data?: { createTest?: { test?: { issueId?: unknown; jira?: { key?: unknown } | null } | null; warnings?: unknown } | null } }).data?.createTest
+      ? (body as { data?: Record<string, Record<string, unknown> | null> | null }).data
       : undefined;
-  const test = createTest?.test ?? undefined;
-  const key = readString(test?.jira?.key)?.toUpperCase();
-  const issueId = readString(test?.issueId);
-  const warnings = Array.isArray(createTest?.warnings)
-    ? createTest.warnings.filter((warning): warning is string => typeof warning === "string" && warning !== "")
+  const result = data?.[mutation] ?? undefined;
+  const issue = result?.[field] as { issueId?: unknown; jira?: { key?: unknown } | null } | null | undefined;
+  const key = readString(issue?.jira?.key)?.toUpperCase();
+  const issueId = readString(issue?.issueId);
+  const rawWarnings = result?.["warnings"];
+  const warnings = Array.isArray(rawWarnings)
+    ? rawWarnings.filter((warning): warning is string => typeof warning === "string" && warning !== "")
     : [];
   const record: { key?: string; issueId?: string; warnings: string[] } = { warnings };
   if (key !== undefined) {
@@ -483,40 +504,69 @@ export class XrayClient {
   }
 
   // Author a new Cucumber test and read its key/issueId back in the same response (no follow-up
-  // fetch). A GraphQL `errors` envelope becomes an `XrayMutationError`; the create still not having
-  // happened is the safe reading of an errored mutation, so nothing is inserted downstream. A 200
-  // with no readable key is NOT an error here — the create succeeded — so it returns a keyless record
-  // the caller surfaces (never a silent orphan).
+  // fetch). A 200 with no readable key is NOT an error here — the create succeeded — so it returns a
+  // keyless record the caller surfaces (never a silent orphan).
   public async createTest(spec: XrayCreateTestSpec, signal?: AbortSignal): Promise<XrayCreatedTest> {
-    const body = await this.graphql(createTestMutation(spec), signal);
-    const summaries = graphqlErrorSummaries(body);
-    if (summaries.length > 0) {
-      for (const summary of summaries) {
-        this.deps.logger.error(`GraphQL (createTest) ${summary}`);
-      }
-      throw new XrayMutationError(summaries.join("; "));
-    }
-    return parseCreatedTest(body);
+    return parseCreated(await this.mutate("createTest", createTestMutation(spec), signal), "createTest", "test");
   }
 
-  // Replace an existing test's Gherkin body and read the stored text back from the SAME response. A
-  // GraphQL `errors` envelope becomes an `XrayMutationError` (the safe reading is that the write never
-  // landed); an `undefined` return means the 200 carried no readable text, so the caller can report the
-  // write as unverified rather than claim a match it never saw.
+  // Author a Test Set / Test Plan holding the given tests, addressed by their remote issue ids (never
+  // keys). Same honest reading as createTest: a 200 with no readable key means the container exists but
+  // could not be named back, which is never a failure.
+  public createTestSet(
+    project: string,
+    summary: string,
+    testIssueIds: readonly string[],
+    signal?: AbortSignal
+  ): Promise<XrayCreatedTest> {
+    return this.createContainer("createTestSet", "testSet", project, summary, testIssueIds, signal);
+  }
+
+  public createTestPlan(
+    project: string,
+    summary: string,
+    testIssueIds: readonly string[],
+    signal?: AbortSignal
+  ): Promise<XrayCreatedTest> {
+    return this.createContainer("createTestPlan", "testPlan", project, summary, testIssueIds, signal);
+  }
+
+  private async createContainer(
+    mutation: string,
+    field: string,
+    project: string,
+    summary: string,
+    testIssueIds: readonly string[],
+    signal: AbortSignal | undefined
+  ): Promise<XrayCreatedTest> {
+    const query = createContainerMutation(mutation, field, project, summary, testIssueIds);
+    return parseCreated(await this.mutate(mutation, query, signal), mutation, field);
+  }
+
+  // Replace an existing test's Gherkin body and read the stored text back from the SAME response. An
+  // `undefined` return means the 200 carried no readable text, so the caller can report the write as
+  // unverified rather than claim a match it never saw.
   public async updateGherkinTestDefinition(
     issueId: string,
     gherkin: string,
     signal?: AbortSignal
   ): Promise<string | undefined> {
-    const body = await this.graphql(updateGherkinMutation(issueId, gherkin), signal);
+    const query = updateGherkinMutation(issueId, gherkin);
+    return parseUpdatedGherkin(await this.mutate("updateGherkinTestDefinition", query, signal));
+  }
+
+  // Every mutation's shared envelope: a GraphQL `errors` array becomes an XrayMutationError, whose safe
+  // reading is that the write never landed, and the raw body goes back for the caller's own parser.
+  private async mutate(name: string, query: string, signal: AbortSignal | undefined): Promise<unknown> {
+    const body = await this.graphql(query, signal);
     const summaries = graphqlErrorSummaries(body);
     if (summaries.length > 0) {
       for (const summary of summaries) {
-        this.deps.logger.error(`GraphQL (updateGherkinTestDefinition) ${summary}`);
+        this.deps.logger.error(`GraphQL (${name}) ${summary}`);
       }
       throw new XrayMutationError(summaries.join("; "));
     }
-    return parseUpdatedGherkin(body);
+    return body;
   }
 
   private async graphql(query: string, signal?: AbortSignal): Promise<unknown> {

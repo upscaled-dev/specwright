@@ -19,6 +19,8 @@ const BOARD_CSS = `
   .board-pane .create-tests { display: block; margin: 0 0 0.6rem; padding: 0.25rem 0.7rem; font-family: inherit; font-size: 0.78rem; border: none; border-radius: 3px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; }
   .board-pane .create-tests:hover:enabled { background: var(--vscode-button-hoverBackground); }
   .board-pane .create-tests:disabled { opacity: 0.55; cursor: default; }
+  .board-pane .verbs { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.6rem; }
+  .board-pane .verbs .create-tests { margin: 0; }
   .board-pane .card .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
   .board-pane .card .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 0.2rem; word-break: break-all; }
   .board-pane .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
@@ -59,6 +61,10 @@ function boardPanesHtml(providerLabel: string): string {
         </div>
         <div class="gutter"><span>drag to link</span></div>
         <div class="column">
+          <div class="verbs">
+            <button id="create-test-set" class="create-tests" type="button" disabled>Create Test Set</button>
+            <button id="create-test-plan" class="create-tests" type="button" disabled>Create Test Plan</button>
+          </div>
           <div class="group">
             <h2>${availableHeading} <span id="available-count" class="count"></span></h2>
             <div id="available-cards" class="cards"></div>
@@ -98,6 +104,8 @@ const BOARD_SCRIPT = `
   const scopeSelect = document.getElementById('scope-select');
   const scenarioCards = document.getElementById('scenario-cards');
   const createTests = document.getElementById('create-tests');
+  const createTestSet = document.getElementById('create-test-set');
+  const createTestPlan = document.getElementById('create-test-plan');
   const availableCards = document.getElementById('available-cards');
   const mappedCards = document.getElementById('mapped-cards');
   const scenarioCount = document.getElementById('scenario-count');
@@ -191,23 +199,23 @@ const BOARD_SCRIPT = `
     return el;
   }
 
-  // The Create tests verb, painted from the host's decision: label, enabled, and the tooltip that says
-  // what a disabled button is waiting for.
-  function renderCreateVerb(verb) {
-    createTests.textContent = verb.label || 'Create tests';
-    createTests.disabled = verb.enabled !== true;
-    createTests.title = verb.hint || '';
+  // A create verb, painted from the host's decision: label, enabled, and the tooltip that says what a
+  // disabled button is waiting for.
+  function renderVerb(button, verb, fallback) {
+    button.textContent = verb.label || fallback;
+    button.disabled = verb.enabled !== true;
+    button.title = verb.hint || '';
   }
 
-  // The bulk-create checkbox. The host owns the selection, so this posts the box's new state and paints
-  // whatever comes back on the next render.
-  function selectBox(card) {
+  // A card's checkbox. The host owns both selections, so this posts the box's new state under its
+  // target and paints whatever comes back on the next render.
+  function selectBox(target, id, label, checked) {
     const check = document.createElement('input');
     check.type = 'checkbox';
-    check.checked = card.selected === true;
-    check.setAttribute('aria-label', 'Select scenario ' + card.name);
+    check.checked = checked === true;
+    check.setAttribute('aria-label', label);
     check.addEventListener('change', function () {
-      window.__spec.post('board', { type: 'select', id: card.dropId, on: check.checked });
+      window.__spec.post('board', { type: 'select', target: target, id: id, on: check.checked });
     });
     return check;
   }
@@ -224,7 +232,7 @@ const BOARD_SCRIPT = `
       el.className = 'card';
       const head = document.createElement('div');
       head.className = 'pick';
-      head.appendChild(selectBox(card));
+      head.appendChild(selectBox('scenario', card.dropId, 'Select scenario ' + card.name, card.selected));
       const title = document.createElement('div');
       title.className = 'title';
       title.textContent = card.name;
@@ -301,10 +309,14 @@ const BOARD_SCRIPT = `
     for (const card of cards) {
       const el = document.createElement('div');
       el.className = 'card';
+      const head = document.createElement('div');
+      head.className = 'pick';
+      head.appendChild(selectBox('test', card.key, 'Select test ' + card.key, card.selected));
       const title = document.createElement('div');
       title.className = 'title key';
       title.textContent = card.key;
-      el.appendChild(title);
+      head.appendChild(title);
+      el.appendChild(head);
       if (card.summary) {
         const meta = document.createElement('div');
         meta.className = 'meta';
@@ -396,12 +408,16 @@ const BOARD_SCRIPT = `
   search.addEventListener('input', function () { window.__spec.post('board', { type: 'search', value: search.value }); });
   scopeSelect.addEventListener('change', function () { window.__spec.post('board', { type: 'scope', project: scopeSelect.value }); });
   createTests.addEventListener('click', function () { window.__spec.post('board', { type: 'bulkCreate' }); });
+  createTestSet.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestSet' }); });
+  createTestPlan.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestPlan' }); });
 
   window.__spec.register('board', function (msg) {
     if (msg.type === 'render') {
       filtering = msg.filtering === true;
       renderScope(msg.projects || [], msg.project || '');
-      renderCreateVerb(msg.createVerb || {});
+      renderVerb(createTests, msg.createVerb || {}, 'Create tests');
+      renderVerb(createTestSet, msg.testSetVerb || {}, 'Create Test Set');
+      renderVerb(createTestPlan, msg.testPlanVerb || {}, 'Create Test Plan');
       renderScenarios(msg.scenarios || []);
       renderTests(msg.available || [], msg.mapped || [], msg.availableEmptyText || '', msg.offerSync === true);
       renderMatrix(msg.matrix || []);

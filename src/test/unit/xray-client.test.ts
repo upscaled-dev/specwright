@@ -706,6 +706,103 @@ describe("XrayClient.createTest", () => {
   });
 });
 
+describe("XrayClient container creates", () => {
+  it("sends createTestSet with the member issue ids and the same jira literal createTest builds", async () => {
+    let captured = "";
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        captured = query;
+        return { data: { createTestSet: { testSet: { issueId: "5000", jira: { key: "calc-90" } }, warnings: [] } } };
+      }),
+    });
+
+    const created = await client.createTestSet("CALC", 'Regression "suite"', ["1001", "1002"]);
+
+    expect(captured).toContain('createTestSet(testIssueIds: ["1001", "1002"]');
+    expect(captured).toContain('jira: { fields: { project: { key: "CALC" }, summary: "Regression \\"suite\\"" } }');
+    expect(captured).toContain('testSet { issueId jira(fields: ["key"]) } warnings');
+    expect(created).toEqual({ key: "CALC-90", issueId: "5000", warnings: [] });
+  });
+
+  it("sends createTestPlan the same way, never a savedFilter (it excludes testIssueIds)", async () => {
+    let captured = "";
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        captured = query;
+        return { data: { createTestPlan: { testPlan: { issueId: "6000", jira: { key: "CALC-91" } }, warnings: [] } } };
+      }),
+    });
+
+    const created = await client.createTestPlan("CALC", "Release 4", ["1001"]);
+
+    expect(captured).toContain('createTestPlan(testIssueIds: ["1001"]');
+    expect(captured).toContain('testPlan { issueId jira(fields: ["key"]) } warnings');
+    expect(captured).not.toContain("savedFilter");
+    expect(created).toEqual({ key: "CALC-91", issueId: "6000", warnings: [] });
+  });
+
+  // `tests(...)` is a connection needing its own limit, so the created container is never asked for its
+  // members: the caller already knows what it sent.
+  it("never selects the members back off the created container", async () => {
+    let captured = "";
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        captured = query;
+        return { data: { createTestSet: { testSet: { issueId: "5000" }, warnings: [] } } };
+      }),
+    });
+
+    await client.createTestSet("CALC", "Regression", ["1001"]);
+
+    expect(captured).not.toContain("tests(");
+  });
+
+  it("returns a keyless record (never throws) when the container response carries no readable key", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({ data: { createTestPlan: { testPlan: { issueId: "6000" }, warnings: [] } } })),
+    });
+
+    const created = await client.createTestPlan("CALC", "Release 4", ["1001"]);
+
+    expect(created).toEqual({ issueId: "6000", warnings: [] });
+  });
+
+  it("surfaces non-empty container warnings and drops empty ones", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({
+        data: { createTestSet: { testSet: { jira: { key: "CALC-90" } }, warnings: ["1002 is not a test", ""] } },
+      })),
+    });
+
+    const created = await client.createTestSet("CALC", "Regression", ["1001", "1002"]);
+
+    expect(created).toEqual({ key: "CALC-90", warnings: ["1002 is not a test"] });
+  });
+
+  it("throws XrayMutationError on a GraphQL errors envelope (the container is treated as not created)", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({
+        errors: [{ message: "Project CALC does not exist", extensions: { code: "BAD_REQUEST" } }],
+        data: null,
+      })),
+    });
+
+    await expect(client.createTestSet("CALC", "Regression", ["1001"])).rejects.toBeInstanceOf(XrayMutationError);
+  });
+
+  it("threads the abort signal through, so a cancelled create never reaches the network", async () => {
+    const fetchImpl = vi.fn<FetchLike>(() => Promise.resolve(response(200, "{}")));
+    const client = makeClient({ fetchImpl });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      client.createTestPlan("CALC", "Release 4", ["1001"], controller.signal)
+    ).rejects.toBeInstanceOf(XrayAbortError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
 describe("XrayClient.updateGherkinTestDefinition", () => {
   it("addresses the mutation by issue id with JSON-escaped gherkin, omits versionId, and returns the read-back text", async () => {
     let captured = "";

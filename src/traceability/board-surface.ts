@@ -42,13 +42,22 @@ interface ScopeMessage {
   type: "scope";
   project: string;
 }
+// `target` says which column's checkbox moved: scenario cards and test cards hold separate selections,
+// and a scenario's drop id and a test's key are never compared.
 interface SelectMessage {
   type: "select";
+  target: "scenario" | "test";
   id: string;
   on: boolean;
 }
 interface BulkCreateMessage {
   type: "bulkCreate";
+}
+interface CreateTestSetMessage {
+  type: "createTestSet";
+}
+interface CreateTestPlanMessage {
+  type: "createTestPlan";
 }
 type BoardIncoming =
   | SearchMessage
@@ -59,16 +68,21 @@ type BoardIncoming =
   | SyncMessage
   | ScopeMessage
   | SelectMessage
-  | BulkCreateMessage;
+  | BulkCreateMessage
+  | CreateTestSetMessage
+  | CreateTestPlanMessage;
 
-// A scenario card plus the host's answer to "is this one checked". The webview holds no selection of
-// its own: it paints this flag and posts every checkbox change straight back.
+// A card plus the host's answer to "is this one checked". The webview holds no selection of its own: it
+// paints this flag and posts every checkbox change straight back.
 interface SelectableScenarioCard extends BoardScenarioCard {
   readonly selected: boolean;
 }
+interface SelectableTestCard extends BoardTestCard {
+  readonly selected: boolean;
+}
 
-// The Create tests button's whole state, decided here so the webview only paints it. `hint` is the
-// button's tooltip, which is where a disabled verb says what is missing.
+// A create button's whole state, decided here so the webview only paints it. `hint` is the button's
+// tooltip, which is where a disabled verb says what is missing.
 interface CreateVerb {
   readonly label: string;
   readonly enabled: boolean;
@@ -78,8 +92,8 @@ interface CreateVerb {
 interface RenderMessage {
   type: "render";
   scenarios: readonly SelectableScenarioCard[];
-  available: readonly BoardTestCard[];
-  mapped: readonly BoardTestCard[];
+  available: readonly SelectableTestCard[];
+  mapped: readonly SelectableTestCard[];
   matrix: readonly MatrixRow[];
   executions: readonly ExecutionRow[];
   availableEmptyText: string;
@@ -94,6 +108,8 @@ interface RenderMessage {
   // create needs a target project; the webview reads `createVerb`, not this.
   scoped: boolean;
   createVerb: CreateVerb;
+  testSetVerb: CreateVerb;
+  testPlanVerb: CreateVerb;
 }
 
 // The board is a document-like surface, so its data source is the stable subsystem — not a one-shot
@@ -123,6 +139,10 @@ export interface BoardSurfaceDeps {
   // the confirm, the progress, and the reporting, and reads the same selection this surface holds, so
   // the button and the palette entry run one path.
   bulkCreate(): void;
+  // The test column's two buttons: one remote container holding the checked test cards. Same division of
+  // labour as `bulkCreate`: the command layer owns the summary prompt, the confirm, and the reporting.
+  createTestSet(): void;
+  createTestPlan(): void;
   // The scope selector's options, read on the same beat as the model: a sync's new catalogue projects
   // appear with the snapshot that carries them. A settings edit alone does not repaint the board, so the
   // list can lag a just-changed sync scope until the next rebuild. That staleness is the price of one
@@ -131,6 +151,15 @@ export interface BoardSurfaceDeps {
   // Where the selection lives between sessions; it also owns coercing a key that has left `knownProjects`
   // back to All Projects.
   readonly projectScope: ProjectScopeStore;
+}
+
+function prune(selection: Set<string>, live: readonly string[]): void {
+  const known = new Set(live);
+  for (const id of selection) {
+    if (!known.has(id)) {
+      selection.delete(id);
+    }
+  }
 }
 
 // The Mapping/Matrix/Executions surface. It paints all three board panes from one filtered view model
@@ -143,9 +172,10 @@ export class BoardSurface {
   private executions: readonly ExecutionRow[];
   private projects: readonly string[];
   private readonly unlinking = new Set<string>();
-  // The checked scenario cards, by drop id, in the order they were checked. Scenario cards are never
-  // scoped away, so a scope change leaves this alone.
-  private readonly selected = new Set<string>();
+  // The checked scenario cards, by drop id, and the checked test cards, by key, each in the order they
+  // were checked. A scope change narrows what is painted, never what is checked.
+  private readonly selectedScenarioIds = new Set<string>();
+  private readonly selectedTestKeys = new Set<string>();
 
   constructor(
     private readonly host: SurfaceHost,
@@ -203,10 +233,11 @@ export class BoardSurface {
       return;
     }
     if (message.type === "select") {
+      const selection = message.target === "test" ? this.selectedTestKeys : this.selectedScenarioIds;
       if (message.on) {
-        this.selected.add(message.id);
+        selection.add(message.id);
       } else {
-        this.selected.delete(message.id);
+        selection.delete(message.id);
       }
       // Re-render so the verb's count and enablement follow the checkbox that just changed.
       this.render();
@@ -216,14 +247,26 @@ export class BoardSurface {
       this.deps.bulkCreate();
       return;
     }
+    if (message.type === "createTestSet") {
+      this.deps.createTestSet();
+      return;
+    }
+    if (message.type === "createTestPlan") {
+      this.deps.createTestPlan();
+      return;
+    }
     this.query = message.value;
     this.render();
   }
 
-  // The bulk-create command reads the selection from here, whether it was fired by the board's button
-  // or from the palette.
+  // The authoring commands read their selection from here, whether they were fired by the board's
+  // buttons or from the palette.
   public selectedScenarios(): readonly string[] {
-    return [...this.selected];
+    return [...this.selectedScenarioIds];
+  }
+
+  public selectedTests(): readonly string[] {
+    return [...this.selectedTestKeys];
   }
 
   private refresh(): void {
@@ -233,16 +276,17 @@ export class BoardSurface {
     this.render();
   }
 
-  // Drop checked ids the model no longer carries, against the whole model rather than the rendered
-  // slice: a rebuild that traces a scenario (its test was just created and tagged) retires it, while a
-  // search that hides a card must not silently uncheck it.
-  private pruneSelection(): void {
-    const live = new Set(this.model.scenarios.map((card) => card.dropId));
-    for (const id of this.selected) {
-      if (!live.has(id)) {
-        this.selected.delete(id);
-      }
-    }
+  // Drop checked ids the board no longer offers, against the model rather than the rendered slice, so a
+  // search that hides a card never silently unchecks it. Scenario cards are never scoped away, so they
+  // are pruned against the whole model; test cards are pruned against the SCOPED one, so a container can
+  // only ever hold tests whose checked boxes were on screen, so the count in its confirm is what the eye
+  // can verify. Both test groups count as live, since a checked available test stays checked once a link
+  // moves it to the mapped group. A key pruned here also leaves `selectedTests`, so a scope change during
+  // the command's name prompt shrinks what it goes on to create; `runContainerCreate`'s fail-fast is what
+  // guarantees the container never gains a member nobody saw.
+  private pruneSelection(scoped: BoardViewModel): void {
+    prune(this.selectedScenarioIds, this.model.scenarios.map((card) => card.dropId));
+    prune(this.selectedTestKeys, [...scoped.available, ...scoped.mapped].map((card) => card.key));
   }
 
   // A create needs a project to land in, so All Projects leaves the button visible but disabled with
@@ -251,7 +295,7 @@ export class BoardSurface {
     if (project === undefined) {
       return { label: "Create tests", enabled: false, hint: "Pick a project in the header to create tests in." };
     }
-    const count = this.selected.size;
+    const count = this.selectedScenarioIds.size;
     if (count === 0) {
       return { label: "Create tests", enabled: false, hint: "Check the scenarios you want tests for." };
     }
@@ -262,15 +306,40 @@ export class BoardSurface {
     };
   }
 
+  // The two test-column verbs share one state machine, `noun` being the only difference: a container
+  // needs a project to land in and at least one checked test, and a disabled button says which is
+  // missing in its tooltip.
+  private containerVerb(noun: string, project: string | undefined): CreateVerb {
+    const label = `Create ${noun}`;
+    if (project === undefined) {
+      return { label, enabled: false, hint: `Pick a project in the header to create a ${noun} in.` };
+    }
+    const count = this.selectedTestKeys.size;
+    if (count === 0) {
+      return { label, enabled: false, hint: `Check the tests you want in the ${noun}.` };
+    }
+    const tests = count === 1 ? "1 test" : `${count} tests`;
+    return {
+      label: `${label} from ${tests}`,
+      enabled: true,
+      hint: `Creates one ${noun} in ${project} holding the checked ${tests}.`,
+    };
+  }
+
   private render(): void {
-    this.pruneSelection();
     const project = this.deps.projectScope.get(this.projects);
-    const filtered = filterBoardViewModel(scopeBoardViewModel(this.model, project), this.query);
+    const scoped = scopeBoardViewModel(this.model, project);
+    this.pruneSelection(scoped);
+    const filtered = filterBoardViewModel(scoped, this.query);
+    const checkedTest = (card: BoardTestCard): SelectableTestCard => ({
+      ...card,
+      selected: this.selectedTestKeys.has(card.key),
+    });
     const message: RenderMessage = {
       type: "render",
-      scenarios: filtered.scenarios.map((card) => ({ ...card, selected: this.selected.has(card.dropId) })),
-      available: filtered.available,
-      mapped: filtered.mapped,
+      scenarios: filtered.scenarios.map((card) => ({ ...card, selected: this.selectedScenarioIds.has(card.dropId) })),
+      available: filtered.available.map(checkedTest),
+      mapped: filtered.mapped.map(checkedTest),
       matrix: filtered.matrix,
       executions: filterExecutionRows(this.executions, this.query),
       availableEmptyText: filtered.availableEmptyText,
@@ -280,6 +349,8 @@ export class BoardSurface {
       project: project ?? "",
       scoped: project !== undefined,
       createVerb: this.createVerb(project),
+      testSetVerb: this.containerVerb("Test Set", project),
+      testPlanVerb: this.containerVerb("Test Plan", project),
     };
     this.host.post(message);
   }

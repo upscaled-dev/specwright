@@ -293,9 +293,18 @@ export interface NewTestSpec {
   readonly gherkin: string;
 }
 
-// The authored test, read back from the SAME create response — no follow-up fetch. `key` is absent
-// only when the response carried no readable key: the test still exists remotely (and `issueId` may
-// pin it), so the flow surfaces that rather than inserting a tag it could not read back.
+// A brand-new remote container (a Test Set or a Test Plan) authored from tests picked on the board:
+// where it lands, what it is called, and the remote issue ids of the tests it holds.
+export interface NewContainerSpec {
+  readonly project: string;
+  readonly summary: string;
+  readonly testIssueIds: readonly string[];
+}
+
+// The authored issue (a test, or one of the containers the seams below create), read back from the SAME
+// create response, no follow-up fetch. `key` is absent only when the response carried no readable key:
+// the issue still exists remotely (and `issueId` may pin it), so the flow surfaces that rather than
+// inserting a tag, or naming a container, it could not read back.
 export interface AuthoredTest {
   readonly key?: string | undefined;
   readonly issueId?: string | undefined;
@@ -308,6 +317,11 @@ export interface AuthoredTest {
 // the extension makes; converting an existing test's type stays out of scope (see `bind` above).
 export interface TestAuthoringCapability {
   createTest(spec: NewTestSpec, signal?: AbortSignal): Promise<AuthoredTest>;
+  // Optional: create a container holding the given tests, addressed by their remote issue ids. One
+  // mutation creates the whole container, so the caller resolves every member's issue id before
+  // calling. A container short of members cannot be repaired from the response.
+  createTestSet?(spec: NewContainerSpec, signal?: AbortSignal): Promise<AuthoredTest>;
+  createTestPlan?(spec: NewContainerSpec, signal?: AbortSignal): Promise<AuthoredTest>;
   // Optional: replace an existing remote test's Gherkin body with local text, addressed by the remote
   // `issueId` (the only handle the write takes, never a key). Resolves to the text read back from the
   // same response, or `undefined` when it carried none, so the caller verifies instead of assuming.

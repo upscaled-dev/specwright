@@ -2,8 +2,17 @@ import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
 import { resolveBoardLink, scenarioDropId } from "../traceability/board-data";
 import { BulkCreateResult, BulkCreateScenario, runBulkCreate } from "../traceability/bulk-create-flow";
+import { ContainerCreateOutcome, runContainerCreate } from "../traceability/container-create-flow";
 import { opensScenario, scenarioGherkinSlice } from "../parsers/gherkin-slice";
-import { KeyGrammar, RemoteSearchCapability, TestCaseMetadata, TraceabilityAdapter } from "../traceability/contracts";
+import {
+  AuthoredTest,
+  KeyGrammar,
+  NewContainerSpec,
+  RemoteSearchCapability,
+  TestAuthoringCapability,
+  TestCaseMetadata,
+  TraceabilityAdapter,
+} from "../traceability/contracts";
 import { PushGherkinOutcome, runPushGherkin } from "../traceability/push-gherkin";
 import type { ScenarioRef } from "../traceability/scenario-ref";
 import { applyTagInsert } from "../traceability/tag-edit";
@@ -14,9 +23,10 @@ import type { TraceabilitySnapshot } from "../traceability/traceability-model";
 export interface AuthoringCommandDeps {
   snapshot(): TraceabilitySnapshot | undefined;
   adapter(): TraceabilityAdapter | undefined;
-  // The board's Mapping tab selection (scenario drop ids) and its project scope. The palette entry and
-  // the board's Create tests button read the same two, so both create in the same place.
+  // The board's Mapping tab selections (scenario drop ids, test keys) and its project scope. The palette
+  // entries and the board's own buttons read the same ones, so both create in the same place.
   selectedScenarios(): readonly string[];
+  selectedTests(): readonly string[];
   targetProject(): string | undefined;
   credentialsPresent(): Promise<boolean>;
   // The normalized site, named in the confirm so the user sees which tracker is about to be written to.
@@ -26,6 +36,7 @@ export interface AuthoringCommandDeps {
 }
 
 const NO_SELECTION = "Select scenarios on the Coverage Board's Mapping tab first.";
+const NO_TEST_SELECTION = "Select tests on the Coverage Board's Mapping tab first.";
 const NO_ROW = "Push Scenario Text: use the Push button on a linked scenario row on the Coverage Board.";
 const NOT_CONNECTED_FOR_PUSH = "Connect to your test tracker before pushing scenario text.";
 const STALE_ROW = "That link is out of date because the board changed. Try again.";
@@ -41,10 +52,25 @@ function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
-// The authoring commands: creating remote tests from local scenarios in bulk. The single-scenario
-// create still lives on the link picker's create path.
+// The remote issue id the last sync recorded for a test key, from wherever the board's card came from: a
+// mapped test carries it on its link's metadata, an available one on the orphan's.
+function issueIdFor(snapshot: TraceabilitySnapshot | undefined, key: string): string | undefined {
+  const link = snapshot?.links.find((item) => item.testKey === key);
+  return link?.meta?.issueId ?? snapshot?.orphans.find((item) => item.testKey === key)?.meta.issueId;
+}
+
+// The write one container verb runs, and how that verb reads its own seam off a capability that need
+// not expose it. Bound at read time so an adapter implementing the seam as a class method keeps its
+// receiver, like the push path does.
+type ContainerSeam = (spec: NewContainerSpec) => Promise<AuthoredTest>;
+type SeamOf = (authoring: TestAuthoringCapability) => ContainerSeam | undefined;
+
+// The authoring commands: creating remote tests from local scenarios in bulk, pushing a scenario's text
+// to its test, and gathering picked tests into a new container. The single-scenario create still lives
+// on the link picker's create path.
 export class TraceabilityAuthoringCommands {
   private inFlight: Promise<void> | undefined;
+  private containerInFlight: Promise<void> | undefined;
   private pushInFlight: Promise<void> | undefined;
 
   constructor(
@@ -101,6 +127,132 @@ export class TraceabilityAuthoringCommands {
     // Counted against the selection, not the resolved list, so the scenarios that dropped out above
     // are named in the summary instead of vanishing from it.
     await this.report(result, { selected: ids.length, dropped: ids.length - scenarios.length }, adapter.label);
+  }
+
+  /**
+   * Create one remote Test Set / Test Plan holding the tests checked on the Coverage Board, in the
+   * board's selected project. Prechecks run before any remote call: a selection, an adapter exposing
+   * that seam, credentials, and a target project; then the name prompt and one modal. The write itself
+   * is all-or-nothing (`runContainerCreate`), so a checked test the snapshot has no issue id for stops
+   * the batch before anything is created.
+   *
+   * One guard covers both verbs: they act on the same selection, so an invocation while either create
+   * is running joins it rather than authoring a second container.
+   */
+  public createTestSet(): Promise<void> {
+    return this.createContainer("Test Set", (authoring) => authoring.createTestSet?.bind(authoring));
+  }
+
+  public createTestPlan(): Promise<void> {
+    return this.createContainer("Test Plan", (authoring) => authoring.createTestPlan?.bind(authoring));
+  }
+
+  private createContainer(kind: string, seamOf: SeamOf): Promise<void> {
+    if (this.containerInFlight) {
+      return this.containerInFlight;
+    }
+    this.containerInFlight = this.containerFromSelection(kind, seamOf).finally(() => {
+      this.containerInFlight = undefined;
+    });
+    return this.containerInFlight;
+  }
+
+  private async containerFromSelection(kind: string, seamOf: SeamOf): Promise<void> {
+    const keys = this.deps.selectedTests();
+    if (keys.length === 0) {
+      vscode.window.showInformationMessage(NO_TEST_SELECTION);
+      return;
+    }
+    const adapter = this.deps.adapter();
+    const authoring = adapter?.testAuthoring;
+    const create = authoring ? seamOf(authoring) : undefined;
+    if (!adapter || !create || !(await this.deps.credentialsPresent())) {
+      vscode.window.showInformationMessage(`Connect to your test tracker before creating a ${kind}.`);
+      return;
+    }
+    const project = this.deps.targetProject();
+    if (project === undefined) {
+      vscode.window.showInformationMessage(`Pick a project on the Coverage Board to create this ${kind} in.`);
+      return;
+    }
+    const summary = (await this.containerSummary(kind, project, keys.length))?.trim();
+    if (summary === undefined || summary === "") {
+      return;
+    }
+    if (!(await this.confirmContainer(kind, project, keys.length, adapter.label))) {
+      return;
+    }
+    const snapshot = this.deps.snapshot();
+    try {
+      const outcome = await runContainerCreate(keys, project, summary, {
+        issueIdFor: (key) => issueIdFor(snapshot, key),
+        create,
+      });
+      this.reportContainer(outcome, kind, keys.length, adapter.label);
+    } catch (error) {
+      this.logger.error(`Creating a ${kind} failed`, { project, error: errMsg(error) });
+      vscode.window.showErrorMessage(`Could not create this ${kind}: ${errMsg(error)}`);
+    }
+  }
+
+  private containerSummary(kind: string, project: string, count: number): Thenable<string | undefined> {
+    return vscode.window.showInputBox({
+      title: `Create ${kind}`,
+      prompt: `Name the ${kind} to create in ${project}.`,
+      value: `${project} ${kind} (${count} ${plural(count, "test")})`,
+      validateInput: (text) => (text.trim() === "" ? `The ${kind} needs a name.` : undefined),
+    });
+  }
+
+  private async confirmContainer(
+    kind: string,
+    project: string,
+    count: number,
+    providerLabel: string
+  ): Promise<boolean> {
+    const site = this.deps.siteUrl();
+    const target = site !== "" ? `project ${project} on ${site}` : `project ${project}`;
+    const action = `Create ${kind}`;
+    const choice = await vscode.window.showWarningMessage(
+      `Create a new ${providerLabel} ${kind} in ${target} holding ${count} selected ${plural(count, "test")}?`,
+      { modal: true },
+      action
+    );
+    return choice === action;
+  }
+
+  // A blocked batch names every key it could not address, since a sync is what fixes them. A created
+  // container names its key; a response that carried none still created it, so that is reported as an
+  // honest gap rather than a failure. Warnings ride the success line and go to the log verbatim.
+  private reportContainer(
+    outcome: ContainerCreateOutcome,
+    kind: string,
+    count: number,
+    providerLabel: string
+  ): void {
+    if (outcome.kind === "unresolved") {
+      const keys = outcome.keys.join(", ");
+      this.logger.warn(`Creating a ${kind} was blocked by tests with no synced issue id`, { keys });
+      vscode.window.showWarningMessage(
+        `Nothing was created: there is no synced issue id for ${keys}, which is the only handle a ${kind} takes. ${RESYNC}`
+      );
+      return;
+    }
+    const created = outcome.created;
+    if (created.warnings.length > 0) {
+      this.logger.warn(`${providerLabel} returned warnings creating a ${kind}`, { warnings: created.warnings.join("; ") });
+    }
+    if (created.key === undefined) {
+      const idNote = created.issueId !== undefined ? ` (issue id ${created.issueId})` : "";
+      vscode.window.showWarningMessage(
+        `The ${kind} was created${idNote} but its key could not be read back, so it could not be named here.`
+      );
+      return;
+    }
+    const base = `Created ${kind} ${created.key} holding ${count} ${plural(count, "test")}.`;
+    vscode.window.showInformationMessage(
+      created.warnings.length > 0 ? `${base} Warnings: ${created.warnings.join("; ")}` : base
+    );
   }
 
   /**

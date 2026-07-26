@@ -71,10 +71,15 @@ export class BoardPanel {
     return instance;
   }
 
-  // The Mapping tab's checked scenario cards, empty when no board is open. The bulk-create command
-  // reads the selection through here, so the palette entry and the board's own button see the same one.
+  // The Mapping tab's checked scenario cards and checked test cards, empty when no board is open. The
+  // authoring commands read their selection through here, so a palette entry and the board's own
+  // buttons see the same one.
   public static selectedScenarios(): readonly string[] {
     return BoardPanel.current?.board.selectedScenarios() ?? [];
+  }
+
+  public static selectedTests(): readonly string[] {
+    return BoardPanel.current?.board.selectedTests() ?? [];
   }
 
   private hostFor(surface: SurfaceName): SurfaceHost {

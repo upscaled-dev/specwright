@@ -5,6 +5,7 @@ import { scenarioDropId } from "../../traceability/board-data";
 import {
   AuthoredTest,
   AutomationBindingClassification,
+  NewContainerSpec,
   NewTestSpec,
   TestCaseMetadata,
   TraceabilityAdapter,
@@ -145,6 +146,7 @@ function rig(options: RigOptions = {}): Rig {
     snapshot: () => options.snapshot ?? snapshot(),
     adapter: () => adapter,
     selectedScenarios: () => options.selected ?? [scenarioDropId(LOGIN), scenarioDropId(CHECKOUT)],
+    selectedTests: () => [],
     targetProject: () => ("project" in options ? options.project : "CALC"),
     credentialsPresent: () => Promise.resolve(options.credentials !== false),
     siteUrl: () => "https://acme.atlassian.net",
@@ -235,6 +237,7 @@ function pushRig(options: PushRigOptions = {}): PushRig {
     snapshot: () => options.snapshot ?? linkSnapshot(),
     adapter: () => adapter,
     selectedScenarios: () => [],
+    selectedTests: () => [],
     targetProject: () => "CALC",
     credentialsPresent: () => Promise.resolve(options.credentials !== false),
     siteUrl: () => "acme.atlassian.net",
@@ -259,6 +262,81 @@ function modalCall(warn: WarnCalls): unknown[] | undefined {
 
 function blockedCall(warn: WarnCalls): unknown[] | undefined {
   return warn.mock.calls.find((call) => (call[1] as { modal?: boolean } | undefined)?.modal !== true);
+}
+
+// A snapshot the board's test cards come from: CALC-1 is mapped, CALC-2 is available, and CALC-3 was
+// synced without an issue id (the only handle a container create takes).
+const CONTAINER_SNAPSHOT: TraceabilitySnapshot = {
+  links: [{ testKey: "CALC-1", scenario: LOGIN, reqKeys: [], meta: { key: "CALC-1", issueId: "45678" } }],
+  untraced: [],
+  orphans: [
+    { testKey: "CALC-2", meta: { key: "CALC-2", issueId: "45679" } },
+    { testKey: "CALC-3", meta: { key: "CALC-3" } },
+  ],
+  stale: false,
+  completeness: "complete",
+  errors: [],
+};
+
+interface ContainerRig {
+  commands: TraceabilityAuthoringCommands;
+  sets: NewContainerSpec[];
+  plans: NewContainerSpec[];
+  logger: Logger;
+}
+
+interface ContainerRigOptions {
+  selected?: string[];
+  project?: string | undefined;
+  seams?: boolean;
+  credentials?: boolean;
+  snapshot?: TraceabilitySnapshot;
+  created?: AuthoredTest;
+  create?: () => Promise<AuthoredTest>;
+}
+
+function containerRig(options: ContainerRigOptions = {}): ContainerRig {
+  const sets: NewContainerSpec[] = [];
+  const plans: NewContainerSpec[] = [];
+  const created = options.created ?? { key: "CALC-90", issueId: "9000", warnings: [] };
+  const create = options.create ?? ((): Promise<AuthoredTest> => Promise.resolve(created));
+  const adapter = {
+    label: "Xray",
+    keyGrammar: { testPrefix: "TEST_", canonicalizeKey: (key: string) => key.toUpperCase() },
+    testAuthoring: {
+      createTest: () => Promise.resolve<AuthoredTest>({ key: "CALC-1", warnings: [] }),
+      ...(options.seams === false
+        ? {}
+        : {
+            createTestSet: (spec: NewContainerSpec) => {
+              sets.push(spec);
+              return create();
+            },
+            createTestPlan: (spec: NewContainerSpec) => {
+              plans.push(spec);
+              return create();
+            },
+          }),
+    },
+  } as unknown as TraceabilityAdapter;
+  const logger = Logger.create();
+  const deps: AuthoringCommandDeps = {
+    snapshot: () => options.snapshot ?? CONTAINER_SNAPSHOT,
+    adapter: () => adapter,
+    selectedScenarios: () => [],
+    selectedTests: () => options.selected ?? ["CALC-1", "CALC-2"],
+    targetProject: () => ("project" in options ? options.project : "CALC"),
+    credentialsPresent: () => Promise.resolve(options.credentials !== false),
+    siteUrl: () => "https://acme.atlassian.net",
+    merge: () => undefined,
+  };
+  return { commands: new TraceabilityAuthoringCommands(logger, deps), sets, plans, logger };
+}
+
+// The name prompt and the modal, both answered: a container create runs on a named, confirmed batch.
+function nameAndConfirm(kind: string, name: string | undefined = "Regression suite"): WarnCalls {
+  vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(name as never);
+  return vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(`Create ${kind}` as never);
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -956,5 +1034,214 @@ describe("TraceabilityAuthoringCommands.pushScenarioText", () => {
     await Promise.all([first, second]);
 
     expect(pushes).toHaveLength(1);
+  });
+});
+
+describe("TraceabilityAuthoringCommands container creates", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("points at the board and creates nothing when no test is checked", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const input = vi.spyOn(vscode.window, "showInputBox");
+    const { commands, sets } = containerRig({ selected: [] });
+
+    await commands.createTestSet();
+
+    expect(String(info.mock.calls[0]?.[0])).toBe("Select tests on the Coverage Board's Mapping tab first.");
+    expect(input).not.toHaveBeenCalled();
+    expect(sets).toEqual([]);
+  });
+
+  it("makes no remote call when the adapter does not expose the container seams", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const input = vi.spyOn(vscode.window, "showInputBox");
+    const { commands, plans } = containerRig({ seams: false });
+
+    await commands.createTestPlan();
+
+    expect(String(info.mock.calls[0]?.[0])).toBe("Connect to your test tracker before creating a Test Plan.");
+    expect(input).not.toHaveBeenCalled();
+    expect(plans).toEqual([]);
+  });
+
+  it("makes no remote call when no credentials are stored for the site", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const { commands, sets } = containerRig({ credentials: false });
+
+    await commands.createTestSet();
+
+    expect(String(info.mock.calls[0]?.[0])).toContain("Connect to your test tracker");
+    expect(sets).toEqual([]);
+  });
+
+  it("asks for a project instead of guessing one under All Projects", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const { commands, sets } = containerRig({ project: undefined });
+
+    await commands.createTestSet();
+
+    expect(String(info.mock.calls[0]?.[0])).toBe("Pick a project on the Coverage Board to create this Test Set in.");
+    expect(sets).toEqual([]);
+  });
+
+  it("defaults the name to the project and the count, and creates nothing when the prompt is dismissed", async () => {
+    const input = vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined as never);
+    const confirm = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands, sets } = containerRig();
+
+    await commands.createTestSet();
+
+    expect(input.mock.calls[0]?.[0]).toMatchObject({ value: "CALC Test Set (2 tests)" });
+    expect(confirm).not.toHaveBeenCalled();
+    expect(sets).toEqual([]);
+  });
+
+  it("names the container type, the project, the count and the site in the one confirmation modal", async () => {
+    const confirm = nameAndConfirm("Test Set");
+    const { commands } = containerRig();
+
+    await commands.createTestSet();
+
+    expect(String(confirm.mock.calls[0]?.[0])).toBe(
+      "Create a new Xray Test Set in project CALC on https://acme.atlassian.net holding 2 selected tests?"
+    );
+    expect(confirm.mock.calls[0]?.[1]).toMatchObject({ modal: true });
+  });
+
+  it("creates nothing when the confirmation modal is dismissed", async () => {
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("Regression suite" as never);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
+    const { commands, sets, plans } = containerRig();
+
+    await commands.createTestSet();
+
+    expect(sets).toEqual([]);
+    expect(plans).toEqual([]);
+  });
+
+  it("sends one Test Set holding the checked tests' issue ids and reports the created key", async () => {
+    nameAndConfirm("Test Set");
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const { commands, sets, plans } = containerRig();
+
+    await commands.createTestSet();
+
+    expect(sets).toEqual([{ project: "CALC", summary: "Regression suite", testIssueIds: ["45678", "45679"] }]);
+    expect(plans).toEqual([]);
+    expect(String(info.mock.calls.at(-1)?.[0])).toBe("Created Test Set CALC-90 holding 2 tests.");
+  });
+
+  it("routes the plan verb to its own seam, trimming the name it was given", async () => {
+    nameAndConfirm("Test Plan", "  Release 4  ");
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const { commands, sets, plans } = containerRig({ selected: ["CALC-2"] });
+
+    await commands.createTestPlan();
+
+    expect(plans).toEqual([{ project: "CALC", summary: "Release 4", testIssueIds: ["45679"] }]);
+    expect(sets).toEqual([]);
+    expect(String(info.mock.calls.at(-1)?.[0])).toBe("Created Test Plan CALC-90 holding 1 test.");
+  });
+
+  it("creates nothing and names every unresolvable key when a checked test has no synced issue id", async () => {
+    const warn = nameAndConfirm("Test Set");
+    const { commands, sets, logger } = containerRig({ selected: ["CALC-3", "CALC-1", "CALC-4"] });
+    const logged = vi.spyOn(logger, "warn");
+
+    await commands.createTestSet();
+
+    expect(sets).toEqual([]);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "Nothing was created: there is no synced issue id for CALC-3, CALC-4, which is the only handle a Test Set takes. Sync traceability, then try again."
+    );
+    expect(logged.mock.calls[0]?.[1]).toMatchObject({ keys: "CALC-3, CALC-4" });
+  });
+
+  it("reports a container created without a readable key as created, naming the issue id", async () => {
+    const warn = nameAndConfirm("Test Set");
+    const { commands, sets } = containerRig({ created: { issueId: "9000", warnings: [] } });
+
+    await commands.createTestSet();
+
+    expect(sets).toHaveLength(1);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "The Test Set was created (issue id 9000) but its key could not be read back, so it could not be named here."
+    );
+  });
+
+  it("carries the tracker's warnings into the report and logs them verbatim", async () => {
+    nameAndConfirm("Test Plan");
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const { commands, logger } = containerRig({
+      created: { key: "CALC-91", warnings: ["45679 is not a test"] },
+    });
+    const logged = vi.spyOn(logger, "warn");
+
+    await commands.createTestPlan();
+
+    expect(String(info.mock.calls.at(-1)?.[0])).toBe(
+      "Created Test Plan CALC-91 holding 2 tests. Warnings: 45679 is not a test"
+    );
+    expect(logged.mock.calls[0]?.[1]).toMatchObject({ warnings: "45679 is not a test" });
+  });
+
+  it("surfaces a failed create as an error and logs it", async () => {
+    nameAndConfirm("Test Set");
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const { commands, logger } = containerRig({ create: () => Promise.reject(new Error("permission denied")) });
+    const logged = vi.spyOn(logger, "error");
+
+    await commands.createTestSet();
+
+    expect(String(error.mock.calls[0]?.[0])).toBe("Could not create this Test Set: permission denied");
+    expect(logged.mock.calls[0]?.[1]).toMatchObject({ project: "CALC" });
+  });
+
+  it("runs one container create at a time, so a second click cannot author a duplicate", async () => {
+    nameAndConfirm("Test Set");
+    let release!: () => void;
+    const { commands, sets } = containerRig({
+      create: () =>
+        new Promise<AuthoredTest>((resolve) => {
+          release = () => resolve({ key: "CALC-90", warnings: [] });
+        }),
+    });
+
+    const first = commands.createTestSet();
+    await flush();
+    const second = commands.createTestSet();
+    await flush();
+    expect(sets).toHaveLength(1);
+
+    release();
+    await Promise.all([first, second]);
+
+    expect(sets).toHaveLength(1);
+  });
+
+  // One guard covers BOTH verbs: they act on the same selection, so the plan must wait rather than
+  // write alongside a set already in flight.
+  it("holds the other verb too while a container create is running", async () => {
+    nameAndConfirm("Test Set");
+    let release!: () => void;
+    const { commands, sets, plans } = containerRig({
+      create: () =>
+        new Promise<AuthoredTest>((resolve) => {
+          release = () => resolve({ key: "CALC-90", warnings: [] });
+        }),
+    });
+
+    const set = commands.createTestSet();
+    await flush();
+    const plan = commands.createTestPlan();
+    await flush();
+    expect(sets).toHaveLength(1);
+    expect(plans).toEqual([]);
+
+    release();
+    await Promise.all([set, plan]);
+
+    expect(sets).toHaveLength(1);
+    expect(plans).toEqual([]);
   });
 });

@@ -28,8 +28,8 @@ interface RenderMessage {
   surface: "board";
   type: "render";
   scenarios: Array<{ name: string; dropId: string; selected: boolean }>;
-  available: Array<{ key: string; links: Array<{ name: string; location: string; unlinkId: string }> }>;
-  mapped: Array<{ key: string; links: Array<{ name: string; location: string; unlinkId: string }> }>;
+  available: Array<{ key: string; selected: boolean; links: Array<{ name: string; location: string; unlinkId: string }> }>;
+  mapped: Array<{ key: string; selected: boolean; links: Array<{ name: string; location: string; unlinkId: string }> }>;
   matrix: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }>;
   executions: Array<{ key: string; summary: string }>;
   availableEmptyText: string;
@@ -38,7 +38,14 @@ interface RenderMessage {
   projects: string[];
   project: string;
   scoped: boolean;
-  createVerb: { label: string; enabled: boolean; hint: string };
+  createVerb: Verb;
+  testSetVerb: Verb;
+  testPlanVerb: Verb;
+}
+interface Verb {
+  label: string;
+  enabled: boolean;
+  hint: string;
 }
 interface ActivateMessage {
   type: "activate";
@@ -108,6 +115,8 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     runSync: () => Promise.resolve(),
     openExecution: () => undefined,
     bulkCreate: () => undefined,
+    createTestSet: () => undefined,
+    createTestPlan: () => undefined,
     knownProjects: () => PROJECTS,
     projectScope: fakeScope(),
     publishDelegate: noopDelegate,
@@ -550,17 +559,17 @@ describe("BoardPanel", () => {
     const { panel } = await openReady();
     expect(lastRender(panel)!.scenarios.map((s) => s.selected)).toEqual([false, false]);
 
-    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-login", on: true });
     expect(lastRender(panel)!.scenarios.filter((s) => s.selected).map((s) => s.name)).toEqual(["Log in"]);
 
-    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: false });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-login", on: false });
 
     expect(lastRender(panel)!.scenarios.every((s) => !s.selected)).toBe(true);
   });
 
   it("keeps the selection across a scope change, since scenario cards are never scoped away", async () => {
     const { panel } = await openReady();
-    await panel.__receive({ surface: "board", type: "select", id: "id-checkout", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-checkout", on: true });
 
     await panel.__receive({ surface: "board", type: "scope", project: "PAY" });
 
@@ -572,7 +581,7 @@ describe("BoardPanel", () => {
 
   it("keeps a filtered-out card checked, so a search never silently unchecks it", async () => {
     const { panel } = await openReady();
-    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-login", on: true });
 
     await panel.__receive({ surface: "board", type: "search", value: "cart.feature" });
     expect(lastRender(panel)!.scenarios.map((s) => s.name)).toEqual(["Checkout"]);
@@ -586,8 +595,8 @@ describe("BoardPanel", () => {
     let current = MODEL;
     const changes = new vscode.EventEmitter<void>();
     const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
-    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
-    await panel.__receive({ surface: "board", type: "select", id: "id-checkout", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-login", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-checkout", on: true });
     await panel.__receive({ surface: "board", type: "scope", project: "CALC" });
     expect(lastRender(panel)!.createVerb.label).toBe("Create 2 tests in CALC");
 
@@ -602,7 +611,7 @@ describe("BoardPanel", () => {
   it("disables the create verb with a pick-a-project hint under All Projects, even with cards checked", async () => {
     const { panel } = await openReady();
 
-    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-login", on: true });
 
     const render = lastRender(panel)!;
     expect(render.scoped).toBe(false);
@@ -620,7 +629,7 @@ describe("BoardPanel", () => {
   it("routes the Create tests button to bulkCreate without re-rendering the board", async () => {
     const bulkCreate = vi.fn();
     const { panel } = await openReady({ bulkCreate, projectScope: fakeScope("CALC") });
-    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-login", on: true });
     const before = panel.webview.__posted.length;
 
     await panel.__receive({ surface: "board", type: "bulkCreate" });
@@ -629,12 +638,171 @@ describe("BoardPanel", () => {
     expect(panel.webview.__posted).toHaveLength(before);
   });
 
+  it("carries the two container buttons in the test column, and opens with both verbs disabled", async () => {
+    const { panel } = await openReady();
+
+    expect(panel.webview.html).toContain('id="create-test-set"');
+    expect(panel.webview.html).toContain('id="create-test-plan"');
+    expect(lastRender(panel)!.testSetVerb).toEqual({
+      label: "Create Test Set",
+      enabled: false,
+      hint: "Pick a project in the header to create a Test Set in.",
+    });
+    expect(lastRender(panel)!.testPlanVerb).toEqual({
+      label: "Create Test Plan",
+      enabled: false,
+      hint: "Pick a project in the header to create a Test Plan in.",
+    });
+  });
+
+  // Source-level only: the webview JS is never executed here, so this pins that a test card's checkbox
+  // is built with a label naming its key, not that checking the rendered box does anything.
+  it("labels a test card's checkbox with the test key", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("'Select test ' + card.key");
+    expect(html).toContain("'Select scenario ' + card.name");
+  });
+
+  it("marks a checked test card selected in either group and clears it again on uncheck", async () => {
+    const { panel } = await openReady();
+    expect(lastRender(panel)!.available.map((t) => t.selected)).toEqual([false]);
+    expect(lastRender(panel)!.mapped.map((t) => t.selected)).toEqual([false]);
+
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "PAY-9", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+    expect(lastRender(panel)!.available.map((t) => t.selected)).toEqual([true]);
+    expect(lastRender(panel)!.mapped.map((t) => t.selected)).toEqual([true]);
+
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: false });
+
+    expect(lastRender(panel)!.available.map((t) => t.selected)).toEqual([true]);
+    expect(lastRender(panel)!.mapped.map((t) => t.selected)).toEqual([false]);
+  });
+
+  it("keeps the two selections apart, so checking a test never touches the scenario verb", async () => {
+    const { panel } = await openReady({ projectScope: fakeScope("CALC") });
+
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+
+    const render = lastRender(panel)!;
+    expect(render.scenarios.every((s) => !s.selected)).toBe(true);
+    expect(render.createVerb).toMatchObject({ label: "Create tests", enabled: false });
+    expect(render.testSetVerb).toMatchObject({ label: "Create Test Set from 1 test", enabled: true });
+    expect(BoardPanel.selectedScenarios()).toEqual([]);
+    expect(BoardPanel.selectedTests()).toEqual(["CALC-1"]);
+  });
+
+  // A container holds what the checked boxes showed, so a test the new scope hides cannot ride along
+  // invisibly in the confirm's count. Scenario cards are unscoped, so their selection is untouched by
+  // the same move.
+  it("drops a checked test the scope hides, while the scenario selection survives", async () => {
+    const { panel } = await openReady({ projectScope: fakeScope("CALC") });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-checkout", on: true });
+    expect(lastRender(panel)!.testSetVerb.label).toBe("Create Test Set from 1 test");
+
+    await panel.__receive({ surface: "board", type: "scope", project: "PAY" });
+
+    const render = lastRender(panel)!;
+    expect(render.mapped).toEqual([]);
+    expect(render.testSetVerb).toEqual({
+      label: "Create Test Set",
+      enabled: false,
+      hint: "Check the tests you want in the Test Set.",
+    });
+    expect(render.testPlanVerb.enabled).toBe(false);
+    expect(BoardPanel.selectedTests()).toEqual([]);
+    expect(render.scenarios.filter((s) => s.selected).map((s) => s.name)).toEqual(["Checkout"]);
+    expect(BoardPanel.selectedScenarios()).toEqual(["id-checkout"]);
+  });
+
+  it("prunes a checked test the rebuild dropped, counting only what the model still carries", async () => {
+    let current = MODEL;
+    const changes = new vscode.EventEmitter<void>();
+    const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "PAY-9", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+    await panel.__receive({ surface: "board", type: "scope", project: "CALC" });
+    expect(lastRender(panel)!.testSetVerb.label).toBe("Create Test Set from 1 test");
+
+    current = { ...MODEL, mapped: [] };
+    changes.fire();
+
+    expect(lastRender(panel)!.testSetVerb).toMatchObject({ label: "Create Test Set", enabled: false });
+    expect(BoardPanel.selectedTests()).toEqual([]);
+  });
+
+  it("keeps a checked test checked when only the search hides its card", async () => {
+    const { panel } = await openReady({ projectScope: fakeScope("CALC") });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+
+    await panel.__receive({ surface: "board", type: "search", value: "nothing matches this" });
+    expect(lastRender(panel)!.mapped).toEqual([]);
+
+    await panel.__receive({ surface: "board", type: "search", value: "" });
+
+    expect(lastRender(panel)!.mapped.map((t) => t.selected)).toEqual([true]);
+    expect(BoardPanel.selectedTests()).toEqual(["CALC-1"]);
+  });
+
+  it("disables both container verbs under a project with no test checked", async () => {
+    const { panel } = await openReady({ projectScope: fakeScope("CALC") });
+
+    expect(lastRender(panel)!.testSetVerb).toEqual({
+      label: "Create Test Set",
+      enabled: false,
+      hint: "Check the tests you want in the Test Set.",
+    });
+    expect(lastRender(panel)!.testPlanVerb.hint).toBe("Check the tests you want in the Test Plan.");
+  });
+
+  it("disables both container verbs with a pick-a-project hint under All Projects, even with tests checked", async () => {
+    const { panel } = await openReady();
+
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+
+    const render = lastRender(panel)!;
+    expect(render.scoped).toBe(false);
+    expect(render.testSetVerb).toMatchObject({ enabled: false, label: "Create Test Set" });
+    expect(render.testPlanVerb.hint).toContain("Pick a project");
+  });
+
+  it("routes the two container buttons to their commands without re-rendering the board", async () => {
+    const createTestSet = vi.fn();
+    const createTestPlan = vi.fn();
+    const { panel } = await openReady({ createTestSet, createTestPlan, projectScope: fakeScope("CALC") });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ surface: "board", type: "createTestSet" });
+    await panel.__receive({ surface: "board", type: "createTestPlan" });
+
+    expect(createTestSet).toHaveBeenCalledOnce();
+    expect(createTestPlan).toHaveBeenCalledOnce();
+    expect(panel.webview.__posted).toHaveLength(before);
+  });
+
+  it("exposes the checked tests to the container commands, and nothing when no board is open", async () => {
+    expect(BoardPanel.selectedTests()).toEqual([]);
+    const { instance, panel } = await openReady();
+
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "PAY-9", on: true });
+    expect(BoardPanel.selectedTests()).toEqual(["CALC-1", "PAY-9"]);
+
+    instance.dispose();
+
+    expect(BoardPanel.selectedTests()).toEqual([]);
+  });
+
   it("exposes the checked cards to the bulk-create command, and nothing when no board is open", async () => {
     expect(BoardPanel.selectedScenarios()).toEqual([]);
     const { instance, panel } = await openReady();
 
-    await panel.__receive({ surface: "board", type: "select", id: "id-checkout", on: true });
-    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-checkout", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-login", on: true });
     expect(BoardPanel.selectedScenarios()).toEqual(["id-checkout", "id-login"]);
 
     instance.dispose();

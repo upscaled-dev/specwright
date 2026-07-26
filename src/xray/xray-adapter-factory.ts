@@ -95,6 +95,8 @@ export function createXrayAdapterFactory(
       // persistence and its account guards.
       const testAuthoring: TestAuthoringCapability = {
         createTest: (spec, signal) => client.createTest(spec, signal),
+        createTestSet: (spec, signal) => client.createTestSet(spec.project, spec.summary, spec.testIssueIds, signal),
+        createTestPlan: (spec, signal) => client.createTestPlan(spec.project, spec.summary, spec.testIssueIds, signal),
         pushGherkin: (issueId, gherkin, signal) => client.updateGherkinTestDefinition(issueId, gherkin, signal),
       };
       // The capability implements both metadata and remote search over the same client/state, so it

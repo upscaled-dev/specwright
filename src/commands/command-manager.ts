@@ -263,6 +263,8 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.clearLocalRunHistory", title: "Clear Local Run History…", category: CATEGORY, handler: this.clearLocalRunHistory.bind(this) },
         { command: "playwrightBddRunner.traceability.bulkCreateTests", title: "Create Tests from Scenarios…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().bulkCreateTests() },
         { command: "playwrightBddRunner.traceability.pushScenarioText", title: "Push Scenario Text…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().pushScenarioText() },
+        { command: "playwrightBddRunner.traceability.createTestSet", title: "Create Test Set…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().createTestSet() },
+        { command: "playwrightBddRunner.traceability.createTestPlan", title: "Create Test Plan…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().createTestPlan() },
       ];
 
       for (const cmd of commands) {
@@ -1283,6 +1285,20 @@ export class CommandManager {
             this.logger.warn("Bulk create from the board failed", { error: errMsg(error) });
           });
       },
+      createTestSet: () => {
+        this.getTraceabilityAuthoringCommands()
+          .createTestSet()
+          .catch((error) => {
+            this.logger.warn("Creating a test set from the board failed", { error: errMsg(error) });
+          });
+      },
+      createTestPlan: () => {
+        this.getTraceabilityAuthoringCommands()
+          .createTestPlan()
+          .catch((error) => {
+            this.logger.warn("Creating a test plan from the board failed", { error: errMsg(error) });
+          });
+      },
       publishDelegate: this.publishDelegate(),
       startPublish: () => {
         this.runPublish().catch((error) => {
@@ -1752,6 +1768,7 @@ export class CommandManager {
       snapshot: () => this.traceabilitySubsystem?.getSnapshot(),
       adapter: () => this.traceabilitySubsystem?.getActiveAdapter(),
       selectedScenarios: () => BoardPanel.selectedScenarios(),
+      selectedTests: () => BoardPanel.selectedTests(),
       targetProject: () => {
         const subsystem = this.traceabilitySubsystem;
         return subsystem?.projectScope().get(this.knownProjectKeys(subsystem.getActiveAdapter()));
