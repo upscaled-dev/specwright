@@ -71,6 +71,12 @@ export class BoardPanel {
     return instance;
   }
 
+  // The Mapping tab's checked scenario cards, empty when no board is open. The bulk-create command
+  // reads the selection through here, so the palette entry and the board's own button see the same one.
+  public static selectedScenarios(): readonly string[] {
+    return BoardPanel.current?.board.selectedScenarios() ?? [];
+  }
+
   private hostFor(surface: SurfaceName): SurfaceHost {
     return {
       post: (message) => this.postRaw({ ...message, surface }),

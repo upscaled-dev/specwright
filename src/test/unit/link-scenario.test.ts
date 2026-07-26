@@ -5,6 +5,7 @@ import {
   buildTestTag,
   computeLinkEdit,
   computeUnlinkEdit,
+  createAndTagTest,
   LinkEdit,
   linkScenarioPicks,
   scenarioGherkinSlice,
@@ -499,6 +500,58 @@ describe("scenarioGherkinSlice", () => {
     ].join("\n");
 
     expect(scenarioGherkinSlice(feature.split("\n"), 3)).toBe("Scenario: A\n  Given x");
+  });
+});
+
+describe("createAndTagTest", () => {
+  const spec = { project: "CALC", summary: "Login", gherkin: "Scenario: Login\n  Given a user" };
+
+  it("creates, then tags, then merges, in that order", async () => {
+    const order: string[] = [];
+
+    const created = await createAndTagTest(spec, {
+      createTest: () => {
+        order.push("create");
+        return Promise.resolve<AuthoredTest>({ key: "CALC-9", warnings: [] });
+      },
+      insertTag: (key) => {
+        order.push(`tag ${key}`);
+        return Promise.resolve();
+      },
+      merge: (key) => order.push(`merge ${key}`),
+    });
+
+    expect(order).toEqual(["create", "tag CALC-9", "merge CALC-9"]);
+    expect(created.key).toBe("CALC-9");
+  });
+
+  it("tags and merges nothing when the create answered no readable key, handing the response back", async () => {
+    const touched: string[] = [];
+
+    const created = await createAndTagTest(spec, {
+      createTest: () => Promise.resolve<AuthoredTest>({ issueId: "45678", warnings: [] }),
+      insertTag: (key) => {
+        touched.push(key);
+        return Promise.resolve();
+      },
+      merge: (key) => touched.push(key),
+    });
+
+    expect(touched).toEqual([]);
+    expect(created).toEqual({ issueId: "45678", warnings: [] });
+  });
+
+  it("never merges a key whose tag write threw, so the failure reaches the caller intact", async () => {
+    const merged: string[] = [];
+
+    await expect(
+      createAndTagTest(spec, {
+        createTest: () => Promise.resolve<AuthoredTest>({ key: "CALC-9", warnings: [] }),
+        insertTag: () => Promise.reject(new Error("refused")),
+        merge: (key) => merged.push(key),
+      })
+    ).rejects.toThrow("refused");
+    expect(merged).toEqual([]);
   });
 });
 

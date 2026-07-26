@@ -14,6 +14,11 @@ const BOARD_CSS = `
     background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   }
   .board-pane .card .title { font-weight: 600; word-break: break-word; }
+  .board-pane .card .pick { display: flex; align-items: flex-start; gap: 0.45rem; }
+  .board-pane .card .pick input { margin: 0.15rem 0 0; }
+  .board-pane .create-tests { display: block; margin: 0 0 0.6rem; padding: 0.25rem 0.7rem; font-family: inherit; font-size: 0.78rem; border: none; border-radius: 3px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; }
+  .board-pane .create-tests:hover:enabled { background: var(--vscode-button-hoverBackground); }
+  .board-pane .create-tests:disabled { opacity: 0.55; cursor: default; }
   .board-pane .card .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
   .board-pane .card .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 0.2rem; word-break: break-all; }
   .board-pane .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
@@ -49,6 +54,7 @@ function boardPanesHtml(providerLabel: string): string {
       <div class="columns">
         <div class="column">
           <h2>Untraced scenarios <span id="scenario-count" class="count"></span></h2>
+          <button id="create-tests" class="create-tests" type="button" disabled>Create tests</button>
           <div id="scenario-cards" class="cards"></div>
         </div>
         <div class="gutter"><span>drag to link</span></div>
@@ -91,6 +97,7 @@ const BOARD_SCRIPT = `
   const search = document.getElementById('search');
   const scopeSelect = document.getElementById('scope-select');
   const scenarioCards = document.getElementById('scenario-cards');
+  const createTests = document.getElementById('create-tests');
   const availableCards = document.getElementById('available-cards');
   const mappedCards = document.getElementById('mapped-cards');
   const scenarioCount = document.getElementById('scenario-count');
@@ -184,6 +191,27 @@ const BOARD_SCRIPT = `
     return el;
   }
 
+  // The Create tests verb, painted from the host's decision: label, enabled, and the tooltip that says
+  // what a disabled button is waiting for.
+  function renderCreateVerb(verb) {
+    createTests.textContent = verb.label || 'Create tests';
+    createTests.disabled = verb.enabled !== true;
+    createTests.title = verb.hint || '';
+  }
+
+  // The bulk-create checkbox. The host owns the selection, so this posts the box's new state and paints
+  // whatever comes back on the next render.
+  function selectBox(card) {
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.checked = card.selected === true;
+    check.setAttribute('aria-label', 'Select scenario ' + card.name);
+    check.addEventListener('change', function () {
+      window.__spec.post('board', { type: 'select', id: card.dropId, on: check.checked });
+    });
+    return check;
+  }
+
   function renderScenarios(cards) {
     scenarioCards.textContent = '';
     scenarioCount.textContent = '(' + cards.length + ')';
@@ -194,10 +222,14 @@ const BOARD_SCRIPT = `
     for (const card of cards) {
       const el = document.createElement('div');
       el.className = 'card';
+      const head = document.createElement('div');
+      head.className = 'pick';
+      head.appendChild(selectBox(card));
       const title = document.createElement('div');
       title.className = 'title';
       title.textContent = card.name;
-      el.appendChild(title);
+      head.appendChild(title);
+      el.appendChild(head);
       const meta = document.createElement('div');
       meta.className = 'meta';
       meta.textContent = card.location;
@@ -355,11 +387,13 @@ const BOARD_SCRIPT = `
 
   search.addEventListener('input', function () { window.__spec.post('board', { type: 'search', value: search.value }); });
   scopeSelect.addEventListener('change', function () { window.__spec.post('board', { type: 'scope', project: scopeSelect.value }); });
+  createTests.addEventListener('click', function () { window.__spec.post('board', { type: 'bulkCreate' }); });
 
   window.__spec.register('board', function (msg) {
     if (msg.type === 'render') {
       filtering = msg.filtering === true;
       renderScope(msg.projects || [], msg.project || '');
+      renderCreateVerb(msg.createVerb || {});
       renderScenarios(msg.scenarios || []);
       renderTests(msg.available || [], msg.mapped || [], msg.availableEmptyText || '', msg.offerSync === true);
       renderMatrix(msg.matrix || []);

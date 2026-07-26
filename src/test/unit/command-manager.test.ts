@@ -15,7 +15,9 @@ import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { CommandBuilder } from "../../core/command-builder";
 import { ExternalRef, RunArtifact, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayAdapter } from "../../xray/xray-adapter";
+import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
+import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { NO_PROJECT_SCOPE, ProjectScopeStore, projectScopeStore } from "../../traceability/project-scope";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
@@ -1460,6 +1462,62 @@ describe("traceability board unlink handler", () => {
     await unlink(mgr, scenarioDropId({ ...A, line: 999 }), "1");
     expect(applied).toHaveLength(0);
     expect(warn).toHaveBeenCalledOnce();
+  });
+});
+
+describe("traceability bulkCreateTests wiring", () => {
+  const win = vscode.window as unknown as {
+    __webviewPanels: Array<{ webview: { __posted: unknown[] }; __receive: (message: unknown) => Promise<void> }>;
+    __resetWebviewPanels: () => void;
+  };
+
+  afterEach(() => {
+    win.__resetWebviewPanels();
+    vi.restoreAllMocks();
+  });
+
+  const A: ScenarioRef = { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" };
+
+  function subsystemWithAuthoring(): TraceabilitySubsystem {
+    return {
+      traceabilityPanelActive: true,
+      getSnapshot: () => ({ links: [], untraced: [{ scenario: A, reqKeys: [] }], orphans: [], stale: false, completeness: "complete", errors: [] }),
+      getActiveAdapter: () => ({
+        label: "Xray",
+        keyGrammar: { testPrefix: "TEST_", projectOf: (key: string) => key.split("-")[0] },
+        testAuthoring: { createTest: () => Promise.resolve({ key: "CALC-1", warnings: [] }) },
+      }),
+      projectScope: () => NO_PROJECT_SCOPE,
+      onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
+    } as unknown as TraceabilitySubsystem;
+  }
+
+  // The command reads its selection off the open board, so drive one check through the panel.
+  async function selectOnBoard(mgr: CommandManager): Promise<void> {
+    BoardPanel.open((mgr as unknown as { boardDeps: () => BoardPanelDeps }).boardDeps());
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+    await panel.__receive({ surface: "board", type: "select", id: scenarioDropId(A), on: true });
+  }
+
+  it("reads an unconfigured site as not connected instead of letting the credential lookup reject", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(subsystemWithAuthoring());
+    // The real store throws on a site that normalizes empty, which is exactly the default config here.
+    mgr.setCredentialStore(new XrayCredentialStore({
+      get: () => Promise.resolve(undefined),
+      store: () => Promise.resolve(),
+      delete: () => Promise.resolve(),
+    } as unknown as vscode.SecretStorage));
+    await selectOnBoard(mgr);
+
+    const run = (mgr as unknown as {
+      getTraceabilityAuthoringCommands: () => { bulkCreateTests: () => Promise<void> };
+    }).getTraceabilityAuthoringCommands();
+
+    await expect(run.bulkCreateTests()).resolves.toBeUndefined();
+    expect(String(info.mock.calls.at(-1)?.[0])).toContain("Connect to your test tracker");
   });
 });
 

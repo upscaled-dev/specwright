@@ -37,11 +37,41 @@ interface ScopeMessage {
   type: "scope";
   project: string;
 }
-type BoardIncoming = SearchMessage | DropMessage | UnlinkMessage | OpenMessage | SyncMessage | ScopeMessage;
+interface SelectMessage {
+  type: "select";
+  id: string;
+  on: boolean;
+}
+interface BulkCreateMessage {
+  type: "bulkCreate";
+}
+type BoardIncoming =
+  | SearchMessage
+  | DropMessage
+  | UnlinkMessage
+  | OpenMessage
+  | SyncMessage
+  | ScopeMessage
+  | SelectMessage
+  | BulkCreateMessage;
+
+// A scenario card plus the host's answer to "is this one checked". The webview holds no selection of
+// its own: it paints this flag and posts every checkbox change straight back.
+interface SelectableScenarioCard extends BoardScenarioCard {
+  readonly selected: boolean;
+}
+
+// The Create tests button's whole state, decided here so the webview only paints it. `hint` is the
+// button's tooltip, which is where a disabled verb says what is missing.
+interface CreateVerb {
+  readonly label: string;
+  readonly enabled: boolean;
+  readonly hint: string;
+}
 
 interface RenderMessage {
   type: "render";
-  scenarios: readonly BoardScenarioCard[];
+  scenarios: readonly SelectableScenarioCard[];
   available: readonly BoardTestCard[];
   mapped: readonly BoardTestCard[];
   matrix: readonly MatrixRow[];
@@ -54,9 +84,10 @@ interface RenderMessage {
   // The scope selector's options and its current selection ("" is All Projects).
   projects: readonly string[];
   project: string;
-  // Whether a project scope is narrowing these lists. Nothing in the webview reads it yet: it is the flag
-  // the creation verbs land against, to disable themselves under a scope. Keep posting it.
+  // Whether a project scope is narrowing these lists. The create verb is computed from it here, since a
+  // create needs a target project; the webview reads `createVerb`, not this.
   scoped: boolean;
+  createVerb: CreateVerb;
 }
 
 // The board is a document-like surface, so its data source is the stable subsystem — not a one-shot
@@ -79,6 +110,10 @@ export interface BoardSurfaceDeps {
   runSync(): Promise<void>;
   // An Executions row's key link: routed through the host's browseIssue path.
   openExecution(key: string): void;
+  // The Create tests button: authors one remote test per checked scenario card. The command layer owns
+  // the confirm, the progress, and the reporting, and reads the same selection this surface holds, so
+  // the button and the palette entry run one path.
+  bulkCreate(): void;
   // The scope selector's options, read on the same beat as the model: a sync's new catalogue projects
   // appear with the snapshot that carries them. A settings edit alone does not repaint the board, so the
   // list can lag a just-changed sync scope until the next rebuild. That staleness is the price of one
@@ -99,6 +134,9 @@ export class BoardSurface {
   private executions: readonly ExecutionRow[];
   private projects: readonly string[];
   private readonly unlinking = new Set<string>();
+  // The checked scenario cards, by drop id, in the order they were checked. Scenario cards are never
+  // scoped away, so a scope change leaves this alone.
+  private readonly selected = new Set<string>();
 
   constructor(
     private readonly host: SurfaceHost,
@@ -151,8 +189,28 @@ export class BoardSurface {
       this.render();
       return;
     }
+    if (message.type === "select") {
+      if (message.on) {
+        this.selected.add(message.id);
+      } else {
+        this.selected.delete(message.id);
+      }
+      // Re-render so the verb's count and enablement follow the checkbox that just changed.
+      this.render();
+      return;
+    }
+    if (message.type === "bulkCreate") {
+      this.deps.bulkCreate();
+      return;
+    }
     this.query = message.value;
     this.render();
+  }
+
+  // The bulk-create command reads the selection from here, whether it was fired by the board's button
+  // or from the palette.
+  public selectedScenarios(): readonly string[] {
+    return [...this.selected];
   }
 
   private refresh(): void {
@@ -162,12 +220,42 @@ export class BoardSurface {
     this.render();
   }
 
+  // Drop checked ids the model no longer carries, against the whole model rather than the rendered
+  // slice: a rebuild that traces a scenario (its test was just created and tagged) retires it, while a
+  // search that hides a card must not silently uncheck it.
+  private pruneSelection(): void {
+    const live = new Set(this.model.scenarios.map((card) => card.dropId));
+    for (const id of this.selected) {
+      if (!live.has(id)) {
+        this.selected.delete(id);
+      }
+    }
+  }
+
+  // A create needs a project to land in, so All Projects leaves the button visible but disabled with
+  // the reason in its tooltip rather than hiding the verb.
+  private createVerb(project: string | undefined): CreateVerb {
+    if (project === undefined) {
+      return { label: "Create tests", enabled: false, hint: "Pick a project in the header to create tests in." };
+    }
+    const count = this.selected.size;
+    if (count === 0) {
+      return { label: "Create tests", enabled: false, hint: "Check the scenarios you want tests for." };
+    }
+    return {
+      label: count === 1 ? `Create 1 test in ${project}` : `Create ${count} tests in ${project}`,
+      enabled: true,
+      hint: `Creates one test per checked scenario in ${project}.`,
+    };
+  }
+
   private render(): void {
+    this.pruneSelection();
     const project = this.deps.projectScope.get(this.projects);
     const filtered = filterBoardViewModel(scopeBoardViewModel(this.model, project), this.query);
     const message: RenderMessage = {
       type: "render",
-      scenarios: filtered.scenarios,
+      scenarios: filtered.scenarios.map((card) => ({ ...card, selected: this.selected.has(card.dropId) })),
       available: filtered.available,
       mapped: filtered.mapped,
       matrix: filtered.matrix,
@@ -178,6 +266,7 @@ export class BoardSurface {
       projects: this.projects,
       project: project ?? "",
       scoped: project !== undefined,
+      createVerb: this.createVerb(project),
     };
     this.host.post(message);
   }

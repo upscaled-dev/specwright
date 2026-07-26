@@ -262,10 +262,29 @@ export interface AuthorScenarioTestDeps {
 }
 
 /**
+ * One scenario's create-and-tag sequence, shared by the single create flow and the bulk one. Order is
+ * load-bearing: create → (only with a readable key) insert the tag → additive merge. A create that
+ * returns no key still happened remotely, so it comes back untagged and unmerged for the caller to
+ * report rather than tagged with a key we can't trust.
+ */
+export async function createAndTagTest(
+  spec: NewTestSpec,
+  deps: AuthorScenarioTestDeps,
+  signal?: AbortSignal
+): Promise<AuthoredTest> {
+  const created = await deps.createTest(spec, signal);
+  if (created.key !== undefined) {
+    await deps.insertTag(created.key);
+    deps.merge(created.key);
+  }
+  return created;
+}
+
+/**
  * The create-from-scenario flow, isolated from VS Code so the confirm gate and the keyless-response
- * handling are unit-testable. Order is load-bearing: confirm → create → (only with a readable key)
- * insert the tag → additive merge. A create that returns no key still happened remotely, so it is
- * surfaced (with the issue id if present) rather than dropped or tagged with a key we can't trust.
+ * handling are unit-testable. Nothing is written before the confirm resolves true; the create itself
+ * runs through `createAndTagTest`. A create that returns no key is surfaced (with the issue id if
+ * present) rather than dropped.
  */
 export async function authorScenarioTest(
   spec: NewTestSpec,
@@ -277,7 +296,7 @@ export async function authorScenarioTest(
   if (!(await ui.confirm())) {
     return;
   }
-  const created = await deps.createTest(spec, signal);
+  const created = await createAndTagTest(spec, deps, signal);
   if (created.key === undefined) {
     const idNote = created.issueId !== undefined ? ` (issue id ${created.issueId})` : "";
     ui.error(
@@ -285,8 +304,6 @@ export async function authorScenarioTest(
     );
     return;
   }
-  await deps.insertTag(created.key);
-  deps.merge(created.key);
   const base = `Created ${created.key} and linked this scenario.`;
   ui.info(created.warnings.length > 0 ? `${base} Warnings: ${created.warnings.join("; ")}` : base);
 }

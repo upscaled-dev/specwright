@@ -624,6 +624,11 @@
         "command": "playwrightBddRunner.traceability.clearLocalRunHistory",
         "title": "Clear Local Run History…",
         "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.bulkCreateTests",
+        "title": "Create Tests from Scenarios…",
+        "category": "Specwright"
       }
     ],
     "viewsContainers": {

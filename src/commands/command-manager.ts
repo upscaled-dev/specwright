@@ -11,6 +11,7 @@ import { StepUsageIndex } from "../providers/step-usage-index";
 import { StepDefinitionNode, UnmatchedFileNode, UnmatchedStepNode } from "../providers/steps-tree-data-provider";
 import { runInsertStep } from "./insert-step";
 import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
+import { TraceabilityAuthoringCommands } from "./traceability-authoring-commands";
 import { XrayConnectionCommands } from "../xray/xray-connection-commands";
 import { XrayCredentialStore } from "../xray/xray-credential-store";
 import type { XrayProbe } from "../xray/xray-connection-test";
@@ -150,6 +151,7 @@ export class CommandManager {
   private credentialStore: XrayCredentialStore | undefined;
   private xrayProbe: XrayProbe | undefined;
   private xrayConnectionCommands: XrayConnectionCommands | undefined;
+  private traceabilityAuthoringCommands: TraceabilityAuthoringCommands | undefined;
   private traceabilitySubsystem: TraceabilitySubsystem | undefined;
   private publishLedger: PublishLedger | undefined;
   private syncInFlight: Promise<void> | undefined;
@@ -259,6 +261,7 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.toggleGrouping", title: "Toggle Grouping", category: CATEGORY, handler: this.toggleGrouping.bind(this) },
         { command: "playwrightBddRunner.traceability.switchDefaultProject", title: "Switch Default Project…", category: CATEGORY, handler: this.switchDefaultProject.bind(this) },
         { command: "playwrightBddRunner.traceability.clearLocalRunHistory", title: "Clear Local Run History…", category: CATEGORY, handler: this.clearLocalRunHistory.bind(this) },
+        { command: "playwrightBddRunner.traceability.bulkCreateTests", title: "Create Tests from Scenarios…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().bulkCreateTests() },
       ];
 
       for (const cmd of commands) {
@@ -711,11 +714,7 @@ export class CommandManager {
         vscode.window.showErrorMessage(message);
       },
     };
-    const merge = (key: string): void => {
-      adapter.remoteSearch?.mergeKeys([key]).catch((error) => {
-        this.logger.warn("Xray metadata merge for a newly created test failed", { error: errMsg(error) });
-      });
-    };
+    const merge = (key: string): void => this.mergeCreatedKey(adapter, key);
     try {
       await authorScenarioTest(spec, adapter.label, ui, {
         createTest: (input, signal) => authoring.createTest(input, signal),
@@ -736,6 +735,14 @@ export class CommandManager {
         error instanceof TagWriteRejected ? error.message : `Could not create the ${adapter.label} test: ${errMsg(error)}`
       );
     }
+  }
+
+  // The additive merge a freshly created key gets, so the picker and the board show it without a full
+  // sync. Shared by the single create flow and the bulk one.
+  private mergeCreatedKey(adapter: TraceabilityAdapter | undefined, key: string): void {
+    adapter?.remoteSearch?.mergeKeys([key]).catch((error) => {
+      this.logger.warn("Xray metadata merge for a newly created test failed", { error: errMsg(error) });
+    });
   }
 
   private async resolveProjectForCreate(): Promise<string | undefined> {
@@ -1261,6 +1268,13 @@ export class CommandManager {
           this.logger.warn("Opening the execution issue failed", { error: errMsg(error) });
         });
       },
+      bulkCreate: () => {
+        this.getTraceabilityAuthoringCommands()
+          .bulkCreateTests()
+          .catch((error) => {
+            this.logger.warn("Bulk create from the board failed", { error: errMsg(error) });
+          });
+      },
       publishDelegate: this.publishDelegate(),
       startPublish: () => {
         this.runPublish().catch((error) => {
@@ -1721,6 +1735,29 @@ export class CommandManager {
       this.xrayProbe
     );
     return this.xrayConnectionCommands;
+  }
+
+  // Every seam is a call-time read: the subsystem is set after activation and the board opens later
+  // still, so nothing here may be captured at construction.
+  private getTraceabilityAuthoringCommands(): TraceabilityAuthoringCommands {
+    this.traceabilityAuthoringCommands ??= new TraceabilityAuthoringCommands(this.logger, {
+      snapshot: () => this.traceabilitySubsystem?.getSnapshot(),
+      adapter: () => this.traceabilitySubsystem?.getActiveAdapter(),
+      selectedScenarios: () => BoardPanel.selectedScenarios(),
+      targetProject: () => {
+        const subsystem = this.traceabilitySubsystem;
+        return subsystem?.projectScope().get(this.knownProjectKeys(subsystem.getActiveAdapter()));
+      },
+      // An unconfigured site has no credential key to look under (the store throws on one), so it reads
+      // as "not connected" here rather than as a rejection nobody surfaces.
+      credentialsPresent: async () => {
+        const site = this.context.config.xraySiteUrl;
+        return normalizeSiteUrl(site) !== "" && ((await this.credentialStore?.hasCredentials(site)) ?? false);
+      },
+      siteUrl: () => normalizeSiteUrl(this.context.config.xraySiteUrl),
+      merge: (key) => this.mergeCreatedKey(this.traceabilitySubsystem?.getActiveAdapter(), key),
+    });
+    return this.traceabilityAuthoringCommands;
   }
 
   private getGenerateStepsCommand(): GenerateStepsCommand {

@@ -27,7 +27,7 @@ interface StubPanel {
 interface RenderMessage {
   surface: "board";
   type: "render";
-  scenarios: Array<{ name: string }>;
+  scenarios: Array<{ name: string; dropId: string; selected: boolean }>;
   available: Array<{ key: string; links: Array<{ name: string; location: string; unlinkId: string }> }>;
   mapped: Array<{ key: string; links: Array<{ name: string; location: string; unlinkId: string }> }>;
   matrix: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }>;
@@ -38,6 +38,7 @@ interface RenderMessage {
   projects: string[];
   project: string;
   scoped: boolean;
+  createVerb: { label: string; enabled: boolean; hint: string };
 }
 interface ActivateMessage {
   type: "activate";
@@ -105,6 +106,7 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     applyUnlink: () => Promise.resolve(),
     runSync: () => Promise.resolve(),
     openExecution: () => undefined,
+    bulkCreate: () => undefined,
     knownProjects: () => PROJECTS,
     projectScope: fakeScope(),
     publishDelegate: noopDelegate,
@@ -508,6 +510,113 @@ describe("BoardPanel", () => {
     expect(render.mapped).toEqual([]);
     expect(render.available).toEqual([]);
     expect(render).toMatchObject({ project: "CALC", scoped: true, filtering: true });
+  });
+
+  it("carries the Create tests button in the mapping pane, and opens with the verb disabled", async () => {
+    const { panel } = await openReady();
+
+    expect(panel.webview.html).toContain('id="create-tests"');
+    expect(lastRender(panel)!.createVerb).toEqual({
+      label: "Create tests",
+      enabled: false,
+      hint: "Pick a project in the header to create tests in.",
+    });
+  });
+
+  it("marks a checked scenario card selected and clears it again on uncheck", async () => {
+    const { panel } = await openReady();
+    expect(lastRender(panel)!.scenarios.map((s) => s.selected)).toEqual([false, false]);
+
+    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+    expect(lastRender(panel)!.scenarios.filter((s) => s.selected).map((s) => s.name)).toEqual(["Log in"]);
+
+    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: false });
+
+    expect(lastRender(panel)!.scenarios.every((s) => !s.selected)).toBe(true);
+  });
+
+  it("keeps the selection across a scope change, since scenario cards are never scoped away", async () => {
+    const { panel } = await openReady();
+    await panel.__receive({ surface: "board", type: "select", id: "id-checkout", on: true });
+
+    await panel.__receive({ surface: "board", type: "scope", project: "PAY" });
+
+    const render = lastRender(panel)!;
+    expect(render.scoped).toBe(true);
+    expect(render.scenarios.filter((s) => s.selected).map((s) => s.name)).toEqual(["Checkout"]);
+    expect(render.createVerb).toMatchObject({ enabled: true, label: "Create 1 test in PAY" });
+  });
+
+  it("keeps a filtered-out card checked, so a search never silently unchecks it", async () => {
+    const { panel } = await openReady();
+    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+
+    await panel.__receive({ surface: "board", type: "search", value: "cart.feature" });
+    expect(lastRender(panel)!.scenarios.map((s) => s.name)).toEqual(["Checkout"]);
+
+    await panel.__receive({ surface: "board", type: "search", value: "" });
+
+    expect(lastRender(panel)!.scenarios.filter((s) => s.selected).map((s) => s.name)).toEqual(["Log in"]);
+  });
+
+  it("prunes a checked card the rebuild dropped, so a created-and-tagged scenario leaves the selection", async () => {
+    let current = MODEL;
+    const changes = new vscode.EventEmitter<void>();
+    const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
+    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+    await panel.__receive({ surface: "board", type: "select", id: "id-checkout", on: true });
+    await panel.__receive({ surface: "board", type: "scope", project: "CALC" });
+    expect(lastRender(panel)!.createVerb.label).toBe("Create 2 tests in CALC");
+
+    current = { ...MODEL, scenarios: MODEL.scenarios.filter((card) => card.dropId !== "id-login") };
+    changes.fire();
+
+    const render = lastRender(panel)!;
+    expect(render.scenarios.map((s) => s.name)).toEqual(["Checkout"]);
+    expect(render.createVerb.label).toBe("Create 1 test in CALC");
+  });
+
+  it("disables the create verb with a pick-a-project hint under All Projects, even with cards checked", async () => {
+    const { panel } = await openReady();
+
+    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+
+    const render = lastRender(panel)!;
+    expect(render.scoped).toBe(false);
+    expect(render.createVerb.enabled).toBe(false);
+    expect(render.createVerb.hint).toContain("Pick a project");
+  });
+
+  it("disables the create verb under a project with nothing checked", async () => {
+    const { panel } = await openReady({ projectScope: fakeScope("CALC") });
+
+    expect(lastRender(panel)!.createVerb).toMatchObject({ label: "Create tests", enabled: false });
+    expect(lastRender(panel)!.createVerb.hint).toContain("Check the scenarios");
+  });
+
+  it("routes the Create tests button to bulkCreate without re-rendering the board", async () => {
+    const bulkCreate = vi.fn();
+    const { panel } = await openReady({ bulkCreate, projectScope: fakeScope("CALC") });
+    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ surface: "board", type: "bulkCreate" });
+
+    expect(bulkCreate).toHaveBeenCalledOnce();
+    expect(panel.webview.__posted).toHaveLength(before);
+  });
+
+  it("exposes the checked cards to the bulk-create command, and nothing when no board is open", async () => {
+    expect(BoardPanel.selectedScenarios()).toEqual([]);
+    const { instance, panel } = await openReady();
+
+    await panel.__receive({ surface: "board", type: "select", id: "id-checkout", on: true });
+    await panel.__receive({ surface: "board", type: "select", id: "id-login", on: true });
+    expect(BoardPanel.selectedScenarios()).toEqual(["id-checkout", "id-login"]);
+
+    instance.dispose();
+
+    expect(BoardPanel.selectedScenarios()).toEqual([]);
   });
 
   it("clears the singleton on dispose and stops posting; dispose is idempotent", async () => {
