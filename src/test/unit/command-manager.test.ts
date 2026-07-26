@@ -17,7 +17,7 @@ import { ExternalRef, RunArtifact, TraceabilityAdapter } from "../../traceabilit
 import { XrayAdapter } from "../../xray/xray-adapter";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
-import { NO_PROJECT_SCOPE, ProjectScopeStore } from "../../traceability/project-scope";
+import { NO_PROJECT_SCOPE, ProjectScopeStore, projectScopeStore } from "../../traceability/project-scope";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
 import { PublishLedger } from "../../traceability/publish-ledger";
 import { BoardViewModel, scenarioDropId } from "../../traceability/board-data";
@@ -1094,7 +1094,13 @@ describe("traceability publishLastRun — Publish tab", () => {
     };
   }
 
-  function connectedSubsystem(catalogueProjects: string[] = []): TraceabilitySubsystem {
+  function scopedTo(project: string): ProjectScopeStore {
+    const scope = projectScopeStore(memento(), () => undefined);
+    scope.set(project);
+    return scope;
+  }
+
+  function connectedSubsystem(catalogueProjects: string[] = [], scope: ProjectScopeStore = NO_PROJECT_SCOPE): TraceabilitySubsystem {
     const adapter = {
       id: "xray",
       label: "Xray",
@@ -1109,7 +1115,7 @@ describe("traceability publishLastRun — Publish tab", () => {
       traceabilityPanelActive: true,
       getActiveAdapter: () => adapter,
       getSnapshot: () => undefined,
-      projectScope: () => NO_PROJECT_SCOPE,
+      projectScope: () => scope,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
   }
@@ -1157,6 +1163,66 @@ describe("traceability publishLastRun — Publish tab", () => {
 
     await panel.__receive({ surface: "publish", type: "cancel" });
     await promise;
+  });
+
+  // The run's only key is CALC-1, so a scope of SHOP is the sole source of a SHOP prefill and the
+  // dropdown's CALC is the sole proof the derived key survived the override.
+  const syncKeysConfig = (keys: string[]): ExtensionConfig =>
+    ExtensionConfig.create(
+      {
+        get: (key: string, fallback: unknown) => (key === "xray.syncProjectKeys" ? keys : fallback),
+      } as unknown as vscode.WorkspaceConfiguration,
+      false
+    );
+
+  async function publishModel(mgr: CommandManager): Promise<{
+    knownProjectKeys: string[];
+    runs: Array<{ project: { value: string; fromDerivation: boolean; fromScope?: boolean } }>;
+  }> {
+    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    await flush();
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+    const posted = panel.webview.__posted.find((m) => m.surface === "publish" && m.type === "model") as unknown as {
+      model: {
+        knownProjectKeys: string[];
+        runs: Array<{ project: { value: string; fromDerivation: boolean; fromScope?: boolean } }>;
+      };
+    };
+    await panel.__receive({ surface: "publish", type: "cancel" });
+    await promise;
+    return posted.model;
+  }
+
+  it("prefills the dialog from the board's persisted scope, keeping the derived key in the dropdown", async () => {
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store, config: syncKeysConfig(["shop"]) }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem([], scopedTo("SHOP")));
+
+    const model = await publishModel(mgr);
+
+    expect(model.runs[0]!.project).toEqual({ value: "SHOP", fromDerivation: false, fromScope: true });
+    expect(model.knownProjectKeys).toContain("CALC");
+  });
+
+  it("falls back to the derived prefill when the persisted scope is no longer a known project", async () => {
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store, config: syncKeysConfig(["shop"]) }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem([], scopedTo("PAY")));
+
+    const model = await publishModel(mgr);
+
+    expect(model.runs[0]!.project).toEqual({ value: "CALC", fromDerivation: true });
+  });
+
+  it("leaves the prefill on the run's derived key when the board has no scope store", async () => {
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem());
+
+    const model = await publishModel(mgr);
+
+    expect(model.runs[0]!.project).toEqual({ value: "CALC", fromDerivation: true });
   });
 
   it("guides the user and opens no board when no publishing capability is connected", async () => {

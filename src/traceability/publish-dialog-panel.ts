@@ -379,7 +379,8 @@ const PUBLISH_SCRIPT = `
   function applyRun(run) {
     subtitle.textContent = run.subtitle;
     projectInput.value = run.project.value;
-    projectHint.hidden = !run.project.fromDerivation;
+    projectHint.hidden = !run.project.fromDerivation && !run.project.fromScope;
+    projectHint.textContent = run.project.fromScope ? "from the board's project scope" : "from this run's test keys";
     summaryInput.value = run.defaultSummary;
     planInput.value = run.prefillPlanKey || '';
     clearResults(projectResults);

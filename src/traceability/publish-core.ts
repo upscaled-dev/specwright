@@ -139,10 +139,14 @@ export function publishRunLabel(createdAt: number, selectionKind: string): strin
 // Create-mode Project prefill (§ point 2). Priority: (a) the single distinct project the run's own
 // publishable test keys resolve to, via the grammar's `projectOf` — carries `fromDerivation: true` so
 // the dialog shows the "from this run's test keys" hint; (b) the `xray.defaultProjectKey` setting when
-// the run yields zero or multiple projects; (c) empty. Only (a) is a derivation, so only (a) hints.
+// the run yields zero or multiple projects; (c) empty. Only (a) is a derivation. The publish flow can
+// outrank all three with the board's project scope, which hints on `fromScope` instead.
 export interface PublishProjectPrefill {
   readonly value: string;
   readonly fromDerivation: boolean;
+  // Set instead of `fromDerivation` when the board's project scope supplied the value, so the dialog
+  // hints where the prefill came from rather than silently outranking the run's own keys.
+  readonly fromScope?: boolean | undefined;
 }
 
 export function derivePublishProject(

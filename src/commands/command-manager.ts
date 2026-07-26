@@ -833,9 +833,10 @@ export class CommandManager {
   // just sealed); omitted, the newest publishable run wins. Nothing here runs a remote test — the
   // flow's only write is the capability's single import POST; attachments upload only AFTER it succeeds.
   private async runPublish(preselectId?: string): Promise<void> {
-    const adapter = this.traceabilitySubsystem?.getActiveAdapter();
+    const subsystem = this.traceabilitySubsystem;
+    const adapter = subsystem?.getActiveAdapter();
     const publishing = adapter?.resultPublishing;
-    if (!adapter || !publishing) {
+    if (!subsystem || !adapter || !publishing) {
       vscode.window.showInformationMessage("Connect to your test tracker before publishing.");
       return;
     }
@@ -852,6 +853,7 @@ export class CommandManager {
     const credentials = await this.credentialStore?.getCredentials(rawSite);
     const jiraSearchAvailable = (await this.credentialStore?.hasJiraCredentials(rawSite)) ?? false;
     const resolveSteps = makeFeatureStepResolver(this.context.featureParser);
+    const known = this.knownProjectKeys(adapter);
     try {
       await runPublishFlow({
         publishing,
@@ -860,8 +862,11 @@ export class CommandManager {
         projectOf: adapter.keyGrammar.projectOf,
         changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
         defaultProjectKey: this.context.config.xrayDefaultProjectKey,
+        // The board's scope, read through the same store and against the same known keys the board uses,
+        // so a project picked there prefills the dialog instead of the run's derived key.
+        selectedProjectKey: subsystem.projectScope().get(known),
         jiraSearchAvailable,
-        knownProjectKeys: this.knownProjectKeys(adapter),
+        knownProjectKeys: known,
         // Lazy — the flow calls this only after the no-runs gate, so an empty run list never fires the
         // one allowed pre-confirm call (the attachment/meta probe).
         attachments: () => this.buildPublishAttachments(rawSite),
@@ -1212,11 +1217,16 @@ export class CommandManager {
   }
 
   // The project keys this workspace knows: the sync setting, the synced catalogue, and the default key.
-  // One list behind both the publish dialog's project dropdown and the board's scope selector.
+  // One list behind both the publish dialog's project dropdown and the board's scope selector, so the
+  // persisted scope is coerced against the same keys wherever it is read. A grammar deriving no project
+  // stamps nothing on the cards, so every option would match nothing: offer none.
   private knownProjectKeys(adapter: TraceabilityAdapter | undefined): string[] {
+    if (!adapter?.keyGrammar.projectOf) {
+      return [];
+    }
     return knownProjectKeys(
       this.context.config.xraySyncProjectKeys,
-      adapter?.metadata?.snapshot().catalogueProjects ?? [],
+      adapter.metadata?.snapshot().catalogueProjects ?? [],
       this.context.config.xrayDefaultProjectKey
     );
   }
@@ -1238,12 +1248,7 @@ export class CommandManager {
           this.context.config.xraySyncProjectKeys.length > 0,
           subsystem?.getActiveAdapter()?.keyGrammar.projectOf
         ),
-      // A provider whose grammar derives no project stamps nothing on the cards, so every option would
-      // empty both groups: offer none and the selector stays on All Projects.
-      knownProjects: () => {
-        const adapter = subsystem?.getActiveAdapter();
-        return adapter?.keyGrammar.projectOf ? this.knownProjectKeys(adapter) : [];
-      },
+      knownProjects: () => this.knownProjectKeys(subsystem?.getActiveAdapter()),
       projectScope: subsystem?.projectScope() ?? NO_PROJECT_SCOPE,
       buildExecutions: () => buildExecutionRows(this.publishLedger?.entriesForSite(site) ?? []),
       onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,

@@ -232,6 +232,33 @@ describe("runPublishFlow — project prefill derivation", () => {
     await runPublishFlow(deps([run], cap.over));
     expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "", fromDerivation: false });
   });
+
+  it("lets the board's project selection outrank the derived key, hinting the scope not a derivation", async () => {
+    const cap = captureModel({ selectedProjectKey: "SHOP", defaultProjectKey: "PAY" });
+    const run = artifact({ results: [mapped("a", "CALC-1"), mapped("b", "CALC-2")] });
+    await runPublishFlow(deps([run], cap.over));
+    expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "SHOP", fromDerivation: false, fromScope: true });
+  });
+
+  it("normalizes the selection the way the dropdown does before it becomes the prefill", async () => {
+    const cap = captureModel({ selectedProjectKey: " shop " });
+    await runPublishFlow(deps([artifact()], cap.over));
+    expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "SHOP", fromDerivation: false, fromScope: true });
+  });
+
+  it("treats a selection that normalizes to nothing as no selection at all", async () => {
+    const cap = captureModel({ selectedProjectKey: "  ", defaultProjectKey: "PAY" });
+    await runPublishFlow(deps([artifact()], cap.over));
+    expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "CALC", fromDerivation: true });
+    expect(cap.models[0]!.knownProjectKeys).toEqual([]);
+  });
+
+  it("keeps the derived key in the dropdown when the selection took the prefill", async () => {
+    const cap = captureModel({ selectedProjectKey: "SHOP", knownProjectKeys: ["SHOP"] });
+    const runs = [artifact({ id: "one", results: [mapped("a", "CALC-1")] }), artifact({ id: "two", results: [mapped("b", "MATH-1")] })];
+    await runPublishFlow(deps(runs, cap.over));
+    expect(cap.models[0]!.knownProjectKeys).toEqual(["CALC", "MATH", "SHOP"]);
+  });
 });
 
 describe("runPublishFlow: known project keys", () => {

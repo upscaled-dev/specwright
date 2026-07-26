@@ -100,6 +100,9 @@ export interface PublishFlowDeps {
   // wires this to the FeatureParser step resolver; a test passes a fixed count.
   changedSinceRun(results: readonly PublishableResult[]): number;
   defaultProjectKey: string;
+  // The board's persisted project scope, when one is picked. It outranks the run-derived key for the
+  // dialog's project prefill; All Projects is the absence of a selection and leaves derivation alone.
+  selectedProjectKey?: string | undefined;
   jiraSearchAvailable: boolean;
   // Keys already known locally (sync config, snapshot catalogue) seeding the dialog's project dropdown.
   // The flow normalizes them through the same `knownProjectKeys` the board's scope selector reads.
@@ -136,30 +139,42 @@ export interface PublishFlowDeps {
   now(): number;
 }
 
-function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps): PublishRunOption {
+// A run's dialog option plus the project its own test keys derived to. The derived key outlives a
+// selection that took over the prefill, so the dropdown can still offer it.
+interface BuiltRunOption {
+  readonly option: PublishRunOption;
+  readonly derivedProject: string;
+}
+
+function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps, scopedProject: string | undefined): BuiltRunOption {
   const reconciled = publishableResults(artifact);
   const summary = summarizePublishable(reconciled);
   const planKey = artifact.selection.kind === "test-plan-derived" ? artifact.selection.planKey : undefined;
   const prior = deps.priorEntryFor(artifact.id);
+  const derived = derivePublishProject(reconciled.publishable, deps.defaultProjectKey, deps.projectOf);
   return {
-    id: artifact.id,
-    label: publishRunLabel(artifact.createdAt, artifact.selection.kind),
-    subtitle: publishDialogSubtitle(summary, deps.changedSinceRun(reconciled.publishable)),
-    project: derivePublishProject(reconciled.publishable, deps.defaultProjectKey, deps.projectOf),
-    defaultSummary: defaultPublishSummary(artifact.createdAt, reconciled.publishable.length),
-    ...(planKey !== undefined && planKey !== "" ? { prefillPlanKey: planKey } : {}),
-    ...(prior
-      ? {
-          republish: {
-            key: prior.executionRef,
-            publishedAt: prior.publishedAt,
-            ...(prior.mode ? { mode: prior.mode } : {}),
-          },
-        }
-      : {}),
-    ...(prior && prior.pendingAttachments.length > 0
-      ? { pendingAttachments: { key: prior.executionRef, count: prior.pendingAttachments.length } }
-      : {}),
+    derivedProject: derived.value,
+    option: {
+      id: artifact.id,
+      label: publishRunLabel(artifact.createdAt, artifact.selection.kind),
+      subtitle: publishDialogSubtitle(summary, deps.changedSinceRun(reconciled.publishable)),
+      project:
+        scopedProject === undefined ? derived : { value: scopedProject, fromDerivation: false, fromScope: true },
+      defaultSummary: defaultPublishSummary(artifact.createdAt, reconciled.publishable.length),
+      ...(planKey !== undefined && planKey !== "" ? { prefillPlanKey: planKey } : {}),
+      ...(prior
+        ? {
+            republish: {
+              key: prior.executionRef,
+              publishedAt: prior.publishedAt,
+              ...(prior.mode ? { mode: prior.mode } : {}),
+            },
+          }
+        : {}),
+      ...(prior && prior.pendingAttachments.length > 0
+        ? { pendingAttachments: { key: prior.executionRef, count: prior.pendingAttachments.length } }
+        : {}),
+    },
   };
 }
 
@@ -186,7 +201,10 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
   // The runs gate passed → the dialog will open, so this is the moment (and only moment) the attachments
   // model + its `attachment/meta` probe are built.
   const attachments = await deps.attachments();
-  const options = runnable.map((artifact) => buildRunOption(artifact, deps));
+  // Folded through the same normalizer as the dropdown, so a blank or lowercase scope cannot reach the
+  // prefill: whatever normalizes to nothing is no selection at all.
+  const scopedProject = knownProjectKeys([deps.selectedProjectKey ?? ""])[0];
+  const built = runnable.map((artifact) => buildRunOption(artifact, deps, scopedProject));
   const selectedRunId =
     deps.preselectId !== undefined && runnable.some((artifact) => artifact.id === deps.preselectId)
       ? deps.preselectId
@@ -194,10 +212,15 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
 
   const dialog = await deps.presentDialog({
     title: "Publish run results",
-    runs: options,
+    runs: built.map((run) => run.option),
     selectedRunId,
     jiraSearchAvailable: deps.jiraSearchAvailable,
-    knownProjectKeys: knownProjectKeys(deps.knownProjectKeys),
+    // Under a selection the run-derived keys are no longer the prefill, so they join the dropdown
+    // to stay one pick away.
+    knownProjectKeys: knownProjectKeys(
+      deps.knownProjectKeys,
+      scopedProject === undefined ? [] : built.map((run) => run.derivedProject)
+    ),
     attachments,
   });
   if (dialog === undefined) {
