@@ -7,7 +7,9 @@ import {
   MatrixRow,
   filterBoardViewModel,
   filterExecutionRows,
+  scopeBoardViewModel,
 } from "./board-data";
+import { ProjectScopeStore } from "./project-scope";
 import { SurfaceHost } from "./webview-host";
 
 interface SearchMessage {
@@ -31,7 +33,11 @@ interface OpenMessage {
 interface SyncMessage {
   type: "sync";
 }
-type BoardIncoming = SearchMessage | DropMessage | UnlinkMessage | OpenMessage | SyncMessage;
+interface ScopeMessage {
+  type: "scope";
+  project: string;
+}
+type BoardIncoming = SearchMessage | DropMessage | UnlinkMessage | OpenMessage | SyncMessage | ScopeMessage;
 
 interface RenderMessage {
   type: "render";
@@ -45,6 +51,12 @@ interface RenderMessage {
   // Whether these lists came out of a query. The webview cannot read this off its own search box: a
   // snapshot-driven render can land before the host has processed a keystroke or a clear.
   filtering: boolean;
+  // The scope selector's options and its current selection ("" is All Projects).
+  projects: readonly string[];
+  project: string;
+  // Whether a project scope is narrowing these lists. Nothing in the webview reads it yet: it is the flag
+  // the creation verbs land against, to disable themselves under a scope. Keep posting it.
+  scoped: boolean;
 }
 
 // The board is a document-like surface, so its data source is the stable subsystem — not a one-shot
@@ -67,16 +79,25 @@ export interface BoardSurfaceDeps {
   runSync(): Promise<void>;
   // An Executions row's key link: routed through the host's browseIssue path.
   openExecution(key: string): void;
+  // The scope selector's options, read on the same beat as the model: a sync's new catalogue projects
+  // appear with the snapshot that carries them. A settings edit alone does not repaint the board, so the
+  // list can lag a just-changed sync scope until the next rebuild. That staleness is the price of one
+  // refresh path, not an oversight.
+  knownProjects(): readonly string[];
+  // Where the selection lives between sessions; it also owns coercing a key that has left `knownProjects`
+  // back to All Projects.
+  readonly projectScope: ProjectScopeStore;
 }
 
 // The Mapping/Matrix/Executions surface. It paints all three board panes from one filtered view model
 // (the shell owns which pane is visible), forwards drops and execution-link clicks, and re-renders on
 // the subsystem's snapshot-change event. Every render round-trips through the vscode-free
-// `filterBoardViewModel`, so the webview JS stays thin and untested.
+// `scopeBoardViewModel` and `filterBoardViewModel`, so the webview JS stays thin and untested.
 export class BoardSurface {
   private query = "";
   private model: BoardViewModel;
   private executions: readonly ExecutionRow[];
+  private projects: readonly string[];
   private readonly unlinking = new Set<string>();
 
   constructor(
@@ -85,6 +106,7 @@ export class BoardSurface {
   ) {
     this.model = deps.buildModel();
     this.executions = deps.buildExecutions();
+    this.projects = deps.knownProjects();
     host.onMessage((message) => this.handle(message as BoardIncoming));
     const subscription = deps.onDidChange(() => this.refresh());
     host.onDidDispose(() => subscription.dispose());
@@ -124,6 +146,11 @@ export class BoardSurface {
         .catch(() => undefined);
       return;
     }
+    if (message.type === "scope") {
+      this.deps.projectScope.set(message.project === "" ? undefined : message.project);
+      this.render();
+      return;
+    }
     this.query = message.value;
     this.render();
   }
@@ -131,11 +158,13 @@ export class BoardSurface {
   private refresh(): void {
     this.model = this.deps.buildModel();
     this.executions = this.deps.buildExecutions();
+    this.projects = this.deps.knownProjects();
     this.render();
   }
 
   private render(): void {
-    const filtered = filterBoardViewModel(this.model, this.query);
+    const project = this.deps.projectScope.get(this.projects);
+    const filtered = filterBoardViewModel(scopeBoardViewModel(this.model, project), this.query);
     const message: RenderMessage = {
       type: "render",
       scenarios: filtered.scenarios,
@@ -146,6 +175,9 @@ export class BoardSurface {
       availableEmptyText: filtered.availableEmptyText,
       offerSync: filtered.offerSync,
       filtering: this.query.trim() !== "",
+      projects: this.projects,
+      project: project ?? "",
+      scoped: project !== undefined,
     };
     this.host.post(message);
   }

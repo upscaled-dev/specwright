@@ -178,6 +178,17 @@ const SHELL_CSS = `
   .tab + .tab { border-left: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); }
   .tab.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .tab[hidden] { display: none; }
+  .scope[hidden] { display: none; }
+  .scope select {
+    padding: 0.4rem 0.5rem;
+    color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+    background: var(--vscode-dropdown-background, var(--vscode-input-background));
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, transparent));
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: inherit;
+  }
+  .scope select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .search { flex: 1; min-width: 12rem; }
   .search[hidden] { display: none; }
   .search input {
@@ -216,12 +227,14 @@ const SHELL_SCRIPT = `
     const tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tab'));
     const panes = Array.prototype.slice.call(document.querySelectorAll('.pane'));
     const searchBox = document.querySelector('.search');
+    const scopeBox = document.querySelector('.scope');
     const boardTabs = { mapping: true, matrix: true, executions: true };
 
     function showTab(tab) {
       tabButtons.forEach(function (btn) { btn.classList.toggle('active', btn.dataset.tab === tab); });
       panes.forEach(function (pane) { pane.hidden = pane.dataset.tab !== tab; });
       if (searchBox) { searchBox.hidden = !boardTabs[tab]; }
+      if (scopeBox) { scopeBox.hidden = !boardTabs[tab]; }
     }
 
     tabButtons.forEach(function (btn) {
@@ -271,6 +284,7 @@ function renderDocument(providerLabel: string): string {
       <button class="tab" data-tab="publish" type="button">Publish</button>
       <button class="tab" data-tab="link" type="button" hidden>Link</button>
     </div>
+    <div class="scope"><select id="scope-select" title="Scope the board to one project"></select></div>
     <div class="search"><input id="search" type="text" spellcheck="false" autocomplete="off" placeholder="Filter by key, tag, file…"></div>
   </header>
   <main>

@@ -17,6 +17,7 @@ import { ExternalRef, RunArtifact, TraceabilityAdapter } from "../../traceabilit
 import { XrayAdapter } from "../../xray/xray-adapter";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
+import { NO_PROJECT_SCOPE, ProjectScopeStore } from "../../traceability/project-scope";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
 import { PublishLedger } from "../../traceability/publish-ledger";
 import { BoardViewModel, scenarioDropId } from "../../traceability/board-data";
@@ -785,6 +786,7 @@ describe("traceability sync command handler", () => {
     const subsystem = {
       getActiveAdapter: () => adapter,
       knownTestKeys: () => [],
+      projectScope: () => NO_PROJECT_SCOPE,
     } as unknown as TraceabilitySubsystem;
 
     const mgr = CommandManager.create(makeContext());
@@ -946,7 +948,13 @@ describe("traceability runAndPublish — preflight batch flow", () => {
 
 describe("traceability openBoard command handler", () => {
   const win = vscode.window as unknown as {
-    __webviewPanels: Array<{ title: string; __revealCount: number; dispose: () => void }>;
+    __webviewPanels: Array<{
+      title: string;
+      webview: { __posted: Array<{ surface?: string; type: string; projects?: string[] }> };
+      __revealCount: number;
+      dispose: () => void;
+      __receive: (message: unknown) => Promise<void>;
+    }>;
     __resetWebviewPanels: () => void;
   };
 
@@ -955,14 +963,24 @@ describe("traceability openBoard command handler", () => {
     vi.restoreAllMocks();
   });
 
-  function fakeSubsystem(panelActive = true): TraceabilitySubsystem {
+  function fakeSubsystem(panelActive = true, catalogueProjects: string[] = [], derivesProjects = true): TraceabilitySubsystem {
     return {
       traceabilityPanelActive: panelActive,
       getSnapshot: () => ({ links: [], untraced: [], orphans: [], stale: false, completeness: "complete", errors: [] }),
-      getActiveAdapter: () => ({ label: "Xray", keyGrammar: { testPrefix: "TEST_" } }),
+      getActiveAdapter: () => ({
+        label: "Xray",
+        keyGrammar: { testPrefix: "TEST_", ...(derivesProjects ? { projectOf: (k: string) => k.split("-")[0] } : {}) },
+        metadata: { snapshot: () => ({ catalogueProjects }) },
+      }),
+      projectScope: () => NO_PROJECT_SCOPE,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
   }
+
+  const boardDeps = (mgr: CommandManager): { knownProjects: () => string[]; projectScope: ProjectScopeStore } =>
+    (mgr as unknown as {
+      boardDeps: () => { knownProjects: () => string[]; projectScope: ProjectScopeStore };
+    }).boardDeps();
 
   const openBoard = (mgr: CommandManager): void =>
     (mgr as unknown as { openBoard: () => void }).openBoard();
@@ -990,6 +1008,41 @@ describe("traceability openBoard command handler", () => {
     openBoard(mgr);
     expect(win.__webviewPanels).toHaveLength(0);
     expect(String(info.mock.calls[0]?.[0])).toContain("Coverage Board");
+  });
+
+  it("seeds the board's scope selector from the sync config, the catalogue snapshot and the default key", async () => {
+    const workspaceConfig = {
+      get: (key: string, fallback: unknown) => {
+        if (key === "xray.syncProjectKeys") { return ["calc", "shop"]; }
+        return key === "xray.defaultProjectKey" ? " pay " : fallback;
+      },
+    } as unknown as vscode.WorkspaceConfiguration;
+    const mgr = CommandManager.create(makeContext({ config: ExtensionConfig.create(workspaceConfig, false) }));
+    mgr.setTraceabilitySubsystem(fakeSubsystem(true, ["SHOP", "MATH"]));
+
+    openBoard(mgr);
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+
+    const render = panel.webview.__posted.find((m) => m.surface === "board" && m.type === "render");
+    expect(render?.projects).toEqual(["CALC", "MATH", "PAY", "SHOP"]);
+  });
+
+  it("offers no scope options when the provider's grammar derives no project, since nothing could match", () => {
+    const workspaceConfig = {
+      get: (key: string, fallback: unknown) => (key === "xray.syncProjectKeys" ? ["CALC"] : fallback),
+    } as unknown as vscode.WorkspaceConfiguration;
+    const mgr = CommandManager.create(makeContext({ config: ExtensionConfig.create(workspaceConfig, false) }));
+    mgr.setTraceabilitySubsystem(fakeSubsystem(true, ["SHOP"], false));
+
+    expect(boardDeps(mgr).knownProjects()).toEqual([]);
+  });
+
+  it("hands the board the null scope store and no options when no subsystem is wired", () => {
+    const deps = boardDeps(CommandManager.create(makeContext()));
+
+    expect(deps.projectScope).toBe(NO_PROJECT_SCOPE);
+    expect(deps.knownProjects()).toEqual([]);
   });
 
   it("guides the user and opens nothing when the panel is disabled (no live model)", () => {
@@ -1056,6 +1109,7 @@ describe("traceability publishLastRun — Publish tab", () => {
       traceabilityPanelActive: true,
       getActiveAdapter: () => adapter,
       getSnapshot: () => undefined,
+      projectScope: () => NO_PROJECT_SCOPE,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
   }

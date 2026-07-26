@@ -23,6 +23,7 @@ import {
 import { TagDiagnosticsProvider } from "./tag-diagnostics";
 import { TagDecorationProvider } from "./tag-decoration";
 import { RunResultStore } from "./run-result-store";
+import { ProjectScopeStore, projectScopeStore } from "./project-scope";
 
 const FALLBACK_PROVIDER_ID = "xray";
 const CONNECTED_CONTEXT_KEY = "playwrightBddRunner.traceability.connected";
@@ -119,6 +120,14 @@ export class TraceabilitySubsystem implements vscode.Disposable {
         });
       },
     };
+  }
+
+  // The board's project scope, persisted per workspace alongside the grouping mode. The board owns when
+  // to read and write it; the coercion of a key that has left the known set lives in the store.
+  public projectScope(): ProjectScopeStore {
+    return projectScopeStore(this.workspaceState, (error) => {
+      this.logger.warn("Persisting the board project scope failed", { error: String(error) });
+    });
   }
 
   // The linkScenario command reads the live adapter's metadata snapshot from here — the browse-URL

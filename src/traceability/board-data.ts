@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import type { KeyGrammar } from "./contracts";
 import type { LedgerEntry } from "./publish-ledger";
 import type { ScenarioRef } from "./scenario-ref";
 import type {
@@ -31,10 +32,12 @@ export interface BoardTestLink {
 
 // A remote test rendered as a card in one of the right column's two groups. `summary` is the synced
 // remote summary when present. An available test (no local scenario maps to it) carries no pills and
-// no links; a mapped test carries its linked-scenario count and one row per linked scenario.
+// no links; a mapped test carries its linked-scenario count and one row per linked scenario. `project`
+// is the key's project, what the board's scope selector compares against.
 export interface BoardTestCard {
   readonly key: string;
   readonly summary?: string | undefined;
+  readonly project?: string | undefined;
   readonly pills: readonly string[];
   readonly links: readonly BoardTestLink[];
 }
@@ -42,13 +45,15 @@ export interface BoardTestCard {
 // One row of the Matrix tab, columns left to right. A coverage hole is an empty string: a requirement
 // with no test leaves `test` empty, a test with no scenario leaves `scenario` empty, an untraced
 // scenario leaves `tag` empty. `result` is always spelled out ("no run" for an untraced scenario,
-// "no coverage" for an orphan test that covers nothing).
+// "no coverage" for an orphan test that covers nothing). `projects` are the projects the row evidences,
+// which is what the board's scope selector compares against; empty means it evidences none.
 export interface MatrixRow {
   readonly requirement: string;
   readonly test: string;
   readonly scenario: string;
   readonly tag: string;
   readonly result: string;
+  readonly projects: readonly string[];
 }
 
 export interface BoardViewModel {
@@ -140,6 +145,29 @@ function nonEmptySummary(summary: string | undefined): string | undefined {
   return summary !== undefined && summary !== "" ? summary : undefined;
 }
 
+// A key's project, or undefined when none can be derived. Uppercased like the scope selector's options
+// (`knownProjectKeys`), since the grammar's `canonicalizeKey` is not required to be: both sides of the
+// scope compare have to normalize the same way. Never the empty string, so a scope compare stays a plain
+// field match and an underivable key falls outside every project.
+function keyProject(projectOf: KeyGrammar["projectOf"], key: string): string | undefined {
+  const project = projectOf?.(key).trim().toUpperCase();
+  return project !== undefined && project !== "" ? project : undefined;
+}
+
+// The projects a matrix row evidences: its test key's, or, for a row with no test key, every one of its
+// requirement keys'. A scenario tagged with two projects' requirements is a coverage hole in both. A row
+// that evidences none comes back empty and stays visible under every scope.
+function rowProjects(projectOf: KeyGrammar["projectOf"], testKey: string, reqKeys: readonly string[]): string[] {
+  const projects = new Set<string>();
+  for (const key of testKey !== "" ? [testKey] : reqKeys) {
+    const project = keyProject(projectOf, key);
+    if (project !== undefined) {
+      projects.add(project);
+    }
+  }
+  return [...projects];
+}
+
 // One row per linked scenario, keyed by `scenarioDropId` so the row round-trips back to exactly that
 // scenario. An outline's Examples blocks stay apart, each owning its own tag. Sorted by name, then by
 // location so blocks sharing a name (an unnamed block falls back to the outline's) hold their order.
@@ -152,7 +180,7 @@ function cardLinks(group: readonly TraceLink[], roots: readonly string[]): Board
   return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name) || a.location.localeCompare(b.location));
 }
 
-function mappedTestCards(links: readonly TraceLink[], roots: readonly string[]): BoardTestCard[] {
+function mappedTestCards(links: readonly TraceLink[], roots: readonly string[], projectOf: KeyGrammar["projectOf"]): BoardTestCard[] {
   const byKey = new Map<string, TraceLink[]>();
   for (const link of links) {
     const list = byKey.get(link.testKey) ?? [];
@@ -165,6 +193,7 @@ function mappedTestCards(links: readonly TraceLink[], roots: readonly string[]):
     const summary = nonEmptySummary(group[0]?.meta?.summary);
     cards.push({
       key,
+      project: keyProject(projectOf, key),
       // The pill counts the rows, so the card's headline and the list under it can never disagree.
       pills: [countLabel(rows.length, "scenario")],
       links: rows,
@@ -200,7 +229,7 @@ function compareMatrixRows(a: MatrixRow, b: MatrixRow): number {
   return byCell(a.requirement, b.requirement) || byCell(a.test, b.test) || byCell(a.scenario, b.scenario);
 }
 
-function matrixRows(snapshot: TraceabilitySnapshot, testTagPrefix: string): MatrixRow[] {
+function matrixRows(snapshot: TraceabilitySnapshot, testTagPrefix: string, projectOf: KeyGrammar["projectOf"]): MatrixRow[] {
   const rows: MatrixRow[] = [];
   for (const link of snapshot.links) {
     rows.push({
@@ -209,13 +238,28 @@ function matrixRows(snapshot: TraceabilitySnapshot, testTagPrefix: string): Matr
       scenario: link.scenario.name,
       tag: `@${testTagPrefix}${link.testKey}`,
       result: linkResult(link),
+      projects: rowProjects(projectOf, link.testKey, link.reqKeys),
     });
   }
   for (const item of snapshot.untraced) {
-    rows.push({ requirement: item.reqKeys.join(", "), test: "", scenario: item.scenario.name, tag: "", result: "no run" });
+    rows.push({
+      requirement: item.reqKeys.join(", "),
+      test: "",
+      scenario: item.scenario.name,
+      tag: "",
+      result: "no run",
+      projects: rowProjects(projectOf, "", item.reqKeys),
+    });
   }
   for (const orphan of snapshot.orphans) {
-    rows.push({ requirement: "", test: orphan.testKey, scenario: "", tag: "", result: "no coverage" });
+    rows.push({
+      requirement: "",
+      test: orphan.testKey,
+      scenario: "",
+      tag: "",
+      result: "no coverage",
+      projects: rowProjects(projectOf, orphan.testKey, []),
+    });
   }
   return rows.sort(compareMatrixRows);
 }
@@ -235,7 +279,8 @@ export function buildBoardViewModel(
   snapshot: TraceabilitySnapshot | undefined,
   workspaceRoots: readonly string[],
   testTagPrefix: string,
-  syncScopeConfigured: boolean
+  syncScopeConfigured: boolean,
+  projectOf?: KeyGrammar["projectOf"]
 ): BoardViewModel {
   const emptyState = availableEmptyState(syncScopeConfigured, snapshot?.completeness);
   if (!snapshot) {
@@ -247,14 +292,20 @@ export function buildBoardViewModel(
   const available = snapshot.orphans
     .map((orphan): BoardTestCard => {
       const summary = nonEmptySummary(orphan.meta.summary);
-      return { key: orphan.testKey, pills: [], links: [], ...(summary !== undefined ? { summary } : {}) };
+      return {
+        key: orphan.testKey,
+        project: keyProject(projectOf, orphan.testKey),
+        pills: [],
+        links: [],
+        ...(summary !== undefined ? { summary } : {}),
+      };
     })
     .sort((a, b) => a.key.localeCompare(b.key));
   return {
     scenarios,
     available,
-    mapped: mappedTestCards(snapshot.links, workspaceRoots),
-    matrix: matrixRows(snapshot, testTagPrefix),
+    mapped: mappedTestCards(snapshot.links, workspaceRoots, projectOf),
+    matrix: matrixRows(snapshot, testTagPrefix, projectOf),
     ...emptyState,
   };
 }
@@ -384,6 +435,27 @@ export function filterExecutionRows(rows: readonly ExecutionRow[], query: string
     return rows;
   }
   return rows.filter((row) => row.key.toLowerCase().includes(needle) || row.summary.toLowerCase().includes(needle));
+}
+
+/**
+ * Narrow the board to one project, or hand it back whole for All Projects (undefined). A compare over
+ * the projects stamped at build time: a test card is in scope when its key's project matches, and a
+ * matrix row when it evidences that project, whether through its test key or through any of its
+ * requirement keys. A row that evidences no project at all stays visible under every scope, so an
+ * untraced scenario's coverage hole never hides behind a filter. Scenario cards are local, not remote,
+ * so they are never scoped away, and the available group's empty state stays whatever the build decided.
+ */
+export function scopeBoardViewModel(model: BoardViewModel, project: string | undefined): BoardViewModel {
+  if (project === undefined) {
+    return model;
+  }
+  const inScope = (card: BoardTestCard): boolean => card.project === project;
+  return {
+    ...model,
+    available: model.available.filter(inScope),
+    mapped: model.mapped.filter(inScope),
+    matrix: model.matrix.filter((row) => row.projects.length === 0 || row.projects.includes(project)),
+  };
 }
 
 // The header search: case-insensitive substring over a test's key/summary and any of its linked

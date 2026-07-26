@@ -25,6 +25,7 @@ import { applyTagInsert, applyTagRemove, TagWrite } from "../traceability/tag-ed
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
 import { BoardDropResolution, buildBoardViewModel, buildExecutionRows, resolveBoardDrop, resolveBoardUnlink } from "../traceability/board-data";
 import { BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
+import { knownProjectKeys, NO_PROJECT_SCOPE } from "../traceability/project-scope";
 import { linkedTestsForScenario, ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
 import {
@@ -860,11 +861,7 @@ export class CommandManager {
         changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
         defaultProjectKey: this.context.config.xrayDefaultProjectKey,
         jiraSearchAvailable,
-        knownProjectKeys: [
-          ...this.context.config.xraySyncProjectKeys,
-          ...(adapter.metadata?.snapshot().catalogueProjects ?? []),
-          this.context.config.xrayDefaultProjectKey,
-        ].map((key) => key.trim().toUpperCase()),
+        knownProjectKeys: this.knownProjectKeys(adapter),
         // Lazy — the flow calls this only after the no-runs gate, so an empty run list never fires the
         // one allowed pre-confirm call (the attachment/meta probe).
         attachments: () => this.buildPublishAttachments(rawSite),
@@ -1214,6 +1211,16 @@ export class CommandManager {
     BoardPanel.open(this.boardDeps());
   }
 
+  // The project keys this workspace knows: the sync setting, the synced catalogue, and the default key.
+  // One list behind both the publish dialog's project dropdown and the board's scope selector.
+  private knownProjectKeys(adapter: TraceabilityAdapter | undefined): string[] {
+    return knownProjectKeys(
+      this.context.config.xraySyncProjectKeys,
+      adapter?.metadata?.snapshot().catalogueProjects ?? [],
+      this.context.config.xrayDefaultProjectKey
+    );
+  }
+
   // The board's dependencies, shared by openBoard, runPublish, and linkScenarioForRef. The board reads
   // the subsystem live (empty when it's absent or the panel is off), owns the Publish tab's delegate,
   // and fires runPublish when that tab is activated idle.
@@ -1228,8 +1235,16 @@ export class CommandManager {
           subsystem?.getSnapshot(),
           roots,
           subsystem?.getActiveAdapter()?.keyGrammar.testPrefix ?? "",
-          this.context.config.xraySyncProjectKeys.length > 0
+          this.context.config.xraySyncProjectKeys.length > 0,
+          subsystem?.getActiveAdapter()?.keyGrammar.projectOf
         ),
+      // A provider whose grammar derives no project stamps nothing on the cards, so every option would
+      // empty both groups: offer none and the selector stays on All Projects.
+      knownProjects: () => {
+        const adapter = subsystem?.getActiveAdapter();
+        return adapter?.keyGrammar.projectOf ? this.knownProjectKeys(adapter) : [];
+      },
+      projectScope: subsystem?.projectScope() ?? NO_PROJECT_SCOPE,
       buildExecutions: () => buildExecutionRows(this.publishLedger?.entriesForSite(site) ?? []),
       onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,
       applyDrop: (scenario, key) => this.applyBoardDrop(scenario, key),

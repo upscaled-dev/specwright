@@ -89,6 +89,7 @@ function boardPanesHtml(providerLabel: string): string {
 
 const BOARD_SCRIPT = `
   const search = document.getElementById('search');
+  const scopeSelect = document.getElementById('scope-select');
   const scenarioCards = document.getElementById('scenario-cards');
   const availableCards = document.getElementById('available-cards');
   const mappedCards = document.getElementById('mapped-cards');
@@ -156,6 +157,23 @@ const BOARD_SCRIPT = `
   // Carried by the render, not read off the search box: the host filtered these lists against its own
   // query, and a snapshot-driven render can arrive before a keystroke or a clear reaches it.
   let filtering = false;
+
+  // The scope selector's options, All Projects first. The host owns the list and the selection, so this
+  // repaints both on every render rather than tracking either.
+  function renderScope(projects, project) {
+    scopeSelect.textContent = '';
+    const all = document.createElement('option');
+    all.value = '';
+    all.textContent = 'All projects';
+    scopeSelect.appendChild(all);
+    for (const key of projects) {
+      const option = document.createElement('option');
+      option.value = key;
+      option.textContent = key;
+      scopeSelect.appendChild(option);
+    }
+    scopeSelect.value = project;
+  }
 
   // A column or group's empty line. Under a query the group is empty because of the filter, not because
   // there is nothing there, so say that instead of its own empty text.
@@ -336,10 +354,12 @@ const BOARD_SCRIPT = `
   }
 
   search.addEventListener('input', function () { window.__spec.post('board', { type: 'search', value: search.value }); });
+  scopeSelect.addEventListener('change', function () { window.__spec.post('board', { type: 'scope', project: scopeSelect.value }); });
 
   window.__spec.register('board', function (msg) {
     if (msg.type === 'render') {
       filtering = msg.filtering === true;
+      renderScope(msg.projects || [], msg.project || '');
       renderScenarios(msg.scenarios || []);
       renderTests(msg.available || [], msg.mapped || [], msg.availableEmptyText || '', msg.offerSync === true);
       renderMatrix(msg.matrix || []);

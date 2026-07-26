@@ -5,10 +5,13 @@ import {
   buildExecutionRows,
   filterBoardViewModel,
   filterExecutionRows,
+  MatrixRow,
   resolveBoardDrop,
   resolveBoardUnlink,
   scenarioDropId,
+  scopeBoardViewModel,
 } from "../../traceability/board-data";
+import { projectFromKey } from "../../xray/xray-adapter";
 import type { LedgerEntry } from "../../traceability/publish-ledger";
 import type {
   OrphanTest,
@@ -274,6 +277,141 @@ describe("buildBoardViewModel — test cards", () => {
   });
 });
 
+// One snapshot spanning every scoping case: a CALC link, a PAY orphan, an untraced scenario carrying a
+// PAY requirement, and an untraced scenario carrying no key at all.
+function scopedSnapshot(): TraceabilitySnapshot {
+  return snapshot({
+    links: [link({ testKey: "CALC-1", reqKeys: ["REQ-7"] })],
+    orphans: [orphan({ testKey: "PAY-9", meta: { key: "PAY-9" } })],
+    untraced: [
+      untraced({ scenario: ref({ line: 20, name: "Pay by card" }), reqKeys: ["PAY-3"] }),
+      untraced({ scenario: ref({ line: 30, name: "Browse" }) }),
+    ],
+  });
+}
+
+function scopedModel(): BoardViewModel {
+  return buildBoardViewModel(scopedSnapshot(), ROOTS, PREFIX, true, projectFromKey);
+}
+
+const rowFor = (model: BoardViewModel, scenario: string): MatrixRow | undefined =>
+  model.matrix.find((row) => row.scenario === scenario);
+
+describe("buildBoardViewModel project stamping", () => {
+  it("stamps every test card with its key's project", () => {
+    const model = scopedModel();
+    expect(model.mapped[0]).toMatchObject({ key: "CALC-1", project: "CALC" });
+    expect(model.available[0]).toMatchObject({ key: "PAY-9", project: "PAY" });
+  });
+
+  it("stamps a matrix row from its test key, or from its requirements when it has no test key", () => {
+    const model = scopedModel();
+    expect(rowFor(model, "Log in")).toMatchObject({ test: "CALC-1", projects: ["CALC"] });
+    expect(rowFor(model, "")).toMatchObject({ test: "PAY-9", projects: ["PAY"] });
+    expect(rowFor(model, "Pay by card")).toMatchObject({ test: "", projects: ["PAY"] });
+  });
+
+  it("stamps every requirement's project on a test-less row, deduped, since it evidences all of them", () => {
+    const model = buildBoardViewModel(
+      snapshot({ untraced: [untraced({ reqKeys: ["PAY-3", "SHOP-1", "PAY-8"] })] }),
+      ROOTS,
+      PREFIX,
+      true,
+      projectFromKey
+    );
+    expect(rowFor(model, "Log in")?.projects).toEqual(["PAY", "SHOP"]);
+  });
+
+  it("uppercases what the grammar yields, so a stamp still matches the selector's canonical option", () => {
+    const lowercased = (key: string): string => projectFromKey(key).toLowerCase();
+    const model = buildBoardViewModel(
+      snapshot({ orphans: [orphan({ testKey: "pay-9", meta: { key: "pay-9" } })] }),
+      ROOTS,
+      PREFIX,
+      true,
+      lowercased
+    );
+
+    expect(model.available[0]!.project).toBe("PAY");
+    expect(model.matrix[0]!.projects).toEqual(["PAY"]);
+    expect(scopeBoardViewModel(model, "PAY").available.map((card) => card.key)).toEqual(["pay-9"]);
+  });
+
+  it("leaves a row carrying neither key with no projects", () => {
+    expect(rowFor(scopedModel(), "Browse")?.projects).toEqual([]);
+  });
+
+  it("stamps nothing when the grammar derives no project", () => {
+    const model = build(scopedSnapshot());
+    expect(model.mapped[0]!.project).toBeUndefined();
+    expect(model.available[0]!.project).toBeUndefined();
+    expect(model.matrix.every((row) => row.projects.length === 0)).toBe(true);
+  });
+});
+
+describe("scopeBoardViewModel", () => {
+  it("hands the model back untouched for All Projects", () => {
+    const model = scopedModel();
+    expect(scopeBoardViewModel(model, undefined)).toBe(model);
+  });
+
+  it("keeps only the picked project's test cards", () => {
+    const pay = scopeBoardViewModel(scopedModel(), "PAY");
+    expect(pay.available.map((card) => card.key)).toEqual(["PAY-9"]);
+    expect(pay.mapped).toEqual([]);
+
+    const calc = scopeBoardViewModel(scopedModel(), "CALC");
+    expect(calc.available).toEqual([]);
+    expect(calc.mapped.map((card) => card.key)).toEqual(["CALC-1"]);
+  });
+
+  it("keeps a matrix row whose test key is in the project and drops the other project's rows", () => {
+    const rows = scopeBoardViewModel(scopedModel(), "CALC").matrix;
+    expect(rows.map((row) => row.test)).toEqual(["CALC-1", ""]);
+    expect(rows.map((row) => row.scenario)).toEqual(["Log in", "Browse"]);
+  });
+
+  it("keeps a row with no test key when its requirement is in the project", () => {
+    const rows = scopeBoardViewModel(scopedModel(), "PAY").matrix;
+    expect(rows.map((row) => row.scenario)).toContain("Pay by card");
+    expect(rows.map((row) => row.test)).toContain("PAY-9");
+  });
+
+  it("shows a two-project requirement row under both of its projects and under neither third one", () => {
+    const model = buildBoardViewModel(
+      snapshot({ untraced: [untraced({ reqKeys: ["PAY-3", "SHOP-1"] })] }),
+      ROOTS,
+      PREFIX,
+      true,
+      projectFromKey
+    );
+    const scenarios = (project: string): string[] =>
+      scopeBoardViewModel(model, project).matrix.map((row) => row.scenario);
+
+    expect(scenarios("PAY")).toEqual(["Log in"]);
+    expect(scenarios("SHOP")).toEqual(["Log in"]);
+    expect(scenarios("CALC")).toEqual([]);
+  });
+
+  it("keeps a row carrying neither key visible under every scope, so its coverage hole never hides", () => {
+    expect(scopeBoardViewModel(scopedModel(), "CALC").matrix.map((row) => row.scenario)).toContain("Browse");
+    expect(scopeBoardViewModel(scopedModel(), "PAY").matrix.map((row) => row.scenario)).toContain("Browse");
+  });
+
+  it("never scopes the local scenario cards away", () => {
+    const names = scopedModel().scenarios.map((card) => card.name);
+    expect(scopeBoardViewModel(scopedModel(), "CALC").scenarios.map((card) => card.name)).toEqual(names);
+  });
+
+  it("passes the available group's empty state through untouched", () => {
+    const model = scopedModel();
+    const out = scopeBoardViewModel({ ...model, offerSync: true }, "CALC");
+    expect(out.available).toEqual([]);
+    expect(out.availableEmptyText).toBe(model.availableEmptyText);
+    expect(out.offerSync).toBe(true);
+  });
+});
+
 describe("filterBoardViewModel", () => {
   const model: BoardViewModel = {
     scenarios: [
@@ -293,8 +431,8 @@ describe("filterBoardViewModel", () => {
       },
     ],
     matrix: [
-      { requirement: "REQ-7", test: "CALC-1", scenario: "Log in", tag: "@TEST_CALC-1", result: "passed" },
-      { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage" },
+      { requirement: "REQ-7", test: "CALC-1", scenario: "Log in", tag: "@TEST_CALC-1", result: "passed", projects: ["CALC"] },
+      { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage", projects: ["PAY"] },
     ],
     availableEmptyText: "No unmapped tests in the last sync.",
     offerSync: false,
@@ -362,7 +500,7 @@ describe("buildBoardViewModel — matrix rows", () => {
   it("joins a mapped link into requirement, test, scenario, the in-file tag, and its result", () => {
     const model = build(snapshot({ links: [link({ testKey: "CALC-1", reqKeys: ["REQ-7"], lastResult: "passed" })] }));
     expect(model.matrix).toEqual([
-      { requirement: "REQ-7", test: "CALC-1", scenario: "Log in", tag: "@TEST_CALC-1", result: "passed" },
+      { requirement: "REQ-7", test: "CALC-1", scenario: "Log in", tag: "@TEST_CALC-1", result: "passed", projects: [] },
     ]);
   });
 
@@ -394,7 +532,7 @@ describe("buildBoardViewModel — matrix rows", () => {
   it("leaves the test and tag cells empty for an untraced scenario and marks it 'no run'", () => {
     const model = build(snapshot({ untraced: [untraced({ reqKeys: ["REQ-9"] })] }));
     expect(model.matrix).toEqual([
-      { requirement: "REQ-9", test: "", scenario: "Log in", tag: "", result: "no run" },
+      { requirement: "REQ-9", test: "", scenario: "Log in", tag: "", result: "no run", projects: [] },
     ]);
   });
 
@@ -406,7 +544,7 @@ describe("buildBoardViewModel — matrix rows", () => {
   it("leaves requirement, scenario, and tag empty for an orphan and marks it 'no coverage'", () => {
     const model = build(snapshot({ orphans: [orphan({ testKey: "CALC-9" })] }));
     expect(model.matrix).toEqual([
-      { requirement: "", test: "CALC-9", scenario: "", tag: "", result: "no coverage" },
+      { requirement: "", test: "CALC-9", scenario: "", tag: "", result: "no coverage", projects: [] },
     ]);
   });
 

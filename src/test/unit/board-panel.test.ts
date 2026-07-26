@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
 import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import { BoardViewModel, ExecutionRow } from "../../traceability/board-data";
+import { NO_PROJECT_SCOPE, ProjectScopeStore } from "../../traceability/project-scope";
 import { PublishDialogDelegate } from "../../traceability/publish-dialog-panel";
 
 const noopDelegate: PublishDialogDelegate = {
@@ -34,6 +35,9 @@ interface RenderMessage {
   availableEmptyText: string;
   offerSync: boolean;
   filtering: boolean;
+  projects: string[];
+  project: string;
+  scoped: boolean;
 }
 interface ActivateMessage {
   type: "activate";
@@ -53,22 +57,38 @@ const MODEL: BoardViewModel = {
     { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: ["no tag"], reqKeys: [] },
     { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: ["no tag"], reqKeys: ["REQ-7"] },
   ],
-  available: [{ key: "PAY-9", pills: [], links: [] }],
+  available: [{ key: "PAY-9", project: "PAY", pills: [], links: [] }],
   mapped: [
     {
       key: "CALC-1",
       summary: "Add two numbers",
+      project: "CALC",
       pills: ["1 scenario"],
       links: [{ name: "Add two numbers", location: "features/calc.feature:3", unlinkId: "id-add" }],
     },
   ],
   matrix: [
-    { requirement: "REQ-7", test: "CALC-1", scenario: "Checkout", tag: "@TEST_CALC-1", result: "passed" },
-    { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage" },
+    { requirement: "REQ-7", test: "CALC-1", scenario: "Checkout", tag: "@TEST_CALC-1", result: "passed", projects: ["CALC"] },
+    { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage", projects: ["PAY"] },
   ],
   availableEmptyText: "No unmapped tests in the last sync.",
   offerSync: false,
 };
+
+const PROJECTS = ["CALC", "PAY"];
+
+// The board's scope store, in memory: the same boundary coercion the memento-backed one does, so a key
+// that has left the known list reads as All Projects without being erased.
+function fakeScope(initial?: string): ProjectScopeStore {
+  const store: ProjectScopeStore & { value: string | undefined } = {
+    value: initial,
+    get: (known) => (store.value !== undefined && known.includes(store.value) ? store.value : undefined),
+    set: (project) => {
+      store.value = project;
+    },
+  };
+  return store;
+}
 
 const EXECUTIONS: ExecutionRow[] = [
   { key: "XNP-1", summary: "Checkout suite", action: "Created", resultsImported: "6", passRate: "5/6 passed", publishedAt: "2026-07-22", timesFromHere: 1 },
@@ -85,6 +105,8 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     applyUnlink: () => Promise.resolve(),
     runSync: () => Promise.resolve(),
     openExecution: () => undefined,
+    knownProjects: () => PROJECTS,
+    projectScope: fakeScope(),
     publishDelegate: noopDelegate,
     startPublish: () => undefined,
     ...over,
@@ -405,6 +427,87 @@ describe("BoardPanel", () => {
 
     expect(lastRender(panel)!.available.map((t) => t.key)).toEqual(["NEW-1"]);
     expect(lastRender(panel)!.mapped).toEqual([]);
+  });
+
+  it("carries the project scope selector in the shell header", () => {
+    BoardPanel.open(deps());
+    expect(win.__webviewPanels[0]!.webview.html).toContain('id="scope-select"');
+  });
+
+  it("posts the scope options, the selection, and the scoped flag, starting on All Projects", async () => {
+    const { panel } = await openReady();
+
+    const render = lastRender(panel)!;
+    expect(render.projects).toEqual(["CALC", "PAY"]);
+    expect(render.project).toBe("");
+    expect(render.scoped).toBe(false);
+    expect(render.available.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(render.mapped.map((t) => t.key)).toEqual(["CALC-1"]);
+  });
+
+  it("narrows the tests and the matrix to the picked project, leaving the scenario cards and executions whole", async () => {
+    const { panel } = await openReady();
+
+    await panel.__receive({ surface: "board", type: "scope", project: "PAY" });
+
+    const render = lastRender(panel)!;
+    expect(render.project).toBe("PAY");
+    expect(render.scoped).toBe(true);
+    expect(render.available.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(render.mapped).toEqual([]);
+    expect(render.matrix.map((r) => r.test)).toEqual(["PAY-9"]);
+    expect(render.scenarios.map((s) => s.name)).toEqual(["Log in", "Checkout"]);
+    expect(render.executions.map((e) => e.key)).toEqual(["XNP-1", "PAY-9"]);
+  });
+
+  it("opens on the persisted selection and clears it back to All Projects when the selector is set to All", async () => {
+    const { panel } = await openReady({ projectScope: fakeScope("CALC") });
+    expect(lastRender(panel)!).toMatchObject({ project: "CALC", scoped: true });
+    expect(lastRender(panel)!.available).toEqual([]);
+
+    await panel.__receive({ surface: "board", type: "scope", project: "" });
+
+    expect(lastRender(panel)!).toMatchObject({ project: "", scoped: false });
+    expect(lastRender(panel)!.available.map((t) => t.key)).toEqual(["PAY-9"]);
+  });
+
+  it("falls back to All Projects when a rebuild drops the selected project out of the known list", async () => {
+    let projects = PROJECTS;
+    const changes = new vscode.EventEmitter<void>();
+    const { panel } = await openReady({
+      projectScope: fakeScope("PAY"),
+      knownProjects: () => projects,
+      onDidChange: changes.event,
+    });
+    expect(lastRender(panel)!.project).toBe("PAY");
+
+    projects = ["CALC"];
+    changes.fire();
+
+    expect(lastRender(panel)!).toMatchObject({ projects: ["CALC"], project: "", scoped: false });
+    expect(lastRender(panel)!.mapped.map((t) => t.key)).toEqual(["CALC-1"]);
+  });
+
+  it("stays on All Projects under the null store, so a board with nowhere to persist cannot be scoped", async () => {
+    const { panel } = await openReady({ projectScope: NO_PROJECT_SCOPE });
+
+    await panel.__receive({ surface: "board", type: "scope", project: "PAY" });
+
+    expect(lastRender(panel)!).toMatchObject({ project: "", scoped: false });
+    expect(lastRender(panel)!.mapped.map((t) => t.key)).toEqual(["CALC-1"]);
+    expect(lastRender(panel)!.available.map((t) => t.key)).toEqual(["PAY-9"]);
+  });
+
+  it("keeps the search and the scope narrowing together", async () => {
+    const { panel } = await openReady();
+
+    await panel.__receive({ surface: "board", type: "scope", project: "CALC" });
+    await panel.__receive({ surface: "board", type: "search", value: "PAY" });
+
+    const render = lastRender(panel)!;
+    expect(render.mapped).toEqual([]);
+    expect(render.available).toEqual([]);
+    expect(render).toMatchObject({ project: "CALC", scoped: true, filtering: true });
   });
 
   it("clears the singleton on dispose and stops posting; dispose is idempotent", async () => {
