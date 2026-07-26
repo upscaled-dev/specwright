@@ -104,6 +104,7 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     onDidChange: new vscode.EventEmitter<void>().event,
     applyDrop: () => Promise.resolve(),
     applyUnlink: () => Promise.resolve(),
+    pushText: () => undefined,
     runSync: () => Promise.resolve(),
     openExecution: () => undefined,
     bulkCreate: () => undefined,
@@ -366,6 +367,28 @@ describe("BoardPanel", () => {
     await panel.__receive({ surface: "board", type: "unlink", scenario: "id-add", key: "CALC-1" });
 
     expect(applyUnlink).toHaveBeenCalledWith("id-add", "CALC-1");
+  });
+
+  it("routes a push message to pushText with the scenario id and key, without re-rendering", async () => {
+    const pushText = vi.fn();
+    const { panel } = await openReady({ pushText });
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ surface: "board", type: "pushText", scenario: "id-add", key: "CALC-1" });
+
+    expect(pushText).toHaveBeenCalledWith("id-add", "CALC-1");
+    expect(panel.webview.__posted).toHaveLength(before);
+  });
+
+  // Source-level only: the webview JS is never executed here, so this pins that the row builder ships
+  // both actions and an aria-label, not that a click on the rendered button does anything.
+  it("carries a Push affordance alongside Unlink on every linked scenario row", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("'pushText'");
+    expect(html).toContain("'unlink'");
+    expect(html).toContain("aria-label");
   });
 
   it("ignores a repeat unlink for a row already in flight, but not one for another key, and re-arms once it settles", async () => {

@@ -90,11 +90,12 @@ export function createXrayAdapterFactory(
         attachTo: () => ctx.config.xrayAttachTo,
         logger: ctx.logger,
       });
-      // A thin wrapper over the client's create mutation — no cache/account state, since the create
-      // reads its key back inline and the subsequent `mergeKeys` (on the metadata capability) owns
+      // A thin wrapper over the client's authoring mutations, with no cache/account state: each one
+      // reads its result back inline and the subsequent `mergeKeys` (on the metadata capability) owns
       // persistence and its account guards.
       const testAuthoring: TestAuthoringCapability = {
         createTest: (spec, signal) => client.createTest(spec, signal),
+        pushGherkin: (issueId, gherkin, signal) => client.updateGherkinTestDefinition(issueId, gherkin, signal),
       };
       // The capability implements both metadata and remote search over the same client/state, so it
       // fills both adapter slots — the linkScenario picker's remote-search section is thereby gated on

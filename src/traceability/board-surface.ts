@@ -26,6 +26,11 @@ interface UnlinkMessage {
   scenario: string;
   key: string;
 }
+interface PushTextMessage {
+  type: "pushText";
+  scenario: string;
+  key: string;
+}
 interface OpenMessage {
   type: "open";
   key: string;
@@ -49,6 +54,7 @@ type BoardIncoming =
   | SearchMessage
   | DropMessage
   | UnlinkMessage
+  | PushTextMessage
   | OpenMessage
   | SyncMessage
   | ScopeMessage
@@ -104,6 +110,9 @@ export interface BoardSurfaceDeps {
   // The unlink seam: the webview posts a test card row's {scenario, key} and the host validates and
   // removes just that `@TEST_` tag, then the snapshot rebuild re-renders (no hand-patching here).
   applyUnlink(scenario: string, key: string): Promise<void>;
+  // The push seam: the same {scenario, key} handle, routed to the push command, which owns the fresh
+  // remote read, the confirm, the write, and the reporting. Nothing is decided here.
+  pushText(scenario: string, key: string): void;
   // The Sync now button on an empty available group: the same traceability sync the palette runs. A
   // successful run re-renders through the snapshot rebuild; the settled promise is what repaints after
   // a failure, so the button never stays stuck on "Syncing".
@@ -171,6 +180,10 @@ export class BoardSurface {
         .applyUnlink(message.scenario, message.key)
         .finally(() => this.unlinking.delete(row))
         .catch(() => undefined);
+      return;
+    }
+    if (message.type === "pushText") {
+      this.deps.pushText(message.scenario, message.key);
       return;
     }
     if (message.type === "open") {

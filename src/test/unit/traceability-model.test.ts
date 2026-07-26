@@ -4,13 +4,13 @@ import * as path from "node:path";
 import { describe, it, expect, afterEach } from "vitest";
 import * as vscode from "vscode";
 import { FeatureParser } from "../../parsers/feature-parser";
+import { scenarioGherkinSlice } from "../../parsers/gherkin-slice";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { Logger } from "../../utils/logger";
 import { normalizePathKey, PlaywrightJsonParser, ScenarioStatus } from "../../utils/playwright-json-parser";
 import {
   buildTraceabilitySnapshot,
   findPlaywrightReport,
-  hasGherkinDrift,
   linkedTestsForScenario,
   ParsedFeatureInput,
   ScenarioRef,
@@ -282,7 +282,56 @@ Scenario Outline: multiply <a> by <b>
     const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
     expect(link(snap.links, "CALC-1043").drift).toBeUndefined();
   });
+
+  // The badge and the push must compare ONE text: the scenario's verbatim slice, Examples tables and
+  // all. A reconstruction from parsed steps would leave every outline permanently drifted, so a push
+  // could never clear the badge no matter how many times it ran.
+  it("compares an outline against its verbatim slice, tables included, so a matching remote is not drifted", () => {
+    const outlineSlice = OUTLINE_SLICE;
+    const matching = remoteSnapshot([{ key: "CALC-1051", gherkin: outlineSlice }]);
+    const stripped = remoteSnapshot([
+      { key: "CALC-1051", gherkin: "Scenario Outline: Multiply values\n  When I multiply <a> by <b>\n  Then the result is <r>" },
+    ]);
+
+    expect(link(buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, matching).links, "CALC-1051").drift).toBeUndefined();
+    expect(link(buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, stripped).links, "CALC-1051").drift).toBe(true);
+  });
+
+  it("clears the outline's badge once the baseline refreshed to the text a push sent", () => {
+    const drifted = remoteSnapshot([{ key: "CALC-1051", gherkin: "Scenario Outline: Multiply values\n  When I multiply <a> by <b>" }]);
+    expect(link(buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, drifted).links, "CALC-1051").drift).toBe(true);
+
+    // What `mergeKeys` brings back after the push: the remote now holds exactly what was sent.
+    const refreshed = remoteSnapshot([{ key: "CALC-1051", gherkin: pushedText(FEATURE, "CALC-1051") }]);
+
+    expect(link(buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, refreshed).links, "CALC-1051").drift).toBeUndefined();
+  });
 });
+
+// The outline block of FEATURE, exactly as the push would send it (its keyword line through its last
+// Examples row, tagged blocks included).
+const OUTLINE_SLICE = [
+  "Scenario Outline: Multiply values",
+  "  When I multiply <a> by <b>",
+  "  Then the result is <r>",
+  "  Examples:",
+  "    | a | b | r |",
+  "    | 2 | 3 | 6 |",
+  "",
+  "  @TEST_CALC-1052",
+  "  Examples: edge cases",
+  "    | a | b | r |",
+  "    | 0 | 9 | 0 |",
+].join("\n");
+
+// The text a push of `testKey` sends: the same slice the parser stamped on the linked scenario, read
+// back through the model rather than restated, so this can never drift from the production path.
+function pushedText(feature: string, testKey: string): string {
+  const scenarios = parse(feature).scenarios;
+  const snap = buildTraceabilitySnapshot([{ filePath: FILE, scenarios }], {}, GRAMMAR);
+  const ref = link(snap.links, testKey).scenario;
+  return scenarioGherkinSlice(feature.split("\n"), ref.line);
+}
 
 const DEMO_FEATURE = `Feature: Demo
 
@@ -433,20 +482,6 @@ describe("buildTraceabilitySnapshot — N/M outline iterations", () => {
   it("leaves plain (non-outline) scenario links with no iterations", () => {
     const snap = buildTraceabilitySnapshot([parse(FEATURE)], { [`${K}:4`]: "passed" }, GRAMMAR);
     expect(link(snap.links, "CALC-1043").iterations).toBeUndefined();
-  });
-});
-
-describe("hasGherkinDrift", () => {
-  it("ignores line endings and trailing whitespace", () => {
-    expect(hasGherkinDrift("Scenario: A\r\n  Given x  \n", "Scenario: A\n  Given x")).toBe(false);
-  });
-
-  it("detects a meaningful text difference", () => {
-    expect(hasGherkinDrift("Scenario: A\n  Given x", "Scenario: A\n  Given y")).toBe(true);
-  });
-
-  it("ignores per-line indentation differences", () => {
-    expect(hasGherkinDrift("Scenario: A\n  Given x", "Scenario: A\n        Given x")).toBe(false);
   });
 });
 

@@ -629,6 +629,11 @@
         "command": "playwrightBddRunner.traceability.bulkCreateTests",
         "title": "Create Tests from Scenarios…",
         "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.pushScenarioText",
+        "title": "Push Scenario Text…",
+        "category": "Specwright"
       }
     ],
     "viewsContainers": {

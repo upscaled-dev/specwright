@@ -286,7 +286,7 @@ export interface AutomationBindingCapability {
 }
 
 // A brand-new remote test authored from a local scenario. `summary` is the scenario name; `gherkin`
-// is the verbatim source slice (never the lossy reconstruction).
+// is the verbatim source slice, the same text the drift badge and the push compare.
 export interface NewTestSpec {
   readonly project: string;
   readonly summary: string;
@@ -308,6 +308,12 @@ export interface AuthoredTest {
 // the extension makes; converting an existing test's type stays out of scope (see `bind` above).
 export interface TestAuthoringCapability {
   createTest(spec: NewTestSpec, signal?: AbortSignal): Promise<AuthoredTest>;
+  // Optional: replace an existing remote test's Gherkin body with local text, addressed by the remote
+  // `issueId` (the only handle the write takes, never a key). Resolves to the text read back from the
+  // same response, or `undefined` when it carried none, so the caller verifies instead of assuming.
+  // Read at call time, like the bulk create's capability check: the board always paints its Push
+  // affordance, and an adapter without this seam reports an unconnected tracker instead of writing.
+  pushGherkin?(issueId: string, gherkin: string, signal?: AbortSignal): Promise<string | undefined>;
 }
 
 // The outcome of a remote search beyond the synced snapshot. An EMPTY `tests` with `complete: true`

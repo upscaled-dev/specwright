@@ -324,6 +324,21 @@ function parseCreatedTest(body: unknown): XrayCreatedTest {
   return record;
 }
 
+// `updateGherkinTestDefinition(issueId: String!, versionId: Int, gherkin: String!): Test`: addressed
+// by issue id, never a key, and returning the Test directly (no result wrapper, no warnings). The
+// `versionId` argument is omitted so the write lands on the default version.
+function updateGherkinMutation(issueId: string, gherkin: string): string {
+  return `mutation { updateGherkinTestDefinition(issueId: ${JSON.stringify(issueId)}, gherkin: ${JSON.stringify(gherkin)}) { issueId gherkin } }`;
+}
+
+function parseUpdatedGherkin(body: unknown): string | undefined {
+  const updated =
+    body !== null && typeof body === "object"
+      ? (body as { data?: { updateGherkinTestDefinition?: { gherkin?: unknown } | null } }).data?.updateGherkinTestDefinition
+      : undefined;
+  return readString(updated?.gherkin);
+}
+
 /**
  * Region-aware Xray Cloud transport. Owns the in-memory JWT (never persisted, never logged — only
  * `describeJwt` facts), batched/paginated `getTests`, flat `coverableIssues`, generic exponential
@@ -482,6 +497,26 @@ export class XrayClient {
       throw new XrayMutationError(summaries.join("; "));
     }
     return parseCreatedTest(body);
+  }
+
+  // Replace an existing test's Gherkin body and read the stored text back from the SAME response. A
+  // GraphQL `errors` envelope becomes an `XrayMutationError` (the safe reading is that the write never
+  // landed); an `undefined` return means the 200 carried no readable text, so the caller can report the
+  // write as unverified rather than claim a match it never saw.
+  public async updateGherkinTestDefinition(
+    issueId: string,
+    gherkin: string,
+    signal?: AbortSignal
+  ): Promise<string | undefined> {
+    const body = await this.graphql(updateGherkinMutation(issueId, gherkin), signal);
+    const summaries = graphqlErrorSummaries(body);
+    if (summaries.length > 0) {
+      for (const summary of summaries) {
+        this.deps.logger.error(`GraphQL (updateGherkinTestDefinition) ${summary}`);
+      }
+      throw new XrayMutationError(summaries.join("; "));
+    }
+    return parseUpdatedGherkin(body);
   }
 
   private async graphql(query: string, signal?: AbortSignal): Promise<unknown> {

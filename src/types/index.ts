@@ -23,6 +23,16 @@ interface ScenarioBase {
   range: vscode.Range;
   lineNumber: number;
   steps: string[];
+  /**
+   * The scenario's verbatim source slice (`scenarioGherkinSlice`), captured at parse time because the
+   * raw lines are only in hand there. This is the local text every remote comparison uses: the drift
+   * badge, the create path, and the push path all read the same string, so they cannot contradict each
+   * other on an outline, a data table, or a doc-string. Optional only so hand-built test fixtures need
+   * not spell it out; the parser always sets it, and a scenario without it is simply never compared.
+   * Outline rows share their outline's slice by reference, so a parse retains about one copy of the
+   * file's text, not one per example row.
+   */
+  gherkin?: string | undefined;
   tags?: string[] | undefined;
   filePath: string;
   featureLineNumber?: number | undefined;

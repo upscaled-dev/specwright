@@ -705,3 +705,42 @@ describe("XrayClient.createTest", () => {
     ).rejects.toBeInstanceOf(XrayMutationError);
   });
 });
+
+describe("XrayClient.updateGherkinTestDefinition", () => {
+  it("addresses the mutation by issue id with JSON-escaped gherkin, omits versionId, and returns the read-back text", async () => {
+    let captured = "";
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        captured = query;
+        return { data: { updateGherkinTestDefinition: { issueId: "45678", gherkin: "Scenario: Login\n  Given a user" } } };
+      }),
+    });
+
+    const readBack = await client.updateGherkinTestDefinition("45678", "Scenario: Login\n  Given a user");
+
+    expect(captured).toContain('updateGherkinTestDefinition(issueId: "45678"');
+    expect(captured).toContain('gherkin: "Scenario: Login\\n  Given a user"');
+    expect(captured).toContain("{ issueId gherkin }");
+    expect(captured).not.toContain("versionId");
+    expect(readBack).toBe("Scenario: Login\n  Given a user");
+  });
+
+  it("returns undefined when the response carries no readable text, so the caller reports it unverified", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({ data: { updateGherkinTestDefinition: null } })),
+    });
+
+    await expect(client.updateGherkinTestDefinition("45678", "Scenario: S")).resolves.toBeUndefined();
+  });
+
+  it("throws XrayMutationError on a GraphQL errors envelope (the update is treated as not having happened)", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({
+        errors: [{ message: "Issue does not exist", extensions: { code: "BAD_REQUEST" } }],
+        data: null,
+      })),
+    });
+
+    await expect(client.updateGherkinTestDefinition("45678", "Scenario: S")).rejects.toBeInstanceOf(XrayMutationError);
+  });
+});

@@ -11,6 +11,7 @@ import {
 import { Logger } from "../utils/logger";
 import { OutlineExampleRow, Scenario } from "../types";
 import { extractKeys, malformedTestTags } from "./tag-extraction";
+import { hasGherkinDrift } from "./push-gherkin";
 import { RunResultStore } from "./run-result-store";
 import { ScenarioRef, sameScenario } from "./scenario-ref";
 import {
@@ -39,8 +40,9 @@ export interface TraceLink {
   // Passed/total iterations for a data-driven row (Scenario Outline / Examples block); drives the
   // "N/M" badge. Absent for non-outline links and for outlines with no run result yet.
   iterations?: { passed: number; total: number } | undefined;
-  // Set when the snapshot's stored Gherkin differs from the local scenario source (display-only; a
-  // reconcile action arrives in P3). Absent until a snapshot populates `meta.gherkin`.
+  // Set when the snapshot's stored Gherkin differs from the scenario's verbatim source slice, which is
+  // the same text the push sends, so a successful push clears this on the refreshed baseline. Absent
+  // until a snapshot populates `meta.gherkin`.
   drift?: boolean | undefined;
   // Provably absent from a complete remote catalogue covering the key's project (display-only
   // verdict). Never set on a partial/unknown snapshot or a project outside the catalogue scope.
@@ -131,25 +133,6 @@ export function worstStatus(
     }
   }
   return worst;
-}
-
-// Drift compares text only, ignoring line endings and per-line indentation/trailing whitespace, so a
-// scenario that differs from the remote test purely by CRLF, indentation, or trailing spaces is not
-// flagged.
-export function normalizeGherkin(text: string): string {
-  const lines = text.replaceAll("\r\n", "\n").split("\n").map((line) => line.trim());
-  while (lines.length > 0 && lines[lines.length - 1] === "") {
-    lines.pop();
-  }
-  return lines.join("\n");
-}
-
-export function hasGherkinDrift(local: string, remote: string): boolean {
-  return normalizeGherkin(local) !== normalizeGherkin(remote);
-}
-
-function reconstructScenarioGherkin(keyword: string, name: string, steps: readonly string[]): string {
-  return [`${keyword}: ${name}`, ...steps.map((step) => `  ${step}`)].join("\n");
 }
 
 // Mirrors PlaywrightBddTestProvider.resolveStatusForItem: outline example rows are titled
@@ -323,7 +306,7 @@ export function buildTraceabilitySnapshot(
         outlineLevelRows.map((r) => lookupStatus(statusMap, filePath, r.lineNumber, r.name, r.substitutedName))
       );
       const iterations = countIterations(statusMap, filePath, outlineLevelRows);
-      const localGherkin = reconstructScenarioGherkin("Scenario Outline", outlineName, first.steps);
+      const localGherkin = first.gherkin;
       const malformed = malformedTestTags(outlineTagsFor(rows), keyGrammar);
       for (const testKey of outlineKeys) {
         addLink(testKey, outlineRef, reqKeys, lastResult, localGherkin, iterations, malformed);
@@ -348,7 +331,7 @@ export function buildTraceabilitySnapshot(
         blockRows.map((r) => lookupStatus(statusMap, filePath, r.lineNumber, r.name, r.substitutedName))
       );
       const iterations = countIterations(statusMap, filePath, blockRows);
-      const localGherkin = reconstructScenarioGherkin("Scenario Outline", ref.name, sample.steps);
+      const localGherkin = sample.gherkin;
       const blockMalformed = malformedTestTags(sample.examplesBlockTags ?? [], keyGrammar);
       for (const testKey of blockKeys) {
         addLink(testKey, ref, reqKeys, lastResult, localGherkin, iterations, blockMalformed);
@@ -391,7 +374,7 @@ export function buildTraceabilitySnapshot(
         untraced.push({ scenario: ref, reqKeys, malformedTags: malformedTestTags(scenario.tags ?? [], keyGrammar) });
         continue;
       }
-      const localGherkin = reconstructScenarioGherkin(isOutline ? "Scenario Outline" : "Scenario", name, scenario.steps);
+      const localGherkin = scenario.gherkin;
       const malformed = malformedTestTags(scenario.tags ?? [], keyGrammar);
       for (const testKey of testKeys) {
         addLink(testKey, ref, reqKeys, lastResult, localGherkin, undefined, malformed);

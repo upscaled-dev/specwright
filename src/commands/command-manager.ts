@@ -15,12 +15,12 @@ import { TraceabilityAuthoringCommands } from "./traceability-authoring-commands
 import { XrayConnectionCommands } from "../xray/xray-connection-commands";
 import { XrayCredentialStore } from "../xray/xray-credential-store";
 import type { XrayProbe } from "../xray/xray-connection-test";
+import { scenarioGherkinSlice } from "../parsers/gherkin-slice";
 import {
   authorScenarioTest,
   AuthorScenarioTestUi,
   buildTestTag,
   linkScenarioPicks,
-  scenarioGherkinSlice,
 } from "../traceability/link-scenario";
 import { applyTagInsert, applyTagRemove, TagWrite } from "../traceability/tag-edit";
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
@@ -262,6 +262,7 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.switchDefaultProject", title: "Switch Default Project…", category: CATEGORY, handler: this.switchDefaultProject.bind(this) },
         { command: "playwrightBddRunner.traceability.clearLocalRunHistory", title: "Clear Local Run History…", category: CATEGORY, handler: this.clearLocalRunHistory.bind(this) },
         { command: "playwrightBddRunner.traceability.bulkCreateTests", title: "Create Tests from Scenarios…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().bulkCreateTests() },
+        { command: "playwrightBddRunner.traceability.pushScenarioText", title: "Push Scenario Text…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().pushScenarioText() },
       ];
 
       for (const cmd of commands) {
@@ -689,9 +690,9 @@ export class CommandManager {
   }
 
   // The capability-gated "Create new <provider> test from this scenario…" flow. Project comes from
-  // `xray.defaultProjectKey` or a prompt; the Gherkin is the verbatim source slice (never the lossy
-  // reconstruction); the modal in `authorScenarioTest` gates the remote write; on success the tag is
-  // inserted and the new key is merged into the snapshot without a full sync.
+  // `xray.defaultProjectKey` or a prompt; the Gherkin is the verbatim source slice, so the test lands
+  // holding the very text the drift badge compares; the modal in `authorScenarioTest` gates the remote
+  // write; on success the tag is inserted and the new key is merged into the snapshot without a sync.
   private async createTestFromScenario(adapter: TraceabilityAdapter, scenario: ScenarioRef): Promise<void> {
     const authoring = adapter.testAuthoring;
     if (!authoring) {
@@ -1261,6 +1262,13 @@ export class CommandManager {
       onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,
       applyDrop: (scenario, key) => this.applyBoardDrop(scenario, key),
       applyUnlink: (scenario, key) => this.applyBoardUnlink(scenario, key),
+      pushText: (scenario, key) => {
+        this.getTraceabilityAuthoringCommands()
+          .pushScenarioText(scenario, key)
+          .catch((error) => {
+            this.logger.warn("Push scenario text from the board failed", { error: errMsg(error) });
+          });
+      },
       runSync: () => this.syncTraceability(),
       openExecution: (key) => {
         const adapter = subsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;

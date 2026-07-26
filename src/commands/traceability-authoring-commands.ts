@@ -1,9 +1,11 @@
 import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
-import { scenarioDropId } from "../traceability/board-data";
+import { resolveBoardLink, scenarioDropId } from "../traceability/board-data";
 import { BulkCreateResult, BulkCreateScenario, runBulkCreate } from "../traceability/bulk-create-flow";
-import { TraceabilityAdapter } from "../traceability/contracts";
-import { scenarioGherkinSlice } from "../traceability/link-scenario";
+import { opensScenario, scenarioGherkinSlice } from "../parsers/gherkin-slice";
+import { KeyGrammar, RemoteSearchCapability, TestCaseMetadata, TraceabilityAdapter } from "../traceability/contracts";
+import { PushGherkinOutcome, runPushGherkin } from "../traceability/push-gherkin";
+import type { ScenarioRef } from "../traceability/scenario-ref";
 import { applyTagInsert } from "../traceability/tag-edit";
 import type { TraceabilitySnapshot } from "../traceability/traceability-model";
 
@@ -24,6 +26,12 @@ export interface AuthoringCommandDeps {
 }
 
 const NO_SELECTION = "Select scenarios on the Coverage Board's Mapping tab first.";
+const NO_ROW = "Push Scenario Text: use the Push button on a linked scenario row on the Coverage Board.";
+const NOT_CONNECTED_FOR_PUSH = "Connect to your test tracker before pushing scenario text.";
+const STALE_ROW = "That link is out of date because the board changed. Try again.";
+const EXAMPLE_ROW =
+  "Pushing text is not available for an example-row link. Link the outline itself to push its text.";
+const RESYNC = "Sync traceability, then try again.";
 
 function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
@@ -33,14 +41,11 @@ function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
-function stripCr(line: string): string {
-  return line.endsWith("\r") ? line.slice(0, -1) : line;
-}
-
 // The authoring commands: creating remote tests from local scenarios in bulk. The single-scenario
 // create still lives on the link picker's create path.
 export class TraceabilityAuthoringCommands {
   private inFlight: Promise<void> | undefined;
+  private pushInFlight: Promise<void> | undefined;
 
   constructor(
     private readonly logger: Logger,
@@ -98,6 +103,168 @@ export class TraceabilityAuthoringCommands {
     await this.report(result, { selected: ids.length, dropped: ids.length - scenarios.length }, adapter.label);
   }
 
+  /**
+   * Push one mapped scenario's local Gherkin to its remote test. The board's row passes its
+   * {scenario, key}; a palette invocation has neither and is pointed at the row. Nothing is written
+   * before a fresh read of the remote text agrees with the synced baseline (`runPushGherkin`), and one
+   * modal names the test before that write.
+   *
+   * Serialized like the bulk create: the palette entry and every row button are doors onto the same
+   * remote writes, so an invocation while one is running joins it instead of starting a second.
+   */
+  public pushScenarioText(scenario?: string, key?: string): Promise<void> {
+    if (this.pushInFlight) {
+      return this.pushInFlight;
+    }
+    this.pushInFlight = this.pushRow(scenario, key).finally(() => {
+      this.pushInFlight = undefined;
+    });
+    return this.pushInFlight;
+  }
+
+  private async pushRow(dropId: string | undefined, key: string | undefined): Promise<void> {
+    if (dropId === undefined || key === undefined) {
+      vscode.window.showInformationMessage(NO_ROW);
+      return;
+    }
+    const adapter = this.deps.adapter();
+    const remoteSearch = adapter?.remoteSearch;
+    // Bound here so an adapter implementing the seam as a class method keeps its receiver.
+    const pushGherkin = adapter?.testAuthoring?.pushGherkin?.bind(adapter.testAuthoring);
+    if (!adapter || !pushGherkin || !remoteSearch || !(await this.deps.credentialsPresent())) {
+      vscode.window.showInformationMessage(NOT_CONNECTED_FOR_PUSH);
+      return;
+    }
+    const link = resolveBoardLink(this.deps.snapshot(), dropId, key);
+    if (!link) {
+      vscode.window.showWarningMessage(STALE_ROW);
+      return;
+    }
+    // An Examples-block link names a table, not a scenario: there is no text of its own to send, and
+    // sending the whole outline would overwrite a test that only covers one block.
+    if (link.scenario.kind === "examplesBlock") {
+      vscode.window.showInformationMessage(EXAMPLE_ROW);
+      return;
+    }
+    try {
+      const local = await this.localGherkin(link.scenario);
+      if (local === undefined) {
+        this.logger.warn("The scenario a push named no longer opens at its recorded line", {
+          scenario: link.scenario.name,
+          key,
+        });
+        vscode.window.showWarningMessage(STALE_ROW);
+        return;
+      }
+      if (!(await this.confirmPush(key, adapter.label))) {
+        return;
+      }
+      const binding = adapter.automationBinding;
+      const outcome = await runPushGherkin(link.meta ?? { key }, local, {
+        readRemote: (target) => this.readRemote(remoteSearch, adapter.keyGrammar, target),
+        pushGherkin,
+        refresh: (target) => remoteSearch.mergeKeys([target]),
+        ...(binding ? { classifyBinding: (meta: TestCaseMetadata) => binding.classify(meta) } : {}),
+      });
+      this.reportPush(outcome, adapter.label);
+    } catch (error) {
+      this.logger.error("Pushing scenario text failed", { key, error: errMsg(error) });
+      vscode.window.showErrorMessage(`Could not push this scenario's text to ${key}: ${errMsg(error)}`);
+    }
+  }
+
+  // The scenario's verbatim source, read fresh from disk, and refused when the recorded line no longer
+  // opens that scenario: the snapshot can predate an edit, and text sliced from a neighbouring scenario
+  // would overwrite the remote test with someone else's steps.
+  private async localGherkin(ref: ScenarioRef): Promise<string | undefined> {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(ref.filePath));
+    const lines = doc.getText().split("\n");
+    return opensScenario(lines[ref.line - 1], ref.name) ? scenarioGherkinSlice(lines, ref.line) : undefined;
+  }
+
+  // The fresh single-key read behind every push decision: the adapter's own key lookup, unmerged, so a
+  // blocked push leaves the stored baseline exactly as the last sync left it.
+  private async readRemote(
+    remoteSearch: RemoteSearchCapability,
+    grammar: KeyGrammar,
+    key: string
+  ): Promise<TestCaseMetadata | undefined> {
+    const canonical = grammar.canonicalizeKey(key);
+    const result = await remoteSearch.search(key);
+    return result.tests.find((test) => grammar.canonicalizeKey(test.key) === canonical);
+  }
+
+  private async confirmPush(key: string, providerLabel: string): Promise<boolean> {
+    const site = this.deps.siteUrl();
+    const target = site !== "" ? `${key} on ${site}` : key;
+    const choice = await vscode.window.showWarningMessage(
+      `Replace the text of ${providerLabel} test ${target} with this scenario's Gherkin?`,
+      { modal: true },
+      "Push text"
+    );
+    return choice === "Push text";
+  }
+
+  // A toast carries one line, so every outcome except the two clean ones (a push that landed and
+  // refreshed, and a no-op) writes its own line to the log. Each blocked outcome names what actually
+  // stopped the write, and only the one a sync can fix asks for one; a landed write is never reported as
+  // a failure, even when the follow-up refresh could not run.
+  private reportPush(outcome: PushGherkinOutcome, providerLabel: string): void {
+    const clean = outcome.kind === "unchanged" || (outcome.kind === "pushed" && outcome.refreshError === undefined);
+    if (!clean) {
+      this.logger.warn("Pushing scenario text did not complete cleanly", {
+        key: outcome.key,
+        outcome: outcome.kind,
+        ...("reason" in outcome ? { reason: outcome.reason } : {}),
+        ...("refreshError" in outcome && outcome.refreshError !== undefined
+          ? { refreshError: outcome.refreshError }
+          : {}),
+      });
+    }
+    if (outcome.kind === "pushed") {
+      const message = `Pushed this scenario's text to ${outcome.key}.`;
+      if (outcome.refreshError === undefined) {
+        vscode.window.showInformationMessage(message);
+      } else {
+        vscode.window.showWarningMessage(
+          `${message} The local baseline could not refresh, so sync to clear the drift badge.`
+        );
+      }
+      return;
+    }
+    if (outcome.kind === "unchanged") {
+      vscode.window.showInformationMessage(`${outcome.key} already matches this scenario's text.`);
+      return;
+    }
+    if (outcome.kind === "unverified") {
+      vscode.window.showErrorMessage(
+        `The text was sent to ${outcome.key}, but ${providerLabel} did not read it back unchanged. Check the test before relying on it.`
+      );
+      return;
+    }
+    vscode.window.showWarningMessage(this.blockedMessage(outcome, providerLabel));
+  }
+
+  private blockedMessage(
+    outcome: Extract<PushGherkinOutcome, { kind: "drift" | "no-baseline" | "no-remote-test" | "no-issue-id" | "wrong-test-type" }>,
+    providerLabel: string
+  ): string {
+    if (outcome.kind === "drift") {
+      return `Nothing was pushed: ${outcome.key} changed in ${providerLabel} since the last sync. ${RESYNC}`;
+    }
+    if (outcome.kind === "no-baseline") {
+      return `Nothing was pushed: there is no synced copy of ${outcome.key} to compare against. ${RESYNC}`;
+    }
+    if (outcome.kind === "no-remote-test") {
+      return `Nothing was pushed: ${providerLabel} has no test ${outcome.key} to write to.`;
+    }
+    if (outcome.kind === "no-issue-id") {
+      return `Nothing was pushed: ${providerLabel} returned no issue id for ${outcome.key}, which is the only handle the write takes.`;
+    }
+    const testType = outcome.testType !== undefined ? `a ${outcome.testType} test` : "not a Gherkin test";
+    return `Nothing was pushed: ${outcome.key} is ${testType} in ${providerLabel}, and only Gherkin tests can hold scenario text.`;
+  }
+
   // Resolve the board's drop ids against the CURRENT snapshot and read each scenario's verbatim Gherkin
   // up front. A selection staged before a rebuild names a card that is gone, and a feature file can have
   // been deleted since the board painted it; both drop out here with a logged reason and are counted as
@@ -128,15 +295,14 @@ export class TraceabilityAuthoringCommands {
   }
 
   // The batch wrote each scenario's location down before the confirm, and lines move: this batch's own
-  // inserts shift them, and so can an edit from outside. The captured slice starts AT the scenario's
-  // keyword line, so the check is that the captured position still reads that same keyword line;
-  // anything else is a different scenario and is rejected rather than tagged. Two scenarios sharing an
-  // identical heading swapped by an outside edit pass, which is fine: the tag still lands on a scenario
-  // whose heading is exactly the one the created test was authored from.
+  // inserts shift them, and so can an edit from outside. The same predicate the push path uses decides
+  // it: the captured position must still open this very scenario, or the tag is refused rather than
+  // written onto whatever moved there. Two scenarios sharing an identical heading swapped by an outside
+  // edit pass, which is fine: the tag still lands on a scenario whose heading is exactly the one the
+  // created test was authored from.
   private async locationHolds(scenario: BulkCreateScenario): Promise<boolean> {
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(scenario.ref.filePath));
-    const current = doc.getText().split("\n")[scenario.ref.line - 1];
-    return current !== undefined && stripCr(current) === scenario.gherkin.split("\n")[0];
+    return opensScenario(doc.getText().split("\n")[scenario.ref.line - 1], scenario.ref.name);
   }
 
   private async confirm(project: string, count: number, providerLabel: string): Promise<boolean> {

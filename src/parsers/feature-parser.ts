@@ -2,20 +2,12 @@ import * as fs from "fs";
 import * as vscode from "vscode";
 import { OutlineExampleRow, OutlineStub, ParsedFeature, RegularScenario, Scenario } from "../types/index";
 import { Logger } from "../utils/logger";
+import { SCENARIO_KEYWORDS, scenarioGherkinSlice } from "./gherkin-slice";
 import { TAG_TOKEN_PATTERN } from "./tag-regex";
 
 export function isOutlineExampleRow(s: Scenario): s is OutlineExampleRow {
   return s.isScenarioOutline && "examplesBlockLineNumber" in s;
 }
-
-// "Example:" and "Scenario Template:" are standard Gherkin synonyms — keep in
-// sync with SCENARIO_BOUNDARY_RE in providers/scenario-boundary.ts.
-const SCENARIO_KEYWORDS = [
-  "Scenario Outline:",
-  "Scenario Template:",
-  "Scenario:",
-  "Example:",
-] as const;
 
 /**
  * Parser for Gherkin feature files
@@ -122,6 +114,7 @@ export class FeatureParser {
       range: vscode.Range;
       lineNumber: number;
       steps: string[];
+      gherkin: string;
       tags: string[];
       filePath: string;
       isScenarioOutline: boolean;
@@ -266,6 +259,9 @@ export class FeatureParser {
           range: new vscode.Range(lineNumber - 1, 0, lineNumber - 1, 0),
           lineNumber,
           steps: [],
+          // Captured here because the raw lines are only in hand at parse time, and this text (not a
+          // reconstruction from `steps`) is what the drift badge and the push both compare.
+          gherkin: scenarioGherkinSlice(lines, lineNumber),
           tags: [...featureTags, ...consumeTags()],
           filePath: "",
           isScenarioOutline: isOutline,
@@ -344,6 +340,7 @@ export class FeatureParser {
         range: draft.range,
         lineNumber: draft.lineNumber,
         steps: draft.steps,
+        gherkin: draft.gherkin,
         tags: draft.tags,
         filePath: draft.filePath,
         isScenarioOutline: false,
@@ -366,6 +363,7 @@ export class FeatureParser {
           range: outline.scenario.range,
           lineNumber: outline.scenario.lineNumber,
           steps: outline.scenario.steps,
+          gherkin: outline.scenario.gherkin,
           tags: outline.scenario.tags,
           filePath: outline.scenario.filePath,
           isScenarioOutline: true,
@@ -407,6 +405,9 @@ export class FeatureParser {
             range: new vscode.Range(exampleLine - 1, 0, exampleLine - 1, 0),
             lineNumber: exampleLine,
             steps: outline.scenario.steps,
+            // The whole outline, Examples tables included: a row's local text is its outline's text,
+            // which is also what a push of that outline would send.
+            gherkin: outline.scenario.gherkin,
             tags: mergedTags,
             filePath: "",
             isScenarioOutline: true,

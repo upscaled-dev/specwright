@@ -34,8 +34,8 @@ const BOARD_CSS = `
   .board-pane .card.drop-target { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -2px; }
   .board-pane .link-row { display: flex; align-items: flex-start; gap: 0.5rem; padding-top: 0.4rem; margin-top: 0.45rem; border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
   .board-pane .link-row .name { flex: 1; min-width: 0; word-break: break-word; }
-  .board-pane .link-row .unlink { font-family: inherit; font-size: 0.72rem; padding: 0.05rem 0.45rem; border: none; border-radius: 999px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
-  .board-pane .link-row .unlink:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
+  .board-pane .link-row .row-action { font-family: inherit; font-size: 0.72rem; padding: 0.05rem 0.45rem; border: none; border-radius: 999px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
+  .board-pane .link-row .row-action:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
   .board-pane .matrix-scroll { overflow: auto; max-height: calc(100vh - 9rem); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; }
   .board-pane table.matrix { border-collapse: collapse; width: 100%; font-size: 0.9em; }
   .board-pane table.matrix th, .board-pane table.matrix td { text-align: left; padding: 0.4rem 0.6rem; white-space: nowrap; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
@@ -240,8 +240,23 @@ const BOARD_SCRIPT = `
     }
   }
 
-  // A linked scenario on a mapped test card: its name, its location, and the button that removes just
-  // this link. The unlink id is the scenario's drop id, the host's only handle back to the tag.
+  // One of a link row's two buttons. The host owns every decision behind them; this only posts the
+  // row's {scenario, key} under the given message type.
+  function rowAction(label, title, type, link, key) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'row-action';
+    btn.textContent = label;
+    btn.title = title;
+    btn.setAttribute('aria-label', label + ' scenario ' + link.name);
+    btn.addEventListener('click', function () {
+      window.__spec.post('board', { type: type, scenario: link.unlinkId, key: key });
+    });
+    return btn;
+  }
+
+  // A linked scenario on a mapped test card: its name, its location, and the two buttons that act on
+  // just this link. The unlink id is the scenario's drop id, the host's only handle back to the tag.
   function linkRow(link, key) {
     const row = document.createElement('div');
     row.className = 'link-row';
@@ -253,15 +268,8 @@ const BOARD_SCRIPT = `
     loc.textContent = link.location;
     name.appendChild(loc);
     row.appendChild(name);
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'unlink';
-    btn.textContent = 'Unlink';
-    btn.title = 'Removes only this test link.';
-    btn.addEventListener('click', function () {
-      window.__spec.post('board', { type: 'unlink', scenario: link.unlinkId, key: key });
-    });
-    row.appendChild(btn);
+    row.appendChild(rowAction('Push', 'Sends the local text of this scenario to the test.', 'pushText', link, key));
+    row.appendChild(rowAction('Unlink', 'Removes only this test link.', 'unlink', link, key));
     return row;
   }
 

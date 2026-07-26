@@ -344,18 +344,29 @@ export function resolveBoardDrop(
 }
 
 /**
- * The unlink twin of `resolveBoardDrop`: validate a test card's unlink against the CURRENT snapshot and
- * resolve the scenario+key pair to a `ScenarioRef` for the tag removal. `dropId` is the row's
- * `unlinkId` (the scenario's `scenarioDropId`); `key` is the card's test. Returns undefined when no
- * live link matches both (a rebuild dropped that link, or the row named a stale scenario) so the caller
- * rejects it instead of removing blind.
+ * The live link a mapped test card's row names, against the CURRENT snapshot. `dropId` is the row's
+ * `unlinkId` (the scenario's `scenarioDropId`); `key` is the card's test. Undefined when no link matches
+ * both (a rebuild dropped that link, or the row named a stale scenario), so a row action rejects instead
+ * of acting blind. The whole link comes back, since the push path needs its synced metadata too.
+ */
+export function resolveBoardLink(
+  snapshot: TraceabilitySnapshot | undefined,
+  dropId: string,
+  key: string
+): TraceLink | undefined {
+  return snapshot?.links.find((item) => scenarioDropId(item.scenario) === dropId && item.testKey === key);
+}
+
+/**
+ * The unlink twin of `resolveBoardDrop`: resolve a test card's unlink to a `ScenarioRef` for the tag
+ * removal, rejecting a row the current snapshot no longer carries.
  */
 export function resolveBoardUnlink(
   snapshot: TraceabilitySnapshot | undefined,
   dropId: string,
   key: string
 ): BoardDropResolution | undefined {
-  const link = snapshot?.links.find((item) => scenarioDropId(item.scenario) === dropId && item.testKey === key);
+  const link = resolveBoardLink(snapshot, dropId, key);
   return link ? { ref: link.scenario, key } : undefined;
 }
 
