@@ -86,6 +86,21 @@ describe("computeLinkEdit", () => {
     expect(edit).toEqual({ kind: "insertLine", line: 2, text: "@TC-5" });
   });
 
+  it("inserts a req-prefixed tag in the same shape and position as a test tag", () => {
+    const feature = "Feature: F\n\n  Scenario: A\n    Given x\n";
+    expect(computeLinkEdit(lines(feature), 3, "CALC-1", JIRA_GRAMMAR, JIRA_GRAMMAR.reqPrefix)).toEqual({
+      kind: "insertLine",
+      line: 2,
+      text: "  @REQ_CALC-1",
+    });
+  });
+
+  it("re-maps the req tag and leaves the test tag alone when asked for the req prefix", () => {
+    const feature = "Feature: F\n\n@REQ_CALC-9 @TEST_CALC-1\nScenario: A\n  Given x\n";
+    const edit = computeLinkEdit(lines(feature), 4, "CALC-8", JIRA_GRAMMAR, JIRA_GRAMMAR.reqPrefix);
+    expect(edit).toEqual({ kind: "replaceLine", line: 2, text: "@REQ_CALC-8 @TEST_CALC-1" });
+  });
+
   it("preserves indentation when inserting", () => {
     const feature = "Feature: F\n\n  Scenario: Indented\n    Given x\n";
     const edit = computeLinkEdit(lines(feature), 3, "CALC-1", JIRA_GRAMMAR);
@@ -233,6 +248,16 @@ describe("computeUnlinkEdit", () => {
   it("treats a case-variant tag as the same key when removing", () => {
     const feature = "Feature: F\n\n@test_calc-1\nScenario: A\n  Given x\n";
     expect(computeUnlinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR)).toEqual({ kind: "deleteLine", line: 2 });
+  });
+
+  it("removes the req tag under the req prefix, where the default test prefix finds nothing", () => {
+    const feature = "Feature: F\n\n@REQ_CALC-9 @TEST_CALC-1\nScenario: A\n  Given x\n";
+    expect(computeUnlinkEdit(lines(feature), 4, "CALC-9", JIRA_GRAMMAR, JIRA_GRAMMAR.reqPrefix)).toEqual({
+      kind: "replaceLine",
+      line: 2,
+      text: "@TEST_CALC-1",
+    });
+    expect(computeUnlinkEdit(lines(feature), 4, "CALC-9", JIRA_GRAMMAR)).toEqual({ kind: "unchanged" });
   });
 
   it("is a no-op when the key is not tagged on the scenario", () => {

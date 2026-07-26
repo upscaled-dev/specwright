@@ -1,5 +1,5 @@
 import { AuthoredTest, KeyGrammar, NewTestSpec, RemoteMetadataSnapshot } from "./contracts";
-import { extractKeys } from "./tag-extraction";
+import { keyForPrefix, stateless } from "./tag-extraction";
 import { stripCr } from "../parsers/gherkin-slice";
 import { TAG_TOKEN_PATTERN } from "../parsers/tag-regex";
 
@@ -8,8 +8,12 @@ export interface LinkScenarioPick {
   readonly summary?: string | undefined;
 }
 
+function tagFor(prefix: string, key: string): string {
+  return `@${prefix}${key}`;
+}
+
 export function buildTestTag(grammar: KeyGrammar, key: string): string {
-  return `@${grammar.testPrefix}${key}`;
+  return tagFor(grammar.testPrefix, key);
 }
 
 // The picker only ever offers keys already in the snapshot — free-text key entry is never a path
@@ -25,13 +29,15 @@ export type LinkEdit =
   | { kind: "replaceLine"; line: number; text: string }
   | { kind: "insertLine"; line: number; text: string };
 
-function testTagOnLine(
+function tagOnLine(
   line: string,
+  prefix: string,
   grammar: KeyGrammar
 ): { token: string; key: string } | undefined {
+  const keyShape = stateless(grammar.keyShape);
   for (const match of line.matchAll(new RegExp(TAG_TOKEN_PATTERN, "g"))) {
     const token = match[0];
-    const key = extractKeys([token], grammar).testKeys[0];
+    const key = keyForPrefix(token, prefix, keyShape, grammar.canonicalizeKey);
     if (key !== undefined) {
       return { token, key };
     }
@@ -44,19 +50,21 @@ function leadingWhitespace(line: string): string {
 }
 
 /**
- * Idempotent placement of the provider test tag above a scenario's keyword line. Re-running with the
- * same key is a no-op; a different key replaces the existing test tag in place (re-map); a scenario
- * with no test tag gets the tag appended to its nearest tag line, or a fresh tag line if it has none.
- * `scenarioLine` is 1-based (the tree's `ScenarioRef.line`).
+ * Idempotent placement of a provider tag above a scenario's keyword line. Re-running with the same
+ * key is a no-op; a different key replaces the existing tag of that prefix in place (re-map); a
+ * scenario with no such tag gets the tag appended to its nearest tag line, or a fresh tag line if it
+ * has none. `prefix` selects which tag family is written and read, and defaults to the grammar's test
+ * prefix. `scenarioLine` is 1-based (the tree's `ScenarioRef.line`).
  */
 export function computeLinkEdit(
   lines: readonly string[],
   scenarioLine: number,
   key: string,
-  grammar: KeyGrammar
+  grammar: KeyGrammar,
+  prefix: string = grammar.testPrefix
 ): LinkEdit {
   const scenIdx = scenarioLine - 1;
-  const newTag = buildTestTag(grammar, key);
+  const newTag = tagFor(prefix, key);
   const newKey = grammar.canonicalizeKey(key);
 
   const tagLineIndices: number[] = [];
@@ -68,7 +76,7 @@ export function computeLinkEdit(
     // The caller splits on "\n", so a CRLF line keeps a trailing "\r"; strip it here so replaceLine
     // text is EOL-free and the caller writes it in front of the document's own "\r\n".
     const line = stripCr(lines[idx] ?? "");
-    const existing = testTagOnLine(line, grammar);
+    const existing = tagOnLine(line, prefix, grammar);
     if (existing) {
       if (grammar.canonicalizeKey(existing.key) === newKey) {
         return { kind: "unchanged" };
@@ -92,15 +100,17 @@ export type UnlinkEdit =
   | { kind: "replaceLine"; line: number; text: string }
   | { kind: "deleteLine"; line: number };
 
-function testTagForKey(
+function tagForKey(
   line: string,
   key: string,
+  prefix: string,
   grammar: KeyGrammar
 ): { token: string; at: number } | undefined {
+  const keyShape = stateless(grammar.keyShape);
   const target = grammar.canonicalizeKey(key);
   for (const match of line.matchAll(new RegExp(TAG_TOKEN_PATTERN, "g"))) {
     const token = match[0];
-    if (extractKeys([token], grammar).testKeys[0] === target && match.index !== undefined) {
+    if (keyForPrefix(token, prefix, keyShape, grammar.canonicalizeKey) === target && match.index !== undefined) {
       return { token, at: match.index };
     }
   }
@@ -108,16 +118,18 @@ function testTagForKey(
 }
 
 /**
- * The removal twin of `computeLinkEdit`: strips the `@TEST_<key>` tag from a scenario's tag lines.
- * When the tag shares its line with other tags the token and one adjoining space go; when it is the
- * only tag on the line the whole line (and its terminator) goes; a key that isn't tagged is a no-op.
- * `scenarioLine` is 1-based (the tree's `ScenarioRef.line`).
+ * The removal twin of `computeLinkEdit`: strips the `@TEST_<key>` tag from a scenario's tag lines
+ * (`prefix` selects the tag family, defaulting to the grammar's test prefix). When the tag shares its
+ * line with other tags the token and one adjoining space go; when it is the only tag on the line the
+ * whole line (and its terminator) goes; a key that isn't tagged is a no-op. `scenarioLine` is 1-based
+ * (the tree's `ScenarioRef.line`).
  */
 export function computeUnlinkEdit(
   lines: readonly string[],
   scenarioLine: number,
   key: string,
-  grammar: KeyGrammar
+  grammar: KeyGrammar,
+  prefix: string = grammar.testPrefix
 ): UnlinkEdit {
   const scenIdx = scenarioLine - 1;
 
@@ -130,7 +142,7 @@ export function computeUnlinkEdit(
     // The caller splits on "\n", so a CRLF line keeps a trailing "\r"; strip it here so replaceLine
     // text is EOL-free and the caller writes it in front of the document's own "\r\n".
     const line = stripCr(lines[idx] ?? "");
-    const found = testTagForKey(line, key, grammar);
+    const found = tagForKey(line, key, prefix, grammar);
     if (found === undefined) {
       continue;
     }

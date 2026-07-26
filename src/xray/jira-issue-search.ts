@@ -13,10 +13,13 @@ const MAX_ATTEMPTS = 4;
 const BACKOFF_BASE_MS = 300;
 const BACKOFF_CAP_MS = 8_000;
 
-export type JiraIssueKind = "execution" | "test-plan";
+// The container kinds pin the search to one Xray issue type; a requirement is any issue type the
+// project uses for its stories, so that kind names none and searches on scope alone. Because scope is
+// all it has, a requirement search REQUIRES a project key: an unscoped one would sweep the whole site.
+export type JiraIssueKind = "execution" | "test-plan" | "requirement";
 
 // The Jira issuetype names Xray provisions for each container kind (verify at F5 — site-configurable).
-export const ISSUE_TYPE_NAME: Record<JiraIssueKind, string> = {
+export const ISSUE_TYPE_NAME: Record<Exclude<JiraIssueKind, "requirement">, string> = {
   execution: "Test Execution",
   "test-plan": "Test Plan",
 };
@@ -138,8 +141,16 @@ function escapeJql(value: string): string {
 }
 
 function buildJql(kind: JiraIssueKind, query: string): string {
-  const scope = query.trim() === "" ? "" : `project = "${escapeJql(query.trim())}" AND `;
-  return `${scope}issuetype = "${ISSUE_TYPE_NAME[kind]}" ORDER BY created DESC`;
+  const project = query.trim();
+  const clauses: string[] = [];
+  if (project !== "") {
+    clauses.push(`project = "${escapeJql(project)}"`);
+  }
+  if (kind !== "requirement") {
+    clauses.push(`issuetype = "${ISSUE_TYPE_NAME[kind]}"`);
+  }
+  const where = clauses.length === 0 ? "" : `${clauses.join(" AND ")} `;
+  return `${where}ORDER BY created DESC`;
 }
 
 class JiraIssueSearch {
@@ -263,12 +274,16 @@ class JiraIssueSearch {
 }
 
 /**
- * Searches the Jira issues of one Xray container kind (Test Execution / Test Plan) via
- * `POST /rest/api/3/search/jql` (basic auth, JQL `project = <key> AND issuetype = "<type>" ORDER BY
- * created DESC`, `nextPageToken` pagination, capped at {@link MAX_ISSUES}). Returns `{ issues,
- * truncated }`. Throws {@link JiraAccessError} with a value-free message on a terminal failure.
- * Diagnostics are allowlisted shape/status/count only — the token and basic-auth header never log.
+ * Searches the Jira issues of one {@link JiraIssueKind} via `POST /rest/api/3/search/jql` (basic auth,
+ * JQL `project = <key> AND issuetype = "<type>" ORDER BY created DESC` with each clause dropped when
+ * it does not apply, `nextPageToken` pagination, capped at {@link MAX_ISSUES}). Returns `{ issues,
+ * truncated }`. Throws {@link JiraAccessError} with a value-free message on a terminal failure. An
+ * unscoped requirement search is refused here, before any request leaves. Diagnostics are allowlisted
+ * shape/status/count only — the token and basic-auth header never log.
  */
 export function searchJiraIssues(deps: JiraIssueSearchDeps): Promise<JiraIssueSearchResult> {
+  if (deps.kind === "requirement" && deps.query.trim() === "") {
+    return Promise.reject(new JiraAccessError("Searching requirements needs a project key to scope the search."));
+  }
   return new JiraIssueSearch(deps).run();
 }

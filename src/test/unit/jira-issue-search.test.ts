@@ -93,6 +93,28 @@ describe("searchJiraIssues", () => {
     expect(jql).toBe('issuetype = "Test Plan" ORDER BY created DESC');
   });
 
+  it("omits the issuetype clause for the requirement kind", async () => {
+    const { logger } = capturingLogger();
+    let jql = "";
+    const fetchImpl: FetchLike = (_url, init) => {
+      jql = (JSON.parse(init.body as string) as { jql: string }).jql;
+      return Promise.resolve(response(200, page([])));
+    };
+    await run(fetchImpl, logger, "requirement");
+    expect(jql).toBe('project = "CALC" ORDER BY created DESC');
+  });
+
+  it("refuses an unscoped requirement search before any request leaves", async () => {
+    const { logger } = capturingLogger();
+    let calls = 0;
+    const fetchImpl: FetchLike = () => {
+      calls += 1;
+      return Promise.resolve(response(200, page([])));
+    };
+    await expect(run(fetchImpl, logger, "requirement", "")).rejects.toBeInstanceOf(JiraAccessError);
+    expect(calls).toBe(0);
+  });
+
   it("falls back to the issue key when a summary is missing", async () => {
     const { logger } = capturingLogger();
     const fetchImpl: FetchLike = () =>

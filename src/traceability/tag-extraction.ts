@@ -21,7 +21,7 @@ export function stateless(keyShape: RegExp): RegExp {
 // The prefix is matched case-insensitively; the key is canonicalized by the adapter's grammar so
 // `@TEST_CALC-1` and `@test_calc-1` collapse to one identity. What counts as a valid key body is the
 // grammar's business — both the shape and the canonical form are supplied, not assumed here.
-function keyForPrefix(
+export function keyForPrefix(
   tag: string,
   prefix: string,
   keyShape: RegExp,
