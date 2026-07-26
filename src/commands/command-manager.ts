@@ -47,7 +47,7 @@ import { PreflightChoice, runPreflightFlow } from "../traceability/preflight-flo
 import { isPublishable, publishableResults } from "../traceability/publish-core";
 import { AttachmentSuggestion, PublishAttachmentsModel, runPublishFlow } from "../traceability/publish-flow";
 import { PendingAttachmentsResult, PublishDialogDelegate } from "../traceability/publish-dialog-panel";
-import { PublishLedger } from "../traceability/publish-ledger";
+import { PublishLedger, STANDALONE_ARTIFACT_PREFIX } from "../traceability/publish-ledger";
 import { makeFeatureStepResolver } from "../xray/feature-step-resolver";
 import { XrayImportError } from "../xray/execution-importers";
 import { fetchJiraAttachmentMeta, uploadJiraAttachments } from "../xray/jira-attachments";
@@ -265,6 +265,7 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.pushScenarioText", title: "Push Scenario Text…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().pushScenarioText() },
         { command: "playwrightBddRunner.traceability.createTestSet", title: "Create Test Set…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().createTestSet() },
         { command: "playwrightBddRunner.traceability.createTestPlan", title: "Create Test Plan…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().createTestPlan() },
+        { command: "playwrightBddRunner.traceability.createTestExecution", title: "Create Test Execution…", category: CATEGORY, handler: () => this.getTraceabilityAuthoringCommands().createTestExecution() },
       ];
 
       for (const cmd of commands) {
@@ -746,6 +747,33 @@ export class CommandManager {
     adapter?.remoteSearch?.mergeKeys([key]).catch((error) => {
       this.logger.warn("Xray metadata merge for a newly created test failed", { error: errMsg(error) });
     });
+  }
+
+  // A standalone execution create's ledger entry: no run behind it, so it carries no counts and nothing
+  // pending, and its artifact id is namespaced away from every run's. The Executions tab reads the ledger
+  // on the board's snapshot-change beat, so a forced rebuild is what makes the new row appear without a
+  // reopen; a failed rebuild only costs that repaint, never the recorded entry.
+  private async recordCreatedExecution(key: string, summary: string): Promise<void> {
+    const rawSite = this.context.config.xraySiteUrl;
+    const site = normalizeSiteUrl(rawSite);
+    // An unconfigured site has no credential key to look under (the store throws on one), and the account
+    // stamp is never worth losing the row over, so it reads as no account rather than as a rejection.
+    const credentials = site === "" ? undefined : await this.credentialStore?.getCredentials(rawSite);
+    this.publishLedger?.record({
+      artifactId: `${STANDALONE_ARTIFACT_PREFIX}${key}`,
+      executionRef: key,
+      site,
+      account: credentials?.clientId ?? "",
+      publishedAt: Date.now(),
+      pendingAttachments: [],
+      summary,
+      mode: "created-empty",
+    });
+    try {
+      await this.traceabilitySubsystem?.rebuildNow();
+    } catch (error) {
+      this.logger.warn("Refreshing the board after creating an execution failed", { error: errMsg(error) });
+    }
   }
 
   private async resolveProjectForCreate(): Promise<string | undefined> {
@@ -1299,6 +1327,13 @@ export class CommandManager {
             this.logger.warn("Creating a test plan from the board failed", { error: errMsg(error) });
           });
       },
+      createTestExecution: () => {
+        this.getTraceabilityAuthoringCommands()
+          .createTestExecution()
+          .catch((error) => {
+            this.logger.warn("Creating a test execution from the board failed", { error: errMsg(error) });
+          });
+      },
       publishDelegate: this.publishDelegate(),
       startPublish: () => {
         this.runPublish().catch((error) => {
@@ -1781,6 +1816,7 @@ export class CommandManager {
       },
       siteUrl: () => normalizeSiteUrl(this.context.config.xraySiteUrl),
       merge: (key) => this.mergeCreatedKey(this.traceabilitySubsystem?.getActiveAdapter(), key),
+      recordExecution: (key, summary) => this.recordCreatedExecution(key, summary),
     });
     return this.traceabilityAuthoringCommands;
   }

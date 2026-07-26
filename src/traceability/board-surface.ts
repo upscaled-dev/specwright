@@ -59,6 +59,9 @@ interface CreateTestSetMessage {
 interface CreateTestPlanMessage {
   type: "createTestPlan";
 }
+interface CreateTestExecutionMessage {
+  type: "createTestExecution";
+}
 type BoardIncoming =
   | SearchMessage
   | DropMessage
@@ -70,7 +73,14 @@ type BoardIncoming =
   | SelectMessage
   | BulkCreateMessage
   | CreateTestSetMessage
-  | CreateTestPlanMessage;
+  | CreateTestPlanMessage
+  | CreateTestExecutionMessage;
+
+// One handler per message type, so a new board verb is a new line rather than another branch. Exhaustive
+// by construction: a message type with no route is a compile error.
+type BoardRoutes = {
+  [K in BoardIncoming["type"]]: (message: Extract<BoardIncoming, { type: K }>) => void;
+};
 
 // A card plus the host's answer to "is this one checked". The webview holds no selection of its own: it
 // paints this flag and posts every checkbox change straight back.
@@ -110,6 +120,7 @@ interface RenderMessage {
   createVerb: CreateVerb;
   testSetVerb: CreateVerb;
   testPlanVerb: CreateVerb;
+  executionVerb: CreateVerb;
 }
 
 // The board is a document-like surface, so its data source is the stable subsystem — not a one-shot
@@ -143,6 +154,9 @@ export interface BoardSurfaceDeps {
   // labour as `bulkCreate`: the command layer owns the summary prompt, the confirm, and the reporting.
   createTestSet(): void;
   createTestPlan(): void;
+  // The Executions tab's button: one empty remote execution in the scoped project, for a later publish to
+  // append to. It reads no selection, so only the scope decides whether it can run.
+  createTestExecution(): void;
   // The scope selector's options, read on the same beat as the model: a sync's new catalogue projects
   // appear with the snapshot that carries them. A settings edit alone does not repaint the board, so the
   // list can lag a just-changed sync scope until the next rebuild. That staleness is the price of one
@@ -190,72 +204,76 @@ export class BoardSurface {
     this.render();
   }
 
-  private handle(message: BoardIncoming): void {
-    if (message.type === "drop") {
-      // The write, its snapshot rebuild, and the follow-up re-render are the host's job. Nothing is
-      // posted back here: a valid drop re-renders via onDidChange, a stale one toasts and leaves the
-      // board as-is for a retry.
+  // Field initializers run before the constructor body, so every route may only CLOSE OVER `this.deps`
+  // and never dereference it here: at this point the constructor has not assigned it yet.
+  private readonly routes: BoardRoutes = {
+    search: (message) => {
+      this.query = message.value;
+      this.render();
+    },
+    // The write, its snapshot rebuild, and the follow-up re-render are the host's job. Nothing is posted
+    // back here: a valid drop re-renders via onDidChange, a stale one toasts and leaves the board as-is
+    // for a retry.
+    drop: (message) => {
       this.deps.applyDrop(message.scenario, message.key).catch(() => undefined);
+    },
+    unlink: (message) => this.unlinkRow(message.scenario, message.key),
+    pushText: (message) => this.deps.pushText(message.scenario, message.key),
+    open: (message) => this.deps.openExecution(message.key),
+    sync: () => this.syncNow(),
+    scope: (message) => this.scopeTo(message.project),
+    select: (message) => this.toggleSelection(message.target, message.id, message.on),
+    bulkCreate: () => this.deps.bulkCreate(),
+    createTestSet: () => this.deps.createTestSet(),
+    createTestPlan: () => this.deps.createTestPlan(),
+    createTestExecution: () => this.deps.createTestExecution(),
+  };
+
+  private handle(message: BoardIncoming): void {
+    // The webview is trusted to post known types, but the message still arrives untyped: an own-property
+    // check is what keeps an unknown type a no-op and a prototype name like `toString` from resolving to
+    // something callable. The cast only erases the per-key narrowing TypeScript cannot carry through a
+    // dynamic index, since the map is exhaustive over `BoardIncoming`.
+    if (!Object.hasOwn(this.routes, message.type)) {
       return;
     }
-    if (message.type === "unlink") {
-      // A row already being unlinked is ignored: the board only re-renders once the snapshot rebuilds,
-      // so a second click would resolve against the pre-edit document and strip the wrong line.
-      const row = `${message.scenario}\n${message.key}`;
-      if (this.unlinking.has(row)) {
-        return;
-      }
-      this.unlinking.add(row);
-      this.deps
-        .applyUnlink(message.scenario, message.key)
-        .finally(() => this.unlinking.delete(row))
-        .catch(() => undefined);
+    (this.routes[message.type] as (routed: BoardIncoming) => void)(message);
+  }
+
+  // A row already being unlinked is ignored: the board only re-renders once the snapshot rebuilds, so a
+  // second click would resolve against the pre-edit document and strip the wrong line.
+  private unlinkRow(scenario: string, key: string): void {
+    const row = `${scenario}\n${key}`;
+    if (this.unlinking.has(row)) {
       return;
     }
-    if (message.type === "pushText") {
-      this.deps.pushText(message.scenario, message.key);
-      return;
+    this.unlinking.add(row);
+    this.deps
+      .applyUnlink(scenario, key)
+      .finally(() => this.unlinking.delete(row))
+      .catch(() => undefined);
+  }
+
+  private syncNow(): void {
+    this.deps
+      .runSync()
+      .finally(() => this.render())
+      .catch(() => undefined);
+  }
+
+  private scopeTo(project: string): void {
+    this.deps.projectScope.set(project === "" ? undefined : project);
+    this.render();
+  }
+
+  private toggleSelection(target: SelectMessage["target"], id: string, on: boolean): void {
+    const selection = target === "test" ? this.selectedTestKeys : this.selectedScenarioIds;
+    if (on) {
+      selection.add(id);
+    } else {
+      selection.delete(id);
     }
-    if (message.type === "open") {
-      this.deps.openExecution(message.key);
-      return;
-    }
-    if (message.type === "sync") {
-      this.deps
-        .runSync()
-        .finally(() => this.render())
-        .catch(() => undefined);
-      return;
-    }
-    if (message.type === "scope") {
-      this.deps.projectScope.set(message.project === "" ? undefined : message.project);
-      this.render();
-      return;
-    }
-    if (message.type === "select") {
-      const selection = message.target === "test" ? this.selectedTestKeys : this.selectedScenarioIds;
-      if (message.on) {
-        selection.add(message.id);
-      } else {
-        selection.delete(message.id);
-      }
-      // Re-render so the verb's count and enablement follow the checkbox that just changed.
-      this.render();
-      return;
-    }
-    if (message.type === "bulkCreate") {
-      this.deps.bulkCreate();
-      return;
-    }
-    if (message.type === "createTestSet") {
-      this.deps.createTestSet();
-      return;
-    }
-    if (message.type === "createTestPlan") {
-      this.deps.createTestPlan();
-      return;
-    }
-    this.query = message.value;
+    // Re-render so the verb's count and enablement follow the checkbox that just changed.
     this.render();
   }
 
@@ -326,6 +344,20 @@ export class BoardSurface {
     };
   }
 
+  // The Executions verb reads no selection: an empty execution needs only a project to land in, so the
+  // scope is the whole of its state.
+  private executionVerb(project: string | undefined): CreateVerb {
+    const label = "Create Execution";
+    if (project === undefined) {
+      return { label, enabled: false, hint: "Pick a project in the header to create an execution in." };
+    }
+    return {
+      label: `${label} in ${project}`,
+      enabled: true,
+      hint: `Creates an empty Test Execution in ${project} for a later publish to append to.`,
+    };
+  }
+
   private render(): void {
     const project = this.deps.projectScope.get(this.projects);
     const scoped = scopeBoardViewModel(this.model, project);
@@ -351,6 +383,7 @@ export class BoardSurface {
       createVerb: this.createVerb(project),
       testSetVerb: this.containerVerb("Test Set", project),
       testPlanVerb: this.containerVerb("Test Plan", project),
+      executionVerb: this.executionVerb(project),
     };
     this.host.post(message);
   }

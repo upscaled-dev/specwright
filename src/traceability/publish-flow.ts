@@ -167,7 +167,10 @@ function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps, scopedProj
             republish: {
               key: prior.executionRef,
               publishedAt: prior.publishedAt,
-              ...(prior.mode ? { mode: prior.mode } : {}),
+              // The banner describes a prior PUBLISH, and `prior` is looked up by a run's artifact id,
+              // which a standalone execution create can never carry (its id is namespaced), so the two
+              // publish modes stay exhaustive here.
+              ...(prior.mode === "create-new" || prior.mode === "append" ? { mode: prior.mode } : {}),
             },
           }
         : {}),

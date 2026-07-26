@@ -392,6 +392,11 @@ function executionAction(mode: LedgerEntry["mode"]): string {
   if (mode === "append") {
     return "Appended";
   }
+  // A standalone create carries no counts, so Imported and Pass rate dash through the same absent-value
+  // path an older entry takes. A later publish appends to the key and writes its own row.
+  if (mode === "created-empty") {
+    return "Created (empty)";
+  }
   return DASH;
 }
 
@@ -414,11 +419,11 @@ function executionPassRate(entry: LedgerEntry): string {
 
 /**
  * The Executions tab rows (vscode-free), newest first, over the site-scoped publish ledger. No live
- * remote execution query exists, so this reflects only what this workspace has published: each row
- * carries the execution key, its summary, whether the publish created or appended, the imported result
- * count (the recorded total) and pass rate (rendered only when the recorded pass/fail/skip counts add
- * up to that total, else a dash), the ISO publish date, and how many ledger entries published to that
- * same key.
+ * remote execution query exists, so this reflects only what this workspace recorded: each row carries the
+ * execution key, its summary, what the entry did to it (created, appended, or created empty), the
+ * imported result count (the recorded total) and pass rate (rendered only when the recorded pass/fail/skip
+ * counts add up to that total, else a dash), the ISO date, and how many ledger entries name that same key,
+ * standalone creations included, so every row for one key reports the same number.
  */
 export function buildExecutionRows(entries: readonly LedgerEntry[]): ExecutionRow[] {
   const timesByKey = new Map<string, number>();

@@ -301,6 +301,13 @@ export interface NewContainerSpec {
   readonly testIssueIds: readonly string[];
 }
 
+// A brand-new, EMPTY remote Test Execution: where it lands and what it is called. It carries no tests and
+// no environments by design, so a later publish is what appends both.
+export interface NewExecutionSpec {
+  readonly project: string;
+  readonly summary: string;
+}
+
 // The authored issue (a test, or one of the containers the seams below create), read back from the SAME
 // create response, no follow-up fetch. `key` is absent only when the response carried no readable key:
 // the issue still exists remotely (and `issueId` may pin it), so the flow surfaces that rather than
@@ -322,6 +329,9 @@ export interface TestAuthoringCapability {
   // calling. A container short of members cannot be repaired from the response.
   createTestSet?(spec: NewContainerSpec, signal?: AbortSignal): Promise<AuthoredTest>;
   createTestPlan?(spec: NewContainerSpec, signal?: AbortSignal): Promise<AuthoredTest>;
+  // Optional: create an empty Test Execution to publish results into later. It takes no members, so it
+  // has no issue ids to resolve and no selection to read.
+  createTestExecution?(spec: NewExecutionSpec, signal?: AbortSignal): Promise<AuthoredTest>;
   // Optional: replace an existing remote test's Gherkin body with local text, addressed by the remote
   // `issueId` (the only handle the write takes, never a key). Resolves to the text read back from the
   // same response, or `undefined` when it carried none, so the caller verifies instead of assuming.

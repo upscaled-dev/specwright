@@ -304,24 +304,28 @@ function createTestMutation(spec: XrayCreateTestSpec): string {
   return `mutation { createTest(testType: { name: "Cucumber" }, gherkin: ${gherkin}, jira: { fields: { project: { key: ${project} }, summary: ${summary} } }) { test { issueId jira(fields: ["key"]) } warnings } }`;
 }
 
-// `createTestSet(testIssueIds: [String], jira: JSON!)` and `createTestPlan(savedFilter, testIssueIds,
-// jira: JSON!)` take the same `jira` literal `createTestMutation` builds. `savedFilter` is never passed:
-// it is mutually exclusive with `testIssueIds`. The selection stops at the created issue: `tests(...)` is
-// a connection needing its own limit, so reading the members back would burn item budget for nothing.
+// `createTestSet(testIssueIds: [String], jira: JSON!)`, `createTestPlan(savedFilter, testIssueIds,
+// jira: JSON!)` and `createTestExecution(testIssueIds, tests, testEnvironments, jira: JSON!)` take the
+// same `jira` literal `createTestMutation` builds. `savedFilter` is never passed: it is mutually
+// exclusive with `testIssueIds`. Absent `testIssueIds` omits the argument entirely, which is how the
+// empty execution is created; `testEnvironments` is likewise never passed, since the publish dialog owns
+// environments. The selection stops at the created issue: `tests(...)` is a connection needing its own
+// limit, so reading the members back would burn item budget for nothing.
 function createContainerMutation(
   mutation: string,
   field: string,
   project: string,
   summary: string,
-  testIssueIds: readonly string[]
+  testIssueIds: readonly string[] | undefined
 ): string {
-  const ids = testIssueIds.map((id) => JSON.stringify(id)).join(", ");
-  return `mutation { ${mutation}(testIssueIds: [${ids}], jira: { fields: { project: { key: ${JSON.stringify(project)} }, summary: ${JSON.stringify(summary)} } }) { ${field} { issueId jira(fields: ["key"]) } warnings } }`;
+  const members =
+    testIssueIds === undefined ? "" : `testIssueIds: [${testIssueIds.map((id) => JSON.stringify(id)).join(", ")}], `;
+  return `mutation { ${mutation}(${members}jira: { fields: { project: { key: ${JSON.stringify(project)} }, summary: ${JSON.stringify(summary)} } }) { ${field} { issueId jira(fields: ["key"]) } warnings } }`;
 }
 
 // One parser for every create mutation: `mutation` names the field under `data`, `field` the created
-// issue under it (test/testSet/testPlan). The containers expose the same `issueId` + `jira(fields)` pair
-// as Test, so only those two names differ.
+// issue under it (test/testSet/testPlan/testExecution). The containers expose the same `issueId` +
+// `jira(fields)` pair as Test, so only those two names differ.
 function parseCreated(body: unknown, mutation: string, field: string): XrayCreatedTest {
   const data =
     body !== null && typeof body === "object"
@@ -531,12 +535,18 @@ export class XrayClient {
     return this.createContainer("createTestPlan", "testPlan", project, summary, testIssueIds, signal);
   }
 
+  // An EMPTY Test Execution: no members and no environments, so a later publish is what fills it. Passing
+  // no `testIssueIds` at all is deliberate, since it is mutually exclusive with the `tests` argument.
+  public createTestExecution(project: string, summary: string, signal?: AbortSignal): Promise<XrayCreatedTest> {
+    return this.createContainer("createTestExecution", "testExecution", project, summary, undefined, signal);
+  }
+
   private async createContainer(
     mutation: string,
     field: string,
     project: string,
     summary: string,
-    testIssueIds: readonly string[],
+    testIssueIds: readonly string[] | undefined,
     signal: AbortSignal | undefined
   ): Promise<XrayCreatedTest> {
     const query = createContainerMutation(mutation, field, project, summary, testIssueIds);

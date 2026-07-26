@@ -790,6 +790,42 @@ describe("XrayClient container creates", () => {
     await expect(client.createTestSet("CALC", "Regression", ["1001"])).rejects.toBeInstanceOf(XrayMutationError);
   });
 
+  it("sends createTestExecution with no members and no environments at all", async () => {
+    let captured = "";
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        captured = query;
+        return {
+          data: { createTestExecution: { testExecution: { issueId: "7000", jira: { key: "xnp-7" } }, warnings: [] } },
+        };
+      }),
+    });
+
+    const created = await client.createTestExecution("XNP", "XNP Test Execution (2026-07-26)");
+
+    expect(captured).toContain(
+      'createTestExecution(jira: { fields: { project: { key: "XNP" }, summary: "XNP Test Execution (2026-07-26)" } })'
+    );
+    expect(captured).toContain('testExecution { issueId jira(fields: ["key"]) } warnings');
+    expect(captured).not.toContain("testIssueIds");
+    expect(captured).not.toContain("testEnvironments");
+    expect(captured).not.toContain("createdTestEnvironments");
+    expect(captured).not.toContain("tests(");
+    expect(created).toEqual({ key: "XNP-7", issueId: "7000", warnings: [] });
+  });
+
+  it("returns a keyless execution record rather than throwing, so the caller can report it honestly", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({
+        data: { createTestExecution: { testExecution: { issueId: "7000" }, warnings: ["summary was trimmed"] } },
+      })),
+    });
+
+    const created = await client.createTestExecution("XNP", "Nightly");
+
+    expect(created).toEqual({ issueId: "7000", warnings: ["summary was trimmed"] });
+  });
+
   it("threads the abort signal through, so a cancelled create never reaches the network", async () => {
     const fetchImpl = vi.fn<FetchLike>(() => Promise.resolve(response(200, "{}")));
     const client = makeClient({ fetchImpl });

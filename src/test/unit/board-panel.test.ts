@@ -41,6 +41,7 @@ interface RenderMessage {
   createVerb: Verb;
   testSetVerb: Verb;
   testPlanVerb: Verb;
+  executionVerb: Verb;
 }
 interface Verb {
   label: string;
@@ -117,6 +118,7 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     bulkCreate: () => undefined,
     createTestSet: () => undefined,
     createTestPlan: () => undefined,
+    createTestExecution: () => undefined,
     knownProjects: () => PROJECTS,
     projectScope: fakeScope(),
     publishDelegate: noopDelegate,
@@ -781,6 +783,58 @@ describe("BoardPanel", () => {
 
     expect(createTestSet).toHaveBeenCalledOnce();
     expect(createTestPlan).toHaveBeenCalledOnce();
+    expect(panel.webview.__posted).toHaveLength(before);
+  });
+
+  // The router dispatches by message type, so an unrouted type must be a no-op rather than a throw out of
+  // the message handler, and a prototype name must not resolve to something callable.
+  it("ignores a message type it has no route for, repainting nothing", async () => {
+    const bulkCreate = vi.fn();
+    const { panel } = await openReady({ bulkCreate });
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ surface: "board", type: "bogus" });
+    await panel.__receive({ surface: "board", type: "toString" });
+    await panel.__receive({ surface: "board", type: "constructor" });
+
+    expect(panel.webview.__posted).toHaveLength(before);
+    expect(bulkCreate).not.toHaveBeenCalled();
+  });
+
+  it("carries the Create Execution button on the Executions pane, disabled under All Projects", async () => {
+    const { panel } = await openReady();
+
+    expect(panel.webview.html).toContain('id="create-execution"');
+    expect(lastRender(panel)!.executionVerb).toEqual({
+      label: "Create Execution",
+      enabled: false,
+      hint: "Pick a project in the header to create an execution in.",
+    });
+  });
+
+  // An empty execution needs no tests, so the scope is the whole of the verb's state: it is live with a
+  // project picked and nothing checked anywhere.
+  it("enables the execution verb on a scoped board with no selection at all", async () => {
+    const { panel } = await openReady({ projectScope: fakeScope("PAY") });
+
+    const render = lastRender(panel)!;
+    expect(render.executionVerb).toEqual({
+      label: "Create Execution in PAY",
+      enabled: true,
+      hint: "Creates an empty Test Execution in PAY for a later publish to append to.",
+    });
+    expect(render.testSetVerb.enabled).toBe(false);
+    expect(BoardPanel.selectedTests()).toEqual([]);
+  });
+
+  it("routes the Create Execution button to its command without re-rendering the board", async () => {
+    const createTestExecution = vi.fn();
+    const { panel } = await openReady({ createTestExecution, projectScope: fakeScope("CALC") });
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ surface: "board", type: "createTestExecution" });
+
+    expect(createTestExecution).toHaveBeenCalledOnce();
     expect(panel.webview.__posted).toHaveLength(before);
   });
 

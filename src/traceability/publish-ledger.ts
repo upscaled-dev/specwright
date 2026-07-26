@@ -20,7 +20,8 @@ export interface LedgerEntry {
   readonly publishedAt: number;
   readonly pendingAttachments: readonly string[];
   readonly summary?: string | undefined;
-  readonly mode?: "create-new" | "append" | undefined;
+  // `created-empty` is a standalone execution create: no run behind it, no results, nothing attached.
+  readonly mode?: "create-new" | "append" | "created-empty" | undefined;
   readonly passed?: number | undefined;
   readonly failed?: number | undefined;
   readonly skipped?: number | undefined;
@@ -28,6 +29,13 @@ export interface LedgerEntry {
 }
 
 const MAX_ENTRIES = 50;
+
+// A standalone execution create has no run artifact, so it borrows the `artifactId` slot under this
+// namespace: `standalone:<KEY>`. Run artifacts are `randomUUID` values, which can never start with it, so
+// every artifactId reader here and on the board (`findLedgerEntry`, `withUpdatedPending`, and by
+// extension the republish banner and the pending-attachment replay) is looking up an id a real run gave
+// it and can never resolve to a standalone entry.
+export const STANDALONE_ARTIFACT_PREFIX = "standalone:";
 
 // Prepend the newest entry and cap the list. At 50 the ledger is both the idempotency source (the
 // re-publish banner reads the matching entry) and the Executions board's local publish history.
@@ -77,7 +85,7 @@ function isValidEntry(value: unknown): value is LedgerEntry {
     typeof entry["publishedAt"] === "number" &&
     Array.isArray(entry["pendingAttachments"]) &&
     isOptional(entry["summary"], (v) => typeof v === "string") &&
-    isOptional(entry["mode"], (v) => v === "create-new" || v === "append") &&
+    isOptional(entry["mode"], (v) => v === "create-new" || v === "append" || v === "created-empty") &&
     isOptional(entry["passed"], isNumber) &&
     isOptional(entry["failed"], isNumber) &&
     isOptional(entry["skipped"], isNumber) &&

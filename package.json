@@ -644,6 +644,11 @@
         "command": "playwrightBddRunner.traceability.createTestPlan",
         "title": "Create Test Plan…",
         "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.createTestExecution",
+        "title": "Create Test Execution…",
+        "category": "Specwright"
       }
     ],
     "viewsContainers": {

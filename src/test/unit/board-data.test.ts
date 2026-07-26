@@ -692,6 +692,19 @@ describe("buildExecutionRows", () => {
     expect(rows.map((r) => r.action)).toEqual(["Created", "Appended", "-"]);
   });
 
+  it("renders a standalone create as Created (empty), dashing the cells it has no counts for", () => {
+    const [row] = buildExecutionRows([
+      ledgerEntry({ executionRef: "XNP-7", summary: "CALC Test Execution (2026-07-26)", mode: "created-empty" }),
+    ]);
+    expect(row).toMatchObject({
+      key: "XNP-7",
+      summary: "CALC Test Execution (2026-07-26)",
+      action: "Created (empty)",
+      resultsImported: "-",
+      passRate: "-",
+    });
+  });
+
   it("carries the summary and renders the published date as an ISO day", () => {
     const [row] = buildExecutionRows([ledgerEntry({ summary: "Nightly", publishedAt: Date.UTC(2026, 6, 22) })]);
     expect(row).toMatchObject({ summary: "Nightly", publishedAt: "2026-07-22" });

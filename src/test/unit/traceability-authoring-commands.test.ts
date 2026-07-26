@@ -6,6 +6,7 @@ import {
   AuthoredTest,
   AutomationBindingClassification,
   NewContainerSpec,
+  NewExecutionSpec,
   NewTestSpec,
   TestCaseMetadata,
   TraceabilityAdapter,
@@ -151,6 +152,7 @@ function rig(options: RigOptions = {}): Rig {
     credentialsPresent: () => Promise.resolve(options.credentials !== false),
     siteUrl: () => "https://acme.atlassian.net",
     merge: (key) => merged.push(key),
+    recordExecution: () => Promise.resolve(),
   };
   return { commands: new TraceabilityAuthoringCommands(logger, deps), specs, merged, logger };
 }
@@ -242,6 +244,7 @@ function pushRig(options: PushRigOptions = {}): PushRig {
     credentialsPresent: () => Promise.resolve(options.credentials !== false),
     siteUrl: () => "acme.atlassian.net",
     merge: () => undefined,
+    recordExecution: () => Promise.resolve(),
   };
   return { commands: new TraceabilityAuthoringCommands(logger, deps), pushes, searched, merged, logger };
 }
@@ -282,6 +285,9 @@ interface ContainerRig {
   commands: TraceabilityAuthoringCommands;
   sets: NewContainerSpec[];
   plans: NewContainerSpec[];
+  executions: NewExecutionSpec[];
+  // What the standalone create wrote to the publish ledger.
+  recorded: Array<{ key: string; summary: string }>;
   logger: Logger;
 }
 
@@ -293,11 +299,14 @@ interface ContainerRigOptions {
   snapshot?: TraceabilitySnapshot;
   created?: AuthoredTest;
   create?: () => Promise<AuthoredTest>;
+  recordError?: Error;
 }
 
 function containerRig(options: ContainerRigOptions = {}): ContainerRig {
   const sets: NewContainerSpec[] = [];
   const plans: NewContainerSpec[] = [];
+  const executions: NewExecutionSpec[] = [];
+  const recorded: Array<{ key: string; summary: string }> = [];
   const created = options.created ?? { key: "CALC-90", issueId: "9000", warnings: [] };
   const create = options.create ?? ((): Promise<AuthoredTest> => Promise.resolve(created));
   const adapter = {
@@ -316,6 +325,10 @@ function containerRig(options: ContainerRigOptions = {}): ContainerRig {
               plans.push(spec);
               return create();
             },
+            createTestExecution: (spec: NewExecutionSpec) => {
+              executions.push(spec);
+              return create();
+            },
           }),
     },
   } as unknown as TraceabilityAdapter;
@@ -329,8 +342,12 @@ function containerRig(options: ContainerRigOptions = {}): ContainerRig {
     credentialsPresent: () => Promise.resolve(options.credentials !== false),
     siteUrl: () => "https://acme.atlassian.net",
     merge: () => undefined,
+    recordExecution: (key, summary) => {
+      recorded.push({ key, summary });
+      return options.recordError ? Promise.reject(options.recordError) : Promise.resolve();
+    },
   };
-  return { commands: new TraceabilityAuthoringCommands(logger, deps), sets, plans, logger };
+  return { commands: new TraceabilityAuthoringCommands(logger, deps), sets, plans, executions, recorded, logger };
 }
 
 // The name prompt and the modal, both answered: a container create runs on a named, confirmed batch.
@@ -1243,5 +1260,183 @@ describe("TraceabilityAuthoringCommands container creates", () => {
 
     expect(sets).toHaveLength(1);
     expect(plans).toEqual([]);
+  });
+});
+
+describe("TraceabilityAuthoringCommands.createTestExecution", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const TODAY = new Date().toISOString().slice(0, 10);
+
+  it("makes no remote call when the adapter cannot create executions", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const input = vi.spyOn(vscode.window, "showInputBox");
+    const { commands, executions } = containerRig({ seams: false });
+
+    await commands.createTestExecution();
+
+    expect(String(info.mock.calls[0]?.[0])).toBe("Connect to your test tracker before creating a Test Execution.");
+    expect(input).not.toHaveBeenCalled();
+    expect(executions).toEqual([]);
+  });
+
+  it("makes no remote call when no credentials are stored for the site", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const { commands, executions } = containerRig({ credentials: false });
+
+    await commands.createTestExecution();
+
+    expect(String(info.mock.calls[0]?.[0])).toContain("Connect to your test tracker");
+    expect(executions).toEqual([]);
+  });
+
+  it("asks for a project instead of guessing one under All Projects", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const input = vi.spyOn(vscode.window, "showInputBox");
+    const { commands, executions } = containerRig({ project: undefined });
+
+    await commands.createTestExecution();
+
+    expect(String(info.mock.calls[0]?.[0])).toBe(
+      "Pick a project on the Coverage Board to create this Test Execution in."
+    );
+    expect(input).not.toHaveBeenCalled();
+    expect(executions).toEqual([]);
+  });
+
+  // The execution holds no tests, so an empty board selection is a normal invocation, not a blocked one.
+  it("runs with nothing checked on the board, defaulting the name to the project and today", async () => {
+    const input = vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined as never);
+    const { commands, executions } = containerRig({ selected: [] });
+
+    await commands.createTestExecution();
+
+    expect(input.mock.calls[0]?.[0]).toMatchObject({ value: `CALC Test Execution (${TODAY})` });
+    expect(executions).toEqual([]);
+  });
+
+  it("names the container type, the project and the site in the one confirmation modal", async () => {
+    const confirm = nameAndConfirm("Test Execution");
+    const { commands } = containerRig();
+
+    await commands.createTestExecution();
+
+    expect(String(confirm.mock.calls[0]?.[0])).toBe(
+      "Create a new Xray Test Execution in project CALC on https://acme.atlassian.net with no tests yet?"
+    );
+    expect(confirm.mock.calls[0]?.[1]).toMatchObject({ modal: true });
+  });
+
+  it("creates nothing when the confirmation modal is dismissed", async () => {
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("Nightly" as never);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
+    const { commands, executions, recorded } = containerRig();
+
+    await commands.createTestExecution();
+
+    expect(executions).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it("creates the empty execution, ledgers it, and reports the created key", async () => {
+    nameAndConfirm("Test Execution", "  Nightly regression  ");
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const { commands, executions, recorded, sets, plans } = containerRig({
+      created: { key: "XNP-7", issueId: "7000", warnings: [] },
+    });
+
+    await commands.createTestExecution();
+
+    expect(executions).toEqual([{ project: "CALC", summary: "Nightly regression" }]);
+    expect(recorded).toEqual([{ key: "XNP-7", summary: "Nightly regression" }]);
+    expect(sets).toEqual([]);
+    expect(plans).toEqual([]);
+    expect(String(info.mock.calls.at(-1)?.[0])).toBe("Created Test Execution XNP-7 in CALC.");
+  });
+
+  it("writes no ledger entry when the response carried no readable key, reporting it honestly", async () => {
+    const warn = nameAndConfirm("Test Execution");
+    const { commands, executions, recorded } = containerRig({ created: { issueId: "7000", warnings: [] } });
+
+    await commands.createTestExecution();
+
+    expect(executions).toHaveLength(1);
+    expect(recorded).toEqual([]);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "The Test Execution was created (issue id 7000) but its key could not be read back, so it could not be named here."
+    );
+  });
+
+  it("carries the tracker's warnings into the report and logs them verbatim", async () => {
+    nameAndConfirm("Test Execution");
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const { commands, logger } = containerRig({ created: { key: "XNP-7", warnings: ["summary was trimmed"] } });
+    const logged = vi.spyOn(logger, "warn");
+
+    await commands.createTestExecution();
+
+    expect(String(info.mock.calls.at(-1)?.[0])).toBe(
+      "Created Test Execution XNP-7 in CALC. Warnings: summary was trimmed"
+    );
+    expect(logged.mock.calls[0]?.[1]).toMatchObject({ warnings: "summary was trimmed" });
+  });
+
+  // The execution exists remotely by then, so a ledger fault costs the Executions row, never the report.
+  it("still reports the created key when the ledger write fails, logging the fault", async () => {
+    nameAndConfirm("Test Execution");
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const { commands, logger } = containerRig({
+      created: { key: "XNP-7", warnings: [] },
+      recordError: new Error("memento unavailable"),
+    });
+    const logged = vi.spyOn(logger, "warn");
+
+    await commands.createTestExecution();
+
+    expect(String(info.mock.calls.at(-1)?.[0])).toBe("Created Test Execution XNP-7 in CALC.");
+    expect(logged.mock.calls[0]?.[1]).toMatchObject({ key: "XNP-7", error: "memento unavailable" });
+  });
+
+  it("surfaces a failed create as an error and logs it", async () => {
+    nameAndConfirm("Test Execution");
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const { commands, recorded, logger } = containerRig({
+      create: () => Promise.reject(new Error("permission denied")),
+    });
+    const logged = vi.spyOn(logger, "error");
+
+    await commands.createTestExecution();
+
+    expect(String(error.mock.calls[0]?.[0])).toBe("Could not create this Test Execution: permission denied");
+    expect(recorded).toEqual([]);
+    expect(logged.mock.calls[0]?.[1]).toMatchObject({ project: "CALC" });
+  });
+
+  // The guard takes a thunk, so the joined invocation never even opens its prompt: one input box across
+  // both calls is what proves it was never started, rather than started and stopped at the confirm.
+  it("shares the container guard, so an execution cannot ride alongside a running set create", async () => {
+    nameAndConfirm("Test Set");
+    const input = vi.spyOn(vscode.window, "showInputBox");
+    let release!: () => void;
+    const { commands, sets, executions } = containerRig({
+      create: () =>
+        new Promise<AuthoredTest>((resolve) => {
+          release = () => resolve({ key: "CALC-90", warnings: [] });
+        }),
+    });
+
+    const set = commands.createTestSet();
+    await flush();
+    const execution = commands.createTestExecution();
+    await flush();
+    expect(sets).toHaveLength(1);
+    expect(executions).toEqual([]);
+    expect(input).toHaveBeenCalledOnce();
+
+    release();
+    await Promise.all([set, execution]);
+
+    expect(executions).toEqual([]);
+    expect(input).toHaveBeenCalledOnce();
   });
 });

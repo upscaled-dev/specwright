@@ -4,9 +4,11 @@ import {
   findLedgerEntry,
   LedgerEntry,
   PublishLedger,
+  STANDALONE_ARTIFACT_PREFIX,
   withLedgerEntry,
   withUpdatedPending,
 } from "../../traceability/publish-ledger";
+import { buildExecutionRows } from "../../traceability/board-data";
 import { Logger, LogLevel } from "../../utils/logger";
 
 function entry(over: Partial<LedgerEntry> = {}): LedgerEntry {
@@ -105,6 +107,81 @@ describe("withUpdatedPending", () => {
     const updated = withUpdatedPending(republished, "run-1", "acme.atlassian.net", ["/new-b"]);
     expect(updated[0]!.pendingAttachments).toEqual(["/new-b"]);
     expect(updated[1]!.pendingAttachments).toEqual(["/old-a"]);
+  });
+});
+
+// A standalone execution create: no run behind it, so it borrows the artifactId slot under the
+// namespace and carries no counts and nothing pending.
+function standalone(key = "XNP-7"): LedgerEntry {
+  return entry({
+    artifactId: `${STANDALONE_ARTIFACT_PREFIX}${key}`,
+    executionRef: key,
+    summary: "CALC Test Execution (2026-07-26)",
+    mode: "created-empty",
+    publishedAt: 2000,
+  });
+}
+
+describe("standalone execution entries", () => {
+  it("survives the store's validation and reads back whole, counts absent", () => {
+    const memento = fakeMemento();
+    new PublishLedger(memento, logger).record(standalone());
+
+    const reloaded = new PublishLedger(memento, logger).entriesForSite("acme.atlassian.net");
+
+    expect(reloaded).toHaveLength(1);
+    expect(reloaded[0]).toMatchObject({
+      artifactId: "standalone:XNP-7",
+      executionRef: "XNP-7",
+      mode: "created-empty",
+      summary: "CALC Test Execution (2026-07-26)",
+      pendingAttachments: [],
+    });
+    expect(reloaded[0]!.total).toBeUndefined();
+    expect(reloaded[0]!.passed).toBeUndefined();
+  });
+
+  it("is never what a run's republish lookup finds, and never eats its pending update", () => {
+    const entries = [standalone(), entry({ artifactId: "run-1", executionRef: "XNP-1", pendingAttachments: ["/a"] })];
+
+    // The republish banner looks up a run's randomUUID, which can never carry the namespace.
+    expect(findLedgerEntry(entries, "run-1", "acme.atlassian.net")?.executionRef).toBe("XNP-1");
+    expect(findLedgerEntry(entries, "standalone:XNP-7", "acme.atlassian.net")?.mode).toBe("created-empty");
+
+    const updated = withUpdatedPending(entries, "run-1", "acme.atlassian.net", ["/b"]);
+
+    expect(updated[0]).toEqual(standalone());
+    expect(updated[1]!.pendingAttachments).toEqual(["/b"]);
+  });
+
+  // From here counts the entries naming a key, creations included, so a key that was created empty and
+  // then published to reads the same number on every one of its rows.
+  it("counts itself alongside the publishes that later landed on the same key", () => {
+    const rows = buildExecutionRows([
+      standalone("XNP-7"),
+      entry({ artifactId: "run-1", executionRef: "XNP-7", mode: "create-new", publishedAt: 3000 }),
+      entry({ artifactId: "run-2", executionRef: "XNP-7", mode: "append", publishedAt: 4000 }),
+    ]);
+
+    expect(rows.map((row) => [row.action, row.timesFromHere])).toEqual([
+      ["Appended", 3],
+      ["Created", 3],
+      ["Created (empty)", 3],
+    ]);
+  });
+
+  it("leaves another key's From here count alone", () => {
+    const rows = buildExecutionRows([
+      standalone("XNP-7"),
+      entry({ artifactId: "run-1", executionRef: "XNP-1", mode: "create-new", publishedAt: 1500 }),
+      entry({ artifactId: "run-2", executionRef: "XNP-1", mode: "append", publishedAt: 1000 }),
+    ]);
+
+    expect(rows.map((row) => [row.key, row.action, row.timesFromHere])).toEqual([
+      ["XNP-7", "Created (empty)", 1],
+      ["XNP-1", "Created", 2],
+      ["XNP-1", "Appended", 2],
+    ]);
   });
 });
 

@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
 import { resolveBoardLink, scenarioDropId } from "../traceability/board-data";
 import { BulkCreateResult, BulkCreateScenario, runBulkCreate } from "../traceability/bulk-create-flow";
-import { ContainerCreateOutcome, runContainerCreate } from "../traceability/container-create-flow";
+import { runContainerCreate } from "../traceability/container-create-flow";
 import { opensScenario, scenarioGherkinSlice } from "../parsers/gherkin-slice";
 import {
   AuthoredTest,
@@ -33,6 +33,9 @@ export interface AuthoringCommandDeps {
   siteUrl(): string;
   // The additive snapshot merge a created key gets, shared with the single create flow.
   merge(key: string): void;
+  // Records a standalone execution create in the publish ledger, so the Executions tab shows it and a
+  // later publish can append to it. The site and account stamps live with the ledger wiring, not here.
+  recordExecution(key: string, summary: string): Promise<void>;
 }
 
 const NO_SELECTION = "Select scenarios on the Coverage Board's Mapping tab first.";
@@ -135,9 +138,6 @@ export class TraceabilityAuthoringCommands {
    * that seam, credentials, and a target project; then the name prompt and one modal. The write itself
    * is all-or-nothing (`runContainerCreate`), so a checked test the snapshot has no issue id for stops
    * the batch before anything is created.
-   *
-   * One guard covers both verbs: they act on the same selection, so an invocation while either create
-   * is running joins it rather than authoring a second container.
    */
   public createTestSet(): Promise<void> {
     return this.createContainer("Test Set", (authoring) => authoring.createTestSet?.bind(authoring));
@@ -147,11 +147,29 @@ export class TraceabilityAuthoringCommands {
     return this.createContainer("Test Plan", (authoring) => authoring.createTestPlan?.bind(authoring));
   }
 
+  /**
+   * Create one EMPTY remote Test Execution in the board's selected project and record it in the publish
+   * ledger, so the Executions tab shows it as created-not-published and a later publish can append to it.
+   * It holds no tests and no environments, so it reads no selection: the same prechecks as the container
+   * verbs minus the selection, then the name prompt and one modal. A response with no readable key writes
+   * no ledger entry, since there would be nothing to show or append to.
+   */
+  public createTestExecution(): Promise<void> {
+    return this.guarded(() => this.executionInScope());
+  }
+
   private createContainer(kind: string, seamOf: SeamOf): Promise<void> {
+    return this.guarded(() => this.containerFromSelection(kind, seamOf));
+  }
+
+  // One guard for every container verb: they write to the same project from the same board, so a second
+  // invocation joins whichever create is running rather than authoring a duplicate. The flow is a thunk,
+  // so a joined invocation never even opens its prompts.
+  private guarded(run: () => Promise<void>): Promise<void> {
     if (this.containerInFlight) {
       return this.containerInFlight;
     }
-    this.containerInFlight = this.containerFromSelection(kind, seamOf).finally(() => {
+    this.containerInFlight = run().finally(() => {
       this.containerInFlight = undefined;
     });
     return this.containerInFlight;
@@ -163,43 +181,109 @@ export class TraceabilityAuthoringCommands {
       vscode.window.showInformationMessage(NO_TEST_SELECTION);
       return;
     }
-    const adapter = this.deps.adapter();
-    const authoring = adapter?.testAuthoring;
-    const create = authoring ? seamOf(authoring) : undefined;
-    if (!adapter || !create || !(await this.deps.credentialsPresent())) {
-      vscode.window.showInformationMessage(`Connect to your test tracker before creating a ${kind}.`);
+    const target = await this.containerTarget(kind, seamOf);
+    if (target === undefined) {
       return;
     }
-    const project = this.deps.targetProject();
-    if (project === undefined) {
-      vscode.window.showInformationMessage(`Pick a project on the Coverage Board to create this ${kind} in.`);
-      return;
-    }
-    const summary = (await this.containerSummary(kind, project, keys.length))?.trim();
+    const { adapter, seam, project } = target;
+    const summary = (await this.containerSummary(kind, project, `${keys.length} ${plural(keys.length, "test")}`))?.trim();
     if (summary === undefined || summary === "") {
       return;
     }
-    if (!(await this.confirmContainer(kind, project, keys.length, adapter.label))) {
+    const holding = `holding ${keys.length} selected ${plural(keys.length, "test")}`;
+    if (!(await this.confirmContainer(kind, project, holding, adapter.label))) {
       return;
     }
     const snapshot = this.deps.snapshot();
     try {
       const outcome = await runContainerCreate(keys, project, summary, {
         issueIdFor: (key) => issueIdFor(snapshot, key),
-        create,
+        create: seam,
       });
-      this.reportContainer(outcome, kind, keys.length, adapter.label);
+      if (outcome.kind === "unresolved") {
+        const unresolved = outcome.keys.join(", ");
+        this.logger.warn(`Creating a ${kind} was blocked by tests with no synced issue id`, { keys: unresolved });
+        vscode.window.showWarningMessage(
+          `Nothing was created: there is no synced issue id for ${unresolved}, which is the only handle a ${kind} takes. ${RESYNC}`
+        );
+        return;
+      }
+      this.reportCreated(
+        outcome.created,
+        kind,
+        adapter.label,
+        (key) => `Created ${kind} ${key} holding ${keys.length} ${plural(keys.length, "test")}.`
+      );
     } catch (error) {
-      this.logger.error(`Creating a ${kind} failed`, { project, error: errMsg(error) });
-      vscode.window.showErrorMessage(`Could not create this ${kind}: ${errMsg(error)}`);
+      this.reportCreateFailure(kind, project, error);
     }
   }
 
-  private containerSummary(kind: string, project: string, count: number): Thenable<string | undefined> {
+  private async executionInScope(): Promise<void> {
+    const kind = "Test Execution";
+    const target = await this.containerTarget(kind, (authoring) => authoring.createTestExecution?.bind(authoring));
+    if (target === undefined) {
+      return;
+    }
+    const { adapter, seam, project } = target;
+    const today = new Date().toISOString().slice(0, 10);
+    const summary = (await this.containerSummary(kind, project, today))?.trim();
+    if (summary === undefined || summary === "") {
+      return;
+    }
+    if (!(await this.confirmContainer(kind, project, "with no tests yet", adapter.label))) {
+      return;
+    }
+    try {
+      const created = await seam({ project, summary });
+      if (created.key !== undefined) {
+        await this.recordExecution(created.key, summary);
+      }
+      this.reportCreated(created, kind, adapter.label, (key) => `Created ${kind} ${key} in ${project}.`);
+    } catch (error) {
+      this.reportCreateFailure(kind, project, error);
+    }
+  }
+
+  // The shared precheck behind every container verb: a connected adapter exposing this one's seam, and a
+  // project to land in. Generic over the seam, since an execution takes a different spec than a container.
+  private async containerTarget<T>(
+    kind: string,
+    seamOf: (authoring: TestAuthoringCapability) => T | undefined
+  ): Promise<{ adapter: TraceabilityAdapter; seam: T; project: string } | undefined> {
+    const adapter = this.deps.adapter();
+    const authoring = adapter?.testAuthoring;
+    const seam = authoring ? seamOf(authoring) : undefined;
+    if (!adapter || seam === undefined || !(await this.deps.credentialsPresent())) {
+      vscode.window.showInformationMessage(`Connect to your test tracker before creating a ${kind}.`);
+      return undefined;
+    }
+    const project = this.deps.targetProject();
+    if (project === undefined) {
+      vscode.window.showInformationMessage(`Pick a project on the Coverage Board to create this ${kind} in.`);
+      return undefined;
+    }
+    return { adapter, seam, project };
+  }
+
+  // The execution exists remotely by now, so a ledger write that fails costs only the Executions row: it
+  // is logged, never turned into a failed create.
+  private async recordExecution(key: string, summary: string): Promise<void> {
+    try {
+      await this.deps.recordExecution(key, summary);
+    } catch (error) {
+      this.logger.warn("Recording the created execution in the publish ledger failed", {
+        key,
+        error: errMsg(error),
+      });
+    }
+  }
+
+  private containerSummary(kind: string, project: string, detail: string): Thenable<string | undefined> {
     return vscode.window.showInputBox({
       title: `Create ${kind}`,
       prompt: `Name the ${kind} to create in ${project}.`,
-      value: `${project} ${kind} (${count} ${plural(count, "test")})`,
+      value: `${project} ${kind} (${detail})`,
       validateInput: (text) => (text.trim() === "" ? `The ${kind} needs a name.` : undefined),
     });
   }
@@ -207,38 +291,29 @@ export class TraceabilityAuthoringCommands {
   private async confirmContainer(
     kind: string,
     project: string,
-    count: number,
+    holding: string,
     providerLabel: string
   ): Promise<boolean> {
     const site = this.deps.siteUrl();
     const target = site !== "" ? `project ${project} on ${site}` : `project ${project}`;
     const action = `Create ${kind}`;
     const choice = await vscode.window.showWarningMessage(
-      `Create a new ${providerLabel} ${kind} in ${target} holding ${count} selected ${plural(count, "test")}?`,
+      `Create a new ${providerLabel} ${kind} in ${target} ${holding}?`,
       { modal: true },
       action
     );
     return choice === action;
   }
 
-  // A blocked batch names every key it could not address, since a sync is what fixes them. A created
-  // container names its key; a response that carried none still created it, so that is reported as an
-  // honest gap rather than a failure. Warnings ride the success line and go to the log verbatim.
-  private reportContainer(
-    outcome: ContainerCreateOutcome,
+  // Every container create reports the same way: warnings logged verbatim and appended to the line, and a
+  // response that carried no key reported as an honest gap rather than a failure, since the issue exists
+  // remotely either way. `landed` is the sentence for the readable case, which only the caller can word.
+  private reportCreated(
+    created: AuthoredTest,
     kind: string,
-    count: number,
-    providerLabel: string
+    providerLabel: string,
+    landed: (key: string) => string
   ): void {
-    if (outcome.kind === "unresolved") {
-      const keys = outcome.keys.join(", ");
-      this.logger.warn(`Creating a ${kind} was blocked by tests with no synced issue id`, { keys });
-      vscode.window.showWarningMessage(
-        `Nothing was created: there is no synced issue id for ${keys}, which is the only handle a ${kind} takes. ${RESYNC}`
-      );
-      return;
-    }
-    const created = outcome.created;
     if (created.warnings.length > 0) {
       this.logger.warn(`${providerLabel} returned warnings creating a ${kind}`, { warnings: created.warnings.join("; ") });
     }
@@ -249,10 +324,15 @@ export class TraceabilityAuthoringCommands {
       );
       return;
     }
-    const base = `Created ${kind} ${created.key} holding ${count} ${plural(count, "test")}.`;
+    const base = landed(created.key);
     vscode.window.showInformationMessage(
       created.warnings.length > 0 ? `${base} Warnings: ${created.warnings.join("; ")}` : base
     );
+  }
+
+  private reportCreateFailure(kind: string, project: string, error: unknown): void {
+    this.logger.error(`Creating a ${kind} failed`, { project, error: errMsg(error) });
+    vscode.window.showErrorMessage(`Could not create this ${kind}: ${errMsg(error)}`);
   }
 
   /**

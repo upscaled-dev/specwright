@@ -87,6 +87,9 @@ function boardPanesHtml(providerLabel: string): string {
       </div>
     </section>
     <section id="pane-executions" class="pane board-pane" data-tab="executions" hidden>
+      <div class="verbs">
+        <button id="create-execution" class="create-tests" type="button" disabled>Create Execution</button>
+      </div>
       <div id="executions-empty" class="empty" hidden>Publishes from this workspace appear here.</div>
       <div id="executions-scroll" class="matrix-scroll">
         <table class="matrix">
@@ -106,6 +109,7 @@ const BOARD_SCRIPT = `
   const createTests = document.getElementById('create-tests');
   const createTestSet = document.getElementById('create-test-set');
   const createTestPlan = document.getElementById('create-test-plan');
+  const createExecution = document.getElementById('create-execution');
   const availableCards = document.getElementById('available-cards');
   const mappedCards = document.getElementById('mapped-cards');
   const scenarioCount = document.getElementById('scenario-count');
@@ -410,6 +414,7 @@ const BOARD_SCRIPT = `
   createTests.addEventListener('click', function () { window.__spec.post('board', { type: 'bulkCreate' }); });
   createTestSet.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestSet' }); });
   createTestPlan.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestPlan' }); });
+  createExecution.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestExecution' }); });
 
   window.__spec.register('board', function (msg) {
     if (msg.type === 'render') {
@@ -418,6 +423,7 @@ const BOARD_SCRIPT = `
       renderVerb(createTests, msg.createVerb || {}, 'Create tests');
       renderVerb(createTestSet, msg.testSetVerb || {}, 'Create Test Set');
       renderVerb(createTestPlan, msg.testPlanVerb || {}, 'Create Test Plan');
+      renderVerb(createExecution, msg.executionVerb || {}, 'Create Execution');
       renderScenarios(msg.scenarios || []);
       renderTests(msg.available || [], msg.mapped || [], msg.availableEmptyText || '', msg.offerSync === true);
       renderMatrix(msg.matrix || []);
