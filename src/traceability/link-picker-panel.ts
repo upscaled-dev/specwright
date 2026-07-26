@@ -234,7 +234,7 @@ const LINK_SCRIPT = `
   let highlightedIndex = -1;
 
   // The "Linked" section sits outside the navigable results list, so its rows are inherently skipped
-  // by the arrow keys and Enter — they are informational and carry only mouse actions.
+  // by the arrow keys and Enter; they are informational and carry only mouse actions.
   function renderLinked() {
     linkedSection.hidden = linkedRows.length === 0;
     linkedList.textContent = '';

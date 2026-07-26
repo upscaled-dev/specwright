@@ -20,7 +20,7 @@ function isFeatureDocument(doc: DecoratableDocument): boolean {
 
 /**
  * 0-based indices of every line carrying a `@TEST_`/`@REQ_` tag. Prefixes and key shape come from
- * the active adapter's grammar — nothing Xray-specific is hardcoded here. A tag line may hold several
+ * the active adapter's grammar; nothing Xray-specific is hardcoded here. A tag line may hold several
  * tokens; one matching key decorates the whole line, so the wash never lands per-character.
  */
 export function tagKeyLines(text: string, grammar: KeyGrammar): number[] {
@@ -45,7 +45,7 @@ const DEBOUNCE_MS = 300;
 /**
  * Faint whole-line wash on `@TEST_`/`@REQ_` tag lines in `.feature` files (§12 View 1). Panel-gated
  * exactly like the tag-grammar diagnostics: the subsystem builds one per active adapter and disposes
- * it on teardown, so the grammar is always the live provider's. Provider-neutral — the prefixes ride
+ * it on teardown, so the grammar is always the live provider's. Provider-neutral: the prefixes ride
  * in through {@link tagKeyLines}, never a hardcoded regex.
  */
 export class TagDecorationProvider implements vscode.Disposable {

@@ -53,7 +53,7 @@ export async function runInsertStep(
   const doc = editor?.document;
   if (!editor || !doc || (doc.languageId !== "gherkin" && !doc.fileName.endsWith(".feature"))) {
     vscode.window.showInformationMessage(
-      "Insert Step needs an active .feature editor — open one and try again.",
+      "Insert Step needs an active .feature editor: open one and try again.",
     );
     return;
   }
@@ -65,7 +65,7 @@ export async function runInsertStep(
     const items = buildInsertStepItems(await getDefs(), toWorkspaceRelative);
     if (items.length === 0) {
       vscode.window.showInformationMessage(
-        "No step definitions found — check playwrightBddRunner.stepDefinitionPaths.",
+        "No step definitions found: check playwrightBddRunner.stepDefinitionPaths.",
       );
       return;
     }

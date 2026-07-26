@@ -28,7 +28,7 @@ const FIXTURES_DIR = path.resolve(__dirname, "../../../features");
 const NL = "\n";
 const lines = (...rows: string[]): string => rows.join(NL);
 
-describe("FeatureParser.parseFeatureContent — invalid input", () => {
+describe("FeatureParser.parseFeatureContent: invalid input", () => {
   it("returns null for an empty string", () => {
     const parser = FeatureParser.create();
     expect(parser.parseFeatureContent("")).toBeNull();
@@ -44,7 +44,7 @@ describe("FeatureParser.parseFeatureContent — invalid input", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureContent — plain feature", () => {
+describe("FeatureParser.parseFeatureContent: plain feature", () => {
   it("parses two scenarios with names and tags", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -69,7 +69,7 @@ describe("FeatureParser.parseFeatureContent — plain feature", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureContent — Gherkin * step keyword", () => {
+describe("FeatureParser.parseFeatureContent: Gherkin * step keyword", () => {
   it("parses mixed Given/*/* steps as scenario steps in order", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -113,7 +113,7 @@ describe("FeatureParser.parseFeatureContent — Gherkin * step keyword", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureContent — Background propagation", () => {
+describe("FeatureParser.parseFeatureContent: Background propagation", () => {
   it("prepends feature-level Background as backgroundSteps on each scenario", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -145,7 +145,7 @@ describe("FeatureParser.parseFeatureContent — Background propagation", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureContent — Rule scoping", () => {
+describe("FeatureParser.parseFeatureContent: Rule scoping", () => {
   it("associates scenarios under a Rule: with the rule name via ruleName", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -167,7 +167,7 @@ describe("FeatureParser.parseFeatureContent — Rule scoping", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureContent — Background stacking", () => {
+describe("FeatureParser.parseFeatureContent: Background stacking", () => {
   it("stacks feature- and rule-level Backgrounds in [feature, rule] order on scenarios inside the rule", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -197,7 +197,7 @@ describe("FeatureParser.parseFeatureContent — Background stacking", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureContent — Scenario Outline (single Examples)", () => {
+describe("FeatureParser.parseFeatureContent: Scenario Outline (single Examples)", () => {
   it("expands one scenario per example row, naming them '<idx>: <outline> - <header>: <value>, ...'", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -226,7 +226,7 @@ describe("FeatureParser.parseFeatureContent — Scenario Outline (single Example
   });
 });
 
-describe("FeatureParser.parseFeatureContent — Scenario Outline (multiple Examples)", () => {
+describe("FeatureParser.parseFeatureContent: Scenario Outline (multiple Examples)", () => {
   it("sums rows across every Examples block", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -257,7 +257,7 @@ describe("FeatureParser.parseFeatureContent — Scenario Outline (multiple Examp
   });
 });
 
-describe("FeatureParser.parseFeatureContent — Named Examples blocks", () => {
+describe("FeatureParser.parseFeatureContent: Named Examples blocks", () => {
   it("surfaces the Examples block name on each expanded scenario via examplesBlockName", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -284,7 +284,7 @@ describe("FeatureParser.parseFeatureContent — Named Examples blocks", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureContent — Tag inheritance (positive)", () => {
+describe("FeatureParser.parseFeatureContent: Tag inheritance (positive)", () => {
   it("merges outline-level and Examples-block tags onto each expanded scenario", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -310,7 +310,7 @@ describe("FeatureParser.parseFeatureContent — Tag inheritance (positive)", () 
   });
 });
 
-describe("FeatureParser.parseFeatureContent — Tag inheritance", () => {
+describe("FeatureParser.parseFeatureContent: Tag inheritance", () => {
   it("propagates feature-level tags but NOT rule-level tags onto scenario.tags", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -352,7 +352,7 @@ describe("FeatureParser.parseFeatureContent — Tag inheritance", () => {
   });
 });
 
-describe("FeatureParser.provideScenarioCodeLenses — counts per fixture", () => {
+describe("FeatureParser.provideScenarioCodeLenses: counts per fixture", () => {
   function readFixture(name: string): string {
     return fs.readFileSync(path.join(FIXTURES_DIR, name), "utf-8");
   }
@@ -386,7 +386,7 @@ describe("FeatureParser.provideScenarioCodeLenses — counts per fixture", () =>
   });
 });
 
-describe("FeatureParser.provideScenarioCodeLenses — Gherkin keyword synonyms", () => {
+describe("FeatureParser.provideScenarioCodeLenses: Gherkin keyword synonyms", () => {
   it("emits Run/Debug lenses for 'Scenario Template:' (treated as an outline) and 'Example:'", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -412,7 +412,7 @@ describe("FeatureParser.provideScenarioCodeLenses — Gherkin keyword synonyms",
   });
 });
 
-describe("FeatureParser.parseFeatureContent — hyphenated tag extraction", () => {
+describe("FeatureParser.parseFeatureContent: hyphenated tag extraction", () => {
   it("preserves hyphenated tags like @rule-scoped in both scenario tags and CodeLens tag list", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -433,7 +433,7 @@ describe("FeatureParser.parseFeatureContent — hyphenated tag extraction", () =
   });
 });
 
-describe("FeatureParser tag regex — rejects punctuation", () => {
+describe("FeatureParser tag regex: rejects punctuation", () => {
   it("parses '@smoke,@critical' (no space) as two separate tags in scenario.tags", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -496,7 +496,7 @@ describe("FeatureParser tag regex — rejects punctuation", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureContent — tags above Rule: are dropped with a warning", () => {
+describe("FeatureParser.parseFeatureContent tags above Rule: are dropped with a warning", () => {
   it("does not propagate dropped tags to child scenarios and logs a warning", () => {
     const logger = makeLoggerMock();
     const parser = FeatureParser.create(logger);
@@ -520,7 +520,7 @@ describe("FeatureParser.parseFeatureContent — tags above Rule: are dropped wit
   });
 });
 
-describe("FeatureParser.parseFeatureContent — zero-Examples Scenario Outline", () => {
+describe("FeatureParser.parseFeatureContent: zero-Examples Scenario Outline", () => {
   it("emits a single scenario with outlineLineNumber set and warns the user", () => {
     const logger = makeLoggerMock();
     const parser = FeatureParser.create(logger);
@@ -548,7 +548,7 @@ describe("FeatureParser.parseFeatureContent — zero-Examples Scenario Outline",
   });
 });
 
-describe("FeatureParser.parseFeatureContent — zero-Examples Scenario Outline is idempotent across calls", () => {
+describe("FeatureParser.parseFeatureContent: zero-Examples Scenario Outline is idempotent across calls", () => {
   it("produces identical output when the same parser parses the same content twice (no internal mutation)", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -578,7 +578,7 @@ describe("FeatureParser.parseFeatureContent — zero-Examples Scenario Outline i
   });
 });
 
-describe("FeatureParser.parseFeatureContent — long Example headers are not truncated", () => {
+describe("FeatureParser.parseFeatureContent: long Example headers are not truncated", () => {
   it("includes the full header name in the expanded scenario name", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -601,7 +601,7 @@ describe("FeatureParser.parseFeatureContent — long Example headers are not tru
   });
 });
 
-describe("FeatureParser.parseFeatureContent — outlineName field on expanded rows", () => {
+describe("FeatureParser.parseFeatureContent: outlineName field on expanded rows", () => {
   it("sets outlineName on every expanded row to the literal outline name", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -689,7 +689,7 @@ describe("FeatureParser.parseFeatureContent — outlineName field on expanded ro
   });
 });
 
-describe("FeatureParser.parseFeatureContent — substitutedName on expanded rows", () => {
+describe("FeatureParser.parseFeatureContent: substitutedName on expanded rows", () => {
   // playwright-bdd substitutes example values into the generated test title whenever the outline
   // TITLE carries `<placeholder>` tokens; substitutedName captures that title so run results can
   // be mapped back onto the row (the report never uses the tree's synthetic example label).
@@ -753,7 +753,7 @@ describe("FeatureParser.parseFeatureContent — substitutedName on expanded rows
   });
 });
 
-describe("isOutlineExampleRow — gating helper", () => {
+describe("isOutlineExampleRow: gating helper", () => {
   function baseFields(): Omit<RegularScenario, "isScenarioOutline"> {
     return {
       name: "x",
@@ -808,7 +808,7 @@ describe("isOutlineExampleRow — gating helper", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureFile — fs path sanity", () => {
+describe("FeatureParser.parseFeatureFile: fs path sanity", () => {
   it("loads complex.feature from disk and produces the same shape as parseFeatureContent", () => {
     const parser = FeatureParser.create();
     const fixturePath = path.join(FIXTURES_DIR, "complex.feature");
@@ -825,11 +825,11 @@ describe("FeatureParser.parseFeatureFile — fs path sanity", () => {
   });
 });
 
-describe("FeatureParser.parseFeatureContent — filePath contract", () => {
+describe("FeatureParser.parseFeatureContent: filePath contract", () => {
   // The parser intentionally returns scenarios with an empty filePath. Callers (the
   // test provider) are responsible for stamping the absolute path on every scenario
   // before deriving test IDs. Regressions of this contract silently corrupt test IDs
-  // in the hierarchical strategy — see addFeatureFileToTestController.
+  // in the hierarchical strategy; see addFeatureFileToTestController.
   it("leaves scenario.filePath as the empty string for the caller to populate", () => {
     const parser = FeatureParser.create();
     const content = lines(

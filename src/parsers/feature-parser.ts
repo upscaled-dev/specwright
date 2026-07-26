@@ -93,8 +93,8 @@ export class FeatureParser {
 
   /**
    * Extract scenarios from content. Supports:
-   * - Background (feature-level and rule-level — steps attached to each child scenario)
-   * - Rule (Gherkin 6+ — scenarios inside a Rule carry its name)
+   * - Background (feature-level and rule-level; steps attached to each child scenario)
+   * - Rule (Gherkin 6+; scenarios inside a Rule carry its name)
    * - Scenario Outline with one or more (named, tagged) Examples blocks
    * @param lines - Feature file lines
    * @returns Array of scenarios with expanded examples
@@ -220,7 +220,7 @@ export class FeatureParser {
         backgroundTarget = null;
         if (pendingTags.length > 0) {
           this.logger.warn(
-            `Tags ${pendingTags.join(" ")} above 'Rule:' on line ${lineNumber} were dropped — rule-level tags don't auto-propagate to child scenarios. Apply them on the scenario or examples block where you want them to take effect.`
+            `Tags ${pendingTags.join(" ")} above 'Rule:' on line ${lineNumber} were dropped; rule-level tags don't auto-propagate to child scenarios. Apply them on the scenario or examples block where you want them to take effect.`
           );
         }
         pendingTags = [];

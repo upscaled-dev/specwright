@@ -19,7 +19,7 @@ type CredentialField = "clientId" | "clientSecret" | "jiraEmail" | "jiraToken";
 
 // Plan §6: `specwright.xray:{siteUrl}:{field}`, site normalized so a pasted scheme/trailing slash
 // resolves to the same entry as the bare host. An empty normalized host would produce a degenerate
-// shared key (`specwright.xray::…`) that no command could ever address again — refuse it.
+// shared key (`specwright.xray::…`) that no command could ever address again; refuse it.
 function credentialKey(siteUrl: string, field: CredentialField): string {
   const normalized = normalizeSiteUrl(siteUrl);
   if (normalized === "") {

@@ -1,12 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, it, expect } from "vitest";
-import {
-  describeJwt,
-  describeShape,
-  graphqlErrorSummaries,
-  scrubJwtLike,
-} from "../../xray/xray-diagnostics";
+import { describeJwt, describeShape, graphqlErrorSummaries } from "../../xray/xray-diagnostics";
 
 describe("xray diagnostics module graph", () => {
   const srcDir = path.resolve(__dirname, "../../xray");
@@ -14,8 +9,8 @@ describe("xray diagnostics module graph", () => {
 
   it("breaks the connection-test <-> jira-project-search import cycle", () => {
     const jira = read("jira-project-search.ts");
-    // jira-project-search sourced describeShape/scrubJwtLike from connection-test before; now it (and
-    // connection-test and the client) all source them here, leaving only one-way edges.
+    // jira-project-search sourced describeShape from connection-test before; now it (and
+    // connection-test and the client) all source it here, leaving only one-way edges.
     expect(jira).toContain('from "./xray-diagnostics"');
     expect(jira).not.toContain("xray-connection-test");
 
@@ -58,23 +53,6 @@ describe("describeShape", () => {
     const out = JSON.stringify(describeShape({ request: { client_secret: secret } }));
     expect(out).not.toContain(secret);
     expect(out).toContain(`string(${secret.length})`);
-  });
-});
-
-describe("scrubJwtLike", () => {
-  const jwt = `${"a".repeat(40)}.${"b".repeat(40)}.${"c".repeat(40)}`;
-
-  it("masks a three-segment token embedded in a sentence", () => {
-    const scrubbed = scrubJwtLike(`denied for token ${jwt} on resource`);
-    expect(scrubbed).not.toContain(jwt);
-    expect(scrubbed).toContain("[jwt-like-token]");
-    expect(scrubbed).toContain("denied for token");
-  });
-
-  it("keeps hostnames and short dotted values intact", () => {
-    expect(scrubJwtLike("see acme.atlassian.net and v1.2.3")).toBe(
-      "see acme.atlassian.net and v1.2.3"
-    );
   });
 });
 

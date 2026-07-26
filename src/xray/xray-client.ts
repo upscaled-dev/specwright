@@ -1,8 +1,9 @@
 import { Logger } from "../utils/logger";
+import { errMsg, scrubJwtLike } from "../utils/text";
 import { NormalizedStatus } from "../traceability/contracts";
 import { XrayCredentials } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
-import { describeJwt, describeShape, graphqlErrorSummaries, scrubJwtLike } from "./xray-diagnostics";
+import { describeJwt, describeShape, graphqlErrorSummaries } from "./xray-diagnostics";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 // Proactively reuse the JWT well inside its ~24h life so an in-flight batch never trips the true
@@ -39,7 +40,7 @@ export interface XrayCachePage {
 
 export interface XrayTestRecord {
   readonly key: string;
-  // The remote issue id — Xray addresses mutations by `issueId`, not the Jira key. Already requested
+  // The remote issue id: Xray addresses mutations by `issueId`, not the Jira key. Already requested
   // in the getTests selection; retained for the authoring/push paths.
   readonly issueId?: string | undefined;
   readonly summary?: string | undefined;
@@ -52,7 +53,7 @@ export interface XrayTestRecord {
 }
 
 // The result of fetching one or more scopes. `complete` is false when any page failed or pagination
-// was cut short — the capability demotes completeness so orphans are never derived from it.
+// was cut short; the capability demotes completeness so orphans are never derived from it.
 export interface XrayFetchOutcome {
   readonly tests: XrayTestRecord[];
   readonly pages: XrayCachePage[];
@@ -108,10 +109,6 @@ interface TimedResponse {
   status: number;
   ok: boolean;
   bodyText: string;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function parseBody(bodyText: string): unknown {
@@ -265,11 +262,11 @@ function pageTermination(jql: string, start: number, page: TestPage): PageTermin
     return { done: true };
   }
   if (page.results.length === 0) {
-    return { done: true, error: `${jql}: empty page at start ${start} with total ${page.total} — pagination incomplete` };
+    return { done: true, error: `${jql}: empty page at start ${start} with total ${page.total}; pagination incomplete` };
   }
   const nextStart = start + PAGE_LIMIT;
   if (nextStart >= MAX_SCOPE_ITEMS) {
-    return { done: true, error: `${jql}: reached the ${MAX_SCOPE_ITEMS}-item pagination cap — scope truncated, marked incomplete` };
+    return { done: true, error: `${jql}: reached the ${MAX_SCOPE_ITEMS}-item pagination cap; scope truncated, marked incomplete` };
   }
   return { done: false, nextStart };
 }
@@ -286,7 +283,7 @@ export interface XrayCreateTestSpec {
 
 // The created issue read back from the SAME mutation response (§ mutation extract): `CreateTestResult
 // { test { issueId jira(fields:["key"]) } warnings }`, and the identical pair under `testSet`/`testPlan`
-// for the container creates. `key` is absent when the response carried no readable one — the create
+// for the container creates. `key` is absent when the response carried no readable one; the create
 // still happened remotely, so the caller must not silently drop it.
 export interface XrayCreatedTest {
   readonly key?: string | undefined;
@@ -365,10 +362,10 @@ function parseUpdatedGherkin(body: unknown): string | undefined {
 }
 
 /**
- * Region-aware Xray Cloud transport. Owns the in-memory JWT (never persisted, never logged — only
+ * Region-aware Xray Cloud transport. Owns the in-memory JWT (never persisted, never logged; only
  * `describeJwt` facts), batched/paginated `getTests`, flat `coverableIssues`, generic exponential
  * backoff with jitter, a 30s per-request timeout, and abort propagation on every call. All
- * diagnostics go through the allowlist helpers — no response value ever reaches the logger.
+ * diagnostics go through the allowlist helpers; no response value ever reaches the logger.
  */
 export class XrayClient {
   private readonly base: string;
@@ -389,7 +386,7 @@ export class XrayClient {
     this.random = deps.random ?? Math.random;
   }
 
-  // Drop the cached JWT so the next request re-authenticates. Called on any credential change —
+  // Drop the cached JWT so the next request re-authenticates. Called on any credential change,
   // cheap, and it covers both an account switch and a same-account secret rotation. Dropping the
   // in-flight authenticate too closes the cross-account window: a probe already fetching the prior
   // account's token is disowned (identity-guarded below) so it can neither install nor clear state.
@@ -420,7 +417,7 @@ export class XrayClient {
 
   // Forward a caller-built JQL through the shared scope engine (pagination/auth/backoff/normalization
   // for free). The neutral search/plan layer owns the JQL; the client only transports it. §5: a bad
-  // clause still returns 200 with 0 rows — never an error — so an empty `tests` means "no matches",
+  // clause still returns 200 with 0 rows, never an error, so an empty `tests` means "no matches",
   // which the caller must word honestly, never as an invalid query.
   public searchTests(jql: string, signal?: AbortSignal): Promise<XrayFetchOutcome> {
     return this.fetchScope(jql, signal);
@@ -471,7 +468,7 @@ export class XrayClient {
       if (error instanceof XrayAbortError) {
         throw error;
       }
-      return { errors: [`${jql}: ${scrubJwtLike(errorMessage(error))}`] };
+      return { errors: [`${jql}: ${scrubJwtLike(errMsg(error))}`] };
     }
     const errorSummaries = graphqlErrorSummaries(body);
     if (errorSummaries.length > 0) {
@@ -485,7 +482,7 @@ export class XrayClient {
 
   // A Bearer-authorized POST with a single refresh-on-401 retry, shared by graphql/postJson/postMultipart.
   // The init is rebuilt per attempt so the fresh JWT rides the retry. A 401 that survives a fresh token
-  // is a real auth failure, not an empty page — surface it so the scope is recorded incomplete.
+  // is a real auth failure, not an empty page; surface it so the scope is recorded incomplete.
   private async sendAuthorized(
     url: string,
     buildInit: (jwt: string) => RequestInit,
@@ -501,14 +498,14 @@ export class XrayClient {
           refreshed = true;
           continue;
         }
-        throw new XrayAuthError("Authentication failed — check your client ID and secret.");
+        throw new XrayAuthError("Authentication failed: check your client ID and secret.");
       }
       return response;
     }
   }
 
   // Author a new Cucumber test and read its key/issueId back in the same response (no follow-up
-  // fetch). A 200 with no readable key is NOT an error here — the create succeeded — so it returns a
+  // fetch). A 200 with no readable key is NOT an error here (the create succeeded), so it returns a
   // keyless record the caller surfaces (never a silent orphan).
   public async createTest(spec: XrayCreateTestSpec, signal?: AbortSignal): Promise<XrayCreatedTest> {
     return parseCreated(await this.mutate("createTest", createTestMutation(spec), signal), "createTest", "test");
@@ -595,7 +592,7 @@ export class XrayClient {
   // Import execution results as Xray JSON (append via top-level `testExecutionKey`, or create via `info`).
   // A thin sibling of graphql: same bearer + refresh-once-on-401, riding the shared backoff/timeout/abort
   // layers. Returns `{status, ok, body}` so a non-2xx (e.g. 400 "No execution results…") reaches the
-  // importer intact — the server message is never stripped here.
+  // importer intact; the server message is never stripped here.
   public async postJson(path: string, body: unknown, signal?: AbortSignal): Promise<{ status: number; ok: boolean; body: unknown }> {
     const response = await this.sendAuthorized(
       `${this.base}${path}`,
@@ -630,7 +627,7 @@ export class XrayClient {
   // Concurrent callers that all miss the cached JWT (or all force-refresh after a shared 401) ride
   // one /authenticate round-trip instead of each firing their own; the entry clears when it settles,
   // so the sequential reuse path above still owns the common case. The identity guards make a probe
-  // that invalidateAuth disowned mid-flight inert — it neither installs its (now stale) JWT nor
+  // that invalidateAuth disowned mid-flight inert; it neither installs its (now stale) JWT nor
   // clobbers a newer in-flight entry.
   private getJwt(signal: AbortSignal | undefined, force: boolean): Promise<string> {
     if (!force && this.jwt !== undefined && this.now() - this.jwtObtainedAt < JWT_REUSE_MS) {
@@ -671,13 +668,13 @@ export class XrayClient {
       signal
     );
     if (!response.ok) {
-      // The bad-credential body may echo the request, so only its shape is logged — never values.
+      // The bad-credential body may echo the request, so only its shape is logged, never values.
       this.deps.logger.error(
         `Authentication failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
       );
       throw new XrayAuthError(
         response.status === 401
-          ? "Authentication failed — check your client ID and secret."
+          ? "Authentication failed: check your client ID and secret."
           : `Authentication failed (HTTP ${response.status}).`
       );
     }
@@ -697,7 +694,7 @@ export class XrayClient {
     return this.withBackoff(async () => {
       const response = await this.timedFetch(url, init, signal);
       // A rate-limit or server fault is retryable; every other status (incl. 401/400) is handled by
-      // the caller. Backoff never depends on rate-limit headers — none appear on the wire (§5).
+      // the caller. Backoff never depends on rate-limit headers; none appear on the wire (§5).
       if (response.status === 429 || response.status >= 500) {
         throw new RetryableError(`HTTP ${response.status}`);
       }
@@ -750,7 +747,7 @@ export class XrayClient {
       if (signal?.aborted) {
         throw new XrayAbortError();
       }
-      throw new RetryableError(scrubJwtLike(errorMessage(error)));
+      throw new RetryableError(scrubJwtLike(errMsg(error)));
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);

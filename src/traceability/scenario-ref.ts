@@ -1,7 +1,7 @@
 import type { Scenario } from "../types";
 
 // A location-and-identity handle for a scenario/outline, independent of any remote metadata. Kept in
-// its own vscode-free module so the preflight classifier and scope resolution stay pure — importing
+// its own vscode-free module so the preflight classifier and scope resolution stay pure; importing
 // them must never transitively load the `vscode` runtime (the model does, for its tree/event plumbing).
 export interface ScenarioRef {
   filePath: string;
@@ -21,7 +21,7 @@ export function normalizePath(p: string): string {
 }
 
 // A strict, order-stable identity string for a ref (path + line + title + kind). Used wherever refs
-// must be grouped/compared by exact identity — duplicate-mapping detection and scope enumeration —
+// must be grouped/compared by exact identity (duplicate-mapping detection and scope enumeration),
 // as opposed to the fuzzy `sameScenario` used to reconcile an input ref against the snapshot.
 export function refIdentity(ref: ScenarioRef): string {
   return `${normalizePath(ref.filePath)}|${ref.line}|${ref.name}|${ref.kind}`;
@@ -36,7 +36,7 @@ export function sameScenario(a: ScenarioRef, b: ScenarioRef): boolean {
   return a.name === b.name;
 }
 
-// The ScenarioRef the model would derive for a parsed scenario — outlines collapse to one ref keyed
+// The ScenarioRef the model would derive for a parsed scenario; outlines collapse to one ref keyed
 // on the outline declaration line/title, matching `buildTraceabilitySnapshot`.
 export function scenarioRefFromScenario(scenario: Scenario): ScenarioRef {
   if (scenario.isScenarioOutline) {

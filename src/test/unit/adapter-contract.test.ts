@@ -267,7 +267,7 @@ interface Controllable {
 }
 
 // An adapter whose `dispose` deliberately leaves its emitters alive, so firing them after teardown
-// proves the *subsystem* dropped the subscription — not that the emitter merely died.
+// proves the *subsystem* dropped the subscription, not that the emitter merely died.
 function controllableAdapter(id: string): Controllable {
   const connEmitter = new vscode.EventEmitter<void>();
   const metaEmitter = new vscode.EventEmitter<void>();

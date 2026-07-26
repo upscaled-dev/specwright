@@ -16,7 +16,7 @@ import {
 
 // The control surface a provider binds to run the shared contract suite. The in-memory adapter
 // implements it directly; a future Xray binding implements it over a mocked transport + credential
-// store — the suite itself stays provider-agnostic (drives connect/sync only through this harness
+// store; the suite itself stays provider-agnostic (drives connect/sync only through this harness
 // and the neutral capabilities).
 export interface AdapterContractHarness {
   readonly adapter: TraceabilityAdapter;

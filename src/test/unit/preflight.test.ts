@@ -83,7 +83,7 @@ describe("classifyPreflight", () => {
     );
   });
 
-  it("never blocks on `unknown` — a metadata-less target maps to `ready` with an honest note", () => {
+  it("never blocks on `unknown`: a metadata-less target maps to `ready` with an honest note", () => {
     const scenario = ref();
     // Partial snapshot: the link exists but no metadata was fetched, so the Xray hook returns unknown.
     const snap = snapshot({ completeness: "partial", links: [link({ meta: undefined })] });
@@ -137,7 +137,7 @@ describe("classifyPreflight", () => {
   });
 
   it("does not false-flag two same-titled scenarios at different lines as duplicates (strict identity)", () => {
-    // Both named "S" but on different lines, mapped to DIFFERENT keys — not a duplicate mapping.
+    // Both named "S" but on different lines, mapped to DIFFERENT keys, not a duplicate mapping.
     const a = ref({ name: "S", line: 3 });
     const b = ref({ name: "S", line: 8 });
     const snap = snapshot({

@@ -32,7 +32,7 @@ interface ExecutableUnit {
 
 const SCENARIO_KEYWORDS = ["Scenario Outline:", "Scenario Template:", "Scenario:", "Example:"] as const;
 
-/** Equal or prefix-overlapping test/req prefixes make tag classification ambiguous — a config error. */
+/** Equal or prefix-overlapping test/req prefixes make tag classification ambiguous, a config error. */
 export function prefixesOverlap(grammar: KeyGrammar): boolean {
   const test = grammar.testPrefix.toLowerCase();
   const req = grammar.reqPrefix.toLowerCase();
@@ -52,7 +52,7 @@ function collectTestTags(lineText: string, lineIdx: number, grammar: KeyGrammar)
   return tags;
 }
 
-// Key-shaped tags carrying neither the test nor the req prefix — a likely dropped prefix. Only
+// Key-shaped tags carrying neither the test nor the req prefix, a likely dropped prefix. Only
 // uppercase bodies qualify: Jira project keys are uppercase by definition, so a lowercase or
 // mixed-case key-shaped tag (`@v2-1`, `@sprint-42`, `@Apex-5`) is a team convention we must never
 // nag. This deliberately trades away the lowercase-typo hint.
@@ -81,7 +81,7 @@ function collectSuggestionTags(lineText: string, lineIdx: number, grammar: KeyGr
 // doubled `@TEST_TEST-APEX-5`. Derive each prefix's word by stripping trailing `-`/`_` ("TEST_" →
 // "TEST", "xt-" → "xt"); when the body is that word plus a single separator plus a key-shaped
 // remainder, suggest the properly-joined form. Test wins over req. (The correctly-joined form never
-// reaches here — it extracts as a real key upstream — so only wrong-separator variants arrive.)
+// reaches here (it extracts as a real key upstream), so only wrong-separator variants arrive.)
 function separatorTypoSuggestion(
   body: string,
   grammar: KeyGrammar,
@@ -118,7 +118,7 @@ function scanUnits(
   let featureTestTags: TagRef[] = [];
   const units: ExecutableUnit[] = [];
   // Bare key-shaped tags that attached to a Feature/Scenario/Outline/Examples block (same scope the
-  // test tags inherit through — Rule-/Background-level tags are dropped by the parser and here too).
+  // test tags inherit through; Rule-/Background-level tags are dropped by the parser and here too).
   const suggestions: SuggestionRef[] = [];
   let nextId = 0;
   let inOutline = false;
@@ -189,7 +189,7 @@ function tooManyTagsMessage(kind: ExecutableUnit["kind"]): string {
 }
 
 /**
- * Grammar-driven tag-linting for a single `.feature` document (§3.4). Nothing Xray-specific — the
+ * Grammar-driven tag-linting for a single `.feature` document (§3.4). Nothing Xray-specific; the
  * active adapter's `keyGrammar` supplies prefixes and key shape. Prefix-overlap is a config-level
  * problem surfaced elsewhere, so this returns nothing when the prefixes overlap.
  */
@@ -208,8 +208,8 @@ export function computeTagDiagnostics(text: string, grammar: KeyGrammar): TagDia
     }
   }
 
-  // Rule 2 + Rule 5: the same test key reaching two or more independent units — whether by an own
-  // tag on each or by a feature-level tag inherited across scenarios — is unsupported.
+  // Rule 2 + Rule 5: the same test key reaching two or more independent units (whether by an own
+  // tag on each or by a feature-level tag inherited across scenarios) is unsupported.
   const unitsForKey = new Map<string, Set<number>>();
   const addUnit = (key: string, unitId: number): void => {
     const set = unitsForKey.get(key) ?? new Set<number>();

@@ -31,7 +31,7 @@ const STATUS_ICON: Record<ScenarioStatus, string> = {
   skipped: "○",
 };
 
-// SGR escape codes — the VS Code "Test Results" panel renders these as colors.
+// SGR escape codes; the VS Code "Test Results" panel renders these as colors.
 // Written as backslash-u escapes (not raw ESC bytes) so editors/formatters can't destroy them.
 const ANSI = {
   reset: "\u001b[0m",
@@ -179,7 +179,7 @@ export function normalizePathKey(p: string): string {
   const slashed = p.replaceAll("\\", "/");
   // VS Code's uri.fsPath lowercases the Windows drive letter (`c:/repo`) while Playwright's
   // JSON report keeps it uppercase (`C:/repo`). Canonicalize the drive so keys/comparisons
-  // built from either source agree — otherwise every Windows lookup misses and scenarios
+  // built from either source agree; otherwise every Windows lookup misses and scenarios
   // show as skipped (and the "outside features scope" warning fires falsely).
   return /^[a-z]:\//.test(slashed)
     ? slashed.charAt(0).toUpperCase() + slashed.slice(1)
@@ -253,7 +253,7 @@ export class PlaywrightJsonParser {
    * `featurePath::scenarioName`, so callers can resolve either way. Each shape is emitted
    * with both the absolute path (relative report paths are resolved against `cwd`) and the
    * cwd-relative path. All paths in keys are normalized to forward slashes (see
-   * {@link normalizePathKey}) — lookups must be normalized the same way. When the same
+   * {@link normalizePathKey}); lookups must be normalized the same way. When the same
    * scenario ran more than once (e.g. multi-project chromium+firefox), the worst status
    * wins: failed > skipped > passed.
    */
@@ -311,9 +311,9 @@ export class PlaywrightJsonParser {
     // fallback for older playwright-bdd versions that still emit it.
     const resolved = this.resolveSourceLocation(ctx, spec.file, spec.line);
     // Outline examples are titled "Example #N" and nested under a describe named after the
-    // outline; capture that so the summary can show "Scenario Outline: <name> — Example #N".
+    // outline; capture that so the summary can show "Scenario Outline: <name> (Example #N)".
     // When the outline TITLE itself carries `<placeholders>`, playwright-bdd substitutes the row
-    // values into each test title instead — the raw placeholders then only survive on the
+    // values into each test title instead; the raw placeholders then only survive on the
     // enclosing describe, so recognize that shape too (feature titles virtually never have `<...>`).
     const outlineName =
       enclosingSuiteTitle &&
@@ -378,7 +378,7 @@ export class PlaywrightJsonParser {
             ...(typeof step.duration === "number" ? { durationMs: step.duration } : {}),
           });
         } else {
-          // Hook/fixture/wrapper step — descend to find the BDD steps nested inside.
+          // Hook/fixture/wrapper step; descend to find the BDD steps nested inside.
           walk(step.steps);
         }
       }
@@ -391,7 +391,7 @@ export class PlaywrightJsonParser {
    * Map a generated-spec line (`spec.line`, i.e. playwright-bdd's `pwTestLine`) back to the
    * source .feature path + line using the `bddFileData` block embedded in the generated spec.
    * Returns undefined when the report lacks `config.rootDir`, the spec can't be read, or the
-   * line isn't in the map — callers then fall back to the spec path / annotation.
+   * line isn't in the map; callers then fall back to the spec path / annotation.
    */
   private resolveSourceLocation(
     ctx: ReportContext,
@@ -500,7 +500,7 @@ export class PlaywrightJsonParser {
 
   private formatScenario(r: ScenarioResult, workspaceRoot?: string): string[] {
     const heading = r.outlineName
-      ? `Scenario Outline: ${r.outlineName} — ${r.scenarioName}`
+      ? `Scenario Outline: ${r.outlineName} (${r.scenarioName})`
       : `Scenario: ${r.scenarioName}`;
     const out = [`${STATUS_ICON[r.status]} ${paint(heading, ANSI.bold)}${this.dimDuration(r.durationMs)}`];
 

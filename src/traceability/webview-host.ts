@@ -5,7 +5,7 @@ export type SurfaceName = "board" | "publish" | "link";
 
 // The reserved untagged shell messages that ride the same channel as the surface-tagged ones. `ready`
 // and `tab` flow webview → host; `activate` and `linkTab` flow host → webview. A surface must never
-// tag one of its own messages with these types — the router only dispatches by `surface`, so they stay
+// tag one of its own messages with these types; the router only dispatches by `surface`, so they stay
 // distinguishable only while they carry no `surface`.
 export type ShellMessageType = "ready" | "tab" | "activate" | "linkTab";
 

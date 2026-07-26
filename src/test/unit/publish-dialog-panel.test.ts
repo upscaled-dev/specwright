@@ -62,7 +62,7 @@ function runOption(over: Partial<PublishRunOption> = {}): PublishRunOption {
     label: "2026-07-22 3:00 PM · all-mapped",
     subtitle: "3 mapped results",
     project: { value: "CALC", fromDerivation: true },
-    defaultSummary: "Specwright run 2026-07-22 — 3 scenarios",
+    defaultSummary: "Specwright run 2026-07-22 (3 scenarios)",
     ...over,
   };
 }
@@ -87,7 +87,7 @@ interface DeferredCall {
   reject: (error: unknown) => void;
 }
 
-// A delegate whose searchTargets never settles on its own — the test drives each call's resolution,
+// A delegate whose searchTargets never settles on its own; the test drives each call's resolution,
 // letting it exercise superseded/aborted responses. `calls` is also the transport-call ledger.
 function deferredDelegate(): {
   delegate: PublishDialogDelegate;
@@ -136,7 +136,7 @@ function surface(delegate: PublishDialogDelegate, startPublish: () => void = () 
   return { rig, publish };
 }
 
-describe("PublishSurface — lifecycle", () => {
+describe("PublishSurface: lifecycle", () => {
   it("resolves undefined when the panel is disposed without confirming (the flow's zero-transport signal)", async () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
@@ -203,7 +203,7 @@ describe("PublishSurface — lifecycle", () => {
   });
 });
 
-describe("PublishSurface — hydrate on present", () => {
+describe("PublishSurface: hydrate on present", () => {
   it("paints the run model onto the tab and activates the Publish tab", () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
@@ -253,7 +253,7 @@ describe("PublishSurface — hydrate on present", () => {
   });
 });
 
-describe("PublishSurface — manual activation", () => {
+describe("PublishSurface: manual activation", () => {
   it("starts a fresh publish when the tab is activated with none underway", () => {
     const { delegate } = deferredDelegate();
     const startPublish = vi.fn();
@@ -276,7 +276,7 @@ describe("PublishSurface — manual activation", () => {
   });
 });
 
-describe("PublishSurface — search", () => {
+describe("PublishSurface: search", () => {
   it("does not call the search delegate until the webview asks for a search", () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
@@ -328,6 +328,20 @@ describe("PublishSurface — search", () => {
     expect(rig.posted.filter((m) => m.type === "search-result")).toHaveLength(0);
   });
 
+  it("scrubs a JWT-shaped thrown value out of the search-result error", async () => {
+    const { delegate, calls } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    void publish.present(makeModel());
+
+    rig.receive({ type: "search", token: 3, kind: "execution", query: "CALC" });
+    // A non-Error throw reaches the sink verbatim through errMsg's String() fallback.
+    calls[0]!.reject("search failed for eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzcGVjd3JpZ2h0In0.c2lnbmF0dXJlLWJ5dGVz");
+    await flush();
+
+    const result = rig.posted.filter((m) => m.type === "search-result")[0];
+    expect(result).toMatchObject({ token: 3, error: "search failed for [jwt-like-token]" });
+  });
+
   it("carries the project kind through to the delegate and back on the response", async () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
@@ -347,7 +361,7 @@ describe("PublishSurface — search", () => {
   });
 });
 
-describe("PublishSurface — attachments", () => {
+describe("PublishSurface: attachments", () => {
   it("calls the browse seam on a browse message and posts the picked files back", async () => {
     const rig = deferredDelegate();
     rig.browseResult = [{ path: "/ws/trace.zip", name: "trace.zip", size: 2048 }];

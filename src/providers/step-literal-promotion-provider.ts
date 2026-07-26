@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import { StepResolver, ParsedStepDefWithFile, ParsedFeatureStep } from "./step-resolver";
 import { extractFirstString } from "./step-definition-provider";
 import { STEP_KEYWORDS } from "./step-keywords";
@@ -93,7 +94,7 @@ export class StepLiteralPromotionProvider implements vscode.CodeActionProvider {
       return await this.resolver.loadAllStepDefs(this.stepGlobs);
     } catch (error) {
       this.logger.warn("StepLiteralPromotionProvider: failed to load step defs", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       return undefined;
     }
@@ -105,7 +106,7 @@ export class StepLiteralPromotionProvider implements vscode.CodeActionProvider {
     } catch (error) {
       this.logger.warn("StepLiteralPromotionProvider: failed to open def file", {
         filePath,
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       return undefined;
     }

@@ -92,14 +92,14 @@ describe("StatusBar", () => {
     executor.fire({ kind: "success", passed: 7, failed: 0 });
     const item = captured[0]!;
     expect(item.text).toBe("$(check) Specwright: passed 7");
-    expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2} — click to show test output$/);
+    expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2}, click to show test output$/);
   });
 
   it("updates to failure state with passed/failed counts", () => {
     executor.fire({ kind: "failure", passed: 3, failed: 2 });
     const item = captured[0]!;
     expect(item.text).toBe("$(error) Specwright: 3 passed, 2 failed");
-    expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2} — click to show test output$/);
+    expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2}, click to show test output$/);
   });
 
   it("settles to a cancelled state instead of staying on the spinner", () => {
@@ -107,7 +107,7 @@ describe("StatusBar", () => {
     executor.fire({ kind: "cancelled", passed: 0, failed: 0 });
     const item = captured[0]!;
     expect(item.text).toBe("$(circle-slash) Specwright: cancelled");
-    expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2} — click to show test output$/);
+    expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2}, click to show test output$/);
   });
 
   it("preserves the last-run tooltip when transitioning back to running", () => {

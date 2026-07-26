@@ -96,7 +96,7 @@ export class TestDiscoveryManager {
         const foundFiles = await vscode.workspace.findFiles(
           relativePattern,
           // Generated specs and report/results dirs can contain copies of executed
-          // feature content — those must never surface as tests in the Explorer.
+          // feature content; those must never surface as tests in the Explorer.
           buildExcludeGlob(excludedDirFragments(folder.uri))
         );
 

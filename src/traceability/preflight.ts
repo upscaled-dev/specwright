@@ -72,7 +72,7 @@ function bindingState(
   }
 }
 
-// A non-blocking warning for a broken `@TEST_` tag sitting alongside a working mapping — surfaced,
+// A non-blocking warning for a broken `@TEST_` tag sitting alongside a working mapping, surfaced,
 // never used to override the sound state (item 7: the mapping stands, the extra tag isn't hidden).
 function malformedNote(links: readonly TraceLink[]): string | undefined {
   const tags = new Set<string>();
@@ -95,11 +95,11 @@ function withDetail(
  * Pure and vscode-free (imports only the neutral scenario-ref helpers; the model types are erased).
  *
  * Precedence on a mapped scenario: `invalid-key` (a verified-absent remote key) outranks
- * `duplicate-mapping`, which outranks the binding-derived states — an unsound key makes the mapping
+ * `duplicate-mapping`, which outranks the binding-derived states; an unsound key makes the mapping
  * moot before ambiguity matters. `unknown` from the hook never blocks (maps to `ready`), and a broken
  * `@TEST_` tag sitting beside a working key is surfaced as a note without overriding the sound state.
  * `not-in-target-plan` (a mapped key absent from `targetPlanKeys` when the run carries a plan) ranks
- * below duplicate but above the binding states — it can't publish there regardless of compatibility.
+ * below duplicate but above the binding states; it can't publish there regardless of compatibility.
  */
 export function classifyPreflight(
   scenarios: readonly ScenarioRef[],

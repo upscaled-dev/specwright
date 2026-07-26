@@ -386,7 +386,7 @@ describe("TestExecutor run events", () => {
 
   it("counts a scenario as failed under any project even when its passing project is reported first", async () => {
     // Multi-project run: chromium passed (listed first), firefox failed. Worst status must win, so
-    // the one scenario is counted failed regardless of report order — not passed (first-wins bug).
+    // the one scenario is counted failed regardless of report order, not passed (first-wins bug).
     const config = makeConfig({ bddgenCommand: "" });
     const shell: ShellRunner = async () => ({
       success: false,
@@ -423,7 +423,7 @@ describe("TestExecutor bddgen diagnostics from the playwright result", () => {
 
   it("publishes bddgen diagnostics when the playwright run fails with bddgen-style errors", async () => {
     // With bddgenCommand empty, bddgen runs inside `playwright test` (defineBddProject auto-gen), so
-    // its errors surface on the playwright result — which must reach the Problems panel via publish.
+    // its errors surface on the playwright result, which must reach the Problems panel via publish.
     const spy = makeSpy();
     const shell: ShellRunner = async () => ({
       success: false,
@@ -759,7 +759,7 @@ describe("TestExecutor terminal lifecycle", () => {
 describe("TestExecutor spawn settles when a grandchild holds the stdio pipes", () => {
   it("resolves shortly after the command exits even if an inherited-stdio child lives on", async () => {
     // The pre-run command exits (code 1) after 200ms but first spawns a child that
-    // inherits stdout/stderr and sleeps 5s — the shape of a web server or browser
+    // inherits stdout/stderr and sleeps 5s, the shape of a web server or browser
     // process outliving `playwright test`. Waiting on `close` would hang ~5s; the
     // exit+grace path must settle in ~2s.
     const orphanCommand =
@@ -821,7 +821,7 @@ describe("TestExecutor debug watchdog (pnpm session teardown wedge)", () => {
 });
 
 describe("TestExecutor cancellation", () => {
-  // A node process that keeps its event loop alive for 10s — the shape of a `playwright test` run
+  // A node process that keeps its event loop alive for 10s, the shape of a `playwright test` run
   // that must be killed when the user hits Stop. Exercised through the REAL spawn runner (no
   // injected shell) via the pre-run hook, so spawnCommand's abort/kill path is what's under test.
   const longLived = 'node -e "setTimeout(()=>{},10000)"';
@@ -1066,7 +1066,7 @@ describe("TestExecutor spec-line target no-tests retry", () => {
     });
 
     expect(calls).toHaveLength(2);
-    // The target must use forward slashes — Playwright treats CLI file filters as regexes, so
+    // The target must use forward slashes; Playwright treats CLI file filters as regexes, so
     // Windows separators (`\b`, `\f`, ...) silently match nothing. Meaningful on win32 CI, where
     // path.relative would otherwise produce backslashes.
     expect(calls[0]).toContain(".features-gen/features/a.feature.spec.js:7");

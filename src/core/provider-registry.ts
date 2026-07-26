@@ -101,7 +101,7 @@ export class ProviderRegistry implements vscode.Disposable {
   /**
    * Idempotent reconciliation between current config and active registrations.
    * Relies on ExtensionConfig refreshing its cached WorkspaceConfiguration BEFORE
-   * notifying listeners (see ExtensionConfig#setupConfigurationChangeListener) —
+   * notifying listeners (see ExtensionConfig#setupConfigurationChangeListener);
    * otherwise this would read stale values during a change event.
    */
   public applyCurrent(): void {
@@ -262,7 +262,7 @@ export class ProviderRegistry implements vscode.Disposable {
         this.tagCompletionDisposable.dispose();
         this.tagCompletionDisposable = undefined;
       }
-      // Dispose the index too — otherwise its FileSystemWatcher keeps consuming events
+      // Dispose the index too; otherwise its FileSystemWatcher keeps consuming events
       // for the whole session even when the feature is off.
       if (this.tagIndex) {
         this.tagIndex.dispose();

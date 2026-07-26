@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import { ParsedStepDefWithFile, StepResolver, UnmatchedStep } from "./step-resolver";
 import { computeSkipRanges } from "./feature-skip-ranges";
 import {
@@ -150,7 +151,7 @@ export class StepUsageIndex implements vscode.Disposable {
       uris = await vscode.workspace.findFiles(featurePattern, workspaceExcludeGlob());
     } catch (error) {
       this.logger.warn("StepUsageIndex: findFiles failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       uris = [];
     }
@@ -164,7 +165,7 @@ export class StepUsageIndex implements vscode.Disposable {
       defs = await this.stepResolver.loadAllStepDefs(this.config.stepDefinitionPaths);
     } catch (error) {
       this.logger.warn("StepUsageIndex: failed to load step defs", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       defs = [];
     }
@@ -182,7 +183,7 @@ export class StepUsageIndex implements vscode.Disposable {
       bytes = await vscode.workspace.fs.readFile(uri);
     } catch (error) {
       this.logger.warn(`StepUsageIndex: could not read ${uri.fsPath}`, {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       return;
     }

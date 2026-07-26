@@ -171,7 +171,7 @@ describe("switchDefaultProject command handler", () => {
   });
 });
 
-describe("switchDefaultProject — Jira project QuickPick branch", () => {
+describe("switchDefaultProject: Jira project QuickPick branch", () => {
   const CMD = "playwrightBddRunner.traceability.switchDefaultProject";
   const mockSearch = vi.mocked(searchJiraProjects);
 

@@ -143,7 +143,7 @@ async function openReady(over: Partial<BoardPanelDeps> = {}): Promise<{ instance
 }
 
 describe("BoardPanel", () => {
-  it("renders the shell — title, tabs, the drag-to-link gutter, the provider label, the matrix header, and the executions table", () => {
+  it("renders the shell: title, tabs, the drag-to-link gutter, the provider label, the matrix header, and the executions table", () => {
     BoardPanel.open(deps());
     const panel = win.__webviewPanels[0]!;
 
@@ -424,7 +424,7 @@ describe("BoardPanel", () => {
     expect(applyUnlink).toHaveBeenCalledTimes(3);
   });
 
-  it("posts no render on a drop — the snapshot rebuild drives the next render, so a stale drop leaves the board untouched", async () => {
+  it("posts no render on a drop; the snapshot rebuild drives the next render, so a stale drop leaves the board untouched", async () => {
     const applyDrop = vi.fn(() => Promise.resolve());
     const { panel } = await openReady({ applyDrop });
 

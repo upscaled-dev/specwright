@@ -123,13 +123,13 @@ interface RenderMessage {
   executionVerb: CreateVerb;
 }
 
-// The board is a document-like surface, so its data source is the stable subsystem — not a one-shot
-// snapshot — letting it re-render across syncs and provider swaps while the panel stays open.
+// The board is a document-like surface, so its data source is the stable subsystem, not a one-shot
+// snapshot, letting it re-render across syncs and provider swaps while the panel stays open.
 // `applyDrop` is the drag-to-link seam: the webview posts a normalized {scenario, key} and the host
 // validates and writes the tag, then the snapshot rebuild re-renders the board (no hand-patching here).
 export interface BoardSurfaceDeps {
   buildModel(): BoardViewModel;
-  // The Executions tab's rows, read from the publish ledger — what this workspace has published, never
+  // The Executions tab's rows, read from the publish ledger: what this workspace has published, never
   // a live remote query. Rebuilt alongside the model on every refresh.
   buildExecutions(): readonly ExecutionRow[];
   readonly onDidChange: vscode.Event<void>;

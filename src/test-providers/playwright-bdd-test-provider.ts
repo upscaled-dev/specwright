@@ -38,7 +38,7 @@ import {
 /**
  * Pull bddgen's "Missing step definitions" block (count + suggested snippets) out of captured
  * run output. bddgen runs before the Playwright runner, so the block is bounded by its own
- * trailing marker, or — defensively — by the first Playwright reporter line that follows.
+ * trailing marker, or, defensively, by the first Playwright reporter line that follows.
  * Returns "" when the output contains no such block.
  */
 export function extractMissingStepsBlock(combinedOutput: string): string {
@@ -256,7 +256,7 @@ export class PlaywrightBddTestProvider {
     this.pruneFileState(uri.fsPath);
     await this.addFeatureFileToTestController(uri);
     // addFeatureFileToTestController only warns and returns on unparsable content, so a file that
-    // stopped parsing leaves no fresh item — delete the stale tree node rather than keep it.
+    // stopped parsing leaves no fresh item; delete the stale tree node rather than keep it.
     if (!this.discoveredTests.has(uri.fsPath)) {
       this.testController.items.delete(uri.fsPath);
     }
@@ -271,7 +271,7 @@ export class PlaywrightBddTestProvider {
   private pruneFileState(fsPath: string): void {
     this.discoveredTests.delete(fsPath);
     this.featureTitleByPath.delete(fsPath);
-    // scenarioByTestId ids for this file all start with `${fsPath}:` — both `${fsPath}:${line}`
+    // scenarioByTestId ids for this file all start with `${fsPath}:`; both `${fsPath}:${line}`
     // and `${fsPath}:outline:...` (OUTLINE_ID_SEPARATOR) shapes.
     const prefix = `${fsPath}:`;
     for (const id of [...this.scenarioByTestId.keys()]) {
@@ -456,7 +456,7 @@ export class PlaywrightBddTestProvider {
   }
 
   // Group ids come prefixed from the organization strategies (`tag:` / `group:`), which is what
-  // runSingleTopLevelItem dispatches on — an unprefixed id would make the node silently unrunnable.
+  // runSingleTopLevelItem dispatches on; an unprefixed id would make the node silently unrunnable.
   private buildGroupItems(groups: TestGroup[]): void {
     for (const group of groups) {
       if (group.scenarios.length === 0) {continue;}
@@ -496,13 +496,13 @@ export class PlaywrightBddTestProvider {
     // finally seals exactly one immutable artifact for the whole Test Explorer run.
     const batch = this.context.runArtifactStore?.beginBatch(this.describeSelection(request));
     // One AbortController per run: cancelling the Test Explorer aborts the spawned Playwright
-    // process (see spawnCommand). runSingleTopLevelItem also reads token to skip — rather than
-    // fail — a subtree whose process was killed mid-run.
+    // process (see spawnCommand). runSingleTopLevelItem also reads token to skip, rather than
+    // fail, a subtree whose process was killed mid-run.
     const abort = new AbortController();
     const cancelSub = token.onCancellationRequested(() => abort.abort());
 
     try {
-      // Once the stop button is hit between items, the rest never run — mark them (and their
+      // Once the stop button is hit between items, the rest never run; mark them (and their
       // descendants) skipped instead of leaving them queued.
       let cancelled = false;
       for (const test of this.requestedItems(request)) {
@@ -529,8 +529,8 @@ export class PlaywrightBddTestProvider {
 
   // The batch-scope descriptor for a Test Explorer run: the deduplicated scenario refs the request
   // expands to (a feature/group node walks down to its scenarios), so the sealed artifact records
-  // what actually ran. testKey threading is independent of this — it resolves from the snapshot at
-  // capture time — so a coarse-but-honest descriptor here is enough.
+  // what actually ran. testKey threading is independent of this; it resolves from the snapshot at
+  // capture time, so a coarse-but-honest descriptor here is enough.
   private describeSelection(request: vscode.TestRunRequest): BatchSelection {
     const refs: ScenarioRef[] = [];
     const seen = new Set<string>();
@@ -611,7 +611,7 @@ export class PlaywrightBddTestProvider {
         const isOutline = test.id.includes(OUTLINE_ID_SEPARATOR);
 
         if (isFeatureFile) {
-          // A feature/outline run executes every descendant with one command — mark them all
+          // A feature/outline run executes every descendant with one command; mark them all
           // started so the Explorer shows what is actually running, not just the clicked parent
           // (which read as "one scenario running" while N results later appeared).
           this.markDescendantsStarted(test, run);
@@ -627,7 +627,7 @@ export class PlaywrightBddTestProvider {
         } else if (isOutline) {
           this.markDescendantsStarted(test, run);
           const scenario = this.scenarioByTestId.get(test.id);
-          // On a lookup miss the name is unknown — omit it rather than pass "", which downstream
+          // On a lookup miss the name is unknown; omit it rather than pass "", which downstream
           // turned into a --grep that matched the entire suite.
           const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
           const options: TestExecutionOptions = {
@@ -749,7 +749,7 @@ export class PlaywrightBddTestProvider {
   /**
    * Re-surface bddgen's "Missing step definitions" block (with the suggested step snippets) from
    * the captured output. With `missingSteps: "skip-scenario"` the run still exits 0, so this
-   * guidance only lives in stdout/stderr — and the formatted summary alone would otherwise drop
+   * guidance only lives in stdout/stderr, and the formatted summary alone would otherwise drop
    * it. Bounded by bddgen's own trailing marker so we don't pull in the Playwright reporter lines
    * that follow.
    */
@@ -764,10 +764,10 @@ export class PlaywrightBddTestProvider {
 
   /**
    * Flag a feature that the run couldn't attribute any results to: either it's outside
-   * playwright-bdd's `features` glob (so bddgen never generates it — Playwright then reports "no
+   * playwright-bdd's `features` glob (so bddgen never generates it; Playwright then reports "no
    * tests found") or the run matched a different feature. We require a positive signal (other
    * features produced results, or Playwright explicitly found no tests) so a genuine build/parse
-   * failure — which leaves no results for a different reason — isn't mislabelled as out-of-scope.
+   * failure, which leaves no results for a different reason, isn't mislabelled as out-of-scope.
    */
   private outOfScopeWarning(
     result: RunOutputResult,
@@ -782,7 +782,7 @@ export class PlaywrightBddTestProvider {
     const target = normalizePathKey(targetFeaturePath);
     if (details.some((d) => normalizePathKey(d.featurePath) === target)) {return "";}
     // When the report's source resolution failed, d.featurePath falls back to the generated spec
-    // path and can never equal the target — yet statuses still attribute by title, the same way
+    // path and can never equal the target, yet statuses still attribute by title, the same way
     // resolveStatusForItem's suffix scan does. Don't warn about results we did attribute.
     const titles = this.subtreeTitles(test);
     if (details.some((d) => titles.has(d.scenarioName))) {return "";}
@@ -827,7 +827,7 @@ export class PlaywrightBddTestProvider {
     // When a single feature/scenario was targeted, scope the summary to that file. A name-based
     // `--grep` can over-match a different feature whose title shares this one's title prefix; the
     // status mapping already ignores those, so narrow the summary too (only when at least one
-    // result belongs to the target — otherwise keep all, which aids diagnosing a mis-targeted run).
+    // result belongs to the target; otherwise keep all, which aids diagnosing a mis-targeted run).
     if (targetFeaturePath && details.length > 0) {
       // Compare through normalizePathKey: targetFeaturePath comes from VS Code (lowercase Windows
       // drive) while d.featurePath is resolved from the report (uppercase drive), so a raw === here
@@ -850,7 +850,7 @@ export class PlaywrightBddTestProvider {
   }
 
   /** Mark every descendant of a parent item as started, so a feature/outline run shows all the
-   *  scenarios it actually executes as running — not just the clicked parent node. */
+   *  scenarios it actually executes as running, not just the clicked parent node. */
   private markDescendantsStarted(parent: vscode.TestItem, run: vscode.TestRun): void {
     parent.children.forEach((child) => {
       run.started(child);
@@ -902,9 +902,9 @@ export class PlaywrightBddTestProvider {
     } else if (result.success === false && !/no tests found/i.test(`${result.output ?? ""}\n${result.error ?? ""}`)) {
       // No child resolved a status yet the run failed: a bddgen/compile error produced no
       // per-scenario results, so blanket-skipping the subtree would hide the failure entirely.
-      // Fail the parent (children stay skipped) — but not for the deliberate "no tests found"
+      // Fail the parent (children stay skipped), but not for the deliberate "no tests found"
       // out-of-scope case, which outOfScopeWarning already explains as skipped.
-      const message = result.error?.trim() ? result.error : "Test failed — see the Test Results output panel.";
+      const message = result.error?.trim() ? result.error : "Test failed: see the Test Results output panel.";
       run.failed(parent, new vscode.TestMessage(message));
       this.testStatusCache.set(parent.id, "failed");
     } else {
@@ -926,7 +926,7 @@ export class PlaywrightBddTestProvider {
       run.passed(item, durationMs);
       this.testStatusCache.set(item.id, "passed");
     } else if (status === "failed" || (!status && !result.success)) {
-      const fallback = result.error?.trim() ? result.error : "Test failed — see the Test Results output panel.";
+      const fallback = result.error?.trim() ? result.error : "Test failed: see the Test Results output panel.";
       run.failed(item, this.failureMessage(item, result.scenarioDetails, fallback), durationMs);
       this.testStatusCache.set(item.id, "failed");
     } else {
@@ -982,7 +982,7 @@ export class PlaywrightBddTestProvider {
    * The parsed JSON report is the source of truth for which scenarios actually ran: every tree
    * item belonging to `filePath` that appears in the result map gets its real pass/fail/skip
    * status, and items absent from the map are left untouched (so running a single scenario never
-   * blanket-marks its siblings). File-owned parents — the feature node and outline nodes — are
+   * blanket-marks its siblings). File-owned parents, the feature node and outline nodes, are
    * rolled up from their children. This replaces the old command-side logic that marked an item
    * and all its descendants with one status derived solely from the process exit code.
    */
@@ -1073,7 +1073,7 @@ export class PlaywrightBddTestProvider {
         run.passed(item);
         this.testStatusCache.set(item.id, "passed");
       } else {
-        const fallback = result.error?.trim() ? result.error : "Test failed — see the Test Results output panel.";
+        const fallback = result.error?.trim() ? result.error : "Test failed: see the Test Results output panel.";
         run.failed(item, this.failureMessage(item, result.scenarioDetails, fallback));
         this.testStatusCache.set(item.id, "failed");
       }
@@ -1102,7 +1102,7 @@ export class PlaywrightBddTestProvider {
    * Outline example rows get the same name-key attempts with their substituted title too:
    * playwright-bdd substitutes the row's values into the generated test title when the outline
    * title carries `<placeholders>`, so the report never uses the tree's synthetic example label.
-   * Returns undefined if no key matches — the caller decides whether to mark skipped.
+   * Returns undefined if no key matches; the caller decides whether to mark skipped.
    */
   private resolveStatusForItem(
     item: vscode.TestItem,
@@ -1146,7 +1146,7 @@ export class PlaywrightBddTestProvider {
         if (key.endsWith(`::${name}`)) {return status;}
       }
     }
-    // Same scan with the substituted title — the only match possible when source resolution
+    // Same scan with the substituted title; the only match possible when source resolution
     // failed AND the outline title had placeholders (the user-reported skipped-outline case).
     if (substitutedName) {
       for (const [key, status] of Object.entries(results)) {
@@ -1219,7 +1219,7 @@ export class PlaywrightBddTestProvider {
     }
   }
 
-  // When the report is missing or unparseable the status is left unset — a stale icon is less
+  // When the report is missing or unparseable the status is left unset; a stale icon is less
   // wrong than marking a passing debug run skipped/failed.
   private applyDebugReportStatus(
     test: vscode.TestItem,

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type * as vscode from "vscode";
 import { ExtensionConfig } from "../../core/extension-config";
 
-// A config stub that answers every get() with the getter's own fallback default — so each
+// A config stub that answers every get() with the getter's own fallback default, so each
 // getter returns exactly the default hardcoded in ExtensionConfig, ready to compare against
 // the default declared in package.json.
 function defaultsOnlyConfig(): vscode.WorkspaceConfiguration {
@@ -29,7 +29,7 @@ function declaredDefaults(): Record<string, unknown> {
 }
 
 // Maps each declared setting to the ExtensionConfig getter that reads it. A new setting in
-// package.json without an entry here fails the completeness test below — by design.
+// package.json without an entry here fails the completeness test below, by design.
 const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   playwrightCommand: (c) => c.playwrightCommand,
   bddgenCommand: (c) => c.bddgenCommand,

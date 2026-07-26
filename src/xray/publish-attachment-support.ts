@@ -2,7 +2,7 @@ import { AttachmentSuggestion, PublishAttachmentsModel } from "../traceability/p
 import { EVIDENCE_MAX_FILE_BYTES } from "../traceability/evidence-resolution";
 import { attachmentUploadLimit, JiraAttachmentMeta } from "./jira-attachments";
 
-// The run-level attachments section surfaces at most this many discovered chips — a `playwright-report`
+// The run-level attachments section surfaces at most this many discovered chips; a `playwright-report`
 // tree matches many files, so the list is capped (per-file chips by design) and the user unchecks noise.
 const MAX_SUGGESTIONS = 25;
 
@@ -15,13 +15,13 @@ const DISABLED_REASON = "Attachments are disabled for this Jira site.";
 export interface AttachmentModelDeps {
   reportGlobs: readonly string[];
   attachTo: "evidence" | "issue" | "both";
-  // Jira credentials present — the section's `available` signal (the same source the upload routine
+  // Jira credentials present; the section's `available` signal (the same source the upload routine
   // guards on). No creds ⇒ the section renders disabled, never a stuck upload.
   jiraAvailable: boolean;
   findFiles: (glob: string) => Promise<readonly string[]>;
   fileSize: (path: string) => number | undefined;
   baseName: (path: string) => string;
-  // Fetched once per dialog open — only when `jiraAvailable`, so a no-creds run makes no remote call.
+  // Fetched once per dialog open, only when `jiraAvailable`, so a no-creds run makes no remote call.
   attachmentMeta: () => Promise<JiraAttachmentMeta>;
 }
 

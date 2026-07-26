@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import { StepResolver, ParsedStepDefWithFile } from "./step-resolver";
 import { extractStepDefsFromSource } from "./step-definition-provider";
 import { StepUsageIndex } from "./step-usage-index";
@@ -127,7 +128,7 @@ export class UnusedStepDiagnosticsProvider implements vscode.Disposable {
       return await this.resolver.findStepFiles([...this.currentGlobs]);
     } catch (error) {
       this.logger.warn("UnusedStepDiagnosticsProvider: findStepFiles failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       return undefined;
     }
@@ -159,7 +160,7 @@ export class UnusedStepDiagnosticsProvider implements vscode.Disposable {
       return await this.index.countUsagesForDef(def);
     } catch (error) {
       this.logger.warn("UnusedStepDiagnosticsProvider: countUsagesForDef failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       return undefined;
     }

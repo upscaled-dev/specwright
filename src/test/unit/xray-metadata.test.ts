@@ -246,7 +246,7 @@ describe("XrayMetadataCapability sync", () => {
     expect(capability.snapshot().verifiedAbsentKeys).toEqual(["DEMO-9"]);
 
     // The catalogue still returns data so this sync commits, but its key batch can no longer vouch
-    // for the prior absence claim — so the set is wiped, not carried.
+    // for the prior absence claim, so the set is wiped, not carried.
     batchFails = true;
     await capability.sync({ projectKeys: ["CALC"], testKeys: ["DEMO-9"] });
     const snap = capability.snapshot();
@@ -483,7 +483,7 @@ describe("XrayMetadataCapability account isolation", () => {
     expect(h.capability.snapshot().tests.size).toBe(0);
   });
 
-  it("discards a sync that straddles an account switch — nothing committed or persisted for the new account", async () => {
+  it("discards a sync that straddles an account switch: nothing committed or persisted for the new account", async () => {
     let resolveFetch!: (value: XrayFetchOutcome) => void;
     const h = harness({
       fetchProjectCatalogue: () => new Promise<XrayFetchOutcome>((resolve) => { resolveFetch = resolve; }),
@@ -637,7 +637,7 @@ describe("XrayMetadataCapability account isolation", () => {
     resolveFetch(outcome([{ key: "CALC-1", summary: "B data fetched with B creds" }]));
     await mergePromise;
 
-    // The stamp drifted from the captured account, so the merge is discarded — nothing under either
+    // The stamp drifted from the captured account, so the merge is discarded; nothing under either
     // key, no fire. Without the captured-account guard this would persist B's data under "acct-A".
     expect(capability.snapshot().tests.size).toBe(0);
     expect(await loadCacheFor(memento, "acct-A")).toBeUndefined();
@@ -645,7 +645,7 @@ describe("XrayMetadataCapability account isolation", () => {
     expect(fired).toBe(0);
   });
 
-  it("resurrects a merged key — a found key is dropped from verifiedAbsentKeys", async () => {
+  it("resurrects a merged key: a found key is dropped from verifiedAbsentKeys", async () => {
     const fetchTestsByKeys = vi
       .fn<(keys: readonly string[]) => Promise<XrayFetchOutcome>>()
       .mockResolvedValueOnce(outcome([])) // sync key-batch: CALC-1 queried, not returned → absent

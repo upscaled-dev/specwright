@@ -1,10 +1,11 @@
 import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
+import { errMsg, scrubJwtLike } from "../utils/text";
 import { normalizeSiteUrl, projectFromKey } from "./xray-adapter";
 import { XrayCredentialStore } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
 import { JiraAccessError, JiraProject, searchJiraProjects } from "./jira-project-search";
-import { describeJwt, describeShape, graphqlErrorSummaries, scrubJwtLike } from "./xray-diagnostics";
+import { describeJwt, describeShape, graphqlErrorSummaries } from "./xray-diagnostics";
 
 const FETCH_TIMEOUT_MS = 30_000;
 const CONNECT_COMMAND = "playwrightBddRunner.traceability.connect";
@@ -54,7 +55,7 @@ export interface XrayConnectionOutcome {
   message: string;
   projects?: XrayProjectSummary[] | undefined;
   // Optional Jira-access enrichment. Never flips `ok` or the stage/dot: a failed Jira call degrades
-  // the project view only (§5 — Jira credentials are optional).
+  // the project view only (§5, Jira credentials are optional).
   jiraProjects?: JiraProject[] | undefined;
   // True when the Jira list hit the enumeration cap, so absence from it is not proof of non-existence.
   jiraTruncated?: boolean | undefined;
@@ -62,16 +63,12 @@ export interface XrayConnectionOutcome {
 }
 
 // The probe as a value, so a single-flight wrapper can be injected wherever `probeXrayConnection`
-// would otherwise be called module-level — the factory `verify` and the connection commands share
+// would otherwise be called module-level; the factory `verify` and the connection commands share
 // one wrapped instance so coincident verifies collapse onto one handshake.
 export type XrayProbe = (
   deps: XrayConnectionTestDeps,
   options?: XrayProbeOptions
 ) => Promise<XrayConnectionOutcome>;
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 interface TimedResponse {
   status: number;
@@ -181,12 +178,12 @@ interface ProjectProbeResult {
 }
 
 // A project probe that is not ok (non-OK status or GraphQL errors) or whose total isn't a number is
-// excluded from the reported totals — a false "0 tests" for a project that actually errored is worse
+// excluded from the reported totals; a false "0 tests" for a project that actually errored is worse
 // than saying nothing. The failure count surfaces in the summary; graphqlRequest already logs why.
 // Cross-check against `jiraKeys` when supplied: a project absent from a COMPLETE Jira list is reported
 // as not-found (§5 wire fact: a nonexistent project's JQL returns 200/total 0), skipping its Xray
 // probe. Absence from a TRUNCATED list is inconclusive, so the Xray total is still probed and
-// existsOnSite is left unset — the honest can't-verify caveat applies rather than a false not-found.
+// existsOnSite is left unset; the honest can't-verify caveat applies rather than a false not-found.
 async function probeProjects(
   base: string,
   logger: Logger,
@@ -222,7 +219,7 @@ async function probeProjects(
 }
 
 // Purely diagnostic: fires a query with a deliberately invalid GraphQL selection field so the error
-// envelope lands in the output channel deterministically — the GraphQL spec forces pre-execution
+// envelope lands in the output channel deterministically; the GraphQL spec forces pre-execution
 // validation to reject an unknown field. A bad JQL clause can't be used here: Xray tolerates an
 // unknown JQL field (returns 200 with a total, no errors) and so never forces an error. Never returns
 // anything the outcome depends on; graphqlRequest already logs the response shape + scrubbed summaries.
@@ -230,7 +227,7 @@ async function probeErrorShape(base: string, logger: Logger, jwt: string): Promi
   try {
     await graphqlRequest(base, logger, jwt, "invalid-field error-shape probe", errorShapeQuery());
   } catch (error) {
-    logger.error(`invalid-field error-shape probe request error: ${scrubJwtLike(errorMessage(error))}`);
+    logger.error(`invalid-field error-shape probe request error: ${scrubJwtLike(errMsg(error))}`);
   }
 }
 
@@ -249,7 +246,7 @@ async function authenticate(
   logger.info(`POST /authenticate → ${response.status}`);
   if (!response.ok) {
     // §5 leaves the bad-credential body undocumented; it may echo the request, so only its field
-    // names and value types are logged — never values.
+    // names and value types are logged, never values.
     logger.error(
       `Authentication failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
     );
@@ -285,7 +282,7 @@ function projectPhrase(p: XrayProjectSummary): string {
     return `project ${p.project}: not found on this site`;
   }
   if (p.existsOnSite === undefined && p.totalTests === 0) {
-    return `project ${p.project}: 0 Xray tests (project may not exist — can't verify without Jira access)`;
+    return `project ${p.project}: 0 Xray tests (project may not exist, can't verify without Jira access)`;
   }
   return `project ${p.project}: ${p.totalTests} Xray tests`;
 }
@@ -300,17 +297,17 @@ function successMessage(
 ): string {
   const parts = projects.map(projectPhrase).join(", ");
   let base = projects.length === 0
-    ? `Connected to ${site} — authentication OK`
-    : `Connected to ${site} — ${parts}`;
+    ? `Connected to ${site}; authentication OK`
+    : `Connected to ${site}; ${parts}`;
   if (failed > 0) {
-    base = `${base} — ${failed} project probe(s) failed, see output`;
+    base = `${base}; ${failed} project probe(s) failed, see output`;
   }
   if (jiraError !== undefined) {
-    base = `${base} — ${jiraError}`;
+    base = `${base}; ${jiraError}`;
   } else if (jiraProjects !== undefined) {
     base = jiraTruncated
-      ? `${base} — ${jiraProjects.length}+ Jira projects accessible (list truncated)`
-      : `${base} — ${jiraProjects.length} Jira project(s) accessible`;
+      ? `${base}; ${jiraProjects.length}+ Jira projects accessible (list truncated)`
+      : `${base}; ${jiraProjects.length} Jira project(s) accessible`;
   }
   return base;
 }
@@ -319,7 +316,7 @@ function successMessage(
 // credential/JWT value ever appears here).
 function authFailureMessage(status: number): string {
   return status === 401
-    ? "Authentication failed — check your client ID and secret."
+    ? "Authentication failed: check your client ID and secret."
     : `Authentication failed (HTTP ${status}).`;
 }
 
@@ -347,12 +344,12 @@ export async function probeXrayConnection(
   try {
     auth = await authenticate(base, logger, credentials);
   } catch (error) {
-    logger.error(`Authentication request error: ${scrubJwtLike(errorMessage(error))}`);
+    logger.error(`Authentication request error: ${scrubJwtLike(errMsg(error))}`);
     return {
       ok: false,
       stage: "network",
       site,
-      message: "Could not reach Xray — check your network connection.",
+      message: "Could not reach Xray: check your network connection.",
     };
   }
   if (!auth.ok) {
@@ -364,7 +361,7 @@ export async function probeXrayConnection(
     return { ok: true, stage: "ok", site, message: `Connected to ${site}` };
   }
 
-  // Optional Jira project list (§5 project-view bullet). This never flips ok/stage — a Jira failure
+  // Optional Jira project list (§5 project-view bullet). This never flips ok/stage; a Jira failure
   // is captured in jiraError and degrades the project view only. Fetched before the GraphQL probes
   // so the cross-check can run and so the view still populates even on a later GraphQL-stage failure.
   let jiraProjects: JiraProject[] | undefined;
@@ -381,7 +378,7 @@ export async function probeXrayConnection(
       );
     } catch (error) {
       jiraError = error instanceof JiraAccessError ? error.message : "Jira project list unavailable.";
-      logger.error(`Jira project search error: ${scrubJwtLike(errorMessage(error))}`);
+      logger.error(`Jira project search error: ${scrubJwtLike(errMsg(error))}`);
     }
   }
   const jiraKeys = jiraProjects ? new Set(jiraProjects.map((p) => p.key.toUpperCase())) : undefined;
@@ -394,7 +391,7 @@ export async function probeXrayConnection(
 
   const keys = uniqueKeys(knownTestKeys()).slice(0, MAX_PROBE_KEYS);
   if (keys.length === 0) {
-    logger.info("no @TEST_ tags found in workspace — skipped GraphQL probes");
+    logger.info("no @TEST_ tags found in workspace; skipped GraphQL probes");
     return finish({
       ok: true,
       stage: "ok",
@@ -414,7 +411,7 @@ export async function probeXrayConnection(
         ok: false,
         stage: "graphql",
         site,
-        message: "Xray GraphQL probe failed (non-OK status or GraphQL errors) — see output for details.",
+        message: "Xray GraphQL probe failed (non-OK status or GraphQL errors): see output for details.",
       });
     }
     await probeErrorShape(base, logger, jwt);
@@ -422,12 +419,12 @@ export async function probeXrayConnection(
     projects = probed.summaries;
     projectFailures = probed.failed;
   } catch (error) {
-    logger.error(`GraphQL request error: ${scrubJwtLike(errorMessage(error))}`);
+    logger.error(`GraphQL request error: ${scrubJwtLike(errMsg(error))}`);
     return finish({
       ok: false,
       stage: "network",
       site,
-      message: "Could not reach Xray — check your network connection.",
+      message: "Could not reach Xray: check your network connection.",
     });
   }
 

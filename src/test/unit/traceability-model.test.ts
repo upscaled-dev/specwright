@@ -126,6 +126,7 @@ Scenario: Broken mapping
     const block = link(snap.links, "CALC-1052");
     expect(block.scenario.kind).toBe("examplesBlock");
     expect(block.scenario.examplesBlockName).toBe("edge cases");
+    expect(block.scenario.name).toBe("Multiply values · edge cases");
     expect(block.scenario.line).toBe(19);
   });
 
@@ -340,7 +341,7 @@ Scenario: Bogus tag
   Given x
 `;
 
-describe("buildTraceabilitySnapshot — remote-absence verdict", () => {
+describe("buildTraceabilitySnapshot: remote-absence verdict", () => {
   it("flags a key provably absent from a complete catalogue covering its project", () => {
     const remote = remoteSnapshot([], { completeness: "complete", catalogueProjects: ["CALC"] });
     const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR, remote);
@@ -432,7 +433,7 @@ Scenario Outline: multiply
     | 6 | 7 | 42 |
 `;
 
-describe("buildTraceabilitySnapshot — N/M outline iterations", () => {
+describe("buildTraceabilitySnapshot: N/M outline iterations", () => {
   const K = normalizePathKey(FILE);
 
   it("counts passed-of-total across a mixed run (some passed, some failed, some skipped)", () => {

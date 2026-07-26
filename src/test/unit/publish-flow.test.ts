@@ -124,7 +124,7 @@ function captureModel(over: Partial<PublishFlowDeps> = {}): { models: PublishDia
   };
 }
 
-describe("runPublishFlow — no publishable runs", () => {
+describe("runPublishFlow: no publishable runs", () => {
   it("reports no runs and opens no dialog for a cancelled-only list", async () => {
     const publishing = spyPublishing();
     const presentDialog = vi.fn(() => Promise.resolve(undefined));
@@ -180,7 +180,7 @@ describe("runPublishFlow — no publishable runs", () => {
   });
 });
 
-describe("runPublishFlow — dropdown ordering and preselection", () => {
+describe("runPublishFlow: dropdown ordering and preselection", () => {
   it("keeps the runs newest-first as passed and defaults the selection to the newest", async () => {
     const cap = captureModel();
     const runs = [artifact({ id: "new", createdAt: CREATED_AT + 1000 }), artifact({ id: "old", createdAt: CREATED_AT })];
@@ -211,7 +211,7 @@ describe("runPublishFlow — dropdown ordering and preselection", () => {
   });
 });
 
-describe("runPublishFlow — project prefill derivation", () => {
+describe("runPublishFlow: project prefill derivation", () => {
   it("derives the single distinct project from the run's own keys and marks it a derivation", async () => {
     const cap = captureModel({ defaultProjectKey: "PAY" });
     const run = artifact({ results: [mapped("a", "CALC-1"), mapped("b", "CALC-2")] });
@@ -275,7 +275,7 @@ describe("runPublishFlow: known project keys", () => {
   });
 });
 
-describe("runPublishFlow — banners", () => {
+describe("runPublishFlow: banners", () => {
   const priorEntry: LedgerEntry = {
     artifactId: "run-1",
     executionRef: "XNP-9",
@@ -306,7 +306,7 @@ describe("runPublishFlow — banners", () => {
   });
 });
 
-describe("runPublishFlow — dialog model", () => {
+describe("runPublishFlow: dialog model", () => {
   it("builds the subtitle, summary default, and plan prefill per run", async () => {
     const cap = captureModel({ defaultProjectKey: "CALC", changedSinceRun: () => 1 });
     const run = artifact({
@@ -318,7 +318,7 @@ describe("runPublishFlow — dialog model", () => {
     expect(option.subtitle).toBe(
       "2 scenarios · 1 passed · 1 failed · 1 unmapped not publishable · 1 changed since run (create mode)"
     );
-    expect(option.defaultSummary).toBe("Specwright run 2026-07-22 — 2 scenarios");
+    expect(option.defaultSummary).toBe("Specwright run 2026-07-22 (2 scenarios)");
     expect(option.prefillPlanKey).toBe("CALC-500");
   });
 
@@ -329,7 +329,7 @@ describe("runPublishFlow — dialog model", () => {
   });
 });
 
-describe("runPublishFlow — cancelled/closed dialog", () => {
+describe("runPublishFlow: cancelled/closed dialog", () => {
   it("makes provably zero transport calls when the dialog is dismissed", async () => {
     const publishing = spyPublishing();
     const d = deps([artifact()], {
@@ -346,7 +346,7 @@ describe("runPublishFlow — cancelled/closed dialog", () => {
   });
 });
 
-describe("runPublishFlow — publish", () => {
+describe("runPublishFlow: publish", () => {
   it("publishes the selected run and records + reports success (no re-confirm modal)", async () => {
     const publishing = spyPublishing();
     const run = artifact();
@@ -357,7 +357,7 @@ describe("runPublishFlow — publish", () => {
 
     await runPublishFlow(d);
 
-    // The single import POST is the ONLY remote call — the flow has no runner and never triggers one.
+    // The single import POST is the ONLY remote call; the flow has no runner and never triggers one.
     expect(publishing.publish).toHaveBeenCalledTimes(1);
     expect(publishing.publish.mock.calls[0]).toEqual([run, CREATE_REQUEST]);
     expect(d.recordPublish).toHaveBeenCalledTimes(1);
@@ -430,7 +430,7 @@ describe("runPublishFlow — publish", () => {
     expect(entry.summary).toBeUndefined();
   });
 
-  it("publishes directly for an already-published run — no re-confirm gate", async () => {
+  it("publishes directly for an already-published run, no re-confirm gate", async () => {
     const publishing = spyPublishing();
     const priorEntry: LedgerEntry = {
       artifactId: "run-1",
@@ -467,7 +467,7 @@ describe("runPublishFlow — publish", () => {
   });
 });
 
-describe("runPublishFlow — attachments", () => {
+describe("runPublishFlow: attachments", () => {
   it("uploads run-level picks after a successful import and reports the attached count", async () => {
     const publishing = spyPublishing();
     const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));

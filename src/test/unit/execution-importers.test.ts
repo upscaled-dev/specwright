@@ -217,7 +217,7 @@ const EXPECTED_CUCUMBER_RESULTS = [
       {
         keyword: "Scenario",
         type: "scenario",
-        name: "Divide — 1/1",
+        name: "Divide (1/1)",
         tags: [{ name: "@TEST_CALC-3" }],
         steps: [
           { keyword: "Given ", name: "a dividend", result: { status: "passed", duration: 1_000_000_000 } },
@@ -228,7 +228,7 @@ const EXPECTED_CUCUMBER_RESULTS = [
       {
         keyword: "Scenario",
         type: "scenario",
-        name: "Divide — 4/2",
+        name: "Divide (4/2)",
         tags: [{ name: "@TEST_CALC-3" }],
         steps: [
           { keyword: "Given ", name: "a dividend", result: { status: "skipped" } },
@@ -336,7 +336,7 @@ describe("buildCucumberMultipartPayload", () => {
       resolveSteps: () => ({ steps: ["Given x"] }),
     });
     const elements = payload.results[0]!.elements;
-    expect(elements.map((e) => e.name)).toEqual(["Divide — 1/1", "Divide — 4/2"]);
+    expect(elements.map((e) => e.name)).toEqual(["Divide (1/1)", "Divide (4/2)"]);
     expect(elements.every((e) => e.tags[0]!.name === "@TEST_C-9")).toBe(true);
     expect(elements[0]!.steps[0]!.result.status).toBe("passed");
     expect(elements[1]!.steps[0]!.result.status).toBe("failed");

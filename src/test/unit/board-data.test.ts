@@ -64,7 +64,7 @@ function orphan(over: Partial<OrphanTest> = {}): OrphanTest {
   return { testKey: "CALC-9", meta: { key: "CALC-9" }, ...over };
 }
 
-describe("buildBoardViewModel — untraced scenario cards", () => {
+describe("buildBoardViewModel: untraced scenario cards", () => {
   it("returns empty columns for an undefined snapshot", () => {
     expect(build(undefined, ROOTS)).toMatchObject({ scenarios: [], available: [], mapped: [], matrix: [] });
   });
@@ -119,7 +119,7 @@ describe("buildBoardViewModel — untraced scenario cards", () => {
   });
 });
 
-describe("buildBoardViewModel — workspace-relative paths", () => {
+describe("buildBoardViewModel: workspace-relative paths", () => {
   it("falls back to the forward-slashed absolute path when the file sits outside every root", () => {
     const item = untraced({ scenario: ref({ filePath: "/elsewhere/x.feature", line: 2 }) });
     const model = build(snapshot({ untraced: [item] }), ROOTS);
@@ -139,7 +139,7 @@ describe("buildBoardViewModel — workspace-relative paths", () => {
   });
 });
 
-describe("buildBoardViewModel — test cards", () => {
+describe("buildBoardViewModel: test cards", () => {
   const loginRow = { name: "Log in", location: "features/login.feature:5", unlinkId: scenarioDropId(ref()) };
   const SCOPE_HINT = "Add project keys to playwrightBddRunner.xray.syncProjectKeys to list available tests.";
 
@@ -179,14 +179,14 @@ describe("buildBoardViewModel — test cards", () => {
   });
 
   it("keeps one row per Examples block, counts them all in the pill, and unlinks each back to its block", () => {
-    const small = examplesBlock(10, "Adding — small");
+    const small = examplesBlock(10, "Adding · small");
     const snap = snapshot({
-      links: [link({ testKey: "CALC-1", scenario: small }), link({ testKey: "CALC-1", scenario: examplesBlock(15, "Adding — large") })],
+      links: [link({ testKey: "CALC-1", scenario: small }), link({ testKey: "CALC-1", scenario: examplesBlock(15, "Adding · large") })],
     });
     const card = build(snap, ROOTS).mapped[0]!;
     // Each block owns its own tag, so each is its own row and the pill counts what the card lists.
     expect(card.pills).toEqual(["2 scenarios"]);
-    expect(card.links.map((row) => row.name)).toEqual(["Adding — large", "Adding — small"]);
+    expect(card.links.map((row) => row.name)).toEqual(["Adding · large", "Adding · small"]);
     expect(resolveBoardUnlink(snap, card.links[1]!.unlinkId, "CALC-1")).toEqual({ ref: small, key: "CALC-1" });
   });
 
@@ -496,7 +496,7 @@ describe("filterBoardViewModel", () => {
   });
 });
 
-describe("buildBoardViewModel — matrix rows", () => {
+describe("buildBoardViewModel: matrix rows", () => {
   it("joins a mapped link into requirement, test, scenario, the in-file tag, and its result", () => {
     const model = build(snapshot({ links: [link({ testKey: "CALC-1", reqKeys: ["REQ-7"], lastResult: "passed" })] }));
     expect(model.matrix).toEqual([
@@ -677,7 +677,7 @@ describe("buildExecutionRows", () => {
   });
 
   it("shows the imported total but dashes the pass rate when pass/fail/skip fall short of it (timed out or interrupted)", () => {
-    // 3 passed + 1 timed-out: passed+failed+skipped is 3, but 4 results were imported — the pass rate
+    // 3 passed + 1 timed-out: passed+failed+skipped is 3, but 4 results were imported; the pass rate
     // cannot be honestly stated, so it dashes while Imported still reports the whole total.
     const [row] = buildExecutionRows([ledgerEntry({ passed: 3, failed: 0, skipped: 0, total: 4 })]);
     expect(row).toMatchObject({ resultsImported: "4", passRate: "-" });

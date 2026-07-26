@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import { Logger } from "../utils/logger";
+import { errMsg, scrubJwtLike } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
 import { contentTypeForFile, EVIDENCE_MAX_FILE_BYTES } from "../traceability/evidence-resolution";
-import { describeShape, scrubJwtLike } from "./xray-diagnostics";
+import { describeShape } from "./xray-diagnostics";
 import { FetchLike, JiraAccessError } from "./jira-project-search";
 
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -13,10 +14,6 @@ const BACKOFF_CAP_MS = 8_000;
 function basicAuthHeader(credentials: XrayJiraCredentials): string {
   const encoded = Buffer.from(`${credentials.email}:${credentials.token}`).toString("base64");
   return `Basic ${encoded}`;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function parseBody(bodyText: string): unknown {
@@ -50,7 +47,7 @@ class RetryableError extends Error {
 // ---- Attachment upload limits (`GET /rest/api/3/attachment/meta`) ----
 
 // `enabled` gates the run-level section; `uploadLimit` (bytes) pre-checks file sizes in the dialog.
-// The field names are flagged *(live — unverified)*; parse tolerantly and fall back to the evidence
+// The field names are flagged *(live, unverified)*; parse tolerantly and fall back to the evidence
 // constant so an absent/renamed field never breaks the dialog.
 export interface JiraAttachmentMeta {
   readonly enabled: boolean;
@@ -78,7 +75,7 @@ function parseMeta(body: unknown): JiraAttachmentMeta {
 
 /**
  * Reads the site's attachment settings. On any failure the dialog degrades to the evidence constants,
- * so this never throws — a failed probe returns `{ enabled: true }` (no `uploadLimit`, fall back to
+ * so this never throws; a failed probe returns `{ enabled: true }` (no `uploadLimit`, fall back to
  * {@link EVIDENCE_MAX_FILE_BYTES}). Diagnostics stay allowlisted shape/status only.
  */
 export async function fetchJiraAttachmentMeta(deps: JiraAttachmentMetaDeps): Promise<JiraAttachmentMeta> {
@@ -99,7 +96,7 @@ export async function fetchJiraAttachmentMeta(deps: JiraAttachmentMetaDeps): Pro
     deps.logger.info(`GET /rest/api/3/attachment/meta → ${response.status}; shape:\n${stringifyShape(body)}`);
     return parseMeta(body);
   } catch (error) {
-    deps.logger.warn(`Attachment meta probe failed: ${scrubJwtLike(errorMessage(error))}; using evidence-limit fallback`);
+    deps.logger.warn(`Attachment meta probe failed: ${scrubJwtLike(errMsg(error))}; using evidence-limit fallback`);
     return { enabled: true };
   }
 }
@@ -111,7 +108,7 @@ export interface JiraAttachmentUploadDeps {
   credentials: XrayJiraCredentials;
   // The execution issue key the attachments land on (the only key reliably held post-import).
   issueKey: string;
-  // Absolute file paths to upload — run-level picks plus any `issue`-routed per-result evidence.
+  // Absolute file paths to upload: run-level picks plus any `issue`-routed per-result evidence.
   files: readonly string[];
   logger: Logger;
   fetchImpl?: FetchLike | undefined;
@@ -121,7 +118,7 @@ export interface JiraAttachmentUploadDeps {
   signal?: AbortSignal | undefined;
 }
 
-// Per-file routing so a partial failure is recoverable — the failed paths become the ledger's
+// Per-file routing so a partial failure is recoverable; the failed paths become the ledger's
 // `pendingAttachments`, replayed by the shared retry/resume routine. One file's failure never rolls
 // back or re-imports; it also never taints the files that did upload.
 export interface JiraAttachmentUploadResult {
@@ -161,7 +158,7 @@ class JiraAttachmentUpload {
     try {
       content = this.readFile(file);
     } catch (error) {
-      this.deps.logger.warn(`Attachment skipped — unreadable: ${scrubJwtLike(errorMessage(error))}`);
+      this.deps.logger.warn(`Attachment skipped, unreadable: ${scrubJwtLike(errMsg(error))}`);
       return false;
     }
     try {
@@ -199,7 +196,7 @@ class JiraAttachmentUpload {
       if (error instanceof RetryableError || error instanceof JiraAccessError) {
         throw error;
       }
-      throw new RetryableError(scrubJwtLike(errorMessage(error)));
+      throw new RetryableError(scrubJwtLike(errMsg(error)));
     } finally {
       clearTimeout(timer);
       this.deps.signal?.removeEventListener("abort", onAbort);
@@ -233,7 +230,7 @@ class JiraAttachmentUpload {
 /**
  * Uploads each file to the execution issue via `POST /rest/api/3/issue/{key}/attachments`
  * (`X-Atlassian-Token: no-check`, Jira basic auth, multipart `file`, original filenames), retrying
- * transient faults with backoff. Returns `{ uploaded, failed }` split per file — a single failure is
+ * transient faults with backoff. Returns `{ uploaded, failed }` split per file; a single failure is
  * isolated so the caller can ledger the pending files and retry without re-importing. The token and
  * file bytes never reach the logger.
  */

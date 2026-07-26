@@ -38,16 +38,16 @@ export interface LinkPickerUi {
 
 export interface LinkPickerDeps {
   readonly ui: LinkPickerUi;
-  // The tests the scenario already carries `@TEST_` tags for — the dialog's "Linked" section.
+  // The tests the scenario already carries `@TEST_` tags for, the dialog's "Linked" section.
   readonly linkedTests: readonly LinkedRow[];
-  // Shown before any typing — the snapshot's orphan tests, the best link candidates by definition.
+  // Shown before any typing: the snapshot's orphan tests, the best link candidates by definition.
   readonly orphanSuggestions: readonly LinkScenarioPick[];
   // The synced snapshot, filtered instantly as the user types (no network).
   readonly localCandidates: readonly LinkScenarioPick[];
-  // Keys already in the local snapshot — remote results dedupe against these, and a confirm reads it
+  // Keys already in the local snapshot; remote results dedupe against these, and a confirm reads it
   // to decide whether the picked test needs a background metadata merge.
   readonly syncedKeys: ReadonlySet<string>;
-  // Present only when the adapter can author — pins a "create a new test" action row on top.
+  // Present only when the adapter can author; pins a "create a new test" action row on top.
   readonly createLabel?: string | undefined;
   readonly remoteSearch?: RemoteSearchCapability | undefined;
   // The idempotent `@TEST_<key>` insert (+ background merge for an unsynced pick), reused verbatim.
@@ -66,8 +66,8 @@ const HINT_ROW_ID = " hint";
 const REMOTE_MIN_CHARS = 3;
 const SEARCH_DEBOUNCE_MS = 400;
 // Reused verbatim from the retired QuickPick so the remote section's feedback wording is unchanged.
-const NO_MATCHES_HINT = "No matches — or the summary field isn't searchable with these credentials";
-const INCOMPLETE_HINT = "Search did not complete — try again";
+const NO_MATCHES_HINT = "No matches, or the summary field isn't searchable with these credentials";
+const INCOMPLETE_HINT = "Search did not complete, try again";
 
 function toRow(pick: LinkScenarioPick): LinkPickerRow {
   return { id: pick.key, key: pick.key, kind: "test", ...(pick.summary !== undefined ? { summary: pick.summary } : {}) };
@@ -181,11 +181,11 @@ export function runLinkPickerFlow(deps: LinkPickerDeps): Promise<void> {
     });
 
     // Unlink drops the row and re-derives candidates: the just-unlinked test is now re-linkable and,
-    // if it was the scenario's last tag, the scenario is untraced again — the fresh local rows reflect
+    // if it was the scenario's last tag, the scenario is untraced again; the fresh local rows reflect
     // both. An in-flight remote search is superseded so its late result can't repaint a stale list.
     // A key already being unlinked is ignored, so a double-click can't fire a second edit that (with
     // the first row already gone) would target the wrong line. A failed edit keeps the row and the
-    // session alive — it is logged, never propagated, so the modal is never orphaned mid-flight.
+    // session alive; it is logged, never propagated, so the modal is never orphaned mid-flight.
     const unlinking = new Set<string>();
     ui.onUnlink((key) => {
       if (done || unlinking.has(key)) {

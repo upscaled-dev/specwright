@@ -26,7 +26,7 @@ export interface AttachmentSuggestion {
   readonly size: number;
 }
 
-// The Publish dialog's run-level attachments section. `available` is false without Jira credentials —
+// The Publish dialog's run-level attachments section. `available` is false without Jira credentials;
 // the section renders disabled with the honest `reason`. `evidenceStream` mirrors `xray.attachTo` so
 // the wording can distinguish the always-to-issue run-level picks from the per-result evidence stream.
 export interface PublishAttachmentsModel {
@@ -39,7 +39,7 @@ export interface PublishAttachmentsModel {
 
 // The already-published banner (§ point 3): the run carries a publish-ledger entry, so the dialog
 // states when it was published, the target key, and the mode BEFORE submit. There is no re-confirm
-// modal anymore — the banner is the whole notice and submit proceeds directly.
+// modal anymore; the banner is the whole notice and submit proceeds directly.
 export interface RepublishNotice {
   readonly key: string;
   readonly publishedAt: number;
@@ -107,10 +107,10 @@ export interface PublishFlowDeps {
   // The resolved project universe seeding the dialog's project dropdown. The flow normalizes it through
   // the same `normalizeProjectKeys` the board's scope selector reads.
   knownProjectKeys: readonly string[];
-  // Built lazily — only when the dialog is actually about to open (after the no-runs gate), so an
+  // Built lazily, only when the dialog is actually about to open (after the no-runs gate), so an
   // empty run list never fires the one allowed pre-confirm call (the `attachment/meta` probe).
   attachments(): Promise<PublishAttachmentsModel>;
-  // A prior publish of the given artifact on the current site (or undefined) — the ledger idempotency
+  // A prior publish of the given artifact on the current site (or undefined); the ledger idempotency
   // read, per run, feeding the republish and pending-attachments banners.
   priorEntryFor(artifactId: string): LedgerEntry | undefined;
   // Renders the dialog and returns the user's selected run + request + attachments, or undefined on
@@ -120,10 +120,10 @@ export interface PublishFlowDeps {
   // returning which failed. The same routine backs toast-retry and the pending-attachments banner.
   attachFiles(executionKey: string, files: readonly string[]): Promise<{ readonly failed: readonly string[] }>;
   recordPublish(entry: LedgerEntry): void;
-  // No publishable run exists — the message/toast the caller shows instead of an empty dialog.
+  // No publishable run exists; the message/toast the caller shows instead of an empty dialog.
   reportNoRuns(): void;
   reportSuccess(outcome: PublishOutcome, request: PublishRequest, attachedCount: number): void;
-  // Import succeeded but some attachments failed — a resumable partial (§8-P3): the toast reports the
+  // Import succeeded but some attachments failed, a resumable partial (§8-P3): the toast reports the
   // count and offers Retry off the ledgered pending files (keyed by `artifactId`). An import is never
   // rolled back for this.
   reportPartialAttachments(
@@ -184,9 +184,9 @@ function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps, scopedProj
 /**
  * The publish flow (vscode-free): filter the runs to the publishable ones with something left after
  * reconciliation, build the multi-run View 3 dialog (newest-first dropdown, per-run project prefill and
- * banners), present it, and — on an explicit confirm — hand the SELECTED run + request to the publishing
+ * banners), present it, and, on an explicit confirm, hand the SELECTED run + request to the publishing
  * capability. The capability's single import POST creates the execution WITH results; nothing runs
- * remotely. Only AFTER a successful import are run-level attachments and issue-routed evidence uploaded —
+ * remotely. Only AFTER a successful import are run-level attachments and issue-routed evidence uploaded;
  * a failed upload records the pending files on the ledger and offers Retry, never rolling back the import.
  * A run already on the ledger shows an inline republish banner (no modal); submit proceeds directly.
  * No publishable run, or cancel/close, makes ZERO transport calls.
@@ -251,7 +251,7 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
     try {
       failed = (await deps.attachFiles(outcome.ref.key, files)).failed;
     } catch {
-      // The import already landed — an upload fault is recoverable, never a rollback. Treat every file
+      // The import already landed; an upload fault is recoverable, never a rollback. Treat every file
       // as pending so Retry/resume can replay them.
       failed = files;
     }

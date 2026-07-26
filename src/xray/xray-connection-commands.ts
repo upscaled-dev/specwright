@@ -103,7 +103,7 @@ export class XrayConnectionCommands {
       getJiraCredentials: (site) => this.credentialStore.getJiraCredentials(site),
       saveJira: (site, email, token) => this.credentialStore.setJiraCredentials(site, email, token),
       clearJira: (site) => this.credentialStore.clearJiraCredentials(site),
-      // The panel renders the outcome inline, so it calls the probe directly — going through the
+      // The panel renders the outcome inline, so it calls the probe directly, going through the
       // testConnection command would fire the standalone command's toasts on top.
       probeConnection: (site) => this.probeConnection(site),
       verifyConnection: (site) => this.probeConnection(site, { authOnly: true }),

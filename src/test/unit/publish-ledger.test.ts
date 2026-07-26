@@ -73,7 +73,7 @@ describe("findLedgerEntry", () => {
     expect(findLedgerEntry(entries, "run-1", "acme.atlassian.net")?.executionRef).toBe("XNP-1");
   });
 
-  it("is site-scoped — an entry from another site is not a match", () => {
+  it("is site-scoped: an entry from another site is not a match", () => {
     expect(findLedgerEntry(entries, "run-1", "third.atlassian.net")).toBeUndefined();
   });
 
@@ -206,7 +206,7 @@ describe("PublishLedger", () => {
   });
 
   it("reads back a v1 entry that predates the counts, leaving them absent", () => {
-    // A v1 entry carries only the original required fields — no summary/mode/counts.
+    // A v1 entry carries only the original required fields, no summary/mode/counts.
     const v1 = {
       artifactId: "v1",
       executionRef: "XNP-1",

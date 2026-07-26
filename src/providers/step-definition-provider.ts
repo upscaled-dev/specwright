@@ -75,14 +75,14 @@ export interface ParsedStepDef {
 
 const STEP_LINE_RE = new RegExp(`^\\s*(?:${STEP_KEYWORDS})\\s+(.+?)\\s*$`);
 
-/** Matches: `Given(...`, `When(...`, `Then(...`, `Step(...` (case-sensitive — that's how playwright-bdd exposes them). */
+/** Matches: `Given(...`, `When(...`, `Then(...`, `Step(...` (case-sensitive; that's how playwright-bdd exposes them). */
 const STEP_CALL_RE = /(^|[^A-Za-z0-9_$.])(Given|When|Then|Step)\s*\(\s*([\s\S]*)$/;
 
 /**
  * A step *definition* registers its handler synchronously: `Given('text', handler)`.
  * bddgen-generated specs (and code copied into reports) *invoke* steps instead:
  * `await Given('text')`. An awaited/returned/yielded call can never be a definition,
- * so such lines are skipped — generated output is ignored no matter where it lives.
+ * so such lines are skipped; generated output is ignored no matter where it lives.
  */
 const INVOCATION_PREFIX_RE = /\b(?:await|return|yield)\s*$/;
 
@@ -95,7 +95,7 @@ function isNonDefinitionPrefix(prefix: string): boolean {
 const GENERATED_FILE_HEADER = "// Generated from:";
 
 /**
- * A definition always passes a handler after the pattern — `Given('x', fn)` or
+ * A definition always passes a handler after the pattern: `Given('x', fn)` or
  * `Given('x', {options}, fn)`. Invocations never do: bddgen emits `Given('x')` or
  * `Given('x', null, { fixtures })`. So a call whose argument list ends after the
  * pattern, or whose next argument is `null`/`undefined`, cannot be a definition.
@@ -122,7 +122,7 @@ export function extractStepText(line: string): string | undefined {
  */
 export function extractStepDefsFromSource(content: string): ParsedStepDef[] {
   // A bddgen-generated spec (or a copy of one, e.g. inside a report directory)
-  // contains only step invocations — never definitions. Skip the whole file.
+  // contains only step invocations, never definitions. Skip the whole file.
   if (content.startsWith(GENERATED_FILE_HEADER)) {return [];}
 
   const defs: ParsedStepDef[] = [];
@@ -161,7 +161,7 @@ interface StepArg {
   text: string;
   isRegex: boolean;
   flags?: string;
-  /** Remainder of the line after the first argument — used to detect handler-less invocations. */
+  /** Remainder of the line after the first argument, used to detect handler-less invocations. */
   tail: string;
 }
 
@@ -184,7 +184,7 @@ function parseCallArgument(lines: string[], i: number, rest: string): StepArg | 
  * Parse the first argument of a Given/When/Then call. Handles:
  *   - 'single-quoted'
  *   - "double-quoted"
- *   - `template literal` (rejected when it contains `${...}` interpolation —
+ *   - `template literal` (rejected when it contains `${...}` interpolation;
  *     we cannot know the runtime pattern, and a mangled matcher is worse than none)
  *   - /regex literal/flags
  */
@@ -214,7 +214,7 @@ const FIRST_STRING_RE = /^(['"`])((?:\\.|(?!\1).)*)\1/;
 
 /**
  * Pull the first quoted string from a JS/TS expression. Supports `'`, `"`, and `` ` ``
- * (no interpolation handling — template literals with `${...}` will not parse).
+ * (no interpolation handling; template literals with `${...}` will not parse).
  */
 export function extractFirstString(expr: string): string | undefined {
   const m = FIRST_STRING_RE.exec(expr);
@@ -224,7 +224,7 @@ export function extractFirstString(expr: string): string | undefined {
 /**
  * Pull the first regex literal from a JS/TS expression. Returns the pattern source
  * (without surrounding slashes) and any flags. We preserve flags so `Given(/foo/i, …)`
- * stays case-insensitive — the `g` flag is dropped because the matcher uses .test().
+ * stays case-insensitive; the `g` flag is dropped because the matcher uses .test().
  */
 function extractFirstRegex(
   expr: string

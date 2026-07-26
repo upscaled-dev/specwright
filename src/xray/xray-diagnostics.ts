@@ -1,9 +1,11 @@
+import { scrubJwtLike } from "../utils/text";
+
 const DEPTH_CAP = 6;
 const ERROR_MESSAGE_CLIP = 160;
 
 // Connection diagnostics log allowlisted information only: status, field names, value types,
-// lengths/counts, and rate-limit headers (docs/requirements/traceability-integration-recommendations.md
-// — truncating arbitrary values is not redaction). The type skeleton is exactly what the §5 wire-shape
+// lengths/counts, and rate-limit headers (docs/requirements/traceability-integration-recommendations.md;
+// truncating arbitrary values is not redaction). The type skeleton is exactly what the §5 wire-shape
 // review needs; response values never reach the output channel.
 export function describeShape(value: unknown, depth = 0): unknown {
   if (depth >= DEPTH_CAP) {
@@ -35,30 +37,6 @@ export function describeShape(value: unknown, depth = 0): unknown {
   return typeof value;
 }
 
-// Anything shaped like a JWT (three consecutive long base64url segments) is masked before a
-// diagnostic string is logged — a defense for the one place we do emit text (GraphQL error
-// messages). Single-quantifier regex; the segment-shape check lives in code to stay linear.
-const TOKEN_RUN = /[A-Za-z0-9_.-]+/g;
-const JWT_SEGMENT_MIN = 8;
-
-function isJwtLike(run: string): boolean {
-  const segments = run.split(".");
-  for (let i = 0; i + 2 < segments.length; i++) {
-    if (
-      (segments[i] ?? "").length >= JWT_SEGMENT_MIN &&
-      (segments[i + 1] ?? "").length >= JWT_SEGMENT_MIN &&
-      (segments[i + 2] ?? "").length >= JWT_SEGMENT_MIN
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-export function scrubJwtLike(text: string): string {
-  return text.replace(TOKEN_RUN, (run) => (isJwtLike(run) ? "[jwt-like-token]" : run));
-}
-
 // GraphQL failures arrive as HTTP 200 with an `errors` array. Error `message` and `extensions.code`
 // are the diagnostic payload the connection test exists to capture (§5 marks the error shape as a
 // live-verification item), so they are the deliberate exception to types-only logging: clipped and
@@ -82,7 +60,7 @@ export function graphqlErrorSummaries(body: unknown): string[] {
   });
 }
 
-// Describes a JWT for the log without ever emitting it — length and segment count are enough to
+// Describes a JWT for the log without ever emitting it; length and segment count are enough to
 // verify the wire shape.
 export function describeJwt(jwt: string): string {
   const segments = jwt.split(".").length;

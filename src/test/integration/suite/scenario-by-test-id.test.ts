@@ -52,7 +52,7 @@ suite("scenarioByTestId map across organization strategies", () => {
         .find(([, scenario]) => !scenario.isScenarioOutline);
       assert.ok(
         firstPlain,
-        `Strategy "${key}" produced no plain scenarios — createScenarioTestItem likely not called for non-outlines.`
+        `Strategy "${key}" produced no plain scenarios; createScenarioTestItem likely not called for non-outlines.`
       );
       assert.match(
         firstPlain[0],

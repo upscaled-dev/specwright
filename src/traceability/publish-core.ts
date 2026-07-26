@@ -2,7 +2,7 @@ import { RunArtifact, RunArtifactOutcome, RunArtifactResult } from "./contracts"
 import { plural } from "../utils/text";
 import { sameScenario } from "./scenario-ref";
 
-// Only a `complete` run is publishable — a cancelled or partial run never reaches the publish dialog
+// Only a `complete` run is publishable; a cancelled or partial run never reaches the publish dialog
 // as a publishable payload (§8-P2 exit criterion).
 export function isPublishable(artifact: RunArtifact): boolean {
   return artifact.state === "complete";
@@ -20,13 +20,13 @@ export interface PublishableResults {
 
 // The publish reconciliation seam (the CONTRACT at preflight-flow.ts): a result being present in the
 // artifact is NOT consent to publish it. Drop every result whose scenario carries an `exclude` decision,
-// then drop keyless results — nothing maps those to a remote test. Exclusion is checked first so a user's
+// then drop keyless results; nothing maps those to a remote test. Exclusion is checked first so a user's
 // explicit exclusion is counted as such, never as merely unmapped.
 //
 // Exclusion matching uses the contract's fuzzy `sameScenario` (path+name, line-tolerant), NOT strict
 // `refIdentity`: preflight records the outline DECLARATION-line ref (`scenarioRefFromScenario`) while the
 // capture path records the example-ROW-line ref (run-artifact-store.ts `buildOutlineResult`), so strict
-// identity would fail to drop an excluded outline. Exclusion favors recall — over-dropping is safer than
+// identity would fail to drop an excluded outline. Exclusion favors recall; over-dropping is safer than
 // publishing excluded results; deliberately divergent from 2c's strict duplicate-detection ruling.
 export function publishableResults(artifact: RunArtifact): PublishableResults {
   const excludedRefs = artifact.preflight
@@ -94,7 +94,7 @@ export function summarizePublishable(reconciled: PublishableResults): Publishabl
 
 // The View 3 subtitle: the publishable-set outcome tally, then the honest not-publishable notes
 // ("N excluded by preflight · M unmapped not publishable · K changed since run (create mode)").
-// `changedSinceRun` is create-mode-only (scenarios whose source no longer resolves) — surfaced as a
+// `changedSinceRun` is create-mode-only (scenarios whose source no longer resolves), surfaced as a
 // note because the radio can still switch to append, which publishes everything.
 export function publishDialogSubtitle(summary: PublishableSummary, changedSinceRun: number): string {
   const head = [
@@ -127,11 +127,11 @@ export function publishDialogSubtitle(summary: PublishableSummary, changedSinceR
   return [...head, ...notes].join(" · ");
 }
 
-// The editable Summary field's default: "Specwright run <date> — N scenarios" (date is the run's
+// The editable Summary field's default: "Specwright run <date> (N scenarios)" (date is the run's
 // creation day, ISO for determinism).
 export function defaultPublishSummary(createdAt: number, publishableCount: number): string {
   const date = new Date(createdAt).toISOString().slice(0, 10);
-  return `Specwright run ${date} — ${publishableCount} ${plural(publishableCount, "scenario")}`;
+  return `Specwright run ${date} (${publishableCount} ${plural(publishableCount, "scenario")})`;
 }
 
 // One run's label in the dialog's newest-first dropdown: its local time and batch scope.
@@ -140,7 +140,7 @@ export function publishRunLabel(createdAt: number, selectionKind: string): strin
 }
 
 // Create-mode Project prefill (§ point 2). Priority: (a) the single distinct project the run's own
-// publishable test keys resolve to, via the grammar's `projectOf` — carries `fromDerivation: true` so
+// publishable test keys resolve to, via the grammar's `projectOf`; carries `fromDerivation: true` so
 // the dialog shows the "from this run's test keys" hint; (b) the `xray.defaultProjectKey` setting when
 // the run yields zero or multiple projects; (c) empty. Only (a) is a derivation. The publish flow can
 // outrank all three with the board's project scope, which hints on `fromScope` instead.

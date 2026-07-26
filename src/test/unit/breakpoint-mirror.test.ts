@@ -265,7 +265,7 @@ describe("BreakpointMirror", () => {
         id: "root-1",
         configuration: { [BreakpointMirror.SESSION_KEY]: id },
       };
-      // The root session starts but NO child session ever attaches — the natural
+      // The root session starts but NO child session ever attaches; the natural
       // last-child-terminated teardown can never fire (pnpm process-tree shape).
       debugApi.__fireStart(root);
 

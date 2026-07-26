@@ -35,7 +35,7 @@ export function parseBddFileData(specText: string): BddFileData | undefined {
   }
 
   // The block reads `const bddFileData = [ // bdd-data-start\n {...},\n {...},\n]; // bdd-data-end`
-  // so the slice between markers is the entries plus a trailing `];` — strip both, plus the
+  // so the slice between markers is the entries plus a trailing `];`; strip both, plus the
   // trailing comma JSON.parse rejects, and re-wrap in brackets.
   let body = specText.slice(start + START_MARKER.length, end).trim();
   if (!body.endsWith("];")) {
@@ -53,8 +53,8 @@ export function parseBddFileData(specText: string): BddFileData | undefined {
     return undefined;
   }
 
-  // Background steps repeat the same pwStepLine across scenario entries — a Set dedupes them.
-  // Scenario Outline rows genuinely produce multiple distinct pwStepLines — those all survive.
+  // Background steps repeat the same pwStepLine across scenario entries; a Set dedupes them.
+  // Scenario Outline rows genuinely produce multiple distinct pwStepLines; those all survive.
   const stepLineSets = new Map<number, Set<number>>();
   const testLines = new Map<number, number>();
   for (const entry of entries) {
@@ -116,7 +116,7 @@ function directSubdirsOf(dir: string): string[] {
 
 // Assumes playwright-bdd resolves outputDir relative to the config file's directory (we
 // approximate that with workingDirectory). Callers invoke this right after bddgen, so the
-// freshly generated spec exists on disk — that lets us probe the actual layout rather than
+// freshly generated spec exists on disk; that lets us probe the actual layout rather than
 // assume it. Two bddgen conventions bend the naive `<genDir>/<feature-relative-path>.spec.js`
 // shape:
 //   - A named BDD project (`defineBddProject(..., 'browser')`) nests its output one level
@@ -153,7 +153,7 @@ export function resolveGeneratedSpecPath(
     if (!match) {
       continue;
     }
-    // Several named projects generating the same feature is a real ambiguity — targeting
+    // Several named projects generating the same feature is a real ambiguity, targeting
     // one spec runs the scenario in only that project. Surface it instead of hiding it.
     if (match.hits.length > 1) {
       onDuplicates?.(

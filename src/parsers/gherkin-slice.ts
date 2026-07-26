@@ -1,4 +1,4 @@
-// "Example:" and "Scenario Template:" are standard Gherkin synonyms — keep in
+// "Example:" and "Scenario Template:" are standard Gherkin synonyms; keep in
 // sync with SCENARIO_BOUNDARY_RE in providers/scenario-boundary.ts.
 export const SCENARIO_KEYWORDS = [
   "Scenario Outline:",
@@ -47,7 +47,7 @@ function tagsLeadIntoExamples(lines: readonly string[], from: number): boolean {
 }
 
 // Advances doc-string fence state for one line. `inString` is true when the line is inside or
-// bounding a fence (`"""` or ```` ``` ````), so the boundary scan skips it — a body line that trims
+// bounding a fence (`"""` or ```` ``` ````), so the boundary scan skips it; a body line that trims
 // to a block keyword or a `@tag` inside a fence must NOT terminate the slice, or an embedded
 // `Scenario: ...` would truncate the gherkin mid-string. The closer is a line whose trimmed text
 // starts with the same delimiter that opened the fence.
@@ -73,7 +73,7 @@ function findSliceEnd(lines: readonly string[], start: number): { end: number; o
     if (state.inString) {
       continue;
     }
-    // Tags leading into an Examples block belong to THIS outline — keep scanning. Tags leading into a
+    // Tags leading into an Examples block belong to THIS outline; keep scanning. Tags leading into a
     // scenario/rule, or any following structural keyword, end the slice before them.
     if (trimmed.startsWith("@") && tagsLeadIntoExamples(lines, i)) {
       continue;
@@ -86,8 +86,8 @@ function findSliceEnd(lines: readonly string[], start: number): { end: number; o
 }
 
 /**
- * THE local text of a scenario, verbatim from source: its keyword line through the end of its block —
- * steps, doc-strings, data tables, and every Examples block (including tagged ones) — stopping before
+ * THE local text of a scenario, verbatim from source. Its keyword line through the end of its block:
+ * steps, doc-strings, data tables, and every Examples block (including tagged ones), stopping before
  * the next scenario's tags or any following structural keyword. The preceding tag lines are excluded
  * because the slice starts AT the keyword line. `scenarioLine` is 1-based.
  *
@@ -101,7 +101,7 @@ export function scenarioGherkinSlice(lines: readonly string[], scenarioLine: num
   const scan = findSliceEnd(lines, start);
   let end = scan.end;
   // Drop trailing blank or comment-only lines so a stray comment sitting between scenarios never rides
-  // into the created gherkin. `#`-lines are only comments OUTSIDE a fence — an unterminated doc-string
+  // into the created gherkin. `#`-lines are only comments OUTSIDE a fence; an unterminated doc-string
   // keeps its `#` body, trimming trailing blanks only.
   const dropComments = !scan.openFence;
   while (end > start + 1) {

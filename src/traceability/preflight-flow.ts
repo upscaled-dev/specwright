@@ -33,15 +33,15 @@ function isExcluded(ref: ScenarioRef, excluded: readonly ScenarioRef[]): boolean
 }
 
 // Removes excluded scenarios from the invocations. A per-scenario invocation is dropped outright; a
-// combined-grep invocation is rebuilt from its remaining refs (dropped if none survive) — so
+// combined-grep invocation is rebuilt from its remaining refs (dropped if none survive), so
 // exclusion stays surgical for the all-mapped scope. A coarse invocation (path-filter/tags) runs a
 // whole feature/folder/tag set and can't be narrowed, so an excluded scenario that falls under one
-// STILL runs and lands in `RunArtifact.results` — the exclusion is recorded as intent on
+// STILL runs and lands in `RunArtifact.results`; the exclusion is recorded as intent on
 // `RunArtifact.preflight` only.
 //
 // CONTRACT for publish (P3): the publish path is the reconciliation seam. It MUST filter `results`
 // against the `preflight` decisions (drop every result whose scenario carries an `exclude` decision)
-// before building the execution payload — a result being present in the artifact is NOT consent to
+// before building the execution payload; a result being present in the artifact is NOT consent to
 // publish it. Do not treat `results` as the publishable set directly.
 export function invocationsAfterExclusions(
   invocations: readonly BatchInvocation[],

@@ -3,7 +3,7 @@ export type XrayRegion = "global" | "us" | "eu" | "au";
 const REGIONS: readonly XrayRegion[] = ["global", "us", "eu", "au"];
 
 // `xray.apiRegion` is a closed enum in package.json, but the value still arrives as a raw string and
-// a hand-edited settings.json can hold anything — treat an unknown value as the global default
+// a hand-edited settings.json can hold anything; treat an unknown value as the global default
 // rather than build a bogus host.
 export function parseXrayRegion(raw: string): XrayRegion {
   return (REGIONS as readonly string[]).includes(raw) ? (raw as XrayRegion) : "global";

@@ -47,7 +47,7 @@ describe("extractKeys", () => {
   });
 
   it("does not confuse a longer prefix token with the configured one", () => {
-    // "@TESTING_CALC-1" must not match prefix "TEST_" — the underscore boundary matters.
+    // "@TESTING_CALC-1" must not match prefix "TEST_"; the underscore boundary matters.
     const keys = extractKeys(["@TESTING_CALC-1"], DEFAULTS);
     expect(keys.testKeys).toEqual([]);
   });

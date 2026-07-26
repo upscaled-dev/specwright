@@ -13,6 +13,7 @@ import {
   formatStub,
   inferParameters,
 } from "../generators/step-stub-generator";
+import { errMsg, plural } from "../utils/text";
 
 const DEFAULT_BASE_DIR = "features/steps";
 const DEFAULT_NEW_FILE_NAME = "generated.steps.ts";
@@ -62,7 +63,7 @@ export function validateNewFilePath(
 }
 
 // Globs should always use forward slashes, but Windows users sometimes configure
-// backslash paths — treat both as segment separators.
+// backslash paths; treat both as segment separators.
 function stripGlobTail(glob: string): string {
   const parts = glob.replaceAll("\\", "/").split("/");
   const idx = parts.findIndex((p) => p.includes("*"));
@@ -187,7 +188,7 @@ export class GenerateStepsCommand {
     } catch (error) {
       this.logger.warn("Generate Steps: destination file save failed", {
         destPath,
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       vscode.window.showWarningMessage(
         "Stubs were written but the destination file could not be saved (it may be open with unsaved changes). Save manually to use the new step definitions."
@@ -245,7 +246,7 @@ export class GenerateStepsCommand {
 
     const picked = await vscode.window.showQuickPick(items, {
       title: "Where to write the generated step definitions?",
-      placeHolder: `${undefinedCount} undefined step${undefinedCount === 1 ? "" : "s"} will be generated`,
+      placeHolder: `${undefinedCount} undefined ${plural(undefinedCount, "step")} will be generated`,
       ignoreFocusOut: true,
     });
     if (!picked) {return undefined;}
@@ -306,6 +307,6 @@ export class GenerateStepsCommand {
   private describeFile(filePath: string): string {
     const defs = this.resolver.parseStepFile(filePath);
     const n = defs.length;
-    return `${n} step${n === 1 ? "" : "s"}`;
+    return `${n} ${plural(n, "step")}`;
   }
 }

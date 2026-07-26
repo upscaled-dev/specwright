@@ -31,13 +31,13 @@ const GROUPING_MODE_KEY = "playwrightBddRunner.traceability.groupingMode";
 
 // One watcher per candidate report path (a brace-glob with a slash inside `{}` does not fire
 // reliably in a VS Code FileSystemWatcher). A create/change/delete on any of these refreshes the
-// badges — including a delete, so stale badges clear when a report is removed.
+// badges, including a delete, so stale badges clear when a report is removed.
 const REPORT_WATCH_GLOBS = REPORT_CANDIDATES.map((candidate) => `**/${candidate}`);
 
 /**
  * Sibling to ProviderRegistry: owns the traceability panel with the same idempotent
  * reconcile-on-config-change lifecycle. When `traceability.enablePanel` is off the whole subsystem
- * tears down — tree, model, watchers, adapter — with zero residue. Shares nothing with the Steps
+ * tears down (tree, model, watchers, adapter) with zero residue. Shares nothing with the Steps
  * code. Adapters are built through the injected registry, so a `traceability.provider` change swaps
  * the whole capability stack at runtime without a window reload.
  */
@@ -55,7 +55,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   private rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   private rebuildInFlight = false;
   private rebuildPending = false;
-  // Bumped whenever connection state is (re)committed — teardown, rebuild, or a fresh probe. An
+  // Bumped whenever connection state is (re)committed: teardown, rebuild, or a fresh probe. An
   // async probe captures the epoch at entry and only commits if it is still current, so a late
   // resolution (panel already torn down, or a newer probe already landed) discards silently.
   private connectionEpoch = 0;
@@ -66,8 +66,8 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   private disposed = false;
   private warnedUnknownProvider = false;
 
-  // Forwards the active model's rebuilds (and teardown) to the Coverage Board, which — unlike the
-  // tree's data provider — outlives model swaps, so it subscribes to the subsystem rather than to a
+  // Forwards the active model's rebuilds (and teardown) to the Coverage Board, which, unlike the
+  // tree's data provider, outlives model swaps, so it subscribes to the subsystem rather than to a
   // model instance it would otherwise pin.
   private readonly _onDidChangeSnapshot = new vscode.EventEmitter<void>();
   public readonly onDidChangeSnapshot = this._onDidChangeSnapshot.event;
@@ -130,7 +130,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     });
   }
 
-  // The linkScenario command reads the live adapter's metadata snapshot from here — the browse-URL
+  // The linkScenario command reads the live adapter's metadata snapshot from here; the browse-URL
   // adapter the command context holds is a separate instance and is never synced.
   public getActiveAdapter(): TraceabilityAdapter | undefined {
     return this.activeAdapter;
@@ -150,7 +150,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     return (scenario) => findLinkForScenario(links, scenario)?.testKey;
   }
 
-  // A synchronous, awaitable rebuild — the debounced watcher path can't be awaited, so the preflight
+  // A synchronous, awaitable rebuild; the debounced watcher path can't be awaited, so the preflight
   // `repair` outcome uses this to guarantee the snapshot reflects the just-inserted tag before it
   // re-classifies.
   public async rebuildNow(): Promise<void> {
@@ -224,7 +224,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       this.queueConnectionRefresh();
       return;
     }
-    // A changed signature — provider swap, prefix, or pattern — rebuilds the whole panel so the new
+    // A changed signature (provider swap, prefix, or pattern) rebuilds the whole panel so the new
     // adapter's model, capabilities, label, and watchers all take effect without a window reload.
     this.teardown();
     const adapter = this.registry.create(id, { config: this.config, logger: this.logger });
@@ -265,7 +265,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       this.adapterSubscriptions.push(
         adapter.metadata.onDidChange(() => {
           this.scheduleRebuild();
-          // Recompose the status row's "synced Nm ago" off the new snapshot — no re-verify.
+          // Recompose the status row's "synced Nm ago" off the new snapshot, no re-verify.
           this.commitConnectionIndicator();
         })
       );
@@ -381,7 +381,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   }
 
   // Serialize rebuilds: at most one in flight with a single pending re-run. Because each rebuild is
-  // awaited before the next starts, the final snapshot is always the newest — a stale run can never
+  // awaited before the next starts, the final snapshot is always the newest; a stale run can never
   // overwrite a fresher one.
   private async runRebuild(): Promise<void> {
     if (this.rebuildInFlight) {
@@ -449,7 +449,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     // this false with a stale true when it later resolves.
     this.connectionEpoch += 1;
     this.commitConnectedContext(false);
-    // An open board reads getSnapshot() (now undefined) — signal it so it clears rather than holding
+    // An open board reads getSnapshot() (now undefined); signal it so it clears rather than holding
     // the torn-down model's last view.
     this._onDidChangeSnapshot.fire();
   }

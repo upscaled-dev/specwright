@@ -1,4 +1,5 @@
 import { escapeHtml } from "../utils/webview";
+import { errMsg, scrubJwtLike } from "../utils/text";
 import { PublishRequest, PublishTarget } from "./contracts";
 import { AttachmentSuggestion, PublishDialogModel, PublishDialogResult } from "./publish-flow";
 import { SurfaceFragment, SurfaceHost } from "./webview-host";
@@ -12,7 +13,7 @@ export interface PendingAttachmentsResult {
 }
 
 // The delegate the surface calls back into. `searchTargets` rejects (NotSupportedError) without Jira
-// creds — the surface only calls it when `jiraSearchAvailable`. `browseFiles` opens the native file
+// creds; the surface only calls it when `jiraSearchAvailable`. `browseFiles` opens the native file
 // picker behind a mockable seam (the surface never imports `showOpenDialog` directly, so the unit rig
 // can drive it) and returns the picked files with their sizes. `attachPending` uploads a run's ledgered
 // pending files WITHOUT a reimport and returns how many still failed.
@@ -54,7 +55,7 @@ type PublishIncoming = SearchMessage | BrowseMessage | ConfirmMessage | AttachPe
  * The View 3 publish dialog, hosted as the board's permanent Publish tab. Constructed once with a
  * `SurfaceHost`, the delegate, and a `startPublish` callback (invoked when the user activates the tab
  * with no publish underway). `present` hydrates the tab with a run model and resolves to the confirmed
- * `PublishDialogResult` — or `undefined` on cancel/close/supersede, the flow's zero-transport signal.
+ * `PublishDialogResult`, or `undefined` on cancel/close/supersede, the flow's zero-transport signal.
  * The surface owns run selection and search/browse/attach seams; the webview paints the run dropdown,
  * banners, and form from the posted model.
  */
@@ -166,7 +167,7 @@ export class PublishSurface {
       if (controller.signal.aborted || this.settled()) {
         return;
       }
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = scrubJwtLike(errMsg(error));
       this.host.post({ type: "search-result", token: message.token, kind: message.kind, items: [], error: reason });
     }
   }

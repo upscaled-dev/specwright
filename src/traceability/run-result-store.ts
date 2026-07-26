@@ -6,7 +6,7 @@ import { ScenarioStatus } from "../utils/playwright-json-parser";
  * ephemeral (a tmp file, deleted right after parsing), so an extension-launched run leaves nothing on
  * disk for the tree to read. This store retains the parsed outcomes for the session, keyed exactly
  * like {@link PlaywrightJsonParser.toStatusMap} (`path:line` / `path::name`, one entry per outline
- * iteration), so the model's badge lookup reads it the same way it reads the workspace-report scan —
+ * iteration), so the model's badge lookup reads it the same way it reads the workspace-report scan,
  * and, unlike the scan, updates live the moment a Test Explorer run finishes. This is only the badge
  * subset of the future `RunArtifactStore`; shards, evidence, and immutable artifacts land in P2.
  */
@@ -18,7 +18,7 @@ export class RunResultStore implements vscode.Disposable {
 
   // When the most recent extension-run outcomes landed. The model compares this against the workspace
   // report's mtime so a newer external CLI run can win over stale store data (whole-map, coarse). 0
-  // until the first non-empty ingest — a never-fed store then collapses to scan-only either way.
+  // until the first non-empty ingest; a never-fed store then collapses to scan-only either way.
   public get lastIngestAt(): number {
     return this._lastIngestAt;
   }

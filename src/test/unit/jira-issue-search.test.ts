@@ -167,7 +167,7 @@ describe("searchJiraIssues", () => {
 });
 
 // The retry/backoff seam. `run` injects a no-op `sleep`, so these exercise the branching without real
-// timers or wall-clock delay — no fake-timer plumbing needed (mirrors the jira-project-search tests).
+// timers or wall-clock delay; no fake-timer plumbing needed (mirrors the jira-project-search tests).
 describe("searchJiraIssues retry/backoff", () => {
   // withBackoff caps at MAX_ATTEMPTS = 4 (module-local); the count is the contract these tests pin.
   const MAX_ATTEMPTS = 4;
@@ -244,7 +244,7 @@ describe("searchJiraIssues retry/backoff", () => {
     expect(sleeps).toHaveLength(MAX_ATTEMPTS - 1);
   });
 
-  it("does not retry a non-retryable 400 — a single fetch, then a terminal JiraAccessError", async () => {
+  it("does not retry a non-retryable 400: a single fetch, then a terminal JiraAccessError", async () => {
     const { logger } = capturingLogger();
     let calls = 0;
     const fetchImpl: FetchLike = () => {

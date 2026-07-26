@@ -10,7 +10,7 @@ import { RemoteSearchCapability, RemoteSearchResult } from "../../traceability/c
 import { LinkScenarioPick } from "../../traceability/link-scenario";
 
 // A fake port standing in for the webview panel: it records what the flow paints (rows/linked/busy/
-// close) and lets the test drive user intent (type/confirm/cancel/open/unlink) — the whole point of
+// close) and lets the test drive user intent (type/confirm/cancel/open/unlink); the whole point of
 // keeping the flow vscode-free.
 class FakeUi implements LinkPickerUi {
   public rows: LinkPickerRow[] = [];
@@ -308,12 +308,12 @@ describe("runLinkPickerFlow", () => {
     await vi.advanceTimersByTimeAsync(400);
     expect(calls).toHaveLength(1);
 
-    // The user deletes down to <3 chars — the list resets to the instant local filter.
+    // The user deletes down to <3 chars; the list resets to the instant local filter.
     h.ui.type("ab");
     expect(h.ui.keys()).toEqual(["AB-1"]);
     const resetAt = h.ui.setRowsCalls;
 
-    // The earlier in-flight search lands late — it must be dropped, leaving the reset list intact.
+    // The earlier in-flight search lands late; it must be dropped, leaving the reset list intact.
     calls[0]!.resolve({ tests: [{ key: "REM-1" }], complete: true });
     await flush();
 

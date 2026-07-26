@@ -297,7 +297,7 @@ describe("XrayConnectionCommands.connect", () => {
     expect(html).toContain(`<input id="clientSecret" type="password" placeholder="client secret" value="${MASK}"`);
     expect(html).toContain('<span id="conn-dot" class="conn-dot checking">');
     expect(html).toContain('<span id="conn-label">Checking connection…</span>');
-    expect(html).not.toContain("stored — enter to replace");
+    expect(html).not.toContain("stored, enter to replace");
     await flush();
   });
 
@@ -378,7 +378,7 @@ describe("Xray setup panel save flow", () => {
       ok: true,
       stage: "ok",
       site: "acme.atlassian.net",
-      message: "Connected to acme.atlassian.net — authentication OK",
+      message: "Connected to acme.atlassian.net; authentication OK",
     });
     const panel = await openPanel(commands);
 
@@ -392,7 +392,7 @@ describe("Xray setup panel save flow", () => {
     expect(panel.webview.__posted.at(-1)).toEqual({
       type: "test-result",
       ok: true,
-      message: "Connected to acme.atlassian.net — authentication OK",
+      message: "Connected to acme.atlassian.net; authentication OK",
     });
   });
 
@@ -403,7 +403,7 @@ describe("Xray setup panel save flow", () => {
       ok: false,
       stage: "auth",
       site: "acme.atlassian.net",
-      message: "Authentication failed — check your client ID and secret.",
+      message: "Authentication failed: check your client ID and secret.",
     });
     const panel = await openPanel(commands);
 
@@ -417,7 +417,7 @@ describe("Xray setup panel save flow", () => {
     expect(panel.webview.__posted.at(-1)).toEqual({
       type: "test-result",
       ok: false,
-      message: "Authentication failed — check your client ID and secret.",
+      message: "Authentication failed: check your client ID and secret.",
     });
   });
 
@@ -428,7 +428,7 @@ describe("Xray setup panel save flow", () => {
       ok: false,
       stage: "graphql",
       site: "acme.atlassian.net",
-      message: "Xray GraphQL probe failed (non-OK status or GraphQL errors) — see output for details.",
+      message: "Xray GraphQL probe failed (non-OK status or GraphQL errors): see output for details.",
     });
     const panel = await openPanel(commands);
 
@@ -442,7 +442,7 @@ describe("Xray setup panel save flow", () => {
     expect(panel.webview.__posted.at(-1)).toEqual({
       type: "test-result",
       ok: false,
-      message: "Xray GraphQL probe failed (non-OK status or GraphQL errors) — see output for details.",
+      message: "Xray GraphQL probe failed (non-OK status or GraphQL errors): see output for details.",
     });
   });
 
@@ -504,7 +504,7 @@ describe("Xray setup panel save flow", () => {
       ok: true,
       stage: "ok",
       site: "acme.atlassian.net",
-      message: "Connected to acme.atlassian.net — authentication OK",
+      message: "Connected to acme.atlassian.net; authentication OK",
     });
     const panel = await openPanel(commands);
     await flush();
@@ -518,7 +518,7 @@ describe("Xray setup panel save flow", () => {
     expect(panel.webview.__posted.at(-1)).toEqual({
       type: "test-result",
       ok: true,
-      message: "Connected to acme.atlassian.net — authentication OK",
+      message: "Connected to acme.atlassian.net; authentication OK",
     });
   });
 
@@ -629,7 +629,7 @@ describe("Xray setup panel connection verification", () => {
       ok: false,
       stage: "auth",
       site: "acme.atlassian.net",
-      message: "Authentication failed — check your client ID and secret.",
+      message: "Authentication failed: check your client ID and secret.",
     });
     const panel = await openPanel(commands);
     await flush();
@@ -642,7 +642,7 @@ describe("Xray setup panel connection verification", () => {
     expect(panel.webview.__posted).toContainEqual({
       type: "test-result",
       ok: false,
-      message: "Authentication failed — check your client ID and secret.",
+      message: "Authentication failed: check your client ID and secret.",
     });
   });
 

@@ -83,7 +83,7 @@ describe("LinkSurface", () => {
     expect(searches).toEqual(["CAL"]);
     expect(confirms).toEqual(["CALC-1"]);
 
-    // A confirm settles the session — a later cancel message is dropped.
+    // A confirm settles the session; a later cancel message is dropped.
     rig.receive({ type: "cancel" });
     expect(cancels).toBe(0);
   });
@@ -184,7 +184,7 @@ describe("LinkSurface", () => {
 
   it("exposes the Link fragment (title/placeholder scaffolding) for the shell document", () => {
     // The pane is hydrated on begin, so the static skeleton carries the section scaffolding, not the
-    // dialog text — the title and placeholder ride the reset message instead.
+    // dialog text; the title and placeholder ride the reset message instead.
     const rig = fakeHost();
     begin(rig);
     expect(rig.posted[0]).toMatchObject({ type: "reset", title: OPTS.title, searchPlaceholder: OPTS.searchPlaceholder });

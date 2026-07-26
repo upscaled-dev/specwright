@@ -62,7 +62,7 @@ function writeTempFeature(content: string): string {
   return filePath;
 }
 
-describe("CommandManager.resolveOutlineName — cache", () => {
+describe("CommandManager.resolveOutlineName: cache", () => {
   let tmpFiles: string[] = [];
 
   beforeEach(() => {
@@ -158,7 +158,7 @@ describe("CommandManager.resolveOutlineName — cache", () => {
   });
 });
 
-describe("CommandManager run commands — single execution (no double-run)", () => {
+describe("CommandManager run commands: single execution (no double-run)", () => {
   function makeExecutorSpy() {
     return {
       runScenario: vi.fn().mockResolvedValue(undefined),
@@ -212,7 +212,7 @@ describe("CommandManager run commands — single execution (no double-run)", () 
   });
 });
 
-describe("scenario.outlineName — Map<test.id, Scenario> lookup model", () => {
+describe("scenario.outlineName: Map<test.id, Scenario> lookup model", () => {
   it("returns the parser's outlineName regardless of which organization tree the test item lives in", () => {
     const parser = FeatureParser.create();
     const content = [
@@ -263,7 +263,7 @@ describe("scenario.outlineName — Map<test.id, Scenario> lookup model", () => {
   });
 });
 
-describe("CommandManager — StepDefinitionProvider caching", () => {
+describe("CommandManager: StepDefinitionProvider caching", () => {
   type StepDefProviderAccess = { getStepDefinitionProvider: () => unknown };
 
   it("reuses a single provider across invocations (no per-call re-scan)", () => {
@@ -882,7 +882,7 @@ describe("traceability sync contributions", () => {
   });
 });
 
-describe("traceability runAndPublish — preflight batch flow", () => {
+describe("traceability runAndPublish: preflight batch flow", () => {
   afterEach(() => vi.restoreAllMocks());
 
   const A: ScenarioRef = { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" };
@@ -1123,7 +1123,7 @@ describe("traceability openBoard command handler", () => {
   });
 });
 
-describe("traceability publishLastRun — Publish tab", () => {
+describe("traceability publishLastRun: Publish tab", () => {
   const win = vscode.window as unknown as {
     __webviewPanels: Array<{
       title: string;

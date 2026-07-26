@@ -19,7 +19,7 @@ import { AdapterContext, TraceabilityAdapterFactory } from "./adapter-registry";
 export const IN_MEMORY_PROVIDER_ID = "in-memory";
 
 // Deliberately non-Jira: a numeric key body (never `PROJECT-123`), no project derivation, and a
-// canonicalization that strips leading zeros. This is what keeps the core honest — anything that
+// canonicalization that strips leading zeros. This is what keeps the core honest; anything that
 // assumes the Xray grammar breaks here first.
 const IN_MEMORY_GRAMMAR: KeyGrammar = {
   testPrefix: "TC-",
@@ -42,7 +42,7 @@ export interface InMemoryFixture {
 /**
  * The contract-test reference adapter (§3.6). It stands in for a real provider so the core is
  * exercised against a non-Jira grammar and can simulate partial catalogues and sync errors without
- * a network. Not registered in the public settings enum — the subsystem resolves it only from a
+ * a network. Not registered in the public settings enum; the subsystem resolves it only from a
  * hand-typed `traceability.provider` value.
  */
 export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.Disposable {
@@ -163,7 +163,7 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
       this.tests = new Map(this.catalogue);
       this.completeness = this.nextCompleteness;
       // Canonicalize through the grammar (numeric here, not uppercase) so "007" and "7" collapse to
-      // one key — the model derives its link keys the same way, so absence verdicts stay honest.
+      // one key; the model derives its link keys the same way, so absence verdicts stay honest.
       const present = new Set([...this.catalogue.keys()].map((key) => this.keyGrammar.canonicalizeKey(key)));
       this.verifiedAbsentKeys = (scope.testKeys ?? [])
         .map((key) => this.keyGrammar.canonicalizeKey(key))

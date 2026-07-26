@@ -1,6 +1,7 @@
 import { Logger } from "../utils/logger";
+import { errMsg, scrubJwtLike } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
-import { describeShape, scrubJwtLike } from "./xray-diagnostics";
+import { describeShape } from "./xray-diagnostics";
 import { FetchLike, JiraAccessError } from "./jira-project-search";
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -18,7 +19,7 @@ const BACKOFF_CAP_MS = 8_000;
 // all it has, a requirement search REQUIRES a project key: an unscoped one would sweep the whole site.
 export type JiraIssueKind = "execution" | "test-plan" | "requirement";
 
-// The Jira issuetype names Xray provisions for each container kind (verify at F5 — site-configurable).
+// The Jira issuetype names Xray provisions for each container kind (verify at F5, site-configurable).
 export const ISSUE_TYPE_NAME: Record<Exclude<JiraIssueKind, "requirement">, string> = {
   execution: "Test Execution",
   "test-plan": "Test Plan",
@@ -31,7 +32,7 @@ export interface JiraIssue {
 
 export interface JiraIssueSearchResult {
   readonly issues: JiraIssue[];
-  // True when the cap cut the list short (more matches exist) — the picker must not treat absence
+  // True when the cap cut the list short (more matches exist); the picker must not treat absence
   // from a truncated list as "no such execution".
   readonly truncated: boolean;
 }
@@ -61,10 +62,6 @@ interface TimedResponse {
   status: number;
   ok: boolean;
   bodyText: string;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function parseBody(bodyText: string): unknown {
@@ -120,16 +117,16 @@ function parsePage(body: unknown): IssuePage {
 
 function accessErrorFor(status: number): JiraAccessError {
   if (status === 400) {
-    return new JiraAccessError("Jira rejected the search — check the project key.");
+    return new JiraAccessError("Jira rejected the search: check the project key.");
   }
   if (status === 401) {
-    return new JiraAccessError("Jira authentication failed — check your Jira email and API token.");
+    return new JiraAccessError("Jira authentication failed: check your Jira email and API token.");
   }
   if (status === 403) {
-    return new JiraAccessError("Jira denied access — the API token lacks permission to search issues.");
+    return new JiraAccessError("Jira denied access: the API token lacks permission to search issues.");
   }
   if (status === 404) {
-    return new JiraAccessError("Jira search endpoint not found — check the site host.");
+    return new JiraAccessError("Jira search endpoint not found: check the site host.");
   }
   return new JiraAccessError(`Jira issue search failed (HTTP ${status}).`);
 }
@@ -137,7 +134,7 @@ function accessErrorFor(status: number): JiraAccessError {
 // JQL metacharacters that would break out of the quoted clause; only `"` and `\` need escaping inside
 // a double-quoted JQL string value.
 function escapeJql(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  return value.replaceAll("\\", String.raw`\\`).replaceAll('"', String.raw`\"`);
 }
 
 function buildJql(kind: JiraIssueKind, query: string): string {
@@ -194,7 +191,7 @@ class JiraIssueSearch {
   private async requestPage(url: string, nextPageToken: string | undefined): Promise<IssuePage> {
     const response = await this.withBackoff(() => this.timedFetch(url, nextPageToken));
     if (response.status === 400 || response.status === 401 || response.status === 403 || response.status === 404) {
-      // The 4xx body may echo request/account details, so only its shape is logged — never values.
+      // The 4xx body may echo request/account details, so only its shape is logged, never values.
       this.deps.logger.error(
         `Jira issue search failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
       );
@@ -223,7 +220,7 @@ class JiraIssueSearch {
         attempt += 1;
         if (!(error instanceof RetryableError) || attempt >= MAX_ATTEMPTS) {
           throw error instanceof RetryableError
-            ? new JiraAccessError("Could not reach Jira — check your network connection.")
+            ? new JiraAccessError("Could not reach Jira: check your network connection.")
             : error;
         }
         await this.sleep(this.backoffDelay(attempt));
@@ -265,7 +262,7 @@ class JiraIssueSearch {
       if (error instanceof RetryableError) {
         throw error;
       }
-      throw new RetryableError(scrubJwtLike(errorMessage(error)));
+      throw new RetryableError(scrubJwtLike(errMsg(error)));
     } finally {
       clearTimeout(timer);
       this.deps.signal?.removeEventListener("abort", onAbort);
@@ -279,7 +276,7 @@ class JiraIssueSearch {
  * it does not apply, `nextPageToken` pagination, capped at {@link MAX_ISSUES}). Returns `{ issues,
  * truncated }`. Throws {@link JiraAccessError} with a value-free message on a terminal failure. An
  * unscoped requirement search is refused here, before any request leaves. Diagnostics are allowlisted
- * shape/status/count only — the token and basic-auth header never log.
+ * shape/status/count only; the token and basic-auth header never log.
  */
 export function searchJiraIssues(deps: JiraIssueSearchDeps): Promise<JiraIssueSearchResult> {
   if (deps.kind === "requirement" && deps.query.trim() === "") {

@@ -22,7 +22,7 @@ interface PackageJson {
 const repoRoot = path.resolve(__dirname, "../../..");
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf-8")) as PackageJson;
 
-describe("contributes.walkthroughs — Set up Xray", () => {
+describe("contributes.walkthroughs: Set up Xray", () => {
   const walkthrough = pkg.contributes.walkthroughs?.find((w) => w.id === "specwright.setupXray");
 
   it("contributes the five §4.4 steps in order", () => {
@@ -63,7 +63,7 @@ describe("contributes.walkthroughs — Set up Xray", () => {
   });
 });
 
-describe("contributes.colors — tag-line decoration", () => {
+describe("contributes.colors: tag-line decoration", () => {
   it("contributes a theme-aware faint wash color for the traceability tag decoration", () => {
     const color = pkg.contributes.colors?.find((c) => c.id === "specwright.traceabilityTagBackground");
     expect(color).toBeDefined();
@@ -72,7 +72,7 @@ describe("contributes.colors — tag-line decoration", () => {
   });
 });
 
-describe("view/item/context — orphan row commands", () => {
+describe("view/item/context: orphan row commands", () => {
   it("places open-issue and copy-key on the orphan row, reusing the shared commands", () => {
     const itemContext = pkg.contributes.menus["view/item/context"]!;
     const orphan = itemContext.filter((e) => e.when?.includes("traceabilityOrphan"));

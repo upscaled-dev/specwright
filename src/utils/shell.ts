@@ -3,12 +3,12 @@
  * (and the js-debug node-terminal) will run the command through.
  *
  * The two shells disagree about the backslash, which is why this must branch:
- *   - POSIX (sh/bash/zsh): inside double quotes, `\` escapes `\`, `$`, `` ` `` and `"` — so all
+ *   - POSIX (sh/bash/zsh): inside double quotes, `\` escapes `\`, `$`, `` ` `` and `"`; so all
  *     four must be backslash-escaped.
  *   - Windows (cmd.exe): backslash is NOT an escape character. POSIX-style doubling leaks the
  *     extra backslashes through to the child verbatim, which corrupted every value containing
  *     one: `--grep "v2\.0"` became the regex `v2\\.0` (matches nothing) and the precise
- *     `dir\file.spec.js:12` target became `dir\\file.spec.js:12` — both silently degraded a
+ *     `dir\file.spec.js:12` target became `dir\\file.spec.js:12`; both silently degraded a
  *     single-row run into a whole-outline name-grep. On win32 we instead follow the
  *     CommandLineToArgvW rules the child's own argv parser applies (the qntm.org/cmd algorithm,
  *     as used by cross-spawn): backslashes are literal UNLESS they precede a double quote, so
@@ -31,7 +31,7 @@ function posixQuote(value: string): string {
 }
 
 // `$` and `` ` `` are literal in cmd.exe and must NOT be escaped. Known gap: `%VAR%` of an
-// existing environment variable still expands inside cmd double quotes — there is no in-quote
+// existing environment variable still expands inside cmd double quotes; there is no in-quote
 // escape for `%` on the command line, and test titles matching a set variable are rare enough
 // that we accept it.
 function windowsQuote(value: string): string {

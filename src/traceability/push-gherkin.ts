@@ -1,3 +1,4 @@
+import { errMsg } from "../utils/text";
 import type { AutomationBindingClassification, TestCaseMetadata } from "./contracts";
 
 // Comparison is text only, ignoring line endings and per-line indentation/trailing whitespace, so a
@@ -124,6 +125,6 @@ async function refreshFailure(deps: PushGherkinDeps, key: string): Promise<strin
     await deps.refresh(key);
     return undefined;
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return errMsg(error);
   }
 }

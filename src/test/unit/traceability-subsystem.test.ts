@@ -584,7 +584,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
     const setIndicator = spyIndicator();
     const { config } = makeConfig();
     const conn = makeConnection(true, () =>
-      Promise.resolve({ status: "ok", message: "Connected to acme — project CALC" })
+      Promise.resolve({ status: "ok", message: "Connected to acme; project CALC" })
     );
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
@@ -594,7 +594,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
 
     const calls = indicatorCalls(setIndicator);
     expect(calls).toContainEqual({ state: "checking", label: "acme.atlassian.net", message: "Checking connection…" });
-    expect(calls.at(-1)).toEqual({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme — project CALC" });
+    expect(calls.at(-1)).toEqual({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme; project CALC" });
     subsystem.dispose();
   });
 
@@ -616,7 +616,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
     const setIndicator = spyIndicator();
     const { config } = makeConfig();
     const conn = makeConnection(true, () =>
-      Promise.resolve({ status: "auth-failed", message: "Authentication failed — check your client ID and secret." })
+      Promise.resolve({ status: "auth-failed", message: "Authentication failed: check your client ID and secret." })
     );
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
@@ -627,7 +627,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
     expect(indicatorCalls(setIndicator).at(-1)).toEqual({
       state: "auth-failed",
       label: "acme.atlassian.net",
-      message: "Authentication failed — check your client ID and secret.",
+      message: "Authentication failed: check your client ID and secret.",
     });
     subsystem.dispose();
   });
@@ -636,7 +636,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
     const setIndicator = spyIndicator();
     const { config } = makeConfig();
     const conn = makeConnection(true, () =>
-      Promise.resolve({ status: "unreachable", message: "Could not reach Xray — check your network connection." })
+      Promise.resolve({ status: "unreachable", message: "Could not reach Xray: check your network connection." })
     );
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
@@ -647,7 +647,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
     expect(indicatorCalls(setIndicator).at(-1)).toEqual({
       state: "unreachable",
       label: "acme.atlassian.net",
-      message: "Could not reach Xray — check your network connection.",
+      message: "Could not reach Xray: check your network connection.",
     });
     subsystem.dispose();
   });
@@ -865,7 +865,7 @@ describe("TraceabilitySubsystem snapshot change event", () => {
     await flush();
 
     // The xray model is torn down (its emitter with it), so the old forwarding subscription can never
-    // fire again — no leak, no double-fire from the dead model.
+    // fire again, no leak, no double-fire from the dead model.
     expect(disposeModel).toHaveBeenCalledTimes(1);
 
     // A rebuild on the new (azure) model drives the event exactly once.

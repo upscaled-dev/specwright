@@ -44,7 +44,7 @@ describe("resolveBatchSelection", () => {
   it("feature → every scenario in the file and one path-filter invocation carrying the source file", () => {
     const resolved = resolveBatchSelection({ kind: "feature", filePath: "/ws/features/a.feature" }, SNAP);
     expect(resolved.scenarios).toEqual([A1, A2, UNTAGGED]);
-    // The executor resolves the working dir from the target and relativizes the filter — the
+    // The executor resolves the working dir from the target and relativizes the filter; the
     // invocation stays FS-free (pure resolution), monorepo-correctness lives in the executor.
     expect(resolved.invocations).toEqual([{ kind: "path-filter", target: "/ws/features/a.feature" }]);
   });

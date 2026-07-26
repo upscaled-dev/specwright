@@ -113,7 +113,7 @@ describe("computeLinkEdit", () => {
     expect(edit).toEqual({ kind: "replaceLine", line: 2, text: "@REQ_CALC-9 @TEST_CALC-1" });
   });
 
-  it("is idempotent — re-linking the same key is a no-op", () => {
+  it("is idempotent: re-linking the same key is a no-op", () => {
     const feature = "Feature: F\n\n@TEST_CALC-1\nScenario: A\n  Given x\n";
     expect(computeLinkEdit(lines(feature), 4, "CALC-1", JIRA_GRAMMAR)).toEqual({ kind: "unchanged" });
   });
@@ -396,7 +396,7 @@ describe("authorScenarioTest", () => {
     expect(info[0]).toContain("Gherkin was adjusted");
   });
 
-  it("never inserts a tag it could not read back — reports the remote write and its issue id instead", async () => {
+  it("never inserts a tag it could not read back; reports the remote write and its issue id instead", async () => {
     const inserted: string[] = [];
     const errors: string[] = [];
 

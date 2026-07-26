@@ -15,7 +15,7 @@ const IMPORT_EXECUTION_PATH = "/import/execution";
 const CUCUMBER_MULTIPART_PATH = "/import/execution/cucumber/multipart";
 
 // Xray's Cucumber tag-matching convention is a fixed `@TEST_<key>` (Xray-defined, NOT the user's local
-// tag prefix — §3.4), so it is hardcoded here rather than read from the KeyGrammar.
+// tag prefix, §3.4), so it is hardcoded here rather than read from the KeyGrammar.
 const XRAY_TEST_TAG_PREFIX = "@TEST_";
 const MS_TO_NS = 1_000_000;
 const GHERKIN_KEYWORDS = ["Given", "When", "Then", "And", "But", "*"] as const;
@@ -28,7 +28,7 @@ export interface ImportResponse {
   readonly body: unknown;
 }
 
-// The transport seam the importers write through — structurally satisfied by XrayClient. Kept as a local
+// The transport seam the importers write through, structurally satisfied by XrayClient. Kept as a local
 // interface so this module imports nothing from the vscode-chained client, staying extractable (P5).
 export interface ImportTransport {
   postJson(path: string, body: unknown, signal?: AbortSignal): Promise<ImportResponse>;
@@ -63,7 +63,7 @@ export class EmptyImportError extends Error {
   }
 }
 
-// Allowlisted fields of the import response — id/key/self are wanted diagnostics (§9.3).
+// Allowlisted fields of the import response; id/key/self are wanted diagnostics (§9.3).
 export interface ExecutionImportResponse {
   readonly id?: string | undefined;
   readonly key?: string | undefined;
@@ -82,7 +82,7 @@ export interface ExecutionImporter<Input, Payload> {
 }
 
 // Throws XrayImportError on a non-2xx (extracting the server `error` string when present); otherwise
-// returns the allowlisted {id, key, self}. Info survives — 3b decides the toast.
+// returns the allowlisted {id, key, self}. Info survives; 3b decides the toast.
 function handleImportResponse(response: ImportResponse): ExecutionImportResponse {
   if (!response.ok) {
     const message = serverMessageOf(response.body);
@@ -174,7 +174,7 @@ export function buildXrayJsonPayload(input: XrayJsonInput): XrayJsonPayload {
   const totalMs = results.reduce((sum, result) => sum + result.durationMs, 0);
   return {
     testExecutionKey: request.executionKey,
-    // The artifact records no wall-clock finish, so finishDate is startDate + Σ result durations —
+    // The artifact records no wall-clock finish, so finishDate is startDate + Σ result durations,
     // approximate but deterministic.
     info: {
       startDate: new Date(artifact.createdAt).toISOString(),
@@ -211,7 +211,7 @@ function toXrayJsonTest(result: PublishableResult, evidence: readonly EmbeddedEv
 
 function toXrayJsonIteration(iteration: RunArtifactIteration): XrayJsonIteration {
   // IterationResult.duration is a string in the schema; the artifact carries milliseconds. `parameters`
-  // is omitted — the artifact records iteration names only (accepted).
+  // is omitted; the artifact records iteration names only (accepted).
   return { name: iteration.name, status: XRAY_STATUS[iteration.outcome], duration: String(iteration.durationMs) };
 }
 
@@ -243,7 +243,7 @@ export interface CucumberStepResult {
   readonly duration?: number | undefined;
 }
 
-// Cucumber's evidence shape (`data` = base64, `mime_type` = content type) — Xray turns per-step
+// Cucumber's evidence shape (`data` = base64, `mime_type` = content type); Xray turns per-step
 // embeddings into test-run evidence.
 export interface CucumberEmbedding {
   readonly data: string;
@@ -296,7 +296,7 @@ export interface CucumberMultipartInput {
   readonly results: readonly PublishableResult[];
   readonly request: Extract<PublishRequest, { mode: "create-new" }>;
   readonly resolveSteps: StepResolver;
-  // The captured `scenario.filePath` is absolute (the P2 ArtifactBuilder stores it un-relativized —
+  // The captured `scenario.filePath` is absolute (the P2 ArtifactBuilder stores it un-relativized; see
   // run-artifact-store.ts); the publish flow supplies the owning workspace root PER feature so the
   // cucumber `uri` is workspace-relative even when a multi-root batch straddles folders. Undefined for
   // a given path → that path is forward-slashed but left as-is.
@@ -358,7 +358,7 @@ function toElements(
     elements = result.iterations.map((iteration) => ({
       keyword: "Scenario",
       type: "scenario",
-      name: `${result.scenario.name} — ${iteration.name}`,
+      name: `${result.scenario.name} (${iteration.name})`,
       tags,
       steps: toCucumberSteps(iteration.outcome, iteration.durationMs, steps),
     }));
@@ -373,7 +373,7 @@ function toElements(
       },
     ];
   }
-  // The result's evidence rides the first element's failing step (or its first step) — the artifact
+  // The result's evidence rides the first element's failing step (or its first step); the artifact
   // carries scenario-level refs, not per-iteration ones, so a data-driven result attaches to one row.
   const first = elements[0];
   if (evidence.length > 0 && first !== undefined && first.steps.length > 0) {
@@ -403,7 +403,7 @@ function stepResult(outcome: RunArtifactOutcome, durationMs: number, index: numb
     return { status: "passed", duration: index === 0 ? durationMs * MS_TO_NS : 0 };
   }
   if (outcome === "failed" || outcome === "timed-out") {
-    // First step carries the failure, the rest are skipped; no error_message — the artifact carries none.
+    // First step carries the failure, the rest are skipped; no error_message, the artifact carries none.
     return { status: index === 0 ? "failed" : "skipped" };
   }
   return { status: "skipped" };
@@ -420,7 +420,7 @@ function splitStep(text: string): { keyword: string; name: string } {
 }
 
 // Forward-slash the captured (absolute) feature path, and posix-relativize it against the workspace
-// root when one is supplied — falling back to the normalized path if the file sits outside the root.
+// root when one is supplied, falling back to the normalized path if the file sits outside the root.
 function featureUri(filePath: string, workspaceRoot: string | undefined): string {
   const normalized = normalizePath(filePath);
   if (workspaceRoot === undefined) {

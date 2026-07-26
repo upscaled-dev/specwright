@@ -57,7 +57,7 @@ export type StepsNode =
   | UnmatchedStepNode;
 
 const NO_DEFS_MESSAGE =
-  "No step definitions found — check playwrightBddRunner.stepDefinitionPaths.";
+  "No step definitions found: check playwrightBddRunner.stepDefinitionPaths.";
 const NO_UNMATCHED_MESSAGE = "No unmatched steps.";
 const DISABLED_MESSAGE =
   "Steps panel is disabled. Set playwrightBddRunner.enableStepsPanel to true to use it.";

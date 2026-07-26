@@ -148,7 +148,7 @@ export class XrayMetadataCapability
       return;
     }
     if (account === this.accountStamp) {
-      return; // same account (secret rotation only) — keep the in-memory state
+      return; // same account (secret rotation only); keep the in-memory state
     }
     // Account switched or cleared: drop the prior account's state before anything can render it.
     this.state = emptyState();
@@ -262,7 +262,7 @@ export class XrayMetadataCapability
 
   // Additive background merge for a test picked from remote search: fetch its metadata and fold it
   // into the in-memory snapshot without disturbing the catalogue (no completeness change, like a key
-  // batch). No per-key fallback — `fetchTestsByKeys` batches, and one stale key never poisons it.
+  // batch). No per-key fallback; `fetchTestsByKeys` batches, and one stale key never poisons it.
   public async mergeKeys(keys: readonly string[], signal?: AbortSignal): Promise<void> {
     const wanted = dedupe(keys.map((key) => this.canonicalizeKey(key))).filter((key) => key !== "");
     if (wanted.length === 0) {
@@ -270,7 +270,7 @@ export class XrayMetadataCapability
     }
     // Capture epoch AND account at entry (mirrors `sync`): the account is what persist keys off, and
     // the stamp-drift check below closes the window where this merge authenticated fresh with the NEW
-    // account's creds while capturing the OLD stamp — persisting its data under the old cache key
+    // account's creds while capturing the OLD stamp; persisting its data under the old cache key
     // would leak across accounts (§7).
     const epoch = this.accountEpoch;
     const account = this.accountStamp ?? (await this.deps.account());
@@ -295,7 +295,7 @@ export class XrayMetadataCapability
       merged.set(record.key, record);
       found.add(record.key);
     }
-    // A key the merge just found can't also be "verified absent" — drop it from the absent set so the
+    // A key the merge just found can't also be "verified absent"; drop it from the absent set so the
     // snapshot never carries a key in both (internally inconsistent, even if model precedence hides it).
     const verifiedAbsentKeys = this.state.verifiedAbsentKeys.filter((key) => !found.has(key));
     this.state = { ...this.state, tests: merged, verifiedAbsentKeys };
@@ -310,7 +310,7 @@ export class XrayMetadataCapability
     const projectKeys = dedupe(scope.projectKeys ?? []);
     const testKeys = dedupe(scope.testKeys ?? []);
     if (projectKeys.length === 0 && testKeys.length === 0) {
-      // Nothing to fetch and no errors possible — leave state, persistence, and listeners untouched.
+      // Nothing to fetch and no errors possible; leave state, persistence, and listeners untouched.
       return;
     }
     // Capture the account and epoch at entry: the epoch guards against a mid-sync switch, and the
@@ -359,12 +359,12 @@ export class XrayMetadataCapability
     if (signal?.aborted) {
       return;
     }
-    // Discard everything this sync fetched — no state commit, no persist, no fire — on either
+    // Discard everything this sync fetched (no state commit, no persist, no fire) on either
     // mid-sync account-change window:
     //   (a) the epoch moved: a credential change landed after entry;
     //   (b) the stamp drifted from the captured account: this sync entered after the epoch bump but
     //       before reconcile's restamp, so its JWT had been invalidated and it authenticated fresh
-    //       with the NEW account's credentials while capturing the OLD stamp — its data belongs to
+    //       with the NEW account's credentials while capturing the OLD stamp; its data belongs to
     //       the new account and must not land under the old one.
     if (
       epoch !== this.accountEpoch ||
@@ -377,7 +377,7 @@ export class XrayMetadataCapability
 
     const gotData = merged.size > 0;
     // Total failure with data already on screen: keep the previous tests + completeness rather than
-    // blanking the panel or lying about coverage — only surface the errors and re-emit.
+    // blanking the panel or lying about coverage; only surface the errors and re-emit.
     if (!gotData && errors.length > 0 && this.state.tests.size > 0) {
       this.state = { ...this.state, errors };
       this._onDidChange.fire();
@@ -401,7 +401,7 @@ export class XrayMetadataCapability
   }
 
   // Completeness describes catalogue integrity only: project scope present, every project's pages
-  // complete, no catalogue errors — all already folded into `catalogueComplete` by the per-project
+  // complete, no catalogue errors; all already folded into `catalogueComplete` by the per-project
   // loop. A key batch, present or failed, never demotes it (its errors surface in `errors` only).
   // A key-batch-only or otherwise-incomplete fetch is "partial"; no data at all is "unknown".
   private completenessFor(
@@ -429,7 +429,7 @@ export class XrayMetadataCapability
   }
 
   // §8-P1 drift-basis guard: for the user's first real sync, confirm the local reconstruction's
-  // comparison basis against real stored-gherkin shapes — logging only booleans/counts, never the
+  // comparison basis against real stored-gherkin shapes, logging only booleans/counts, never the
   // Gherkin text (the key is a tag already in the repo, not a secret).
   private logDriftBasis(tests: Map<string, TestCaseMetadata>): void {
     for (const test of tests.values()) {
@@ -457,7 +457,7 @@ export class XrayMetadataCapability
       this.deps.logger.warn(`Xray metadata cache load failed: ${String(error)}`);
       return;
     }
-    // A credential change during the load supersedes it — reconcileAccount owns the state now.
+    // A credential change during the load supersedes it; reconcileAccount owns the state now.
     if (epoch !== this.accountEpoch) {
       return;
     }
@@ -469,7 +469,7 @@ export class XrayMetadataCapability
     this._onDidChange.fire();
   }
 
-  // `account` is the identifier captured at sync entry, not a live read — the data belongs to that
+  // `account` is the identifier captured at sync entry, not a live read; the data belongs to that
   // account, so it is keyed there even if the live credentials have since rotated.
   private async persist(account: string | undefined): Promise<void> {
     if (this.state.syncedAt === undefined) {

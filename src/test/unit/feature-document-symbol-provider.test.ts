@@ -12,7 +12,7 @@ function fakeDocument(text: string): vscode.TextDocument {
   return { getText: () => text } as unknown as vscode.TextDocument;
 }
 
-describe("FeatureDocumentSymbolProvider — empty / malformed", () => {
+describe("FeatureDocumentSymbolProvider: empty / malformed", () => {
   it("returns [] for empty content", () => {
     expect(buildSymbols("")).toEqual([]);
   });
@@ -32,7 +32,7 @@ describe("FeatureDocumentSymbolProvider — empty / malformed", () => {
   });
 });
 
-describe("FeatureDocumentSymbolProvider — simple feature", () => {
+describe("FeatureDocumentSymbolProvider: simple feature", () => {
   it("returns one Feature root with two Scenario children", () => {
     const content = lines(
       "Feature: Plain",
@@ -56,7 +56,7 @@ describe("FeatureDocumentSymbolProvider — simple feature", () => {
   });
 });
 
-describe("FeatureDocumentSymbolProvider — Background + Scenarios", () => {
+describe("FeatureDocumentSymbolProvider: Background + Scenarios", () => {
   it("returns Feature root with Background + 2 Scenario children", () => {
     const content = lines(
       "Feature: WithBg",
@@ -81,7 +81,7 @@ describe("FeatureDocumentSymbolProvider — Background + Scenarios", () => {
   });
 });
 
-describe("FeatureDocumentSymbolProvider — Rule containing scenarios", () => {
+describe("FeatureDocumentSymbolProvider: Rule containing scenarios", () => {
   it("nests scenarios under their Rule", () => {
     const content = lines(
       "Feature: WithRule",
@@ -129,7 +129,7 @@ describe("FeatureDocumentSymbolProvider — Rule containing scenarios", () => {
   });
 });
 
-describe("FeatureDocumentSymbolProvider — tags as detail", () => {
+describe("FeatureDocumentSymbolProvider: tags as detail", () => {
   it("emits tags as detail joined with a space", () => {
     const content = lines(
       "Feature: Tagged",
@@ -155,7 +155,7 @@ describe("FeatureDocumentSymbolProvider — tags as detail", () => {
   });
 });
 
-describe("FeatureDocumentSymbolProvider — mixed block kinds", () => {
+describe("FeatureDocumentSymbolProvider: mixed block kinds", () => {
   it("picks up Scenario, Scenario Outline, Example, Background with correct kinds", () => {
     const content = lines(
       "Feature: Mixed",
@@ -208,7 +208,7 @@ describe("FeatureDocumentSymbolProvider — mixed block kinds", () => {
   });
 });
 
-describe("FeatureDocumentSymbolProvider — ranges", () => {
+describe("FeatureDocumentSymbolProvider: ranges", () => {
   it("sets the Feature range to span the whole document and selectionRange to its keyword line", () => {
     const content = lines(
       "Feature: Spans",

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { contentSecurityPolicy, createNonce, escapeHtml } from "../utils/webview";
+import { errMsg, scrubJwtLike } from "../utils/text";
 import { normalizeSiteUrl } from "./xray-adapter";
 import { JiraProject } from "./jira-project-search";
 import { XrayConnectionOutcome, XrayProjectSummary } from "./xray-connection-test";
@@ -125,7 +126,7 @@ function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): st
   const jiraValue = hasJira ? MASK : "";
   // Always emit the hint so the retained panel can un-hide it after a first-time save without a
   // re-render (a re-render would reload the page and race the posted `saved` message).
-  const credHint = `<p class="hint" id="cred-hint"${hasCredentials ? "" : " hidden"}>Credentials are stored for this site. The masked fields keep the stored credentials — type over a field to replace it.</p>`;
+  const credHint = `<p class="hint" id="cred-hint"${hasCredentials ? "" : " hidden"}>Credentials are stored for this site. The masked fields keep the stored credentials; type over a field to replace it.</p>`;
   // Stored credentials render the neutral "checking" dot and kick off an auth-only verify; the
   // green dot only appears once that handshake succeeds. No credentials → plain red "Not connected".
   const dotClass = hasCredentials ? " checking" : "";
@@ -302,7 +303,7 @@ function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): st
   function probedPhrase(s) {
     if (s.existsOnSite === false) { return s.project + ': not found on this site'; }
     if (s.existsOnSite === undefined && s.totalTests === 0) {
-      return s.project + ": 0 Xray tests — project may not exist, can't verify without Jira access";
+      return s.project + ": 0 Xray tests; project may not exist, can't verify without Jira access";
     }
     return s.project + ': ' + s.totalTests + ' Xray tests';
   }
@@ -325,7 +326,7 @@ function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): st
     projectView.appendChild(el);
   }
 
-  // Values come from Jira and are rendered with textContent only — never innerHTML — so a project
+  // Values come from Jira and are rendered with textContent only, never innerHTML, so a project
   // name can never inject markup past the CSP.
   function renderProjectView(msg) {
     projectView.textContent = '';
@@ -338,7 +339,7 @@ function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): st
       appendHeading(msg.jiraTruncated
         ? 'Accessible Jira projects (' + msg.jiraProjects.length + '+, list truncated)'
         : 'Accessible Jira projects (' + msg.jiraProjects.length + ')');
-      appendList(msg.jiraProjects, function (p) { return p.key + ' — ' + p.name; });
+      appendList(msg.jiraProjects, function (p) { return p.key + ': ' + p.name; });
     }
     if (msg.probed.length > 0) {
       appendHeading('Xray coverage for tagged projects');
@@ -458,7 +459,7 @@ export class XraySetupPanel {
     }
   }
 
-  // A submitted MASK means "keep the stored value" — but only for the host the mask was issued for.
+  // A submitted MASK means "keep the stored value", but only for the host the mask was issued for.
   // Per-field so the user can rotate one credential while leaving the other masked; a host change
   // (or a mask with nothing stored) can never carry an old secret forward.
   private async resolveCredentials(message: SaveMessage): Promise<ResolvedCredentials> {
@@ -499,7 +500,7 @@ export class XraySetupPanel {
 
   // Jira mirror of resolveCredentials with an extra both-or-neither rule: a masked field keeps its
   // stored value (same host only), and a form with exactly one Jira field filled is rejected. Both
-  // blank means "no Jira access" — a valid state that clears any stored pair.
+  // blank means "no Jira access", a valid state that clears any stored pair.
   private async resolveJira(message: SaveMessage): Promise<ResolvedJira> {
     let email = message.jiraEmail;
     let token = message.jiraToken;
@@ -599,7 +600,7 @@ export class XraySetupPanel {
       }
       await this.post({ type: "saved", site, jira: jira.store });
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = scrubJwtLike(errMsg(error));
       await this.post({ type: "error", message: `Could not save: ${reason}` });
       return;
     }
@@ -627,7 +628,7 @@ export class XraySetupPanel {
       if (this.stale(epoch)) {
         return;
       }
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = scrubJwtLike(errMsg(error));
       await this.post({ type: "conn-state", state: "disconnected", label: "Not connected" });
       await this.post({ type: "error", message: `${options.throwPrefix}: ${reason}` });
       return;
@@ -648,7 +649,7 @@ export class XraySetupPanel {
       if (this.stale(epoch)) {
         return;
       }
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = scrubJwtLike(errMsg(error));
       await this.post({ type: "conn-state", state: "disconnected", label: "Not connected" });
       await this.post({ type: "error", message: `${options.throwPrefix}: ${reason}` });
       return;

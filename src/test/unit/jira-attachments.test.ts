@@ -69,7 +69,7 @@ describe("uploadJiraAttachments", () => {
     expect(headers["Authorization"]).toBe(`Basic ${Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64")}`);
   });
 
-  it("isolates a per-file failure — the 4xx file fails, the others upload", async () => {
+  it("isolates a per-file failure: the 4xx file fails, the others upload", async () => {
     const fetchImpl: FetchLike = (_u, init) => {
       const body = init.body as FormData;
       const file = body.get("file") as { name?: string } | null;

@@ -102,7 +102,7 @@ export class BreakpointMirror {
       debugApi.onDidTerminateDebugSession((session) => {
         const ownId = session.configuration?.[BreakpointMirror.SESSION_KEY] as unknown;
         if (typeof ownId === "string" && this.mirrors.has(ownId)) {
-          // The parent itself terminated (manual disconnect) — nothing left to stop.
+          // The parent itself terminated (manual disconnect), nothing left to stop.
           this.release(ownId);
           return;
         }
@@ -133,7 +133,7 @@ export class BreakpointMirror {
 
   /**
    * Always returns a mirror id, even when the spec is unreadable/unparseable or no breakpoint
-   * maps (then the id tracks an empty key list) — every debug session must be tracked so
+   * maps (then the id tracks an empty key list); every debug session must be tracked so
    * session-end detection and auto-disconnect work universally.
    */
   public mirrorBreakpoints(featureFsPath: string, specFsPath: string | undefined): string {
@@ -161,7 +161,7 @@ export class BreakpointMirror {
     const featureBreakpoints = sourceBreakpoints.filter((bp) =>
       samePath(bp.location.uri.fsPath, featureFsPath)
     );
-    // A breakpoint the user placed in the generated spec already serves the line, so we skip it —
+    // A breakpoint the user placed in the generated spec already serves the line, so we skip it,
     // but our own mirrors from concurrent sessions must not count as occupied: those are
     // reference-counted below instead.
     const mirrorOwned = new Set(
@@ -223,7 +223,7 @@ export class BreakpointMirror {
   /**
    * Force the session for a mirror down: stop its root session (when known) and
    * release the mirror. Used as a watchdog escape when the natural teardown chain
-   * (last child session terminates → root stopped) wedges — e.g. pnpm process trees
+   * (last child session terminates → root stopped) wedges, e.g. pnpm process trees
    * leaving a debug-attached child alive, or no child session ever attaching.
    */
   public async forceStop(mirrorId: string): Promise<void> {

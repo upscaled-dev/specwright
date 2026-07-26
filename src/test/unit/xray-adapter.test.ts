@@ -214,13 +214,13 @@ describe("createXrayAdapterFactory verify", () => {
       ok: false,
       stage: "network",
       site: "acme.atlassian.net",
-      message: "Could not reach Xray — check your network connection.",
+      message: "Could not reach Xray: check your network connection.",
     });
     const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), NOOP_PUBLISH_SUPPORT).create({ config, logger: Logger.create() });
 
     expect(await adapter.connection!.verify!()).toEqual({
       status: "unreachable",
-      message: "Could not reach Xray — check your network connection.",
+      message: "Could not reach Xray: check your network connection.",
     });
   });
 
@@ -231,13 +231,13 @@ describe("createXrayAdapterFactory verify", () => {
       ok: false,
       stage: "auth",
       site: "acme.atlassian.net",
-      message: "Authentication failed — check your client ID and secret.",
+      message: "Authentication failed: check your client ID and secret.",
     });
     const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), NOOP_PUBLISH_SUPPORT).create({ config, logger: Logger.create() });
 
     expect(await adapter.connection!.verify!()).toEqual({
       status: "auth-failed",
-      message: "Authentication failed — check your client ID and secret.",
+      message: "Authentication failed: check your client ID and secret.",
     });
   });
 });

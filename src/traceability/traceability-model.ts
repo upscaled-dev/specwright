@@ -53,7 +53,7 @@ export interface UntracedScenario {
   scenario: ScenarioRef;
   reqKeys: string[];
   // Tags carrying the test prefix whose key body is malformed (`@TEST_notakey`). Non-empty means the
-  // scenario is untraced because of a broken tag, not the absence of one — preflight reads this to
+  // scenario is untraced because of a broken tag, not the absence of one; preflight reads this to
   // classify `invalid-key` rather than `unmapped`. Always populated by the model; optional only so a
   // hand-built snapshot fixture need not spell out an empty list.
   malformedTags?: string[] | undefined;
@@ -100,7 +100,7 @@ export function findLinkForScenario(
 }
 
 // The link dialog's "Linked" section: the links a scenario already carries `@TEST_` tags for.
-// Stricter than `sameScenario` on purpose — two scenarios with the same name in one file (a tagged
+// Stricter than `sameScenario` on purpose; two scenarios with the same name in one file (a tagged
 // scenario and its untagged twin) must never be conflated, or the dialog would claim the untagged
 // twin is linked to the sibling's test. A real 1-based line on both sides is decisive; only a
 // line-less ref keeps `sameScenario`'s title fallback (the outline-row reunification the snapshot
@@ -136,7 +136,7 @@ export function worstStatus(
 }
 
 // Mirrors PlaywrightBddTestProvider.resolveStatusForItem: outline example rows are titled
-// "Example #N" (or the substituted title) in the report, never the tree's synthetic row label —
+// "Example #N" (or the substituted title) in the report, never the tree's synthetic row label,
 // so line-based match is primary, then the source name, then the substituted title.
 function lookupStatus(
   statusMap: Record<string, ScenarioStatus>,
@@ -321,7 +321,7 @@ export function buildTraceabilitySnapshot(
       const ref: ScenarioRef = {
         filePath,
         line: sample.examplesBlockLineNumber,
-        name: blockName ? `${outlineName} — ${blockName}` : outlineName,
+        name: blockName ? `${outlineName} · ${blockName}` : outlineName,
         kind: "examplesBlock",
         outlineName,
         ...(blockName ? { examplesBlockName: blockName } : {}),
@@ -411,13 +411,13 @@ function isProvablyAbsent(
 }
 
 // A successful key-batch fetch that queried this key and did not get it back proves absence outright
-// (§5), independent of catalogue scope or completeness — this covers a tag whose project is not in
+// (§5), independent of catalogue scope or completeness; this covers a tag whose project is not in
 // the configured catalogue scope.
 function isVerifiedAbsent(testKey: string, remote: RemoteMetadataSnapshot | undefined): boolean {
   return remote?.verifiedAbsentKeys.some((key) => key.toLowerCase() === testKey.toLowerCase()) ?? false;
 }
 
-// Orphans are only authoritative on a complete catalogue fetch — a partial or unknown snapshot may
+// Orphans are only authoritative on a complete catalogue fetch; a partial or unknown snapshot may
 // be missing the very scenarios that would cover a key, so it can never yield orphan counts.
 function computeOrphans(links: TraceLink[], remote: RemoteMetadataSnapshot): OrphanTest[] {
   if (remote.completeness !== "complete") {
@@ -521,7 +521,7 @@ export class TraceabilityModel implements vscode.Disposable {
   // Explorer run still badges the tree (store-only). When both exist, a coarse whole-map mtime check
   // keeps a stale store outcome from permanently masking a newer external report: a report written
   // after the last ingest wins the whole map, otherwise the store does. Per-key is impossible with a
-  // single report timestamp — that limitation is accepted. A never-fed store collapses to scan-only.
+  // single report timestamp; that limitation is accepted. A never-fed store collapses to scan-only.
   private async readStatusMap(): Promise<Record<string, ScenarioStatus>> {
     const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
     const found = await findPlaywrightReport(roots);

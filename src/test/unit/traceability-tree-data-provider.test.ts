@@ -425,10 +425,10 @@ describe("TraceabilityTreeDataProvider", () => {
 
   it("labels the row with the product name, keeps the site host and provider detail in the tooltip, and carries the setup command", () => {
     const p = provider(SNAPSHOT);
-    p.setConnectionIndicator({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme — project CALC" });
+    p.setConnectionIndicator({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme; project CALC" });
     const item = p.getTreeItem(p.getChildren()[0]!);
     expect(item.label).toBe("Xray Cloud");
-    expect(item.tooltip).toBe("acme.atlassian.net\nConnected to acme — project CALC");
+    expect(item.tooltip).toBe("acme.atlassian.net\nConnected to acme; project CALC");
     expect(item.contextValue).toBe("traceabilityConnection");
     expect((item.command as { command: string }).command).toBe("playwrightBddRunner.traceability.connect");
   });
@@ -538,14 +538,14 @@ describe("TraceabilityTreeDataProvider remote summaries and N/M badges", () => {
       links: [
         {
           testKey: "MUL-1",
-          scenario: { filePath: "/ws/a.feature", line: 8, name: "multiply — small", kind: "examplesBlock", outlineName: "multiply", examplesBlockName: "small" },
+          scenario: { filePath: "/ws/a.feature", line: 8, name: "multiply · small", kind: "examplesBlock", outlineName: "multiply", examplesBlockName: "small" },
           reqKeys: [],
           lastResult: "failed",
           iterations: { passed: 2, total: 3 },
         },
         {
           testKey: "MUL-1",
-          scenario: { filePath: "/ws/a.feature", line: 14, name: "multiply — big", kind: "examplesBlock", outlineName: "multiply", examplesBlockName: "big" },
+          scenario: { filePath: "/ws/a.feature", line: 14, name: "multiply · big", kind: "examplesBlock", outlineName: "multiply", examplesBlockName: "big" },
           reqKeys: [],
           lastResult: "passed",
           iterations: { passed: 1, total: 2 },

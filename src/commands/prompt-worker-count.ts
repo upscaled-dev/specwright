@@ -98,7 +98,7 @@ async function promptUserForWorkerCount(): Promise<number | undefined> {
     { label: "Custom…" },
   ];
   const pick = await vscode.window.showQuickPick(items, {
-    title: "Run in Parallel — choose worker count",
+    title: "Run in Parallel: choose worker count",
     placeHolder: "Select the number of Playwright workers",
     ignoreFocusOut: true,
   });

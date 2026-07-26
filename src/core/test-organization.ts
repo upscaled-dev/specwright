@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { Scenario, TestGroup, TestOrganizationStrategy } from "../types";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 
 // win32.basename splits on both / and \, so labels stay correct for paths from either platform.
 function fileBasename(filePath: string): string {
@@ -121,7 +122,7 @@ export class TagBasedOrganization implements TestOrganizationStrategy {
       return groups;
     } catch (error) {
       this.logger.error("Failed to organize tests by tags", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
         stack: error instanceof Error ? error.stack : undefined,
       });
       // Fallback to flat organization
@@ -457,7 +458,7 @@ export class TestOrganizationManager {
       return result;
     } catch (error) {
       this.logger.error("Failed to organize tests", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
         stack: error instanceof Error ? error.stack : undefined,
         strategy: this.currentStrategy.constructor.name,
       });

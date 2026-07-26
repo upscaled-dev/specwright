@@ -88,7 +88,7 @@ describe("isSameOrInsideDir", () => {
     expect(isSameOrInsideDir("/repo/pkg-other", "/repo/pkg", /*caseInsensitive*/ false)).toBe(false);
   });
 
-  it("matches case-insensitively — the canonicalCwd uppercase-drive vs lowercase-fsPath case", () => {
+  it("matches case-insensitively: the canonicalCwd uppercase-drive vs lowercase-fsPath case", () => {
     // On Windows the cwd is canonicalized to an uppercase drive while the workspace folder's
     // uri.fsPath keeps the lowercase drive VS Code produced; the two must still match.
     expect(isSameOrInsideDir("/Repo/pkg/e2e", "/repo/pkg", /*caseInsensitive*/ true)).toBe(true);

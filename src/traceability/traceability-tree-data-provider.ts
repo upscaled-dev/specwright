@@ -142,7 +142,7 @@ function sameIndicator(
 }
 
 // Coarse "time ago" for the sync staleness suffix (§7). Minutes below an hour, hours below a day,
-// then days — enough resolution for a manually-triggered sync.
+// then days, enough resolution for a manually-triggered sync.
 export function formatSyncedAgo(elapsedMs: number): string {
   const minutes = Math.floor(elapsedMs / 60_000);
   if (minutes < 1) {
@@ -470,7 +470,7 @@ export class TraceabilityTreeDataProvider
   }
 
   // Untraced first (the gap bucket is the work queue), then covered, then orphans last. Orphans
-  // render only on a complete catalogue fetch — a partial/unknown snapshot can never distinguish a
+  // render only on a complete catalogue fetch; a partial/unknown snapshot can never distinguish a
   // genuine orphan from a key whose covering scenario simply wasn't fetched (§2).
   private testRoots(): TraceabilityNode[] {
     const sections: TraceabilityNode[] = [

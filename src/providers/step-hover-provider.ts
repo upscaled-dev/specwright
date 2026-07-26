@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import { StepResolver, ParsedStepDefWithFile, ParsedFeatureStep } from "./step-resolver";
 import { STEP_KEYWORDS } from "./step-keywords";
 import { computeSkipRanges } from "./feature-skip-ranges";
@@ -46,7 +47,7 @@ export class StepHoverProvider implements vscode.HoverProvider {
       return await this.resolver.loadAllStepDefs(this.stepGlobs);
     } catch (error) {
       this.logger.warn("StepHoverProvider: failed to load step defs", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       return undefined;
     }
@@ -65,10 +66,10 @@ function buildHoverMarkdown(matches: ParsedStepDefWithFile[]): vscode.MarkdownSt
   // so the markdown must stay untrusted.
   const md = new vscode.MarkdownString();
   const suffix = matches.length > 1 ? "es" : "";
-  md.appendMarkdown(`**Playwright-BDD step** — ${matches.length} match${suffix}\n\n`);
+  md.appendMarkdown(`**Playwright-BDD step**: ${matches.length} match${suffix}\n\n`);
   for (const match of matches) {
     const rel = toWorkspaceRelative(match.filePath);
-    md.appendMarkdown(`- \`${match.pattern}\` — ${rel}:${match.line + 1}\n`);
+    md.appendMarkdown(`- \`${match.pattern}\`: ${rel}:${match.line + 1}\n`);
   }
   return md;
 }

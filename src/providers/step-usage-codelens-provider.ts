@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { ParsedStepDefWithFile } from "./step-resolver";
 import { extractStepDefsFromSource } from "./step-definition-provider";
 import { StepUsageIndex } from "./step-usage-index";
+import { plural } from "../utils/text";
 
 export class StepUsageCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
   private readonly _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
@@ -46,6 +47,5 @@ export class StepUsageCodeLensProvider implements vscode.CodeLensProvider, vscod
 
 function titleFor(count: number): string {
   if (count === 0) {return "Unused";}
-  const suffix = count === 1 ? "" : "s";
-  return `Used ${count} time${suffix}`;
+  return `Used ${count} ${plural(count, "time")}`;
 }

@@ -180,7 +180,7 @@ describe("StepCodeActionProvider", () => {
   });
 
   it("still offers the quick fix for a reconstructed (value-equal) diagnostic", async () => {
-    // VS Code does not hand back the Diagnostic instances we published — it
+    // VS Code does not hand back the Diagnostic instances we published; it
     // reconstructs equivalent ones for CodeActionContext.diagnostics.
     const resolver = new StepResolver();
     resolver.loadAllStepDefs = async () => [];

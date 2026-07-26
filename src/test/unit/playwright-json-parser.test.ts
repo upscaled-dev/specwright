@@ -224,7 +224,7 @@ describe("PlaywrightJsonParser", () => {
         featurePath: "",
         steps: [{ title: 'Given I have a "hello" value', status: "passed" }],
       }]));
-      expect(out).toContain("✔ Scenario Outline: Test scenario outline — Example #1");
+      expect(out).toContain("✔ Scenario Outline: Test scenario outline (Example #1)");
       expect(out).toContain('    ✔ Given I have a "hello" value');
     });
 

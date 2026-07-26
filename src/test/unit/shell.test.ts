@@ -28,9 +28,9 @@ describe("shellQuote", () => {
   });
 
   describe("win32 (cmd.exe / CommandLineToArgvW)", () => {
-    it("leaves path backslashes alone — the spec-line target must survive verbatim", () => {
+    it("leaves path backslashes alone: the spec-line target must survive verbatim", () => {
       // POSIX-style doubling turned this into dir\\file…:12, a Playwright filter matching
-      // nothing — the silent fallback that ran a whole outline instead of one example row.
+      // nothing, the silent fallback that ran a whole outline instead of one example row.
       expect(shellQuote(".features-gen\\features\\sample.feature.spec.js:12", "win32")).toBe(
         '".features-gen\\features\\sample.feature.spec.js:12"'
       );

@@ -343,7 +343,7 @@ function renderFeature(
   // <summary> and before </details> are required for the inner Markdown to render.
   const lines = [
     detailsTag(collapsed),
-    `<summary><strong>${title}</strong> — ${count}</summary>`,
+    `<summary><strong>${title}</strong>: ${count}</summary>`,
     "",
     `${featureLevel} ${title}`,
     `\`${feature.pathRel}\``,

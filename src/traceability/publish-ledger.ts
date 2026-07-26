@@ -1,15 +1,15 @@
 import type { Memento } from "vscode";
 import { Logger } from "../utils/logger";
 
-// One recorded publish. `account` is the non-secret clientId (§7 — never derived from a secret);
+// One recorded publish. `account` is the non-secret clientId (§7, never derived from a secret);
 // `site` scopes the entry so a stale-site key never confuses the current connection. `executionRef`
 // is the created/appended execution KEY (the browse-link identity). `pendingAttachments` are the
-// absolute file paths that failed to upload after a successful import — the resume/retry routine
+// absolute file paths that failed to upload after a successful import; the resume/retry routine
 // replays them WITHOUT re-importing, and clears the ones that then succeed.
 //
 // `summary`, `mode`, the passed/failed/skipped counts, and `total` back the Executions board (what
 // this workspace has published). They are optional because entries written before the ledger recorded
-// them have none — readers render a dash rather than migrating the store. `total` is the whole
+// them have none; readers render a dash rather than migrating the store. `total` is the whole
 // publishable count: it can exceed passed+failed+skipped when a result timed out or was interrupted,
 // so the board reads it for Imported and dashes the pass rate when the three counts do not add up.
 export interface LedgerEntry {
@@ -43,7 +43,7 @@ export function withLedgerEntry(entries: readonly LedgerEntry[], entry: LedgerEn
   return [entry, ...entries].slice(0, MAX_ENTRIES);
 }
 
-// The most recent entry for this artifact ON THE CURRENT SITE — the idempotency banner reads it.
+// The most recent entry for this artifact ON THE CURRENT SITE; the idempotency banner reads it.
 // Site-scoping is deliberate: a key published under a different site says nothing about this one.
 export function findLedgerEntry(
   entries: readonly LedgerEntry[],
@@ -53,7 +53,7 @@ export function findLedgerEntry(
   return entries.find((entry) => entry.artifactId === artifactId && entry.site === site);
 }
 
-// Replaces the pending list of the NEWEST matching entry only (order preserved) — the resume/retry
+// Replaces the pending list of the NEWEST matching entry only (order preserved); the resume/retry
 // routine records which files are still pending after a replay. A republished run has one entry per
 // publish (recordPublish prepends), so touching only the first match keeps an earlier publish's
 // pending record intact. A no-op when nothing matches.
@@ -113,7 +113,7 @@ export class PublishLedger {
     return findLedgerEntry(this.entries, artifactId, site);
   }
 
-  // Entries for the current site only — the tree/board never renders another site's keys.
+  // Entries for the current site only; the tree/board never renders another site's keys.
   public entriesForSite(site: string): LedgerEntry[] {
     return this.entries.filter((entry) => entry.site === site);
   }

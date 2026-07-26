@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import { TAG_TOKEN_PATTERN } from "../parsers/tag-regex";
 import {
   isUnderExcludedDir,
@@ -56,7 +57,7 @@ export class TagIndex implements vscode.Disposable {
       uris = await vscode.workspace.findFiles(pattern, workspaceExcludeGlob());
     } catch (error) {
       this.logger.warn("TagIndex: findFiles failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       uris = [];
     }
@@ -91,7 +92,7 @@ export class TagIndex implements vscode.Disposable {
       bytes = await vscode.workspace.fs.readFile(uri);
     } catch (error) {
       this.logger.warn(`TagIndex: could not read ${uri.fsPath}`, {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       return;
     }

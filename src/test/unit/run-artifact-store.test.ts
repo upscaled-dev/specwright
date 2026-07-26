@@ -317,7 +317,7 @@ describe("testKey threading and preflight decisions", () => {
     const store = new RunArtifactStore(fakeMemento(), logger);
     let currentKey = "K1";
     // The factory snapshots currentKey's value when called (at beginBatch), mirroring how the
-    // subsystem snapshots the links array — later mutation of currentKey must not leak in.
+    // subsystem snapshots the links array; later mutation of currentKey must not leak in.
     store.setKeyResolver(() => {
       const frozen = currentKey;
       return (s) => (s.name === "S" ? frozen : undefined);

@@ -238,7 +238,7 @@ describe("XrayClient invalidateAuth during an in-flight authenticate", () => {
     await first;
     usedBearers.length = 0;
     await client.fetchProjectCatalogue("PHYS");
-    expect(authCalls).toBe(2); // JWT2 reused — the stale token never clobbered the cache
+    expect(authCalls).toBe(2); // JWT2 reused; the stale token never clobbered the cache
     expect(usedBearers).toEqual([`Bearer ${JWT2}`]);
   });
 });
@@ -293,7 +293,7 @@ describe("XrayClient pagination", () => {
         if (start === 0) {
           return testsPage(Array.from({ length: 100 }, (_v, i) => `CALC-${i + 1}`), 150);
         }
-        return testsPage([], 150); // empty page while start < total — a short/anomalous fetch
+        return testsPage([], 150); // empty page while start < total, a short/anomalous fetch
       }),
     });
 
@@ -365,7 +365,7 @@ describe("XrayClient auth refresh on 401", () => {
 
     const outcome = await client.fetchProjectCatalogue("CALC");
 
-    // Initial auth + exactly one refresh — an infinite-refresh regression makes these grow unbounded.
+    // Initial auth + exactly one refresh; an infinite-refresh regression makes these grow unbounded.
     expect(authCalls).toBe(2);
     expect(graphqlCalls).toBe(2);
     expect(outcome.complete).toBe(false);

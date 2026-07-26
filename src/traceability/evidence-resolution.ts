@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { plural } from "../utils/text";
 
-// Conservative caps — the official Xray import size limits are undocumented (open item). A single
+// Conservative caps; the official Xray import size limits are undocumented (open item). A single
 // evidence file over the file cap, or one that would push the running total past the total cap, is
 // skipped with a surfaced note rather than silently dropped or sent oversize.
 export const EVIDENCE_MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -31,7 +31,7 @@ function refBaseName(ref: string): string {
   return parts[parts.length - 1] ?? ref;
 }
 
-// The fs seam evidence resolution reads through — the `nodeEvidenceFs` default is swapped for a fake
+// The fs seam evidence resolution reads through; the `nodeEvidenceFs` default is swapped for a fake
 // map in tests so no real screenshot has to exist on disk.
 export interface EvidenceFs {
   exists(absPath: string): boolean;
@@ -58,7 +58,7 @@ export interface EvidenceSkip {
   readonly reason: EvidenceSkipReason;
 }
 
-// The distinct workspace-folder roots owning the artifact's shard working dirs (multi-root aware) —
+// The distinct workspace-folder roots owning the artifact's shard working dirs (multi-root aware);
 // an evidenceRef relativized against one run folder resolves against that folder, first existing wins.
 export function evidenceRoots(
   workingDirs: readonly string[],
@@ -114,7 +114,7 @@ export class EvidenceEmbedder {
 
 const MB = 1024 * 1024;
 
-// A single surfaced note for every skip reason (never silent — same bar as preflight). Counts are
+// A single surfaced note for every skip reason (never silent, same bar as preflight). Counts are
 // grouped so the toast reads "Skipped 2 files over 5 MB, 1 evidence file not found."
 export function summarizeEvidenceSkips(skips: readonly EvidenceSkip[]): string | undefined {
   if (skips.length === 0) {

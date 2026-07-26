@@ -64,18 +64,18 @@ export interface SyncScope {
 }
 
 // The offline-first metadata snapshot. `completeness` describes catalogue integrity only (project
-// scope present, every project's pages complete, no catalogue errors — a supplemental key batch,
+// scope present, every project's pages complete, no catalogue errors; a supplemental key batch,
 // present or failed, never affects it) and gates orphan derivation: orphans are only authoritative
-// on a `"complete"` catalogue fetch — a `"partial"` or `"unknown"` snapshot must never yield orphan
+// on a `"complete"` catalogue fetch; a `"partial"` or `"unknown"` snapshot must never yield orphan
 // counts.
 export interface RemoteMetadataSnapshot {
   readonly tests: ReadonlyMap<string, TestCaseMetadata>;
   readonly fetchedScopes: readonly string[];
   // The project keys whose full catalogue this snapshot attempted; authoritative for key-absence
   // verdicts only when `completeness === "complete"` (which already implies every catalogue page
-  // complete with no catalogue errors — `errors` may still carry key-batch failures).
+  // complete with no catalogue errors; `errors` may still carry key-batch failures).
   readonly catalogueProjects: readonly string[];
-  // Canonical keys a *successful* key-batch fetch explicitly queried and the remote did not return —
+  // Canonical keys a *successful* key-batch fetch explicitly queried and the remote did not return,
   // authoritative absence evidence regardless of `completeness` (§5 key-batch leniency: getTests
   // silently omits nonexistent keys and still returns 200). A failed or partial batch contributes
   // nothing.
@@ -100,7 +100,7 @@ export type BatchSelection =
 
 // Preflight verdict for one scenario about to run in a batch. `ready` means publishable-in-principle;
 // every other state needs an explicit decision before the batch runs. `not-in-target-plan` is
-// declared for slice 2d's plan lookup — 2c never produces it.
+// declared for slice 2d's plan lookup; 2c never produces it.
 export type PreflightState =
   | "ready"
   | "unmapped"
@@ -124,7 +124,7 @@ export interface PreflightItem {
 }
 
 // The automation-binding hook's verdict for a target test's metadata. `unknown` (no metadata / a
-// partial snapshot) never blocks — preflight maps it to `ready` with an honest note.
+// partial snapshot) never blocks; preflight maps it to `ready` with an honest note.
 export type AutomationBindingClassification =
   | "compatible"
   | "incompatible-test-type"
@@ -169,7 +169,7 @@ export interface ShardInfo {
 }
 
 // A non-`ready` preflight item's recorded resolution, sealed onto the artifact. `repair`/`cancel`
-// never reach here — repair loops back into classification and cancel runs nothing.
+// never reach here; repair loops back into classification and cancel runs nothing.
 export interface PreflightDecision {
   readonly scenario: ScenarioRef;
   readonly testKey?: string | undefined;
@@ -210,7 +210,7 @@ export interface PublishTarget {
 
 // The user's resolved publish choice. Create-new drives the Cucumber multipart importer (project +
 // summary + optional plan/environments); append drives the Xray JSON importer (top-level execution
-// key, project derived from it). Always asked — never a remembered key (§2).
+// key, project derived from it). Always asked, never a remembered key (§2).
 export type PublishRequest =
   | {
       readonly mode: "create-new";
@@ -224,7 +224,7 @@ export type PublishRequest =
 // The result of a successful publish: the created/appended execution, how many results the import
 // carried, and any honest notes (e.g. scenarios dropped because their source changed since the run,
 // or evidence files skipped for size). `issueEvidenceFiles` are per-result evidence paths the
-// `xray.attachTo` mode routes to the Jira issue rather than the payload — the flow uploads them
+// `xray.attachTo` mode routes to the Jira issue rather than the payload; the flow uploads them
 // (alongside the dialog's run-level picks) after a successful import.
 export interface PublishOutcome {
   readonly ref: ExecutionRef;
@@ -241,13 +241,13 @@ export interface ConnectionVerifyResult {
 }
 
 // Read-side view of the provider connection. The connect/disconnect actions live in provider
-// commands + the credential store, not here — this capability only reports state.
+// commands + the credential store, not here; this capability only reports state.
 export interface ConnectionCapability {
   readonly onDidChange: Event<void>;
   readonly label: string;
   isConnected(): Promise<boolean>;
   // `verify` runs a live, cheap handshake against the provider; `isConnected()` stays "credentials
-  // stored" and continues to gate tree visibility — the two deliberately differ so the offline tree
+  // stored" and continues to gate tree visibility; the two deliberately differ so the offline tree
   // still shows when the network doesn't.
   verify?(): Promise<ConnectionVerifyResult>;
 }
@@ -275,11 +275,11 @@ export class NotSupportedError extends Error {
 export interface AutomationBindingCapability {
   // Pure, offline classification of a target test's automation compatibility for preflight. Provider
   // logic lives here, never in the neutral preflight core. `undefined`/partial metadata → `unknown`.
-  // This is the P2 deliverable — validation only.
+  // This is the P2 deliverable, validation only.
   classify(meta: TestCaseMetadata | undefined): AutomationBindingClassification;
   // `bind` writes an automation binding to the remote. For Xray it stays `NotSupportedError` by
   // adjudication, not for lack of an API: the mutation root DOES expose `updateTestType`, but the
-  // only "binding" that would mean is converting an existing remote test's type — a destructive
+  // only "binding" that would mean is converting an existing remote test's type, a destructive
   // change to an issue we don't own. An `incompatible-test-type` is repaired by linking a different
   // test or authoring a new one (`TestAuthoringCapability`), never by mutating theirs.
   bind(ref: TestCaseRef, signal?: AbortSignal): Promise<void>;
@@ -319,7 +319,7 @@ export interface AuthoredTest {
 }
 
 // Optional capability: author a brand-new remote test from a local scenario's Gherkin. Capability-
-// gated — the linkScenario picker only offers "create a new test" when the active adapter exposes it
+// gated; the linkScenario picker only offers "create a new test" when the active adapter exposes it
 // (the live, credentialed adapter, never the browse-only instance). This is the only authoring write
 // the extension makes; converting an existing test's type stays out of scope (see `bind` above).
 export interface TestAuthoringCapability {
@@ -349,12 +349,12 @@ export interface RemoteSearchResult {
 }
 
 // Optional capability: search the provider for tests the local snapshot never synced, and merge a
-// picked test's metadata into the snapshot without a full sync. Capability-gated — the linkScenario
+// picked test's metadata into the snapshot without a full sync. Capability-gated; the linkScenario
 // picker only offers remote search when the active adapter exposes this.
 export interface RemoteSearchCapability {
   search(text: string, signal?: AbortSignal): Promise<RemoteSearchResult>;
   // Additive, non-destructive merge of specific keys' metadata into the local snapshot (fires the
-  // metadata change event). Never demotes catalogue completeness — it supplements, like a key batch.
+  // metadata change event). Never demotes catalogue completeness; it supplements, like a key batch.
   mergeKeys(keys: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
@@ -386,7 +386,7 @@ export interface ResultPublishingCapability {
     signal?: AbortSignal
   ): Promise<readonly PublishTarget[]>;
   // One batch → one execution: create-new imports via the create path, append via the append path.
-  // The reconcile filter (`publishableResults`) runs INSIDE — a result being present in the artifact
+  // The reconcile filter (`publishableResults`) runs INSIDE; a result being present in the artifact
   // is not consent to publish it. Deferred creation: this single call creates the execution WITH its
   // results; it never invokes a remote runner.
   publish(artifact: RunArtifact, request: PublishRequest, signal?: AbortSignal): Promise<PublishOutcome>;
@@ -396,7 +396,7 @@ export interface AttachmentCapability {
   attach(target: ExecutionRef, files: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
-// A small base plus independently optional capabilities — the model reads whichever capabilities an
+// A small base plus independently optional capabilities; the model reads whichever capabilities an
 // adapter exposes and degrades gracefully when one is absent. Never one large interface.
 export interface TraceabilityAdapter {
   readonly id: string;

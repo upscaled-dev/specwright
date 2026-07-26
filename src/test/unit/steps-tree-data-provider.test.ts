@@ -142,7 +142,7 @@ describe("StepsTreeDataProvider", () => {
     const groups = await definitionsChildren(provider);
     expect(groups).toHaveLength(1);
     expect(provider.getTreeItem(groups[0]!).label).toBe(
-      "No step definitions found — check playwrightBddRunner.stepDefinitionPaths."
+      "No step definitions found: check playwrightBddRunner.stepDefinitionPaths."
     );
   });
 

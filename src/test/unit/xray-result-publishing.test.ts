@@ -61,8 +61,8 @@ function makeDeps(over: Partial<XrayResultPublishingDeps>): XrayResultPublishing
   };
 }
 
-describe("createXrayResultPublishing — publish routing (pin: create vs append mapping)", () => {
-  it("create-new POSTs Cucumber multipart and never posts JSON — the import is the only remote call", async () => {
+describe("createXrayResultPublishing: publish routing (pin: create vs append mapping)", () => {
+  it("create-new POSTs Cucumber multipart and never posts JSON: the import is the only remote call", async () => {
     const t = spyTransport();
     const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport }));
 
@@ -105,7 +105,7 @@ describe("createXrayResultPublishing — publish routing (pin: create vs append 
   });
 });
 
-describe("createXrayResultPublishing — reconcile filter (cross-seam)", () => {
+describe("createXrayResultPublishing: reconcile filter (cross-seam)", () => {
   it("never sends an excluded result to the create importer", async () => {
     const t = spyTransport();
     const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport }));
@@ -137,7 +137,7 @@ describe("createXrayResultPublishing — reconcile filter (cross-seam)", () => {
   });
 });
 
-describe("createXrayResultPublishing — publish guards (fail fast before any import)", () => {
+describe("createXrayResultPublishing: publish guards (fail fast before any import)", () => {
   it("rejects an empty create summary and posts nothing", async () => {
     const t = spyTransport();
     const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport }));
@@ -192,12 +192,12 @@ function fakeFs(files: Record<string, Buffer>): EvidenceFs {
 
 const APPEND = { mode: "append", executionKey: "XNP-1" } as const;
 
-describe("createXrayResultPublishing — evidence resolution + attachTo", () => {
+describe("createXrayResultPublishing: evidence resolution + attachTo", () => {
   const shotAbs = path.join("/ws", "test-results/shot.png");
   const fs = fakeFs({ [shotAbs]: Buffer.from("PNG") });
   const JIRA = { email: "a@b.c", token: "t" };
   const withShot = (): RunArtifactResult => mapped("a", "CALC-1", { evidenceRefs: ["test-results/shot.png"] });
-  // Jira creds present — the issue stream needs a real upload destination.
+  // Jira creds present; the issue stream needs a real upload destination.
   const deps = (attachTo: XrayResultPublishingDeps["attachTo"], t: ImportTransport): XrayResultPublishingDeps =>
     makeDeps({
       transport: t,
@@ -309,7 +309,7 @@ describe("createXrayResultPublishing — evidence resolution + attachTo", () => 
   });
 });
 
-describe("createXrayResultPublishing — create-mode issue type resolution", () => {
+describe("createXrayResultPublishing: create-mode issue type resolution", () => {
   const JIRA = { email: "a@b.c", token: "t" };
   const infoOf = (postMultipart: ReturnType<typeof spyTransport>["postMultipart"]): { fields: { issuetype: { name: string } } } =>
     JSON.parse((postMultipart.mock.calls[0]![1] as { info: string }).info) as { fields: { issuetype: { name: string } } };
@@ -418,7 +418,7 @@ describe("createXrayResultPublishing — create-mode issue type resolution", () 
   });
 });
 
-describe("createXrayResultPublishing — searchTargets", () => {
+describe("createXrayResultPublishing: searchTargets", () => {
   it("rejects with NotSupportedError when Jira credentials are absent", async () => {
     const publishing = createXrayResultPublishing(makeDeps({ jiraCredentials: () => Promise.resolve(undefined) }));
     await expect(publishing.searchTargets("execution", "CALC")).rejects.toBeInstanceOf(NotSupportedError);

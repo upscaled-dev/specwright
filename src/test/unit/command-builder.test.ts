@@ -121,8 +121,8 @@ describe("CommandBuilder", () => {
   });
 
   it("prefers a specLineTarget over --grep for a scenario run (precise single-row targeting)", async () => {
-    // Grep on an outline title can't isolate one example row — playwright-bdd substitutes the
-    // example values into the title — so a resolved `<spec>:<pwTestLine>` target wins instead.
+    // Grep on an outline title can't isolate one example row; playwright-bdd substitutes the
+    // example values into the title, so a resolved `<spec>:<pwTestLine>` target wins instead.
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
     const cmd = await builder.buildScenarioCommand({
       filePath: "/abs/features/products.feature",
@@ -207,7 +207,7 @@ describe("CommandBuilder", () => {
       scenarioName: "Passing",
     });
     expect(bddgenCommand).toBe("npx bddgen");
-    // The Playwright Inspector flag must NOT be present — debugging runs under VS Code's
+    // The Playwright Inspector flag must NOT be present; debugging runs under VS Code's
     // JS debugger (node-terminal), not the Inspector.
     expect(playwrightCommand).not.toContain("--debug");
     expect(playwrightCommand).not.toContain("bddgen");

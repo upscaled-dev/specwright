@@ -4,7 +4,7 @@ import { ScenarioRef, normalizePath, refIdentity, sameScenario } from "./scenari
 
 // One thing to run for a resolved batch. `scenario` greps by name/outline; `grep` runs one combined
 // name-regex over several scenarios in a single bddgen+playwright pass (the all-mapped collapse);
-// `path-filter` carries the source feature file or folder — the executor resolves its working dir
+// `path-filter` carries the source feature file or folder; the executor resolves its working dir
 // (the owning Playwright config, monorepo-aware) and derives a forward-slashed, regex-escaped
 // positional filter relative to that dir; `tags` routes the expression through the `bddgen --tags`
 // path.
@@ -66,7 +66,7 @@ function underFolder(filePath: string, folderPath: string): boolean {
  * reusing the existing command-builder routes. Pure: derives its scenario set from the snapshot so a
  * scope's refs always agree with the ones preflight classifies. `tag-expression`'s membership is
  * bddgen's to decide, so its scenario set is left empty (nothing to preflight offline);
- * `test-plan-derived` needs `options.planTestKeys` from the remote plan lookup — without them it
+ * `test-plan-derived` needs `options.planTestKeys` from the remote plan lookup; without them it
  * resolves to nothing (the lookup hasn't run).
  */
 export function resolveBatchSelection(
@@ -97,7 +97,7 @@ export function resolveBatchSelection(
     case "all-mapped": {
       const scenarios = mappedScenarioRefs(snapshot);
       // Collapse to one combined-grep invocation (one bddgen regeneration for the whole set) instead
-      // of one full bddgen+playwright pass per scenario. Exclusion stays surgical — the grep is
+      // of one full bddgen+playwright pass per scenario. Exclusion stays surgical; the grep is
       // rebuilt from the remaining refs (see `invocationsAfterExclusions`).
       const invocations = scenarios.length > 0 ? [{ kind: "grep" as const, refs: scenarios }] : [];
       return { scenarios, invocations };

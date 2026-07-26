@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import { StepResolver, ParsedStepDefWithFile } from "./step-resolver";
 import { humanizeRegexSource, patternToSnippet } from "./pattern-humanizer";
 import { STEP_KEYWORDS } from "./step-keywords";
@@ -63,7 +64,7 @@ export class StepCompletionProvider implements vscode.CompletionItemProvider {
       return await this.resolver.loadAllStepDefs(this.stepGlobs);
     } catch (error) {
       this.logger.warn("StepCompletionProvider: failed to load step defs", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errMsg(error),
       });
       return undefined;
     }

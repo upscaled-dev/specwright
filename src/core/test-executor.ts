@@ -342,8 +342,8 @@ export class TestExecutor {
       return { success: false, output: "", error: preRunFailure, duration: Math.max(1, Date.now() - start) };
     }
 
-    // Run bddgen separately FIRST (not chained with `&&`) so the generated spec — and its
-    // pickleLine→pwTestLine map — is fresh before we resolve the precise `<spec>:<pwTestLine>`
+    // Run bddgen separately FIRST (not chained with `&&`) so the generated spec, and its
+    // pickleLine→pwTestLine map, is fresh before we resolve the precise `<spec>:<pwTestLine>`
     // target. This makes single-row targeting airtight even right after the feature was edited
     // (mirrors the debug path). When bddgenCommand is undefined (empty config or defineBddProject
     // auto-gen), generation happens inside `playwright test`, so we resolve from the existing spec.
@@ -374,7 +374,7 @@ export class TestExecutor {
     const result = await this.runScenarioPlaywright(enriched, workingDir, start, signal);
 
     // Safety net: a spec-line target Playwright doesn't recognize (stale spec, path-filter
-    // quirk) makes it report "no tests found" — the run ends with nothing executed and every
+    // quirk) makes it report "no tests found"; the run ends with nothing executed and every
     // Explorer item skipped. That's strictly worse than the imprecise name-grep, so rerun once
     // without the target. Only the exact no-tests outcome retries; real failures (compile
     // errors, failing tests) would fail identically again and must surface as-is.
@@ -421,7 +421,7 @@ export class TestExecutor {
     } catch (error) {
       if (signal?.aborted) { return this.cancelledResult(start); }
       // A spawn/binary failure never reaches buildOutputResult, so contribute the failed invocation's
-      // shard here — one shard per invocation, and the batch honestly seals partial.
+      // shard here: one shard per invocation, and the batch honestly seals partial.
       this.contributeArtifactShard(options.artifactBatch, workingDir, command, false, 1, []);
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return { success: false, output: "", error: errMsg(error), duration: Math.max(1, Date.now() - start) };
@@ -463,7 +463,7 @@ export class TestExecutor {
   }
 
   // Batch feature/folder/all-mapped scopes: run every generated spec matching a positional path filter,
-  // capturing the shard into the open artifact. `target` is the source feature file or folder — the
+  // capturing the shard into the open artifact. `target` is the source feature file or folder; the
   // working dir is resolved from it the same way as every run (the owning Playwright-config package,
   // monorepo-aware), and the filter is relativized against that dir so it matches the generated specs
   // even when the config lives in a subdirectory. Relativizing off the pre-canonical dir keeps the
@@ -526,7 +526,7 @@ export class TestExecutor {
       return { ...options, specLineTarget: resolution.target };
     }
     // Falling back to name-grep. For a plain scenario that grep is precise, but for an outline
-    // row it matches EVERY example row of the outline — surface why, so N tests fanning out
+    // row it matches EVERY example row of the outline; surface why, so N tests fanning out
     // across Playwright's workers isn't a silent mystery.
     if (options.outlineName !== undefined && options.lineNumber !== undefined) {
       this.logger.warn(
@@ -541,8 +541,8 @@ export class TestExecutor {
    * Resolve `<generatedSpec>:<pwTestLine>` for a single scenario/outline row by reading the
    * generated spec's `bddFileData` (pickleLine→pwTestLine). This is the only reliable way to target
    * one Scenario Outline example row, since playwright-bdd substitutes example values into the test
-   * title (so no grep on the source title can isolate a row). Returns a `reason` — caller falls
-   * back to name-grep — when there's no line, the spec can't be located/read, or the line isn't
+   * title (so no grep on the source title can isolate a row). Returns a `reason` (caller falls
+   * back to name-grep) when there's no line, the spec can't be located/read, or the line isn't
    * mapped.
    */
   /**
@@ -557,7 +557,7 @@ export class TestExecutor {
       (chosen, candidates) => {
         this.logger.warn(
           `Multiple generated specs match ${filePath}: ${candidates.join(", ")}. ` +
-            `Targeting the newest, ${chosen} — the scenario runs only in that BDD project. ` +
+            `Targeting the newest, ${chosen}; the scenario runs only in that BDD project. ` +
             `To always target one project, point 'playwrightBddRunner.featuresGenDir' at its ` +
             `output dir (e.g. ".features-gen/browser").`
         );
@@ -584,7 +584,7 @@ export class TestExecutor {
     } catch {
       return {
         reason:
-          `no generated spec at ${specPath} — ` +
+          `no generated spec at ${specPath}; ` +
           "check that 'playwrightBddRunner.featuresGenDir' matches your bddgen outputDir",
       };
     }
@@ -600,7 +600,7 @@ export class TestExecutor {
     const rel = path.relative(workingDir, specPath);
     const specArg = rel === "" || rel.startsWith("..") || path.isAbsolute(rel) ? specPath : rel;
     // Playwright treats CLI file filters as regular expressions. A Windows-separator path is
-    // regex poison there — `.features-gen\browser` reads as "gen" + word-boundary + "rowser",
+    // regex poison there; `.features-gen\browser` reads as "gen" + word-boundary + "rowser",
     // which matches nothing, and Playwright reports "no tests found". Forward slashes are
     // literal in a regex and Playwright accepts them on every platform.
     return { target: `${specArg.split(path.sep).join("/")}:${pwTestLine}` };
@@ -636,7 +636,7 @@ export class TestExecutor {
     );
     const baseCommand = buildCommand();
     // Normally we force `--reporter=json` for result mapping. With useConfigReporters the user's
-    // config owns the reporter list (so a custom reporter survives) — a `--reporter` here would
+    // config owns the reporter list (so a custom reporter survives); a `--reporter` here would
     // override it. We still set PLAYWRIGHT_JSON_OUTPUT_NAME below, which steers a bare `['json']`
     // reporter in their config to our temp file.
     const command = this.config.useConfigReporters ? baseCommand : `${baseCommand} --reporter=json`;
@@ -662,7 +662,7 @@ export class TestExecutor {
     }
   }
 
-  // A cancelled run fires "cancelled", never success/failure — the killed process exits
+  // A cancelled run fires "cancelled", never success/failure; the killed process exits
   // non-zero, and announcing a failure would misrepresent a deliberate stop. Without any event
   // the status bar would sit on "running…" until the next run, so the distinct kind lets it
   // settle. The caller marks the affected items skipped.
@@ -712,7 +712,7 @@ export class TestExecutor {
   }
 
   // Contribute one shard to the open artifact batch (no-op when the run carries no handle, e.g. a
-  // command-driven run). Every invocation contributes exactly once — success or spawn failure.
+  // command-driven run). Every invocation contributes exactly once: success or spawn failure.
   private contributeArtifactShard(
     artifactBatch: number | undefined,
     workingDir: string,
@@ -734,7 +734,7 @@ export class TestExecutor {
   }
 
   // The workspace folder that owns this run (multi-root aware), mirroring the debug-launch cwd
-  // resolution — a run under folder #2 must relativize evidence against folder #2, not the first.
+  // resolution; a run under folder #2 must relativize evidence against folder #2, not the first.
   private workspaceRootFor(workingDir: string): string | undefined {
     const folders = this.workspace.workspaceFolders;
     return (folders?.find((f) => isSameOrInsideDir(workingDir, f.uri.fsPath)) ?? folders?.[0])?.uri.fsPath;
@@ -812,9 +812,9 @@ export class TestExecutor {
 
   /**
    * Wait for the debug session to settle. Normally the mirror releases when the last
-   * child debug session terminates. That chain can wedge — pnpm process trees leave a
+   * child debug session terminates. That chain can wedge; pnpm process trees leave a
    * debug-attached child (web server, extra node layer) alive, or no child session
-   * ever attaches — so when a JSON report path is in play, watch for the report file:
+   * ever attaches, so when a JSON report path is in play, watch for the report file:
    * Playwright writes it only AFTER the tests finish (a paused breakpoint delays it,
    * so the watchdog can never fire mid-debug). Once it appears, give natural teardown
    * a grace period, then force the session down.
@@ -880,7 +880,7 @@ export class TestExecutor {
       if (!this.terminal) {
         this.terminal = this.window.createTerminal("Specwright");
         // Without this, a user-closed terminal leaves a disposed handle behind and every later
-        // run sends text into it — nothing visible happens. Drop the handle so the next run
+        // run sends text into it; nothing visible happens. Drop the handle so the next run
         // creates a fresh terminal.
         this.terminalCloseSubscription ??= this.window.onDidCloseTerminal((closed) => {
           if (closed === this.terminal) { this.terminal = undefined; }
@@ -957,7 +957,7 @@ export class TestExecutor {
         child.on("close", (code: number | null) => { settle(code); });
         child.on("exit", (code: number | null) => {
           // `close` additionally waits for all stdio pipes to close. A grandchild that
-          // inherited them (web server, browser process — common on Windows) keeps the
+          // inherited them (web server, browser process; common on Windows) keeps the
           // run hanging forever after playwright itself exited. Results come from the
           // JSON report file, not stdout, so after a short flush grace settle anyway.
           const timer = setTimeout(() => { settle(code); }, 2000);
@@ -991,7 +991,7 @@ export class TestExecutor {
         process.kill(-child.pid, "SIGTERM");
       }
     } catch (error) {
-      // ESRCH: the group already exited between close and kill — nothing left to signal.
+      // ESRCH: the group already exited between close and kill; nothing left to signal.
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
         this.logger.warn(`Failed to kill process tree: ${errMsg(error)}`);
       }
@@ -1006,7 +1006,7 @@ export class TestExecutor {
    * by walking up from the file to the nearest `playwright.config.*` (stopping at
    * the file's workspace folder). This makes monorepos work without configuration:
    * pnpm links binaries only into the declaring package's `node_modules/.bin`, so
-   * `npx bddgen` resolves only when spawned from that package — not the repo root.
+   * `npx bddgen` resolves only when spawned from that package, not the repo root.
    */
   private getWorkingDirectory(forFile?: string): string {
     // Canonicalize the result so the spawn cwd has an uppercase Windows drive letter.

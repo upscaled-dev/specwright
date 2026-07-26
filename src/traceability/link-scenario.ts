@@ -16,7 +16,7 @@ export function buildTestTag(grammar: KeyGrammar, key: string): string {
   return tagFor(grammar.testPrefix, key);
 }
 
-// The picker only ever offers keys already in the snapshot — free-text key entry is never a path
+// The picker only ever offers keys already in the snapshot; free-text key entry is never a path
 // here, so a missing/empty snapshot is the caller's cue to prompt for connect/sync instead.
 export function linkScenarioPicks(snapshot: RemoteMetadataSnapshot): LinkScenarioPick[] {
   return [...snapshot.tests.values()]
@@ -166,7 +166,7 @@ export function computeUnlinkEdit(
 }
 
 export interface AuthorScenarioTestUi {
-  // The pre-confirm modal — resolves true only on the explicit affirmative. NO authoring write fires
+  // The pre-confirm modal: resolves true only on the explicit affirmative. NO authoring write fires
   // before this resolves true (a unit test pins the dismiss → no-mutation contract).
   confirm(): Promise<boolean>;
   info(message: string): void;
@@ -218,7 +218,7 @@ export async function authorScenarioTest(
   if (created.key === undefined) {
     const idNote = created.issueId !== undefined ? ` (issue id ${created.issueId})` : "";
     ui.error(
-      `The ${providerLabel} test was created${idNote} but its key could not be read back, so the tag was not inserted — add it by hand.`
+      `The ${providerLabel} test was created${idNote} but its key could not be read back, so the tag was not inserted: add it by hand.`
     );
     return;
   }

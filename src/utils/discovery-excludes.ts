@@ -5,7 +5,7 @@ const FEATURES_GEN_KEY = "featuresGenDir";
 const DEFAULT_FEATURES_GEN_DIR = ".features-gen";
 
 /**
- * Output directories whose files must never be scanned — for step definitions,
+ * Output directories whose files must never be scanned, for step definitions,
  * feature files, usages, or tags. bddgen's generated specs and the Playwright
  * report/results contain step invocations and copies of executed feature content
  * that mirror the real sources, so scanning them produces phantom step
@@ -33,7 +33,7 @@ export function excludedDirFragments(resource: vscode.Uri | undefined): string[]
 }
 
 /**
- * Built-in excluded directory names across every workspace folder — for
+ * Built-in excluded directory names across every workspace folder, for
  * workspace-wide findFiles calls and watcher event filters, where per-folder
  * resolution isn't possible. Folder-scoped `featuresGenDir` overrides are unioned.
  */

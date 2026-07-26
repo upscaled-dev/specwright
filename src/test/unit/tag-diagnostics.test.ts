@@ -15,7 +15,7 @@ const GRAMMAR: KeyGrammar = {
 const messages = (feature: string, grammar: KeyGrammar = GRAMMAR): string[] =>
   computeTagDiagnostics(feature, grammar).map((d) => d.message);
 
-describe("computeTagDiagnostics — rule 1: one test tag per unit", () => {
+describe("computeTagDiagnostics rule 1: one test tag per unit", () => {
   it("flags each test tag when a scenario carries more than one", () => {
     const feature = "Feature: F\n\n@TEST_CALC-1 @TEST_CALC-2\nScenario: A\n  Given x\n";
     const diags = computeTagDiagnostics(feature, GRAMMAR);
@@ -43,7 +43,7 @@ describe("computeTagDiagnostics — rule 1: one test tag per unit", () => {
   });
 });
 
-describe("computeTagDiagnostics — rule 2/5: a test key across independent units", () => {
+describe("computeTagDiagnostics rule 2/5: a test key across independent units", () => {
   it("flags the same key mapped on two independent scenarios", () => {
     const feature =
       "Feature: F\n\n@TEST_CALC-1\nScenario: A\n  Given x\n\n@TEST_CALC-1\nScenario: B\n  Given y\n";
@@ -67,7 +67,7 @@ describe("computeTagDiagnostics — rule 2/5: a test key across independent unit
   });
 });
 
-describe("computeTagDiagnostics — Gherkin inheritance semantics", () => {
+describe("computeTagDiagnostics: Gherkin inheritance semantics", () => {
   it("does not inherit a tag placed directly above a Rule (parser drops it)", () => {
     const feature =
       "Feature: F\n\n@TEST_CALC-9\nRule: R1\n\n  Scenario: A\n    Given x\n\n  Scenario: B\n    Given y\n";
@@ -83,7 +83,7 @@ describe("computeTagDiagnostics — Gherkin inheritance semantics", () => {
   });
 });
 
-describe("computeTagDiagnostics — permitted shapes", () => {
+describe("computeTagDiagnostics: permitted shapes", () => {
   it("permits multiple requirement tags with a single test tag (rule 3)", () => {
     const feature = "Feature: F\n\n@REQ_CALC-9 @REQ_CALC-8 @TEST_CALC-1\nScenario: A\n  Given x\n";
     expect(computeTagDiagnostics(feature, GRAMMAR)).toEqual([]);
@@ -95,7 +95,7 @@ describe("computeTagDiagnostics — permitted shapes", () => {
   });
 });
 
-describe("computeTagDiagnostics — non-Jira grammar", () => {
+describe("computeTagDiagnostics: non-Jira grammar", () => {
   it("lints through the active adapter's grammar (in-memory numeric keys)", () => {
     const grammar = new InMemoryTraceabilityAdapter().keyGrammar;
     const feature = "Feature: F\n\n@TC-1 @TC-2\nScenario: A\n  Given x\n";
@@ -105,7 +105,7 @@ describe("computeTagDiagnostics — non-Jira grammar", () => {
   });
 });
 
-describe("computeTagDiagnostics — doc-string fences", () => {
+describe("computeTagDiagnostics: doc-string fences", () => {
   it("never treats tags or scenario keywords inside triple-quote or backtick fences as units", () => {
     const triple =
       'Feature: F\n\n@TEST_CALC-1\nScenario: A\n  Given a doc:\n  """\n  @TEST_CALC-1\n  Scenario: fake\n  """\n';
@@ -116,7 +116,7 @@ describe("computeTagDiagnostics — doc-string fences", () => {
   });
 });
 
-describe("computeTagDiagnostics — prefix suggestion (F5 finding #4)", () => {
+describe("computeTagDiagnostics: prefix suggestion (F5 finding #4)", () => {
   it("suggests the prefixed form for a key-shaped tag missing the test prefix", () => {
     const feature = "Feature: F\n\n@APEX-5\nScenario: A\n  Given x\n";
     const diags = computeTagDiagnostics(feature, GRAMMAR);
@@ -215,7 +215,7 @@ describe("computeTagDiagnostics — prefix suggestion (F5 finding #4)", () => {
   });
 });
 
-describe("prefixesOverlap — rule 4 config-level guard", () => {
+describe("prefixesOverlap: rule 4 config-level guard", () => {
   it("detects equal, forward-overlapping, and reverse-overlapping prefixes; clean prefixes pass", () => {
     expect(prefixesOverlap(GRAMMAR)).toBe(false);
     expect(prefixesOverlap({ ...GRAMMAR, reqPrefix: "TEST_" })).toBe(true);

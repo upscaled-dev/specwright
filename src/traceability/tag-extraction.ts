@@ -20,7 +20,7 @@ export function stateless(keyShape: RegExp): RegExp {
 
 // The prefix is matched case-insensitively; the key is canonicalized by the adapter's grammar so
 // `@TEST_CALC-1` and `@test_calc-1` collapse to one identity. What counts as a valid key body is the
-// grammar's business — both the shape and the canonical form are supplied, not assumed here.
+// grammar's business; both the shape and the canonical form are supplied, not assumed here.
 export function keyForPrefix(
   tag: string,
   prefix: string,
@@ -38,7 +38,7 @@ function pushUnique(keys: string[], key: string): void {
   if (!keys.includes(key)) {keys.push(key);}
 }
 
-// Tags carrying the test prefix whose key body fails the grammar's `keyShape` — a broken `@TEST_`
+// Tags carrying the test prefix whose key body fails the grammar's `keyShape`, a broken `@TEST_`
 // tag, not the absence of one. `extractKeys` drops these silently (the scenario lands in untraced);
 // the model carries them so preflight can tell "no tag" from "invalid key".
 export function malformedTestTags(

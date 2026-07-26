@@ -1,6 +1,7 @@
 import { Logger } from "../utils/logger";
+import { errMsg, scrubJwtLike } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
-import { describeShape, scrubJwtLike } from "./xray-diagnostics";
+import { describeShape } from "./xray-diagnostics";
 import { FetchLike } from "./jira-project-search";
 import { ISSUE_TYPE_NAME } from "./jira-issue-search";
 
@@ -41,10 +42,6 @@ interface TimedResponse {
   status: number;
   ok: boolean;
   bodyText: string;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function tryParse(bodyText: string): { ok: true; value: unknown } | { ok: false } {
@@ -140,7 +137,7 @@ class IssueTypeResolver {
     try {
       response = await this.withBackoff(() => this.timedFetch(url));
     } catch (error) {
-      this.deps.logger.warn(`Issue-type resolution could not reach Jira: ${scrubJwtLike(errorMessage(error))}`);
+      this.deps.logger.warn(`Issue-type resolution could not reach Jira: ${scrubJwtLike(errMsg(error))}`);
       return { kind: "unknown" };
     }
     const parsed = tryParse(response.bodyText);
@@ -203,7 +200,7 @@ class IssueTypeResolver {
       if (error instanceof RetryableError) {
         throw error;
       }
-      throw new RetryableError(scrubJwtLike(errorMessage(error)));
+      throw new RetryableError(scrubJwtLike(errMsg(error)));
     } finally {
       clearTimeout(timer);
       this.deps.signal?.removeEventListener("abort", onAbort);

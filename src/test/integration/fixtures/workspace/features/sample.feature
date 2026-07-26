@@ -1,4 +1,4 @@
-# Test fixture — line numbers are load-bearing for integration tests.
+# Test fixture: line numbers are load-bearing for integration tests.
 @feature @fixture
 Feature: Fixture feature
 

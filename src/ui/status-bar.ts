@@ -9,7 +9,7 @@ function formatTooltip(lastRunAt: Date | undefined): string {
   const hh = String(lastRunAt.getHours()).padStart(2, "0");
   const mm = String(lastRunAt.getMinutes()).padStart(2, "0");
   const ss = String(lastRunAt.getSeconds()).padStart(2, "0");
-  return `Last run at ${hh}:${mm}:${ss} — click to show test output`;
+  return `Last run at ${hh}:${mm}:${ss}, click to show test output`;
 }
 
 export class StatusBar implements vscode.Disposable {

@@ -101,7 +101,7 @@ describe("publishableResults", () => {
     expect(result.excludedCount).toBe(1);
   });
 
-  it("ignores local-only decisions — only an exclude decision drops a result", () => {
+  it("ignores local-only decisions: only an exclude decision drops a result", () => {
     const localOnly = ref("features/calc.feature", 3, "Add");
     const result = publishableResults(
       artifact(
@@ -114,7 +114,7 @@ describe("publishableResults", () => {
   });
 });
 
-describe("publishableResults — outline exclusion (capture-path faithful)", () => {
+describe("publishableResults: outline exclusion (capture-path faithful)", () => {
   it("drops an excluded outline even though the captured ref and the preflight ref differ by line", () => {
     const feature = "/repo/features/math.feature";
     const declLine = 5;
@@ -228,8 +228,8 @@ describe("publishDialogSubtitle", () => {
 
 describe("defaultPublishSummary", () => {
   it("names the run date and the publishable count", () => {
-    expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 4)).toBe("Specwright run 2026-07-22 — 4 scenarios");
-    expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 1)).toBe("Specwright run 2026-07-22 — 1 scenario");
+    expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 4)).toBe("Specwright run 2026-07-22 (4 scenarios)");
+    expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 1)).toBe("Specwright run 2026-07-22 (1 scenario)");
   });
 });
 

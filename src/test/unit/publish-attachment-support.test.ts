@@ -16,7 +16,7 @@ function deps(over: Partial<AttachmentModelDeps> = {}): AttachmentModelDeps {
   };
 }
 
-describe("buildAttachmentsModel — disabled reasons", () => {
+describe("buildAttachmentsModel: disabled reasons", () => {
   it("renders disabled with the add-creds reason and never probes when Jira creds are absent", async () => {
     const attachmentMeta = vi.fn(() => Promise.resolve<JiraAttachmentMeta>({ enabled: true }));
     const model = await buildAttachmentsModel(deps({ jiraAvailable: false, attachmentMeta, attachTo: "issue" }));
@@ -47,7 +47,7 @@ describe("buildAttachmentsModel — disabled reasons", () => {
   });
 });
 
-describe("buildAttachmentsModel — discovery", () => {
+describe("buildAttachmentsModel: discovery", () => {
   it("maps discovered files to sized suggestions", async () => {
     const model = await buildAttachmentsModel(
       deps({

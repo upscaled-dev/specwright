@@ -106,12 +106,12 @@ function renderGroup(
   // <summary> and before </details> are required for the inner Markdown to render.
   const lines = [
     detailsTag(collapsed),
-    `<summary><strong>${group.keyword}</strong> — ${count}</summary>`,
+    `<summary><strong>${group.keyword}</strong>: ${count}</summary>`,
     "",
     `${keywordLevel} ${group.keyword}`,
   ];
   for (const def of group.defs) {
-    lines.push(`- **\`${def.humanized}\`** — ${usageSuffix(def.usageCount)}`);
+    lines.push(`- **\`${def.humanized}\`**: ${usageSuffix(def.usageCount)}`);
     lines.push(`  - Pattern: \`${def.verbatim}\``);
     lines.push(`  - Source: \`${def.sourceRel}:${def.line}\``);
   }
@@ -161,12 +161,12 @@ function renderUnused(unused: StepDefExport[], collapsed?: boolean): string[] {
   );
   const lines = [
     detailsTag(collapsed),
-    `<summary><strong>Unused</strong> — ${countLabel(unused.length, "definition")}</summary>`,
+    `<summary><strong>Unused</strong>: ${countLabel(unused.length, "definition")}</summary>`,
     "",
     "## Unused",
   ];
   for (const def of ordered) {
-    lines.push(`- **\`${def.humanized}\`** (${def.keyword}) — \`${def.sourceRel}:${def.line}\``);
+    lines.push(`- **\`${def.humanized}\`** (${def.keyword}): \`${def.sourceRel}:${def.line}\``);
   }
   lines.push("", "</details>");
   return lines;

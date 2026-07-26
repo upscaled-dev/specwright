@@ -1,6 +1,6 @@
 /**
  * Integration tests for the discover → run → status seam, exercised through the REAL provider,
- * parser, organization, and command builder — only the shell (Playwright invocation) and file
+ * parser, organization, and command builder; only the shell (Playwright invocation) and file
  * discovery are faked. This is the layer unit tests couldn't reach: it catches report→tree
  * mapping regressions (a passing scenario showing as skipped, outline examples not mapping, and
  * out-of-scope features running the wrong file).
@@ -100,7 +100,7 @@ function reportJson(
   });
 }
 
-describe("PlaywrightBddTestProvider — discover → run → status (integration)", () => {
+describe("PlaywrightBddTestProvider: discover → run → status (integration)", () => {
   let fixture: Fixture;
   let origReadFile: typeof vscode.workspace.fs.readFile;
 
@@ -209,7 +209,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
 
   it("cancelling mid-run skips the started and not-yet-run items, fails none, and fires no failure event", async () => {
     // Two top-level items. The first item's run cancels the token (user hits Stop); its process is
-    // killed (exit 130) but must NOT paint the tree red — it's skipped — and the second, never-run
+    // killed (exit 130) but must NOT paint the tree red (it's skipped), and the second, never-run
     // item is skipped too. No failure event reaches the status bar.
     const source = new vscode.CancellationTokenSource();
     let calls = 0;
@@ -294,7 +294,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
     // The report titles examples "Example #N" with the generated spec line; only the
     // bddFileData line-mapping connects them to the right .feature example row.
     const shell: ShellRunner = async (_cmd, _dir, env) => {
-      // bddgen runs first as its own step (no JSON env) — succeed so the playwright run proceeds.
+      // bddgen runs first as its own step (no JSON env); succeed so the playwright run proceeds.
       if (!env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
         return { success: true, output: "", error: "", returnCode: 0 };
       }
@@ -324,7 +324,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
 
   it("flags an out-of-scope run (no results attributed) in the Test Results output", async () => {
     const shell: ShellRunner = async (_cmd, _dir, env) => {
-      // bddgen step (no JSON env) succeeds; the playwright run then matches nothing — Playwright
+      // bddgen step (no JSON env) succeeds; the playwright run then matches nothing; Playwright
       // reports "no tests found" and writes an empty report.
       if (!env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
         return { success: true, output: "", error: "", returnCode: 0 };
@@ -516,7 +516,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
     };
     const { controller } = buildProvider(shell);
 
-    // A Windows-style feature item: VS Code lowercase drive + backslashes. No discovery needed —
+    // A Windows-style feature item: VS Code lowercase drive + backslashes. No discovery needed;
     // the run path only reads the item's uri/id/label.
     const winPath = "c:\\repo\\features\\a.feature";
     const featureItem = controller.createTestItem(winPath, "A feature", { fsPath: winPath });
@@ -532,7 +532,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
   });
 
   it("fails the feature parent when the run failed with no per-scenario results and no \"no tests found\"", async () => {
-    // A bddgen/compile error can exit non-zero yet leave an empty report — no per-scenario results
+    // A bddgen/compile error can exit non-zero yet leave an empty report; no per-scenario results
     // for a genuine failure. Blanket-skipping would hide it, so applyResultsToChildren must fail the
     // parent (its scenarios, having no attributed result, stay skipped).
     const shell: ShellRunner = async (_cmd, _dir, env) => {
@@ -591,7 +591,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
       expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
     });
 
-    // One debug command runs every descendant, so each is marked started — including the nested
+    // One debug command runs every descendant, so each is marked started, including the nested
     // outline example rows (:12, :13), which proves the recursion, not just the direct children.
     const run = controller.runs.at(-1)!;
     expect(run.outcome.started).toContain(`${fixture.featurePath}:4`);
@@ -609,7 +609,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
   describe("scenario outlines whose title contains <placeholders> (substituted report titles)", () => {
     // The user-reported bug: an outline titled with placeholders makes playwright-bdd generate
     // tests titled with the SUBSTITUTED values ("Add (2/2) widgets"), never "Example #N" and
-    // never the tree's synthetic example label — so name-based mapping can only go through the
+    // never the tree's synthetic example label, so name-based mapping can only go through the
     // row's substitutedName.
     const SUBSTITUTED_FEATURE = [
       "Feature: Sample feature",
@@ -671,7 +671,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
     it("maps the example rows to their real statuses when the report's spec path is unresolvable (the user's environment)", async () => {
       // The user's environment: a custom featuresGenDir / cleaned gen dir means the parser can't
       // read the generated spec, so resolveSourceLocation fails and each result's featurePath
-      // falls back to the RELATIVE spec path — no line-based or feature-path-based key can ever
+      // falls back to the RELATIVE spec path; no line-based or feature-path-based key can ever
       // match. Only the substitutedName suffix scan connects report entries to the example rows.
       const { provider, controller } = buildProvider(
         substitutedShell(path.join(fixture.root, "no-such-gen-dir"))
@@ -744,7 +744,7 @@ describe("PlaywrightBddTestProvider — discover → run → status (integration
       // The old outline example rows are gone from both the tree and the id→scenario map.
       expect(controller.find(`${fixture.featurePath}:12`)).toBeUndefined();
       expect(provider.testIdToScenarioMap.has(`${fixture.featurePath}:12`)).toBe(false);
-      // No discovery sweep — the whole point of the incremental path.
+      // No discovery sweep, the whole point of the incremental path.
       expect(discoveryManager.discoverTestFiles).not.toHaveBeenCalled();
     });
 

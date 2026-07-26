@@ -20,7 +20,7 @@ export interface BoardPanelDeps extends BoardSurfaceDeps {
 }
 
 /**
- * The Coverage Board (View 2) — a singleton, document-like webview in the editor area (a second open
+ * The Coverage Board (View 2), a singleton, document-like webview in the editor area (a second open
  * reveals the existing panel). The board is one of several surfaces routed through a shared document:
  * the shell owns the single WebviewPanel, one `acquireVsCodeApi()`, the tab strip, and a ready-gated
  * outbound queue, then dispatches inbound messages by `surface`. Its document is assembled from the
@@ -55,7 +55,7 @@ export class BoardPanel {
 
   public static open(deps: BoardPanelDeps): BoardPanel {
     if (BoardPanel.current) {
-      // Reveal wherever it already lives — don't yank a board the user parked in another column.
+      // Reveal wherever it already lives; don't yank a board the user parked in another column.
       BoardPanel.current.panel.reveal();
       return BoardPanel.current;
     }

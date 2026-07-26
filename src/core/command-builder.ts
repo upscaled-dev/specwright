@@ -19,7 +19,7 @@ function nonEmpty(value: string | undefined): string | undefined {
  *   2. `playwright test` runs those generated specs.
  *
  * Newer versions can run codegen automatically via `defineBddProject` in playwright.config.ts,
- * in which case `bddgen` is unnecessary — set `playwrightBddRunner.bddgenCommand` to an empty
+ * in which case `bddgen` is unnecessary; set `playwrightBddRunner.bddgenCommand` to an empty
  * string to skip it.
  *
  * Targeting:
@@ -95,7 +95,7 @@ export class CommandBuilder {
     // it, so the title appears verbatim in Playwright's grep target. This is far more precise
     // than the filename basename, which matched unrelated features whose titles merely contained
     // the filename (file `sample.feature` matched the "Sample feature" of another file). We keep
-    // it unanchored because Playwright's grep target may be prefixed by the spec file path — an
+    // it unanchored because Playwright's grep target may be prefixed by the spec file path; an
     // `^` anchor would then match nothing. Basename stays as a last-resort fallback.
     const grep = options.featureName
       ? this.gripPattern(options.featureName)
@@ -115,7 +115,7 @@ export class CommandBuilder {
   /**
    * Run every generated spec whose path matches a positional filter. Playwright treats the filter as
    * a regular expression, so the caller passes an already forward-slashed, regex-escaped path (see
-   * `resolveBatchSelection`) — a Windows-separator path would read as regex poison and match nothing
+   * `resolveBatchSelection`); a Windows-separator path would read as regex poison and match nothing
    * (the v0.3.9 gotcha). Used by the batch feature/folder scopes.
    */
   public buildPathFilterCommand(pathFilter: string): string {
@@ -147,7 +147,7 @@ export class CommandBuilder {
   }
 
   /**
-   * Run several scenarios in one bddgen+playwright pass via a combined `--grep` regex — the batch
+   * Run several scenarios in one bddgen+playwright pass via a combined `--grep` regex; the batch
    * all-mapped collapse. Each name is regex-escaped (and its outline `<placeholders>` wildcarded) the
    * same way {@link buildScenarioCommand} escapes a single grep, then OR-joined. Stays UNANCHORED
    * like every other grep here: Playwright's grep target is `path › describes › title › @tags`
@@ -173,7 +173,7 @@ export class CommandBuilder {
    * itself (so the generated specs exist before breakpoints are mirrored into them) and then
    * launches ONLY the playwright half under VS Code's JS debugger via a `node-terminal`
    * configuration, so breakpoints in step-definition files are hit. We do NOT add Playwright's
-   * `--debug` flag here — that opens the Playwright Inspector and pauses there instead of in
+   * `--debug` flag here; that opens the Playwright Inspector and pauses there instead of in
    * VS Code.
    */
   public buildDebugCommandParts(
@@ -224,8 +224,8 @@ export class CommandBuilder {
   private buildPlaywright(options: TestExecutionOptions, greppedByName: boolean): string {
     const parts: string[] = [this.config.playwrightCommand];
 
-    // Grep by the scenario name, or — when targeting a whole Scenario Outline (the Test Explorer
-    // outline node passes only `outlineName`) — by the outline name, which matches every expanded
+    // Grep by the scenario name, or, when targeting a whole Scenario Outline (the Test Explorer
+    // outline node passes only `outlineName`), by the outline name, which matches every expanded
     // example row. Without this, an outline run with no scenarioName produced no `--grep` and ran
     // the entire suite.
     if (greppedByName && options.specLineTarget) {
@@ -270,13 +270,13 @@ export class CommandBuilder {
       parts.push(`--workers=${resolveWorkerCount(this.config, this.logger)}`);
     }
     // When useConfigReporters is set, defer entirely to the reporters declared in the user's
-    // Playwright config — injecting any `--reporter` here would override them (a CLI --reporter
+    // Playwright config; injecting any `--reporter` here would override them (a CLI --reporter
     // replaces the config's reporter array), dropping their custom reporter.
     if (this.config.useConfigReporters) {
       return;
     }
     // Always emit the reporter explicitly (including the default `list`). When the executor
-    // later appends `--reporter=json` for result mapping, Playwright keeps both reporters —
+    // later appends `--reporter=json` for result mapping, Playwright keeps both reporters;
     // omitting `list` here would let `--reporter=json` clobber the implicit default and leave
     // stdout (and therefore the Test Explorer output panel) empty.
     const reporter = opts.reporter ?? this.config.reporter;
@@ -294,7 +294,7 @@ export class CommandBuilder {
     const base = nonEmpty(outlineName) ?? scenarioName;
     // Escape regex specials, THEN turn Gherkin `<placeholders>` into `.*` wildcards. playwright-bdd
     // expands an outline's example rows into tests whose titles have the placeholders substituted
-    // (`<role>` → `admin`), so grepping the literal `<role>` only ever matched the parent describe —
+    // (`<role>` → `admin`), so grepping the literal `<role>` only ever matched the parent describe,
     // and the `<`/`>` are redirection operators in cmd.exe / PowerShell, which mangled the command
     // on Windows and made the run find no tests at all. Wildcarding both fixes the match and drops
     // the shell-hostile characters. Order matters: escape first (placeholder names rarely contain

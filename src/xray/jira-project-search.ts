@@ -1,6 +1,7 @@
 import { Logger } from "../utils/logger";
+import { errMsg, scrubJwtLike } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
-import { describeShape, scrubJwtLike } from "./xray-diagnostics";
+import { describeShape } from "./xray-diagnostics";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const PAGE_SIZE = 50;
@@ -63,10 +64,6 @@ interface TimedResponse {
   bodyText: string;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function parseBody(bodyText: string): unknown {
   try {
     return JSON.parse(bodyText) as unknown;
@@ -84,7 +81,7 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 // Basic auth per Jira REST v3. The base64 of `email:token` is the credential in transit and must
-// never be logged — every diagnostic in this module is shape/status/count only.
+// never be logged; every diagnostic in this module is shape/status/count only.
 function basicAuthHeader(credentials: XrayJiraCredentials): string {
   const encoded = Buffer.from(`${credentials.email}:${credentials.token}`).toString("base64");
   return `Basic ${encoded}`;
@@ -124,13 +121,13 @@ function parsePage(body: unknown): JiraPage {
 // only the status drives the wording.
 function accessErrorFor(status: number): JiraAccessError {
   if (status === 401) {
-    return new JiraAccessError("Jira authentication failed — check your Jira email and API token.");
+    return new JiraAccessError("Jira authentication failed: check your Jira email and API token.");
   }
   if (status === 403) {
-    return new JiraAccessError("Jira denied access — the API token lacks permission to list projects.");
+    return new JiraAccessError("Jira denied access: the API token lacks permission to list projects.");
   }
   if (status === 404) {
-    return new JiraAccessError("Jira project search endpoint not found — check the site host.");
+    return new JiraAccessError("Jira project search endpoint not found: check the site host.");
   }
   return new JiraAccessError(`Jira project list failed (HTTP ${status}).`);
 }
@@ -169,14 +166,14 @@ class JiraProjectSearch {
       }
       url = page.nextPage;
     }
-    // Exhausted the page budget before the site said isLast — treat the list as truncated.
+    // Exhausted the page budget before the site said isLast; treat the list as truncated.
     return { projects, truncated: true };
   }
 
   private async requestPage(url: string): Promise<JiraPage> {
     const response = await this.withBackoff(() => this.timedFetch(url));
     if (response.status === 401 || response.status === 403 || response.status === 404) {
-      // The 4xx body may echo request/account details, so only its shape is logged — never values.
+      // The 4xx body may echo request/account details, so only its shape is logged, never values.
       this.deps.logger.error(
         `Jira project search failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
       );
@@ -205,7 +202,7 @@ class JiraProjectSearch {
         attempt += 1;
         if (!(error instanceof RetryableError) || attempt >= MAX_ATTEMPTS) {
           throw error instanceof RetryableError
-            ? new JiraAccessError("Could not reach Jira — check your network connection.")
+            ? new JiraAccessError("Could not reach Jira: check your network connection.")
             : error;
         }
         await this.sleep(this.backoffDelay(attempt));
@@ -238,7 +235,7 @@ class JiraProjectSearch {
       if (error instanceof RetryableError) {
         throw error;
       }
-      throw new RetryableError(scrubJwtLike(errorMessage(error)));
+      throw new RetryableError(scrubJwtLike(errMsg(error)));
     } finally {
       clearTimeout(timer);
       this.deps.signal?.removeEventListener("abort", onAbort);
@@ -250,10 +247,10 @@ class JiraProjectSearch {
  * Lists the Jira projects the supplied credentials can access via `GET /rest/api/3/project/search`
  * (basic auth, `values[].{key,name}`, paginated by `isLast`/`nextPage`, capped at {@link MAX_PROJECTS}),
  * narrowed server-side by the optional `query` (Jira matches key and name, case-insensitively).
- * Returns `{ projects, truncated }` — `truncated` is true when the cap cut the list short, so callers
+ * Returns `{ projects, truncated }`: `truncated` is true when the cap cut the list short, so callers
  * never treat absence from a partial list as proof a project is missing. Throws {@link JiraAccessError}
  * with a value-free message on a terminal failure. Diagnostics are allowlisted shape/status/count only
- * — the token and the basic-auth header never reach the logger.
+ * (the token and the basic-auth header never reach the logger).
  */
 export function searchJiraProjects(deps: JiraProjectSearchDeps): Promise<JiraProjectSearchResult> {
   return new JiraProjectSearch(deps).run();

@@ -42,7 +42,7 @@ export function renderFooter(stats: string[]): string[] {
 }
 
 /**
- * Opening tag for a collapsible section — `<details open>` normally, or `<details>` when the
+ * Opening tag for a collapsible section: `<details open>` normally, or `<details>` when the
  * export is configured to start collapsed (better for large catalogs).
  */
 export function detailsTag(collapsed?: boolean): string {

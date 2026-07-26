@@ -117,7 +117,7 @@ function jwtThenGraphql(
   });
 }
 
-describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
+describe("runXrayConnectionTest: secret/JWT redaction invariant", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -206,7 +206,7 @@ describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
     const { lines } = deps;
 
     // 200 headers arrive, then the body stream stalls: text() settles only when the request
-    // signal aborts — exactly the case the timer must still cover.
+    // signal aborts, exactly the case the timer must still cover.
     vi.stubGlobal(
       "fetch",
       vi.fn((_url: string, init?: RequestInit) => {
@@ -252,7 +252,7 @@ describe("runXrayConnectionTest — secret/JWT redaction invariant", () => {
   });
 });
 
-describe("probeXrayConnection — structured outcome", () => {
+describe("probeXrayConnection: structured outcome", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -269,10 +269,10 @@ describe("probeXrayConnection — structured outcome", () => {
       ok: true,
       stage: "ok",
       site: SITE,
-      message: `Connected to ${SITE} — authentication OK`,
+      message: `Connected to ${SITE}; authentication OK`,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(deps.lines.join("\n")).toContain("no @TEST_ tags found in workspace — skipped GraphQL probes");
+    expect(deps.lines.join("\n")).toContain("no @TEST_ tags found in workspace; skipped GraphQL probes");
   });
 
   it("groups keys by project and reports each project's total from a `project = X` probe", async () => {
@@ -297,7 +297,7 @@ describe("probeXrayConnection — structured outcome", () => {
       { project: "MATH", totalTests: 7 },
     ]);
     expect(outcome.message).toBe(
-      `Connected to ${SITE} — project CALC: 42 Xray tests, project MATH: 7 Xray tests`
+      `Connected to ${SITE}; project CALC: 42 Xray tests, project MATH: 7 Xray tests`
     );
     // authenticate + two shape probes + invalid-field probe + one probe per project.
     expect(fetchMock).toHaveBeenCalledTimes(6);
@@ -324,7 +324,7 @@ describe("probeXrayConnection — structured outcome", () => {
 
     expect(outcome.ok).toBe(false);
     expect(outcome.stage).toBe("auth");
-    expect(outcome.message).toBe("Authentication failed — check your client ID and secret.");
+    expect(outcome.message).toBe("Authentication failed: check your client ID and secret.");
     expect(outcome.projects).toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -350,7 +350,7 @@ describe("probeXrayConnection — structured outcome", () => {
     const outcome = await probeXrayConnection(deps, { authOnly: true });
 
     expect(outcome).toEqual({ ok: true, stage: "ok", site: SITE, message: `Connected to ${SITE}` });
-    // Only /authenticate — no shape or project probes.
+    // Only /authenticate, no shape or project probes.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -372,7 +372,7 @@ describe("probeXrayConnection — structured outcome", () => {
     expect(outcome.ok).toBe(true);
     expect(outcome.projects).toEqual([{ project: "MATH", totalTests: 5 }]);
     expect(outcome.message).toBe(
-      `Connected to ${SITE} — project MATH: 5 Xray tests — 1 project probe(s) failed, see output`
+      `Connected to ${SITE}; project MATH: 5 Xray tests; 1 project probe(s) failed, see output`
     );
     expect(outcome.message).not.toContain("project CALC");
   });
@@ -452,7 +452,7 @@ async function jiraSeededDeps(knownTestKeys: () => string[]): Promise<Awaited<Re
   return deps;
 }
 
-describe("probeXrayConnection — Jira project view", () => {
+describe("probeXrayConnection: Jira project view", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -492,7 +492,7 @@ describe("probeXrayConnection — Jira project view", () => {
     const outcome = await probeXrayConnection(deps);
 
     expect(outcome.projects).toEqual([{ project: "ZZZ", totalTests: 0 }]);
-    expect(outcome.message).toContain("project may not exist — can't verify without Jira access");
+    expect(outcome.message).toContain("project may not exist, can't verify without Jira access");
     expect(outcome.jiraProjects).toBeUndefined();
   });
 
@@ -554,7 +554,7 @@ describe("probeXrayConnection — Jira project view", () => {
     expect(outcome.jiraTruncated).toBe(true);
     // CALC is absent from the (truncated) list, so it stays existsOnSite-unset rather than not-found.
     expect(outcome.projects).toEqual([{ project: "CALC", totalTests: 0 }]);
-    expect(outcome.message).toContain("project may not exist — can't verify without Jira access");
+    expect(outcome.message).toContain("project may not exist, can't verify without Jira access");
     expect(outcome.message).not.toContain("project CALC: not found on this site");
     expect(outcome.message).toContain("(list truncated)");
   });
