@@ -358,6 +358,23 @@ export interface RemoteSearchCapability {
   mergeKeys(keys: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
+// The projects a connection can reach. `truncated` means the provider capped the list, so absence from
+// `projects` is never proof a project does not exist.
+export interface ProjectDirectory {
+  readonly projects: readonly { readonly key: string; readonly name: string }[];
+  readonly truncated: boolean;
+}
+
+// Optional capability: enumerate the projects the current credentials can reach, so a surface can offer
+// them without the workspace having to name them first. Offline-first like `metadata`: `cached` answers
+// from the last-known list synchronously (empty before the first refresh) and kicks a background refresh
+// once it has aged out, which fires the provider's metadata change event so the surface repaints; `list`
+// is the awaited fetch. Capability-gated: an adapter that cannot enumerate projects omits it.
+export interface ProjectDirectoryCapability {
+  cached(): ProjectDirectory;
+  list(signal?: AbortSignal): Promise<ProjectDirectory>;
+}
+
 export interface ResultPublishingCapability {
   // Search the tracker for the targets a publish can name: executions to append to, test plans to
   // associate a new execution with, projects to create one in. Requires provider credentials for the
@@ -392,6 +409,7 @@ export interface TraceabilityAdapter {
   readonly coverage?: CoverageCapability | undefined;
   readonly automationBinding?: AutomationBindingCapability | undefined;
   readonly remoteSearch?: RemoteSearchCapability | undefined;
+  readonly projectDirectory?: ProjectDirectoryCapability | undefined;
   readonly testAuthoring?: TestAuthoringCapability | undefined;
   readonly resultPublishing?: ResultPublishingCapability | undefined;
   readonly attachments?: AttachmentCapability | undefined;

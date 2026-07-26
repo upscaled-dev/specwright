@@ -3,13 +3,17 @@ import { ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
 import {
   MetadataCapability,
+  ProjectDirectory,
+  ProjectDirectoryCapability,
   RemoteMetadataSnapshot,
   RemoteSearchCapability,
   RemoteSearchResult,
   SyncScope,
   TestCaseMetadata,
 } from "../traceability/contracts";
+import { normalizeProjectKeys } from "../traceability/project-scope";
 import { XrayAbortError, XrayCachePage, XrayClient, XrayFetchOutcome } from "./xray-client";
+import { JiraProjectSearchResult } from "./jira-project-search";
 import { CachedMetadata, CACHE_SCHEMA_VERSION, XrayMetadataCache } from "./xray-metadata-cache";
 import { buildSearchJql } from "./xray-search";
 
@@ -53,6 +57,9 @@ function stateFromCached(cached: CachedMetadata): MetadataState {
   };
 }
 
+const EMPTY_DIRECTORY: ProjectDirectory = { projects: [], truncated: false };
+const MIN_DIRECTORY_TTL_MS = 60_000;
+
 function dedupe(keys: readonly string[]): string[] {
   const out: string[] = [];
   for (const key of keys) {
@@ -72,6 +79,10 @@ export interface XrayMetadataDeps {
   // so a credential change re-evaluates it; `undefined` when no credentials are stored.
   account: () => Promise<string | undefined>;
   onCredentialsChange: vscode.Event<void>;
+  // Lists the projects the connection's Jira credentials can reach, or `undefined` when the connection
+  // has no Jira access at all: the directory then stays empty and the project universe falls back to
+  // the workspace's own keys.
+  listProjects: (signal?: AbortSignal) => Promise<JiraProjectSearchResult | undefined>;
   now?: (() => number) | undefined;
   // The active grammar's key canonicalization, so absent-set and catalogue keying match the keys the
   // model derives from tags. Defaults to the Xray rule (keys are definitionally uppercase).
@@ -91,7 +102,7 @@ export interface XrayMetadataDeps {
  * discarded wholesale (no commit, no persist, no fire).
  */
 export class XrayMetadataCapability
-  implements MetadataCapability, RemoteSearchCapability, vscode.Disposable
+  implements MetadataCapability, RemoteSearchCapability, ProjectDirectoryCapability, vscode.Disposable
 {
   private readonly _onDidChange = new vscode.EventEmitter<void>();
   public readonly onDidChange = this._onDidChange.event;
@@ -99,6 +110,11 @@ export class XrayMetadataCapability
   private readonly canonicalizeKey: (key: string) => string;
   private readonly credentialsSub: vscode.Disposable;
   private state: MetadataState = emptyState();
+  // The project directory, cached in memory per connection (never persisted: it is a cheap list and it
+  // must not outlive the credentials that could read it).
+  private directory: ProjectDirectory = EMPTY_DIRECTORY;
+  private directoryFetchedAt: number | undefined;
+  private directoryInFlight: Promise<ProjectDirectory> | undefined;
   // The account the in-memory state belongs to, and an epoch bumped on every credential change.
   private accountStamp: string | undefined;
   private accountEpoch = 0;
@@ -116,6 +132,10 @@ export class XrayMetadataCapability
   public onCredentialsChanged(): void {
     this.deps.client.invalidateAuth();
     this.accountEpoch += 1;
+    // The directory is per connection: the next credentials may reach a different set of projects, so
+    // the list is dropped rather than aged out.
+    this.directory = EMPTY_DIRECTORY;
+    this.directoryFetchedAt = undefined;
     this.reconcileAccount().catch((error) => {
       this.deps.logger.warn(`Xray metadata account reconcile failed: ${String(error)}`);
     });
@@ -166,12 +186,72 @@ export class XrayMetadataCapability
     };
   }
 
+  // The last-known project list, right now, plus a background refresh once it has aged past the
+  // directory TTL: the same offline-first shape as `snapshot`. The refresh fires `onDidChange`, which
+  // is what repaints the surfaces, so their read of this stays synchronous.
+  public cached(): ProjectDirectory {
+    if (this.directoryStale()) {
+      this.list().catch(() => undefined);
+    }
+    return this.directory;
+  }
+
+  // One enumeration at a time: a repaint and an explicit call share the in-flight promise rather than
+  // walking the whole site twice. The first caller's signal is therefore the only one honored, which
+  // holds while the refresh is the sole production caller.
+  public list(signal?: AbortSignal): Promise<ProjectDirectory> {
+    this.directoryInFlight ??= this.fetchDirectory(signal).finally(() => {
+      this.directoryInFlight = undefined;
+    });
+    return this.directoryInFlight;
+  }
+
+  // Floored, because this is what makes the read/refresh loop terminate: `cached` kicks a refresh
+  // whenever the list is stale and the refresh repaints, so a zero TTL (the setting has no minimum)
+  // would re-enumerate the whole site on every repaint, forever.
+  private directoryStale(): boolean {
+    const ttlMs = Math.max(MIN_DIRECTORY_TTL_MS, this.deps.config.xrayCacheTtlMinutes * 60_000);
+    return this.directoryFetchedAt === undefined || this.now() - this.directoryFetchedAt > ttlMs;
+  }
+
+  private async fetchDirectory(signal?: AbortSignal): Promise<ProjectDirectory> {
+    const epoch = this.accountEpoch;
+    let result: JiraProjectSearchResult | undefined;
+    try {
+      result = await this.deps.listProjects(signal);
+    } catch (error) {
+      this.deps.logger.warn(`Jira project directory refresh failed: ${String(error)}`);
+    }
+    // A credential change during the fetch supersedes it: that connection's list is not this one's.
+    if (epoch !== this.accountEpoch) {
+      return this.directory;
+    }
+    // Stamped even when the fetch failed or the connection has no Jira access, so a surface repainting
+    // on every snapshot change cannot turn a stale directory into a request loop: the TTL is the retry
+    // window.
+    this.directoryFetchedAt = this.now();
+    if (result === undefined) {
+      return this.directory;
+    }
+    this.directory = { projects: result.projects, truncated: result.truncated };
+    this._onDidChange.fire();
+    return this.directory;
+  }
+
+  // The projects a remote search may match a summary in: the sync setting union the already-synced
+  // catalogue, which is the widest scope this layer can know (tag-derived keys live in the workspace
+  // model, above it, and reach here only once a sync has catalogued them). Never the project directory,
+  // since a summary match across every accessible project is a crawl, not a search.
+  private searchProjects(): string[] {
+    return normalizeProjectKeys([...this.deps.config.xraySyncProjectKeys, ...this.state.catalogueProjects]);
+  }
+
   // Remote free-text/key search beyond the synced snapshot. The neutral JQL builder scopes a summary
-  // match to the configured projects (or a direct key lookup for a key-shaped input); §5 leniency
+  // match to the projects `searchProjects` resolves (or a direct key lookup for a key-shaped input); §5 leniency
   // means an empty `tests` is an honest "no matches", never an invalid query. The JQL carries only
   // the user's search text (a repo tag, not a secret), so logging it at debug is safe.
   public async search(text: string, signal?: AbortSignal): Promise<RemoteSearchResult> {
-    const jql = buildSearchJql(this.deps.config.xraySyncProjectKeys, text);
+    const jql = buildSearchJql(this.searchProjects(), text);
     if (jql === undefined) {
       return { tests: [], complete: true };
     }

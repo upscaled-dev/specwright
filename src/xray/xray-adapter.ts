@@ -8,6 +8,7 @@ import {
   KeyGrammar,
   MetadataCapability,
   NotSupportedError,
+  ProjectDirectoryCapability,
   RemoteSearchCapability,
   ResultPublishingCapability,
   TestAuthoringCapability,
@@ -102,6 +103,7 @@ export class XrayAdapter implements TraceabilityAdapter {
   public readonly connection: ConnectionCapability | undefined;
   public readonly metadata: MetadataCapability | undefined;
   public readonly remoteSearch: RemoteSearchCapability | undefined;
+  public readonly projectDirectory: ProjectDirectoryCapability | undefined;
   public readonly testAuthoring: TestAuthoringCapability | undefined;
   public readonly resultPublishing: ResultPublishingCapability | undefined;
   // Offline classification is always available (no network); it degrades to `unknown` on a partial
@@ -110,7 +112,8 @@ export class XrayAdapter implements TraceabilityAdapter {
 
   // The model degrades to the offline tag-only join when a capability is absent, so the browse-URL
   // command instance (built without a credential store or client) leaves them undefined. The live
-  // capability instance implements both metadata and remote search, so the factory passes it twice.
+  // capability instance implements metadata, remote search, and the project directory over one piece of
+  // connection state, so the factory passes it in all three slots.
   constructor(
     private readonly config: ExtensionConfig,
     credentialStore?: XrayCredentialStore,
@@ -118,13 +121,15 @@ export class XrayAdapter implements TraceabilityAdapter {
     metadata?: MetadataCapability,
     remoteSearch?: RemoteSearchCapability,
     resultPublishing?: ResultPublishingCapability,
-    testAuthoring?: TestAuthoringCapability
+    testAuthoring?: TestAuthoringCapability,
+    projectDirectory?: ProjectDirectoryCapability
   ) {
     this.connection = credentialStore ? xrayConnection(config, credentialStore, verify) : undefined;
     this.metadata = metadata;
     this.remoteSearch = remoteSearch;
     this.resultPublishing = resultPublishing;
     this.testAuthoring = testAuthoring;
+    this.projectDirectory = projectDirectory;
   }
 
   public get keyGrammar(): KeyGrammar {

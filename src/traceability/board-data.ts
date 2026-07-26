@@ -146,7 +146,7 @@ function nonEmptySummary(summary: string | undefined): string | undefined {
 }
 
 // A key's project, or undefined when none can be derived. Uppercased like the scope selector's options
-// (`knownProjectKeys`), since the grammar's `canonicalizeKey` is not required to be: both sides of the
+// (`normalizeProjectKeys`), since the grammar's `canonicalizeKey` is not required to be: both sides of the
 // scope compare have to normalize the same way. Never the empty string, so a scope compare stays a plain
 // field match and an underivable key falls outside every project.
 function keyProject(projectOf: KeyGrammar["projectOf"], key: string): string | undefined {

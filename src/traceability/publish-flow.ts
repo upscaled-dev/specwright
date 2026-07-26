@@ -5,7 +5,7 @@ import {
   RunArtifact,
 } from "./contracts";
 import { LedgerEntry } from "./publish-ledger";
-import { knownProjectKeys } from "./project-scope";
+import { normalizeProjectKeys } from "./project-scope";
 import {
   defaultPublishSummary,
   derivePublishProject,
@@ -104,8 +104,8 @@ export interface PublishFlowDeps {
   // dialog's project prefill; All Projects is the absence of a selection and leaves derivation alone.
   selectedProjectKey?: string | undefined;
   jiraSearchAvailable: boolean;
-  // Keys already known locally (sync config, snapshot catalogue) seeding the dialog's project dropdown.
-  // The flow normalizes them through the same `knownProjectKeys` the board's scope selector reads.
+  // The resolved project universe seeding the dialog's project dropdown. The flow normalizes it through
+  // the same `normalizeProjectKeys` the board's scope selector reads.
   knownProjectKeys: readonly string[];
   // Built lazily — only when the dialog is actually about to open (after the no-runs gate), so an
   // empty run list never fires the one allowed pre-confirm call (the `attachment/meta` probe).
@@ -206,7 +206,7 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
   const attachments = await deps.attachments();
   // Folded through the same normalizer as the dropdown, so a blank or lowercase scope cannot reach the
   // prefill: whatever normalizes to nothing is no selection at all.
-  const scopedProject = knownProjectKeys([deps.selectedProjectKey ?? ""])[0];
+  const scopedProject = normalizeProjectKeys([deps.selectedProjectKey ?? ""])[0];
   const built = runnable.map((artifact) => buildRunOption(artifact, deps, scopedProject));
   const selectedRunId =
     deps.preselectId !== undefined && runnable.some((artifact) => artifact.id === deps.preselectId)
@@ -220,10 +220,10 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
     jiraSearchAvailable: deps.jiraSearchAvailable,
     // Under a selection the run-derived keys are no longer the prefill, so they join the dropdown
     // to stay one pick away.
-    knownProjectKeys: knownProjectKeys(
-      deps.knownProjectKeys,
-      scopedProject === undefined ? [] : built.map((run) => run.derivedProject)
-    ),
+    knownProjectKeys: normalizeProjectKeys([
+      ...deps.knownProjectKeys,
+      ...(scopedProject === undefined ? [] : built.map((run) => run.derivedProject)),
+    ]),
     attachments,
   });
   if (dialog === undefined) {

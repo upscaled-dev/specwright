@@ -3,6 +3,7 @@ import { ConnectionVerifyResult, TestAuthoringCapability } from "../traceability
 import { TraceabilityAdapterFactory } from "../traceability/adapter-registry";
 import { canonicalizeXrayKey, normalizeSiteUrl, XrayAdapter } from "./xray-adapter";
 import { XrayClient } from "./xray-client";
+import { JiraProjectSearchResult, searchJiraProjects } from "./jira-project-search";
 import { XrayMetadataCapability } from "./xray-metadata";
 import { currentWorkspaceId, XrayMetadataCache } from "./xray-metadata-cache";
 import { parseXrayRegion, xrayBaseUrl } from "./xray-region";
@@ -70,6 +71,16 @@ export function createXrayAdapterFactory(
         account,
         workspaceId: currentWorkspaceId(),
       });
+      // The project directory rides the Jira REST credentials, which are optional: without them the
+      // connection can still read Xray, so "no Jira access" is an empty directory, not a failure.
+      const listProjects = async (signal?: AbortSignal): Promise<JiraProjectSearchResult | undefined> => {
+        const site = normalizeSiteUrl(ctx.config.xraySiteUrl);
+        const credentials = await credentialStore.getJiraCredentials(ctx.config.xraySiteUrl);
+        if (site === "" || !credentials) {
+          return undefined;
+        }
+        return searchJiraProjects({ site, credentials, logger: ctx.logger, ...(signal ? { signal } : {}) });
+      };
       const metadata = new XrayMetadataCapability({
         client,
         cache,
@@ -79,6 +90,7 @@ export function createXrayAdapterFactory(
         // Every credential change drops the JWT and re-stamps/reloads state for the current account,
         // so a same-site account switch never serves the prior account's data.
         onCredentialsChange: credentialStore.onDidChange,
+        listProjects,
         canonicalizeKey: canonicalizeXrayKey,
       });
       const resultPublishing = createXrayResultPublishing({
@@ -100,11 +112,20 @@ export function createXrayAdapterFactory(
         createTestExecution: (spec, signal) => client.createTestExecution(spec.project, spec.summary, signal),
         pushGherkin: (issueId, gherkin, signal) => client.updateGherkinTestDefinition(issueId, gherkin, signal),
       };
-      // The capability implements both metadata and remote search over the same client/state, so it
-      // fills both adapter slots — the linkScenario picker's remote-search section is thereby gated on
-      // the live (synced) adapter, never the browse-only instance. Authoring rides the same live
-      // client, so the "create a new test" entry is gated the same way.
-      return new XrayAdapter(ctx.config, credentialStore, verify, metadata, metadata, resultPublishing, testAuthoring);
+      // The capability implements metadata, remote search, and the project directory over the same
+      // client/state, so it fills all three adapter slots. The linkScenario picker's remote-search
+      // section is thereby gated on the live (synced) adapter, never the browse-only instance.
+      // Authoring rides the same live client, so the "create a new test" entry is gated the same way.
+      return new XrayAdapter(
+        ctx.config,
+        credentialStore,
+        verify,
+        metadata,
+        metadata,
+        resultPublishing,
+        testAuthoring,
+        metadata
+      );
     },
   };
 }

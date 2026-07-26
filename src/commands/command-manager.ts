@@ -27,7 +27,7 @@ import { applyTagInsert, applyTagRemove, TagWrite } from "../traceability/tag-ed
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
 import { BoardDropResolution, buildBoardViewModel, buildExecutionRows, resolveBoardDrop, resolveBoardUnlink } from "../traceability/board-data";
 import { BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
-import { knownProjectKeys, NO_PROJECT_SCOPE } from "../traceability/project-scope";
+import { NO_PROJECT_SCOPE, resolveProjectUniverse } from "../traceability/project-scope";
 import { linkedTestsForScenario, ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
 import {
@@ -884,7 +884,7 @@ export class CommandManager {
     const credentials = await this.credentialStore?.getCredentials(rawSite);
     const jiraSearchAvailable = (await this.credentialStore?.hasJiraCredentials(rawSite)) ?? false;
     const resolveSteps = makeFeatureStepResolver(this.context.featureParser);
-    const known = this.knownProjectKeys(adapter);
+    const known = this.projectUniverse(adapter);
     try {
       await runPublishFlow({
         publishing,
@@ -1247,19 +1247,34 @@ export class CommandManager {
     BoardPanel.open(this.boardDeps());
   }
 
-  // The project keys this workspace knows: the sync setting, the synced catalogue, and the default key.
-  // One list behind both the publish dialog's project dropdown and the board's scope selector, so the
-  // persisted scope is coerced against the same keys wherever it is read. A grammar deriving no project
-  // stamps nothing on the cards, so every option would match nothing: offer none.
-  private knownProjectKeys(adapter: TraceabilityAdapter | undefined): string[] {
+  // The projects this workspace can offer, down the source ladder: the provider's own directory when the
+  // connection can enumerate one, plus the workspace's tag-derived keys, the sync setting, the synced
+  // catalogue, and the default key. One list behind both the publish dialog's project dropdown and the
+  // board's scope selector, so the persisted scope is coerced against the same keys wherever it is read.
+  // A grammar deriving no project stamps nothing on the cards, so every option would match nothing:
+  // offer none.
+  private projectUniverse(adapter: TraceabilityAdapter | undefined): string[] {
     if (!adapter?.keyGrammar.projectOf) {
       return [];
     }
-    return knownProjectKeys(
-      this.context.config.xraySyncProjectKeys,
-      adapter.metadata?.snapshot().catalogueProjects ?? [],
-      this.context.config.xrayDefaultProjectKey
-    );
+    return resolveProjectUniverse({
+      directoryProjects: adapter.projectDirectory?.cached().projects.map((project) => project.key),
+      ...this.localProjectSources(adapter),
+      defaultKey: this.context.config.xrayDefaultProjectKey,
+    }).projects;
+  }
+
+  // The workspace's own project sources, shared by the universe above and the sync scope below.
+  private localProjectSources(adapter: TraceabilityAdapter | undefined): {
+    tagDerivedKeys: readonly string[];
+    syncSettingKeys: readonly string[];
+    catalogueKeys: readonly string[];
+  } {
+    return {
+      tagDerivedKeys: this.traceabilitySubsystem?.tagDerivedProjectKeys() ?? [],
+      syncSettingKeys: this.context.config.xraySyncProjectKeys,
+      catalogueKeys: adapter?.metadata?.snapshot().catalogueProjects ?? [],
+    };
   }
 
   // The board's dependencies, shared by openBoard, runPublish, and linkScenarioForRef. The board reads
@@ -1279,7 +1294,7 @@ export class CommandManager {
           this.context.config.xraySyncProjectKeys.length > 0,
           subsystem?.getActiveAdapter()?.keyGrammar.projectOf
         ),
-      knownProjects: () => this.knownProjectKeys(subsystem?.getActiveAdapter()),
+      knownProjects: () => this.projectUniverse(subsystem?.getActiveAdapter()),
       projectScope: subsystem?.projectScope() ?? NO_PROJECT_SCOPE,
       buildExecutions: () => buildExecutionRows(this.publishLedger?.entriesForSite(site) ?? []),
       onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,
@@ -1439,14 +1454,18 @@ export class CommandManager {
   // adapter, provider without a client); guide the user rather than throwing. Progress renders on the
   // tree view; cancellation flows through to the fetch's AbortSignal.
   private async runTraceabilitySyncCommand(): Promise<void> {
-    const metadata = this.traceabilitySubsystem?.getActiveAdapter()?.metadata;
+    const adapter = this.traceabilitySubsystem?.getActiveAdapter();
+    const metadata = adapter?.metadata;
     if (!metadata) {
       vscode.window.showInformationMessage("Connect to your test tracker before syncing.");
       return;
     }
     const scope: SyncScope = {
       testKeys: this.traceabilitySubsystem?.knownTestKeys() ?? [],
-      projectKeys: this.context.config.xraySyncProjectKeys,
+      // The same resolver as the project universe, minus the provider directory: a sync fetches one full
+      // catalogue per project, so it may only ever cover projects this workspace already names. Handing
+      // it every accessible project would fetch hundreds of catalogues nobody asked for.
+      projectKeys: resolveProjectUniverse(this.localProjectSources(adapter)).projects,
     };
     const controller = new AbortController();
     const result = await vscode.window.withProgress(
@@ -1799,7 +1818,7 @@ export class CommandManager {
       selectedTests: () => BoardPanel.selectedTests(),
       targetProject: () => {
         const subsystem = this.traceabilitySubsystem;
-        return subsystem?.projectScope().get(this.knownProjectKeys(subsystem.getActiveAdapter()));
+        return subsystem?.projectScope().get(this.projectUniverse(subsystem.getActiveAdapter()));
       },
       // An unconfigured site has no credential key to look under (the store throws on one), so it reads
       // as "not connected" here rather than as a rejection nobody surfaces.

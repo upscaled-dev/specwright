@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type * as vscode from "vscode";
-import { knownProjectKeys, projectScopeStore } from "../../traceability/project-scope";
+import { normalizeProjectKeys, projectScopeStore, resolveProjectUniverse } from "../../traceability/project-scope";
 
 const KEY = "playwrightBddRunner.board.projectScope";
 
@@ -19,17 +19,59 @@ function memento(seed: Record<string, unknown> = {}): vscode.Memento & { values:
   return store as unknown as vscode.Memento & { values: Record<string, unknown> };
 }
 
-describe("knownProjectKeys", () => {
-  it("unions the three sources, uppercases, trims, drops empties, dedupes and sorts", () => {
-    expect(knownProjectKeys(["calc", " shop "], ["SHOP", "math"], " pay ")).toEqual(["CALC", "MATH", "PAY", "SHOP"]);
+describe("normalizeProjectKeys", () => {
+  it("uppercases, trims, drops empties, dedupes and sorts", () => {
+    expect(normalizeProjectKeys(["calc", " shop ", "SHOP", "", "  "])).toEqual(["CALC", "SHOP"]);
+  });
+});
+
+describe("resolveProjectUniverse", () => {
+  it("lists the provider directory on the jira tier, still unioned with the workspace's own keys", () => {
+    const universe = resolveProjectUniverse({
+      directoryProjects: ["ops", "PAY"],
+      tagDerivedKeys: ["CALC"],
+      syncSettingKeys: ["shop"],
+      catalogueKeys: ["MATH"],
+      defaultKey: " pay ",
+    });
+
+    expect(universe.tier).toBe("jira");
+    expect(universe.projects).toEqual(["CALC", "MATH", "OPS", "PAY", "SHOP"]);
   });
 
-  it("normalizes a single list when the other sources are absent", () => {
-    expect(knownProjectKeys(["SHOP", "CALC", "CALC", "", "PAY"])).toEqual(["CALC", "PAY", "SHOP"]);
+  it("falls back to the xray-only tier when there is no directory to enumerate", () => {
+    const universe = resolveProjectUniverse({
+      tagDerivedKeys: ["calc"],
+      syncSettingKeys: ["SHOP"],
+      defaultKey: "pay",
+    });
+
+    expect(universe.tier).toBe("xray-only");
+    expect(universe.projects).toEqual(["CALC", "PAY", "SHOP"]);
+  });
+
+  // A token that legitimately reaches nothing is still the jira tier, so the surface can say so instead
+  // of sending the user to the sync setting.
+  it("stays on the jira tier when the directory enumerated zero projects", () => {
+    expect(resolveProjectUniverse({ directoryProjects: [] })).toEqual({ projects: [], tier: "jira" });
+  });
+
+  it("keeps requirement-derived keys, so a workspace that tags only requirements is never empty", () => {
+    expect(resolveProjectUniverse({ tagDerivedKeys: ["REQ", "REQ", "calc"] })).toEqual({
+      projects: ["CALC", "REQ"],
+      tier: "xray-only",
+    });
+  });
+
+  it("offers the setting and the default key with no tags at all", () => {
+    expect(resolveProjectUniverse({ syncSettingKeys: ["shop"], defaultKey: "pay" }).projects).toEqual(["PAY", "SHOP"]);
   });
 
   it("returns nothing when every source is empty", () => {
-    expect(knownProjectKeys([], [], "   ")).toEqual([]);
+    expect(resolveProjectUniverse({ tagDerivedKeys: [], syncSettingKeys: [], defaultKey: "   " })).toEqual({
+      projects: [],
+      tier: "xray-only",
+    });
   });
 });
 

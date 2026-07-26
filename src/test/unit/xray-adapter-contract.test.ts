@@ -99,6 +99,7 @@ function xrayHarness(): AdapterContractHarness {
     logger: Logger.create(undefined, LogLevel.ERROR),
     account: () => Promise.resolve("account"),
     onCredentialsChange: credentialStore.onDidChange,
+    listProjects: () => Promise.resolve(undefined),
   });
   const adapter = new XrayAdapter(config, credentialStore, () => Promise.resolve({ status: "ok", message: "ok" }), metadata);
 

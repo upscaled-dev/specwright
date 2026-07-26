@@ -2,25 +2,57 @@ import type * as vscode from "vscode";
 
 const PROJECT_SCOPE_KEY = "playwrightBddRunner.board.projectScope";
 
-/**
- * The project keys this workspace knows about, unioned from the sync setting, the synced catalogue, and
- * the default project key, then trimmed, uppercased, deduped, and sorted. One owner for the list the
- * publish dialog's project dropdown and the board's scope selector both offer, so they can never
- * disagree. The trailing sources default to empty for a caller that already holds a single union.
- */
-export function knownProjectKeys(
-  syncKeys: readonly string[],
-  catalogueProjects: readonly string[] = [],
-  defaultKey = ""
-): string[] {
-  const keys = new Set<string>();
-  for (const raw of [...syncKeys, ...catalogueProjects, defaultKey]) {
+/** Trimmed, uppercased, deduped, sorted; empties dropped. The one shape every project key is compared in. */
+export function normalizeProjectKeys(keys: readonly string[]): string[] {
+  const seen = new Set<string>();
+  for (const raw of keys) {
     const key = raw.trim().toUpperCase();
     if (key !== "") {
-      keys.add(key);
+      seen.add(key);
     }
   }
-  return [...keys].sort((a, b) => a.localeCompare(b));
+  return [...seen].sort((a, b) => a.localeCompare(b));
+}
+
+// Which rung of the source ladder the universe came from: `jira` when the provider enumerated its own
+// project directory, `xray-only` when the workspace's own keys are all there is to go on.
+export type ProjectUniverseTier = "jira" | "xray-only";
+
+export interface ProjectUniverseSources {
+  // Every project the provider's connection can enumerate. Its presence is what makes the tier `jira`.
+  readonly directoryProjects?: readonly string[] | undefined;
+  // Projects the workspace's own test and requirement tags reference. Never a prerequisite: a workspace
+  // with no tags still gets the setting, the catalogue, and the default key.
+  readonly tagDerivedKeys?: readonly string[] | undefined;
+  readonly syncSettingKeys?: readonly string[] | undefined;
+  // Projects an earlier sync already pulled a catalogue for, so their cards keep a scope to select.
+  readonly catalogueKeys?: readonly string[] | undefined;
+  readonly defaultKey?: string | undefined;
+}
+
+export interface ProjectUniverse {
+  readonly projects: string[];
+  readonly tier: ProjectUniverseTier;
+}
+
+/**
+ * The projects a surface may offer, unioned down the source ladder and normalized. One owner for the
+ * list the publish dialog's project dropdown and the board's scope selector read, so they can never
+ * disagree. The sync scope resolves the same way minus the directory, since syncing every accessible
+ * project is not a scope.
+ */
+export function resolveProjectUniverse(sources: ProjectUniverseSources): ProjectUniverse {
+  const projects = normalizeProjectKeys([
+    ...(sources.directoryProjects ?? []),
+    ...(sources.tagDerivedKeys ?? []),
+    ...(sources.syncSettingKeys ?? []),
+    ...(sources.catalogueKeys ?? []),
+    sources.defaultKey ?? "",
+  ]);
+  // The tier answers whether the provider could enumerate at all, not how many it returned: a connection
+  // that legitimately reaches zero projects is still the jira tier, so its empty state can say the token
+  // reaches nothing rather than telling the user to add keys to settings.
+  return { projects, tier: sources.directoryProjects !== undefined ? "jira" : "xray-only" };
 }
 
 // The board's project scope, persisted per workspace. All Projects is the absence of a selection, so

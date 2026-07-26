@@ -167,6 +167,30 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     return [...seen];
   }
 
+  // The projects this workspace's own tags reference. Both test and requirement keys count: a
+  // requirements-first workspace tags coverage before it has a single test key, and it must not come up
+  // empty. Empty when the grammar derives no project from a key.
+  public tagDerivedProjectKeys(): string[] {
+    const projectOf = this.activeAdapter?.keyGrammar.projectOf;
+    const snapshot = this.model?.snapshot;
+    if (!projectOf || !snapshot) {
+      return [];
+    }
+    const projects = new Set<string>();
+    for (const link of snapshot.links) {
+      projects.add(projectOf(link.testKey));
+      for (const key of link.reqKeys) {
+        projects.add(projectOf(key));
+      }
+    }
+    for (const item of snapshot.untraced) {
+      for (const key of item.reqKeys) {
+        projects.add(projectOf(key));
+      }
+    }
+    return [...projects];
+  }
+
   // Reads config.traceabilityProvider live so switching the provider re-selects here; an unknown id
   // falls back to Xray and warns once (not once per config-change burst).
   private resolveProviderId(): string | undefined {

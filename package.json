@@ -354,7 +354,7 @@
         "playwrightBddRunner.xray.cacheTtlMinutes": {
           "type": "number",
           "default": 15,
-          "description": "How long a synced Xray snapshot is considered fresh, in minutes. Past this the panel dims the data and marks it stale — display only; nothing is re-fetched until you run Sync again."
+          "description": "How long a synced Xray snapshot is considered fresh, in minutes. Past this the panel dims the data and marks it stale: display only, and no test data is re-fetched until you run Sync again. The same window paces the project list behind the board's project picker, which does refresh itself in the background once it is stale (never more often than once a minute)."
         },
         "playwrightBddRunner.xray.defaultProjectKey": {
           "type": "string",

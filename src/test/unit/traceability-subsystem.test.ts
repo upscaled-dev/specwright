@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
@@ -892,5 +895,56 @@ describe("TraceabilitySubsystem snapshot change event", () => {
     await flush();
 
     expect(fired).toBe(afterDispose);
+  });
+});
+
+describe("TraceabilitySubsystem tag-derived project keys", () => {
+  const FEATURE = `Feature: Calc
+
+@TEST_CALC-1 @REQ_MATH-9
+Scenario: Divide
+  Given a calculator
+
+@REQ_OPS-4
+Scenario: Untagged by test
+  Given x
+`;
+
+  let dir: string;
+
+  beforeEach(() => {
+    treeViews.__resetTreeViewCounters();
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-scope-"));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("derives projects from test AND requirement tags, so a requirements-first workspace is never empty", async () => {
+    const file = path.join(dir, "calc.feature");
+    fs.writeFileSync(file, FEATURE, "utf-8");
+    const adapter = fakeAdapter("xray");
+    adapter.keyGrammar.projectOf = (key: string) => key.split("-")[0] ?? key;
+    const { config } = makeConfig();
+    const { subsystem, discovery } = build(config, { xray: adapter });
+    vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([file]);
+
+    subsystem.applyCurrent();
+    await flush();
+
+    expect(subsystem.tagDerivedProjectKeys().sort()).toEqual(["CALC", "MATH", "OPS"]);
+    subsystem.dispose();
+  });
+
+  it("derives nothing when the panel is off, so no model exists", () => {
+    const { config } = makeConfig({ enableTraceabilityPanel: false });
+    const { subsystem } = build(config);
+
+    subsystem.applyCurrent();
+
+    expect(subsystem.tagDerivedProjectKeys()).toEqual([]);
+    subsystem.dispose();
   });
 });

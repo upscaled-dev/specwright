@@ -5,6 +5,7 @@ import { ExtensionConfig } from "../../core/extension-config";
 import { XrayFetchOutcome, XrayTestRecord, XrayClient } from "../../xray/xray-client";
 import { CachedMetadata, CACHE_SCHEMA_VERSION, XrayMetadataCache } from "../../xray/xray-metadata-cache";
 import { XrayMetadataCapability } from "../../xray/xray-metadata";
+import { JiraProjectSearchResult } from "../../xray/jira-project-search";
 import { TestCaseMetadata } from "../../traceability/contracts";
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -67,8 +68,12 @@ interface CapabilityOptions {
   logger?: Logger;
   account?: () => Promise<string | undefined>;
   onCredentialsChange?: vscode.Event<void>;
+  listProjects?: (signal?: AbortSignal) => Promise<JiraProjectSearchResult | undefined>;
   now?: () => number;
 }
+
+// A connection with no Jira access: the project directory stays empty without failing.
+const noProjects = (): Promise<JiraProjectSearchResult | undefined> => Promise.resolve(undefined);
 
 function makeCapability(options: CapabilityOptions): XrayMetadataCapability {
   return new XrayMetadataCapability({
@@ -78,6 +83,7 @@ function makeCapability(options: CapabilityOptions): XrayMetadataCapability {
     logger: options.logger ?? silentLogger(),
     account: options.account ?? (() => Promise.resolve("account-a")),
     onCredentialsChange: options.onCredentialsChange ?? new vscode.EventEmitter<void>().event,
+    listProjects: options.listProjects ?? noProjects,
     now: options.now ?? ((): number => 10_000),
   });
 }
@@ -269,6 +275,7 @@ describe("XrayMetadataCapability sync", () => {
       logger: silentLogger(),
       account: () => Promise.resolve("account-a"),
       onCredentialsChange: new vscode.EventEmitter<void>().event,
+      listProjects: noProjects,
       now: () => 20_000,
     });
     await flush(); // let the constructor's cache load settle first
@@ -331,6 +338,7 @@ describe("XrayMetadataCapability offline cache load", () => {
       logger: silentLogger(),
       account: () => Promise.resolve("account-a"),
       onCredentialsChange: new vscode.EventEmitter<void>().event,
+      listProjects: noProjects,
     });
     let fired = 0;
     offline.onDidChange(() => { fired += 1; });
@@ -415,6 +423,7 @@ describe("XrayMetadataCapability account isolation", () => {
       logger: silentLogger(),
       account: accountProvider,
       onCredentialsChange: creds.event,
+      listProjects: noProjects,
       now: () => 10_000,
     });
     return {
@@ -551,6 +560,7 @@ describe("XrayMetadataCapability account isolation", () => {
       logger: silentLogger(),
       account: accountProvider,
       onCredentialsChange: new vscode.EventEmitter<void>().event,
+      listProjects: noProjects,
       now: () => 10_000,
     });
     await flush(); // loadFromCache stamps "acct-A"
@@ -605,6 +615,7 @@ describe("XrayMetadataCapability account isolation", () => {
       logger: silentLogger(),
       account: accountProvider,
       onCredentialsChange: new vscode.EventEmitter<void>().event,
+      listProjects: noProjects,
       now: () => 10_000,
     });
     await flush(); // loadFromCache stamps "acct-A"
@@ -695,6 +706,136 @@ describe("XrayMetadataCapability.search", () => {
 
     const result = await capability.search("login");
     expect(result.complete).toBe(false);
+  });
+
+  // A project that reached the sync scope through the tag ladder is only in the setting-free catalogue,
+  // so scoping the search to the setting alone would make its tests unfindable.
+  it("scopes the JQL to the synced catalogue as well as the setting", async () => {
+    const seen: string[] = [];
+    const capability = makeCapability({
+      config: fakeConfig(15, ["SHOP"]),
+      client: fakeClient({
+        fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1" }])),
+        searchTests: (jql) => {
+          seen.push(jql);
+          return Promise.resolve(outcome([]));
+        },
+      }),
+    });
+    await capability.sync({ projectKeys: ["CALC"] });
+
+    await capability.search("login");
+
+    expect(seen).toEqual(['project in (CALC, SHOP) AND summary ~ "login*"']);
+  });
+});
+
+describe("XrayMetadataCapability project directory", () => {
+  const acme: JiraProjectSearchResult = { projects: [{ key: "OPS", name: "Operations" }], truncated: false };
+
+  it("answers from the last known list and refreshes it in the background", async () => {
+    const listProjects = vi.fn(() => Promise.resolve(acme));
+    const capability = makeCapability({ client: fakeClient({}), listProjects });
+
+    // Nothing fetched yet: the first read is empty and synchronous, and it kicks the refresh.
+    expect(capability.cached()).toEqual({ projects: [], truncated: false });
+    let fired = 0;
+    capability.onDidChange(() => { fired += 1; });
+    await flush();
+
+    expect(fired).toBe(1);
+    expect(capability.cached()).toEqual({ projects: [{ key: "OPS", name: "Operations" }], truncated: false });
+    expect(listProjects).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves the cached list without re-listing until the TTL expires", async () => {
+    let clock = 10_000;
+    const listProjects = vi.fn(() => Promise.resolve(acme));
+    const capability = makeCapability({
+      client: fakeClient({}),
+      config: fakeConfig(15),
+      listProjects,
+      now: () => clock,
+    });
+    capability.cached();
+    await flush();
+
+    capability.cached();
+    await flush();
+    expect(listProjects).toHaveBeenCalledTimes(1);
+
+    clock += 16 * 60_000;
+    capability.cached();
+    await flush();
+    expect(listProjects).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the list empty, without failing, when the connection has no Jira access", async () => {
+    const capability = makeCapability({ client: fakeClient({}), listProjects: noProjects });
+
+    capability.cached();
+    await flush();
+
+    expect(capability.cached()).toEqual({ projects: [], truncated: false });
+  });
+
+  it("holds the last list after a failed refresh, and does not retry it until the TTL is up", async () => {
+    let clock = 10_000;
+    let fail = false;
+    const listProjects = vi.fn(() => (fail ? Promise.reject(new Error("Jira denied access")) : Promise.resolve(acme)));
+    const capability = makeCapability({ client: fakeClient({}), listProjects, now: () => clock });
+    capability.cached();
+    await flush();
+
+    clock += 16 * 60_000;
+    fail = true;
+    capability.cached();
+    await flush();
+    expect(listProjects).toHaveBeenCalledTimes(2);
+
+    // The failure stamped the clock like a success, so a repaint inside the TTL reads the held list
+    // rather than hammering a connection that just refused.
+    capability.cached();
+    await flush();
+
+    expect(listProjects).toHaveBeenCalledTimes(2);
+    expect(capability.cached().projects).toEqual([{ key: "OPS", name: "Operations" }]);
+  });
+
+  it("drops the list when the credentials change, so the next read lists the new connection", async () => {
+    const creds = new vscode.EventEmitter<void>();
+    const listProjects = vi.fn(() => Promise.resolve(acme));
+    const capability = makeCapability({
+      client: fakeClient({}),
+      onCredentialsChange: creds.event,
+      listProjects,
+    });
+    capability.cached();
+    await flush();
+
+    creds.fire();
+
+    expect(capability.cached()).toEqual({ projects: [], truncated: false });
+    await flush();
+    expect(listProjects).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards a list that resolves after the credentials changed, since it belongs to the old connection", async () => {
+    const creds = new vscode.EventEmitter<void>();
+    let resolveList!: (result: JiraProjectSearchResult) => void;
+    const capability = makeCapability({
+      client: fakeClient({}),
+      onCredentialsChange: creds.event,
+      listProjects: () => new Promise<JiraProjectSearchResult>((resolve) => { resolveList = resolve; }),
+    });
+    capability.cached(); // kicks the refresh, which parks on the pending list
+    await flush();
+
+    creds.fire();
+    resolveList(acme);
+    await flush();
+
+    expect(capability.cached().projects).toEqual([]);
   });
 });
 

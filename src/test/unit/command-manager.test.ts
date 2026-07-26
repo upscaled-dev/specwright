@@ -738,6 +738,7 @@ describe("traceability sync command handler", () => {
     const subsystem = {
       getActiveAdapter: () => adapter,
       knownTestKeys: () => ["CALC-1"],
+      tagDerivedProjectKeys: () => [],
     } as unknown as TraceabilitySubsystem;
     const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
 
@@ -747,6 +748,35 @@ describe("traceability sync command handler", () => {
 
     expect(sync).toHaveBeenCalledWith({ testKeys: ["CALC-1"], projectKeys: [] }, expect.anything());
     expect(errorToast).toHaveBeenCalled();
+  });
+
+  it("scopes the sync to the tags, the setting and the already-synced catalogue, never the provider directory", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const adapter = {
+      keyGrammar: { projectOf: (k: string) => k.split("-")[0] },
+      metadata: {
+        sync,
+        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: ["MATH"], verifiedAbsentKeys: [], stale: false, completeness: "complete", errors: [] }),
+      },
+      projectDirectory: { cached: () => ({ projects: [{ key: "OPS", name: "Ops" }], truncated: false }), list: () => Promise.resolve({ projects: [], truncated: false }) },
+    };
+    const subsystem = {
+      getActiveAdapter: () => adapter,
+      knownTestKeys: () => ["CALC-1"],
+      tagDerivedProjectKeys: () => ["CALC"],
+    } as unknown as TraceabilitySubsystem;
+    const workspaceConfig = {
+      get: (key: string, fallback: unknown) => (key === "xray.syncProjectKeys" ? ["shop"] : fallback),
+    } as unknown as vscode.WorkspaceConfiguration;
+
+    const mgr = CommandManager.create(makeContext({ config: ExtensionConfig.create(workspaceConfig, false) }));
+    mgr.setTraceabilitySubsystem(subsystem);
+    await (mgr as unknown as { syncTraceability: () => Promise<void> }).syncTraceability();
+
+    expect(sync).toHaveBeenCalledWith(
+      { testKeys: ["CALC-1"], projectKeys: ["CALC", "MATH", "SHOP"] },
+      expect.anything()
+    );
   });
 
   it("coalesces concurrent invocations into a single in-flight run", async () => {
@@ -761,6 +791,7 @@ describe("traceability sync command handler", () => {
     const subsystem = {
       getActiveAdapter: () => adapter,
       knownTestKeys: () => [],
+      tagDerivedProjectKeys: () => [],
     } as unknown as TraceabilitySubsystem;
 
     const mgr = CommandManager.create(makeContext());
@@ -788,6 +819,7 @@ describe("traceability sync command handler", () => {
     const subsystem = {
       getActiveAdapter: () => adapter,
       knownTestKeys: () => [],
+      tagDerivedProjectKeys: () => [],
       projectScope: () => NO_PROJECT_SCOPE,
     } as unknown as TraceabilitySubsystem;
 
@@ -965,7 +997,13 @@ describe("traceability openBoard command handler", () => {
     vi.restoreAllMocks();
   });
 
-  function fakeSubsystem(panelActive = true, catalogueProjects: string[] = [], derivesProjects = true): TraceabilitySubsystem {
+  function fakeSubsystem(
+    panelActive = true,
+    catalogueProjects: string[] = [],
+    derivesProjects = true,
+    ladder: { tagDerived?: string[]; directory?: string[] } = {}
+  ): TraceabilitySubsystem {
+    const directory = ladder.directory;
     return {
       traceabilityPanelActive: panelActive,
       getSnapshot: () => ({ links: [], untraced: [], orphans: [], stale: false, completeness: "complete", errors: [] }),
@@ -973,7 +1011,16 @@ describe("traceability openBoard command handler", () => {
         label: "Xray",
         keyGrammar: { testPrefix: "TEST_", ...(derivesProjects ? { projectOf: (k: string) => k.split("-")[0] } : {}) },
         metadata: { snapshot: () => ({ catalogueProjects }) },
+        ...(directory
+          ? {
+              projectDirectory: {
+                cached: () => ({ projects: directory.map((key) => ({ key, name: key })), truncated: false }),
+                list: () => Promise.resolve({ projects: [], truncated: false }),
+              },
+            }
+          : {}),
       }),
+      tagDerivedProjectKeys: () => ladder.tagDerived ?? [],
       projectScope: () => NO_PROJECT_SCOPE,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
@@ -1028,6 +1075,25 @@ describe("traceability openBoard command handler", () => {
 
     const render = panel.webview.__posted.find((m) => m.surface === "board" && m.type === "render");
     expect(render?.projects).toEqual(["CALC", "MATH", "PAY", "SHOP"]);
+  });
+
+  it("offers every project the connection can reach, plus the keys the workspace's own tags name", async () => {
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(fakeSubsystem(true, [], true, { tagDerived: ["CALC"], directory: ["OPS", "pay"] }));
+
+    openBoard(mgr);
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+
+    const render = panel.webview.__posted.find((m) => m.surface === "board" && m.type === "render");
+    expect(render?.projects).toEqual(["CALC", "OPS", "PAY"]);
+  });
+
+  it("offers the tag-derived keys alone when the connection enumerates no projects", () => {
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(fakeSubsystem(true, [], true, { tagDerived: ["calc"] }));
+
+    expect(boardDeps(mgr).knownProjects()).toEqual(["CALC"]);
   });
 
   it("offers no scope options when the provider's grammar derives no project, since nothing could match", () => {
@@ -1117,6 +1183,7 @@ describe("traceability publishLastRun — Publish tab", () => {
       traceabilityPanelActive: true,
       getActiveAdapter: () => adapter,
       getSnapshot: () => undefined,
+      tagDerivedProjectKeys: () => [],
       projectScope: () => scope,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
@@ -1487,6 +1554,7 @@ describe("traceability bulkCreateTests wiring", () => {
         keyGrammar: { testPrefix: "TEST_", projectOf: (key: string) => key.split("-")[0] },
         testAuthoring: { createTest: () => Promise.resolve({ key: "CALC-1", warnings: [] }) },
       }),
+      tagDerivedProjectKeys: () => [],
       projectScope: () => NO_PROJECT_SCOPE,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
