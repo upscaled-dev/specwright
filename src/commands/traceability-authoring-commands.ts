@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
+import { errMsg, plural } from "../utils/text";
 import { resolveBoardLink, scenarioDropId } from "../traceability/board-data";
 import { BulkCreateResult, BulkCreateScenario, runBulkCreate } from "../traceability/bulk-create-flow";
 import { runContainerCreate } from "../traceability/container-create-flow";
@@ -47,12 +48,10 @@ const EXAMPLE_ROW =
   "Pushing text is not available for an example-row link. Link the outline itself to push its text.";
 const RESYNC = "Sync traceability, then try again.";
 
-function plural(count: number, word: string): string {
-  return count === 1 ? word : `${word}s`;
-}
-
-function errMsg(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown error";
+// Where a create is about to land, named the way every confirm names it: with the site when one is
+// configured, so the user reads which tracker is being written to.
+function projectTarget(site: string, project: string): string {
+  return site !== "" ? `project ${project} on ${site}` : `project ${project}`;
 }
 
 // The remote issue id the last sync recorded for a test key, from wherever the board's card came from: a
@@ -294,8 +293,7 @@ export class TraceabilityAuthoringCommands {
     holding: string,
     providerLabel: string
   ): Promise<boolean> {
-    const site = this.deps.siteUrl();
-    const target = site !== "" ? `project ${project} on ${site}` : `project ${project}`;
+    const target = projectTarget(this.deps.siteUrl(), project);
     const action = `Create ${kind}`;
     const choice = await vscode.window.showWarningMessage(
       `Create a new ${providerLabel} ${kind} in ${target} ${holding}?`,
@@ -538,8 +536,7 @@ export class TraceabilityAuthoringCommands {
   }
 
   private async confirm(project: string, count: number, providerLabel: string): Promise<boolean> {
-    const site = this.deps.siteUrl();
-    const target = site !== "" ? `project ${project} on ${site}` : `project ${project}`;
+    const target = projectTarget(this.deps.siteUrl(), project);
     const choice = await vscode.window.showWarningMessage(
       `Create ${count} new ${providerLabel} ${plural(count, "test")} in ${target}, one per selected scenario?`,
       { modal: true },

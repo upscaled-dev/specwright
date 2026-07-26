@@ -10,6 +10,7 @@ import {
   PlaywrightBddExtensionContext,
 } from "../types/index";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import { ExtensionConfig } from "./extension-config";
 import { spawn, ChildProcess } from "node:child_process";
 import { PlaywrightJsonParser, ScenarioStatus, ScenarioResult, normalizePathKey } from "../utils/playwright-json-parser";
@@ -33,10 +34,6 @@ export type RunOutputResult = TestRunResult & {
   scenarioResults?: Record<string, ScenarioStatus>;
   scenarioDetails?: ScenarioResult[];
 };
-
-function errMsg(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown error occurred";
-}
 
 // Worst status wins when one scenario ran under several projects (failed > skipped > passed), so
 // a chromium-passed / firefox-failed scenario counts as failed no matter which result the report

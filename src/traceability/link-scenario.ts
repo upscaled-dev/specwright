@@ -1,5 +1,6 @@
 import { AuthoredTest, KeyGrammar, NewTestSpec, RemoteMetadataSnapshot } from "./contracts";
 import { extractKeys } from "./tag-extraction";
+import { stripCr } from "../parsers/gherkin-slice";
 import { TAG_TOKEN_PATTERN } from "../parsers/tag-regex";
 
 export interface LinkScenarioPick {
@@ -66,8 +67,7 @@ export function computeLinkEdit(
   for (const idx of tagLineIndices) {
     // The caller splits on "\n", so a CRLF line keeps a trailing "\r"; strip it here so replaceLine
     // text is EOL-free and the caller writes it in front of the document's own "\r\n".
-    const raw = lines[idx] ?? "";
-    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    const line = stripCr(lines[idx] ?? "");
     const existing = testTagOnLine(line, grammar);
     if (existing) {
       if (grammar.canonicalizeKey(existing.key) === newKey) {
@@ -129,8 +129,7 @@ export function computeUnlinkEdit(
   for (const idx of tagLineIndices) {
     // The caller splits on "\n", so a CRLF line keeps a trailing "\r"; strip it here so replaceLine
     // text is EOL-free and the caller writes it in front of the document's own "\r\n".
-    const raw = lines[idx] ?? "";
-    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    const line = stripCr(lines[idx] ?? "");
     const found = testTagForKey(line, key, grammar);
     if (found === undefined) {
       continue;

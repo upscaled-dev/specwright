@@ -1,4 +1,5 @@
 import type { AuthoredTest, NewTestSpec } from "./contracts";
+import { errMsg } from "../utils/text";
 import { createAndTagTest } from "./link-scenario";
 import type { ScenarioRef } from "./scenario-ref";
 import type { TagWrite } from "./tag-edit";
@@ -27,10 +28,6 @@ export interface BulkCreateDeps {
 export interface BulkCreateResult {
   readonly created: ReadonlyArray<{ scenario: BulkCreateScenario; key: string }>;
   readonly failed: ReadonlyArray<{ scenario: BulkCreateScenario; reason: string }>;
-}
-
-function failureReason(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown error";
 }
 
 const FILE_CHANGED = "the feature file changed during the batch";
@@ -86,7 +83,7 @@ export async function runBulkCreate(
         created.push({ scenario, key: test.key });
       }
     } catch (error) {
-      failed.push({ scenario, reason: failureReason(error) });
+      failed.push({ scenario, reason: errMsg(error) });
     }
   }
   return { created, failed };

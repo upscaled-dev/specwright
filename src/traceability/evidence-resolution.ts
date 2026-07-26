@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { plural } from "../utils/text";
 
 // Conservative caps — the official Xray import size limits are undocumented (open item). A single
 // evidence file over the file cap, or one that would push the running total past the total cap, is
@@ -136,8 +137,4 @@ export function summarizeEvidenceSkips(skips: readonly EvidenceSkip[]): string |
     parts.push(`${counts.missing} evidence ${plural(counts.missing, "file")} not found`);
   }
   return `Skipped ${parts.join(", ")}.`;
-}
-
-function plural(n: number, word: string): string {
-  return n === 1 ? word : `${word}s`;
 }

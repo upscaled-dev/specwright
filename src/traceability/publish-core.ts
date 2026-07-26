@@ -1,4 +1,5 @@
 import { RunArtifact, RunArtifactOutcome, RunArtifactResult } from "./contracts";
+import { plural } from "../utils/text";
 import { sameScenario } from "./scenario-ref";
 
 // Only a `complete` run is publishable — a cancelled or partial run never reaches the publish dialog
@@ -96,8 +97,11 @@ export function summarizePublishable(reconciled: PublishableResults): Publishabl
 // `changedSinceRun` is create-mode-only (scenarios whose source no longer resolves) — surfaced as a
 // note because the radio can still switch to append, which publishes everything.
 export function publishDialogSubtitle(summary: PublishableSummary, changedSinceRun: number): string {
-  const plural = summary.total === 1 ? "" : "s";
-  const head = [`${summary.total} scenario${plural}`, `${summary.passed} passed`, `${summary.failed} failed`];
+  const head = [
+    `${summary.total} ${plural(summary.total, "scenario")}`,
+    `${summary.passed} passed`,
+    `${summary.failed} failed`,
+  ];
   if (summary.skipped > 0) {
     head.push(`${summary.skipped} skipped`);
   }
@@ -127,8 +131,7 @@ export function publishDialogSubtitle(summary: PublishableSummary, changedSinceR
 // creation day, ISO for determinism).
 export function defaultPublishSummary(createdAt: number, publishableCount: number): string {
   const date = new Date(createdAt).toISOString().slice(0, 10);
-  const plural = publishableCount === 1 ? "" : "s";
-  return `Specwright run ${date} — ${publishableCount} scenario${plural}`;
+  return `Specwright run ${date} — ${publishableCount} ${plural(publishableCount, "scenario")}`;
 }
 
 // One run's label in the dialog's newest-first dropdown: its local time and batch scope.

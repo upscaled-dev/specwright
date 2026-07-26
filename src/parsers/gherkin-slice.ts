@@ -13,7 +13,9 @@ export const SCENARIO_KEYWORDS = [
 const NEXT_SCENARIO_BLOCK = /^(Feature|Rule|Background|Scenario Outline|Scenario Template|Scenario|Example)\b/;
 const EXAMPLES_BLOCK = /^(Examples|Scenarios)\b/;
 
-function stripCr(line: string): string {
+// A line split off a CRLF document keeps its trailing "\r"; every caller that compares or rewrites
+// such a line wants it gone first.
+export function stripCr(line: string): string {
   return line.endsWith("\r") ? line.slice(0, -1) : line;
 }
 

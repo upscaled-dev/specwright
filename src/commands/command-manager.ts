@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Logger } from "../utils/logger";
+import { errMsg, plural } from "../utils/text";
 import { CommandArguments, CommandHandler, ParsedFeature, PlaywrightBddExtensionContext, TestExecutionOptions } from "../types";
 import { RunOutputResult } from "../core/test-executor";
 import { GenerateStepsCommand } from "./generate-steps";
@@ -120,14 +121,6 @@ const STRATEGY_TYPE_BY_VALUE: Record<string, string> = {
 
 const CATEGORY = "Specwright";
 const NO_PUBLISHABLE_RUNS_MESSAGE = "No local runs to publish yet. Run a batch first.";
-
-function errMsg(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown error";
-}
-
-function plural(count: number, word: string, many = `${word}s`): string {
-  return count === 1 ? word : many;
-}
 
 // The clear-run-history toast, naming only what was actually removed.
 function clearedHistoryMessage(runs: number, entries: number): string {

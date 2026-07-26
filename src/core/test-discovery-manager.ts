@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import { ExtensionConfig } from "./extension-config";
 import { CacheEntry, DiscoveryOptions } from "../types";
 import { buildExcludeGlob, excludedDirFragments } from "../utils/discovery-excludes";
@@ -69,11 +70,9 @@ export class TestDiscoveryManager {
 
       return files;
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Unknown error";
       this.logger.error("Failed to discover test files", {
         pattern,
-        error: errorMessage,
+        error: errMsg(error),
       });
       throw error;
     }
@@ -106,11 +105,9 @@ export class TestDiscoveryManager {
 
       return files;
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Unknown error";
       this.logger.error("Failed to discover files", {
         pattern,
-        error: errorMessage,
+        error: errMsg(error),
       });
       throw error;
     }

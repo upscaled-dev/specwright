@@ -14,6 +14,7 @@ import {
   TestExecutionOptions,
 } from "../types";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import { ExtensionConfig } from "../core/extension-config";
 import { TestDiscoveryManager } from "../core/test-discovery-manager";
 import { TestOrganizationManager } from "../core/test-organization";
@@ -33,10 +34,6 @@ import {
   resolveWorkerCountDetailed,
   WorkerCountResolution,
 } from "../commands/prompt-worker-count";
-
-function errMsg(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown error";
-}
 
 /**
  * Pull bddgen's "Missing step definitions" block (count + suggested snippets) out of captured
