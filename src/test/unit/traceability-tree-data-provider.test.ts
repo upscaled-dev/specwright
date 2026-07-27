@@ -616,11 +616,13 @@ describe("TraceabilityTreeDataProvider orphan section", () => {
     ]);
   });
 
+  // "Available" is the board's word for the same rows, so the tree says it too; only the label moved,
+  // the section's own identity ("orphan", traceabilityOrphan) is what the menus bind to.
   it("labels the orphan header with the provider and shows the count, like the other sections", () => {
     const p = provider(withOrphans("complete"), "Xray");
     const orphanSection = p.getChildren()[2]!;
     const header = p.getTreeItem(orphanSection);
-    expect(header.label).toBe("Orphan Xray tests");
+    expect(header.label).toBe("Available Xray tests");
     expect(header.description).toBe("2");
   });
 

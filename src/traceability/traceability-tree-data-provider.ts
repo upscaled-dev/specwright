@@ -450,7 +450,7 @@ export class TraceabilityTreeDataProvider
     const labels: Record<SectionNode["section"], string> = {
       untraced: "Untraced scenarios",
       covered: "Mapped tests",
-      orphan: `Orphan ${this.providerLabel} tests`,
+      orphan: `Available ${this.providerLabel} tests`,
     };
     const counts: Record<SectionNode["section"], number> = {
       untraced: snap.untraced.length,
@@ -589,7 +589,7 @@ export class TraceabilityTreeDataProvider
   private orphanNodes(): TraceabilityNode[] {
     const orphans = this.model.snapshot.orphans;
     if (orphans.length === 0) {
-      return [{ kind: "info", label: `No orphan ${this.providerLabel} tests in the synced scope.` }];
+      return [{ kind: "info", label: `No available ${this.providerLabel} tests in the synced scope.` }];
     }
     return [...orphans]
       .sort((a, b) => a.testKey.localeCompare(b.testKey))
