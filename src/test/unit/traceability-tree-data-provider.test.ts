@@ -178,6 +178,36 @@ describe("TraceabilityTreeDataProvider", () => {
     expect(item.contextValue).toBe("traceabilityUntraced");
   });
 
+  // Work waiting, not an alarm: the neutral empty circle, uncoloured, leaves the warning triangle to
+  // mean a key the remote proved broken.
+  it("marks an untraced scenario with an uncoloured empty circle", () => {
+    const p = provider(SNAPSHOT);
+    const icon = p.getTreeItem(p.getChildren(p.getChildren()[0])[0]!).iconPath as vscode.ThemeIcon;
+    expect(icon.id).toBe("circle-large-outline");
+    expect(icon.color).toBeUndefined();
+  });
+
+  // The glyphs already said pass and fail; the theme's own testing colours say it at a glance, and an
+  // unset verdict stays uncoloured rather than dressing "we do not know" up as a result.
+  it("colours a result badge from the theme's testing palette, leaving an unset verdict bare", () => {
+    // The first covered key's badge, from a snapshot carrying one link in the given state.
+    const badgeFor = (link: TraceabilitySnapshot["links"][number]): vscode.ThemeIcon => {
+      const p = provider({ ...SNAPSHOT, links: [link] });
+      const keys = p.getChildren(p.getChildren()[1]);
+      return p.getTreeItem(keys[0]!).iconPath as vscode.ThemeIcon;
+    };
+    const base = SNAPSHOT.links[0]!;
+    const colorOf = (icon: vscode.ThemeIcon): string | undefined => (icon.color as vscode.ThemeColor | undefined)?.id;
+
+    expect(colorOf(badgeFor({ ...base, lastResult: "passed" }))).toBe("testing.iconPassed");
+    expect(colorOf(badgeFor({ ...base, lastResult: "failed" }))).toBe("testing.iconFailed");
+    expect(colorOf(badgeFor({ ...base, lastResult: "skipped" }))).toBe("testing.iconSkipped");
+    const pending = badgeFor({ ...base, meta: { key: base.testKey, status: { category: "pending", providerValue: "In Progress" } } });
+    expect([pending.id, colorOf(pending)]).toEqual(["testing-queued-icon", "testing.iconQueued"]);
+    const unknown = badgeFor({ ...base, meta: { key: base.testKey, status: { category: "unknown", providerValue: "Custom" } } });
+    expect([unknown.id, colorOf(unknown)]).toEqual(["testing-unset-icon", undefined]);
+  });
+
   const untracedOutline = (examples: number, reqKeys: string[]): TraceabilitySnapshot => ({
     links: [],
     untraced: [
@@ -407,19 +437,21 @@ describe("TraceabilityTreeDataProvider", () => {
     expect((checking.iconPath as vscode.ThemeIcon).id).toBe("loading~spin");
     expect(checking.description).toBe("Checking…");
 
+    // Each failure names its own cause: a key for refused credentials, a severed plug for a site that
+    // never answered, rather than two shades of the same dot.
     const ok = rowFor("ok");
     expect((ok.iconPath as vscode.ThemeIcon).id).toBe("cloud");
-    expect((ok.iconPath as vscode.ThemeIcon).color).toBeUndefined();
+    expect(((ok.iconPath as vscode.ThemeIcon).color as vscode.ThemeColor).id).toBe("charts.green");
     expect(ok.description).toBe("Connected");
 
     const authFailed = rowFor("auth-failed");
-    expect((authFailed.iconPath as vscode.ThemeIcon).id).toBe("circle-filled");
+    expect((authFailed.iconPath as vscode.ThemeIcon).id).toBe("key");
     expect(((authFailed.iconPath as vscode.ThemeIcon).color as vscode.ThemeColor).id).toBe("charts.red");
     expect(authFailed.description).toBe("Authentication failed");
 
     const unreachable = rowFor("unreachable");
-    expect((unreachable.iconPath as vscode.ThemeIcon).id).toBe("circle-outline");
-    expect((unreachable.iconPath as vscode.ThemeIcon).color).toBeUndefined();
+    expect((unreachable.iconPath as vscode.ThemeIcon).id).toBe("debug-disconnect");
+    expect(((unreachable.iconPath as vscode.ThemeIcon).color as vscode.ThemeColor).id).toBe("charts.yellow");
     expect(unreachable.description).toBe("Unreachable");
   });
 
@@ -605,12 +637,14 @@ describe("TraceabilityTreeDataProvider orphan section", () => {
     expect((command.arguments[0] as { testKey: string }).testKey).toBe("CALC-9999");
   });
 
-  it("renders orphan rows with the amber warning-triangle icon", () => {
+  // An unmapped remote test is inventory to pick up, not a fault, so it reads as a blue beaker and the
+  // warning triangle is left to mean a real problem.
+  it("renders orphan rows with the blue beaker icon", () => {
     const p = provider(withOrphans("complete"));
     const rows = p.getChildren(p.getChildren()[2]);
     const icon = p.getTreeItem(rows[0]!).iconPath as vscode.ThemeIcon;
-    expect(icon.id).toBe("warning");
-    expect((icon.color as vscode.ThemeColor).id).toBe("problemsWarningIcon.foreground");
+    expect(icon.id).toBe("beaker");
+    expect((icon.color as vscode.ThemeColor).id).toBe("charts.blue");
   });
 
   it("never renders orphans from a partial fetch, even when orphan data is present", () => {

@@ -299,7 +299,7 @@ describe("CommandManager: StepDefinitionProvider caching", () => {
 describe("command contributions ↔ handler registrations parity", () => {
   interface PackageJson {
     contributes: {
-      commands: Array<{ command: string }>;
+      commands: Array<{ command: string; icon?: string }>;
       menus: Record<string, Array<{ command?: string; when?: string; submenu?: string; group?: string }>>;
     };
   }
@@ -389,11 +389,61 @@ describe("command contributions ↔ handler registrations parity", () => {
     expect(palette.find((e) => e.command === "playwrightBddRunner.traceability.clearLocalRunHistory")).toBeUndefined();
   });
 
-  it("puts the manage-connection gear in the traceability view title bar", () => {
+  it("puts the manage-connection plug last in the traceability view title bar", () => {
     const viewTitle = pkg.contributes.menus["view/title"]!;
-    const gear = viewTitle.find((e) => e.command === "playwrightBddRunner.traceability.manageConnection");
-    expect(gear?.when).toBe("view == playwrightBddRunner.traceability");
-    expect(gear?.group).toBe("navigation@1");
+    const plug = viewTitle.find((e) => e.command === "playwrightBddRunner.traceability.manageConnection");
+    expect(plug?.when).toBe("view == playwrightBddRunner.traceability");
+    expect(plug?.group).toBe("navigation@4");
+  });
+
+  // One toolbar, six buttons, one slot each: two commands sharing a slot leaves their order to chance.
+  it("gives every traceability title-bar button its own navigation slot, in the approved order", () => {
+    const slots = pkg.contributes.menus["view/title"]!
+      .filter((e) => e.command?.startsWith("playwrightBddRunner.traceability."))
+      .map((e) => [e.command, e.group] as const)
+      .sort((a, b) => Number(a[1]?.split("@")[1]) - Number(b[1]?.split("@")[1]));
+
+    expect(slots).toEqual([
+      ["playwrightBddRunner.traceability.toggleGrouping", "navigation@-1"],
+      ["playwrightBddRunner.traceability.sync", "navigation@0"],
+      ["playwrightBddRunner.traceability.openBoard", "navigation@1"],
+      ["playwrightBddRunner.traceability.runAndPublish", "navigation@2"],
+      ["playwrightBddRunner.traceability.publishLastRun", "navigation@3"],
+      ["playwrightBddRunner.traceability.manageConnection", "navigation@4"],
+    ]);
+  });
+
+  // Adjacent duplicates read as one button pressed twice, so the toolbar's glyphs must all differ.
+  it("paints every title-bar button with a distinct icon", () => {
+    const iconOf = (command: string): string | undefined =>
+      pkg.contributes.commands.find((c) => c.command === command)?.icon;
+    const icons = pkg.contributes.menus["view/title"]!
+      .filter((e) => e.command?.startsWith("playwrightBddRunner.traceability."))
+      .sort((a, b) => Number(a.group?.split("@")[1]) - Number(b.group?.split("@")[1]))
+      .map((e) => iconOf(e.command!));
+
+    expect(icons).toEqual(["$(list-tree)", "$(sync)", "$(project)", "$(play-circle)", "$(cloud-upload)", "$(plug)"]);
+    expect(new Set(icons).size).toBe(icons.length);
+  });
+
+  // Every traceability command carries an icon now, so the ones VS Code paints (title bar, inline rows,
+  // editor actions) never fall back to a blank slot.
+  it("declares an icon for every traceability command", () => {
+    const iconless = pkg.contributes.commands
+      .filter((c) => c.command.startsWith("playwrightBddRunner.traceability.") && c.icon === undefined)
+      .map((c) => c.command);
+
+    expect(iconless).toEqual([]);
+  });
+
+  it("offers switch-default-project inline on the connection row as well as in its context menu", () => {
+    const entries = pkg.contributes.menus["view/item/context"]!.filter(
+      (e) =>
+        e.command === "playwrightBddRunner.traceability.switchDefaultProject" &&
+        e.when === "view == playwrightBddRunner.traceability && viewItem == traceabilityConnection"
+    );
+
+    expect(entries.map((e) => e.group)).toEqual([undefined, "inline@1"]);
   });
 });
 
@@ -1587,10 +1637,10 @@ describe("traceability coverage board contributions", () => {
   ) as Pkg;
   const CMD = "playwrightBddRunner.traceability.openBoard";
 
-  it("declares the open-board command with a table icon under Specwright", () => {
+  it("declares the open-board command with a project-board icon under Specwright", () => {
     const command = pkg.contributes.commands.find((c) => c.command === CMD);
     expect(command?.category).toBe("Specwright");
-    expect(command?.icon).toBe("$(table)");
+    expect(command?.icon).toBe("$(project)");
   });
 
   it("slots an ungated open-board button right after sync in the traceability title bar", () => {

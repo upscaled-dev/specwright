@@ -109,10 +109,14 @@ describe("traceability switch-default-project contributions", () => {
     );
   });
 
-  it("offers the command on the connection row's context menu", () => {
+  // Twice on the same row: once inline, where the swap icon sits on hover, and once in the context menu,
+  // which never renders the inline group.
+  it("offers the command on the connection row, inline and in its context menu", () => {
     const items = pkg.contributes.menus["view/item/context"]!.filter((e) => e.command === CMD);
-    expect(items.map((e) => e.when)).toEqual([
-      "view == playwrightBddRunner.traceability && viewItem == traceabilityConnection",
+    const when = "view == playwrightBddRunner.traceability && viewItem == traceabilityConnection";
+    expect(items.map((e) => [e.when, e.group])).toEqual([
+      [when, undefined],
+      [when, "inline@1"],
     ]);
   });
 });

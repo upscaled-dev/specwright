@@ -13,6 +13,9 @@ type ShellTab = BoardTab | "publish" | "link";
 
 export interface BoardPanelDeps extends BoardSurfaceDeps {
   readonly providerLabel: string;
+  // The editor tab's icon, one file per theme. Absent in rigs with no extension root to resolve media
+  // against, where the tab is not painted anyway.
+  readonly tabIcon?: { light: vscode.Uri; dark: vscode.Uri } | undefined;
   // The Publish tab's callbacks: the search/browse/attach delegate the surface calls into, and the
   // command the shell fires when the tab is activated with no publish already underway.
   readonly publishDelegate: PublishDialogDelegate;
@@ -66,6 +69,9 @@ export class BoardPanel {
       retainContextWhenHidden: true,
       localResourceRoots: [],
     });
+    if (deps.tabIcon) {
+      panel.iconPath = deps.tabIcon;
+    }
     const instance = new BoardPanel(panel, deps);
     BoardPanel.current = instance;
     panel.webview.html = renderDocument(deps.providerLabel);

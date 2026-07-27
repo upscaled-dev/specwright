@@ -177,6 +177,7 @@ export class CommandManager {
   private pendingLoad: string | undefined;
   // The board's snapshot-change source when no subsystem is wired (unit rigs); it never fires.
   private readonly boardChange = new vscode.EventEmitter<void>();
+  private extensionUri: vscode.Uri | undefined;
 
   public static create(context: PlaywrightBddExtensionContext): CommandManager {
     return new CommandManager(context);
@@ -234,6 +235,8 @@ export class CommandManager {
   public registerCommands(context: vscode.ExtensionContext): void {
     try {
       this.clearCommands();
+      // The only place the extension root reaches this class; the board's tab icon resolves against it.
+      this.extensionUri = context.extensionUri;
 
       const commands: CommandOptions[] = [
         { command: "playwrightBddRunner.runScenario", title: "Run Scenario", category: CATEGORY, handler: this.runScenario.bind(this) },
@@ -1313,6 +1316,19 @@ export class CommandManager {
     return resolveSyncProjectKeys({ ...sources, selectedKey });
   }
 
+  // The Coverage Board tab's icon, one file per theme, resolved off the extension root captured at
+  // registration. Undefined in a rig that never registered commands, which also never paints a tab.
+  private boardTabIcon(): { light: vscode.Uri; dark: vscode.Uri } | undefined {
+    const root = this.extensionUri;
+    if (!root) {
+      return undefined;
+    }
+    return {
+      light: vscode.Uri.joinPath(root, "media", "coverage-board-light.svg"),
+      dark: vscode.Uri.joinPath(root, "media", "coverage-board-dark.svg"),
+    };
+  }
+
   // The board's dependencies, shared by openBoard, runPublish, and linkScenarioForRef. The board reads
   // the subsystem live (empty when it's absent or the panel is off), owns the Publish tab's delegate,
   // and fires runPublish when that tab is activated idle.
@@ -1322,6 +1338,7 @@ export class CommandManager {
     const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
     return {
       providerLabel: subsystem?.getActiveAdapter()?.label ?? "Xray",
+      tabIcon: this.boardTabIcon(),
       buildModel: () =>
         buildBoardViewModel(
           subsystem?.getSnapshot(),

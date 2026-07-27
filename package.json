@@ -563,7 +563,7 @@
         "command": "playwrightBddRunner.traceability.runAndPublish",
         "title": "Run Locally and Publish…",
         "category": "Specwright",
-        "icon": "$(cloud-upload)"
+        "icon": "$(play-circle)"
       },
       {
         "command": "playwrightBddRunner.traceability.publishLastRun",
@@ -581,33 +581,37 @@
         "command": "playwrightBddRunner.traceability.openBoard",
         "title": "Open Coverage Board",
         "category": "Specwright",
-        "icon": "$(table)"
+        "icon": "$(project)"
       },
       {
         "command": "playwrightBddRunner.traceability.manageConnection",
         "title": "Manage Xray Connection",
         "category": "Specwright",
-        "icon": "$(gear)"
+        "icon": "$(plug)"
       },
       {
         "command": "playwrightBddRunner.traceability.connect",
         "title": "Connect to Xray",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(sign-in)"
       },
       {
         "command": "playwrightBddRunner.traceability.disconnect",
         "title": "Disconnect from Xray",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(sign-out)"
       },
       {
         "command": "playwrightBddRunner.traceability.testConnection",
         "title": "Test Xray Connection",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(pulse)"
       },
       {
         "command": "playwrightBddRunner.traceability.hidePanel",
         "title": "Hide Traceability Panel",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(eye-closed)"
       },
       {
         "command": "playwrightBddRunner.traceability.toggleGrouping",
@@ -618,37 +622,44 @@
       {
         "command": "playwrightBddRunner.traceability.switchDefaultProject",
         "title": "Switch Default Project…",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(arrow-swap)"
       },
       {
         "command": "playwrightBddRunner.traceability.clearLocalRunHistory",
         "title": "Clear Local Run History…",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(clear-all)"
       },
       {
         "command": "playwrightBddRunner.traceability.bulkCreateTests",
         "title": "Create Tests from Scenarios…",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(add)"
       },
       {
         "command": "playwrightBddRunner.traceability.pushScenarioText",
         "title": "Push Scenario Text…",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(arrow-circle-up)"
       },
       {
         "command": "playwrightBddRunner.traceability.createTestSet",
         "title": "Create Test Set…",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(library)"
       },
       {
         "command": "playwrightBddRunner.traceability.createTestPlan",
         "title": "Create Test Plan…",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(checklist)"
       },
       {
         "command": "playwrightBddRunner.traceability.createTestExecution",
         "title": "Create Test Execution…",
-        "category": "Specwright"
+        "category": "Specwright",
+        "icon": "$(run-all)"
       }
     ],
     "viewsContainers": {
@@ -823,7 +834,7 @@
         {
           "command": "playwrightBddRunner.traceability.manageConnection",
           "when": "view == playwrightBddRunner.traceability",
-          "group": "navigation@1"
+          "group": "navigation@4"
         },
         {
           "command": "playwrightBddRunner.traceability.openBoard",
@@ -885,6 +896,11 @@
         {
           "command": "playwrightBddRunner.traceability.switchDefaultProject",
           "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityConnection"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.switchDefaultProject",
+          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityConnection",
+          "group": "inline@1"
         }
       ],
       "editor/context": [

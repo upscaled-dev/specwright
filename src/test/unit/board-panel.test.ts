@@ -292,6 +292,25 @@ describe("BoardPanel", () => {
     expect(startPublish).not.toHaveBeenCalled();
   });
 
+  // The stub keeps whatever the host assigns, so this pins that both themes reach the tab. Resolving the
+  // media Uris off the extension root is the command layer's job and is not exercised here.
+  it("puts the light and dark tab icons on the panel when the host supplies them", () => {
+    const tabIcon = {
+      light: vscode.Uri.file("/ext/media/coverage-board-light.svg"),
+      dark: vscode.Uri.file("/ext/media/coverage-board-dark.svg"),
+    };
+
+    BoardPanel.open(deps({ tabIcon }));
+
+    expect((win.__webviewPanels[0] as unknown as { iconPath?: unknown }).iconPath).toEqual(tabIcon);
+  });
+
+  it("opens without a tab icon when the host has no extension root to resolve one from", () => {
+    BoardPanel.open(deps());
+
+    expect((win.__webviewPanels[0] as unknown as { iconPath?: unknown }).iconPath).toBeUndefined();
+  });
+
   it("reveals the existing panel instead of opening a second (singleton surface)", () => {
     BoardPanel.open(deps());
     BoardPanel.open(deps());

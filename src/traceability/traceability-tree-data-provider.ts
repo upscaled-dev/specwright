@@ -99,16 +99,18 @@ const CONNECTION_DESCRIPTION: Record<ConnectionIndicator["state"], string> = {
   unreachable: "Unreachable",
 };
 
+// Each state gets a glyph that names its cause, not a generic dot: a key for credentials the site
+// refused, a severed plug for a site that never answered.
 function connectionIcon(state: ConnectionIndicator["state"]): vscode.ThemeIcon {
   switch (state) {
     case "checking":
       return new vscode.ThemeIcon("loading~spin");
     case "ok":
-      return new vscode.ThemeIcon("cloud");
+      return new vscode.ThemeIcon("cloud", new vscode.ThemeColor("charts.green"));
     case "auth-failed":
-      return new vscode.ThemeIcon("circle-filled", new vscode.ThemeColor("charts.red"));
+      return new vscode.ThemeIcon("key", new vscode.ThemeColor("charts.red"));
     case "unreachable":
-      return new vscode.ThemeIcon("circle-outline");
+      return new vscode.ThemeIcon("debug-disconnect", new vscode.ThemeColor("charts.yellow"));
   }
 }
 
@@ -223,12 +225,28 @@ const STATUS_ICON: Record<NormalizedStatus["category"], string> = {
   unknown: "testing-unset-icon",
 };
 
+// The glyphs already say pass/fail; the theme's own testing colors say it at a glance, and reuse the
+// palette the Test Explorer paints two panels away. An unset verdict stays uncolored, since colouring
+// "we do not know" would read as a result.
+const RESULT_COLOR: Record<RunOutcome | NormalizedStatus["category"], string | undefined> = {
+  passed: "testing.iconPassed",
+  failed: "testing.iconFailed",
+  skipped: "testing.iconSkipped",
+  pending: "testing.iconQueued",
+  unknown: undefined,
+};
+
+function resultIcon(glyph: string, key: RunOutcome | NormalizedStatus["category"]): vscode.ThemeIcon {
+  const color = RESULT_COLOR[key];
+  return color ? new vscode.ThemeIcon(glyph, new vscode.ThemeColor(color)) : new vscode.ThemeIcon(glyph);
+}
+
 function outcomeIcon(outcome: RunOutcome | undefined): vscode.ThemeIcon {
-  return new vscode.ThemeIcon(outcome ? OUTCOME_ICON[outcome] : "circle-outline");
+  return outcome ? resultIcon(OUTCOME_ICON[outcome], outcome) : new vscode.ThemeIcon("circle-outline");
 }
 
 function statusIcon(status: NormalizedStatus): vscode.ThemeIcon {
-  return new vscode.ThemeIcon(STATUS_ICON[status.category]);
+  return resultIcon(STATUS_ICON[status.category], status.category);
 }
 
 function reqDescription(reqKeys: readonly string[]): string {
@@ -402,7 +420,9 @@ export class TraceabilityTreeDataProvider
         if (req !== "") {parts.push(req);}
         item.description = parts.join(" · ");
         item.contextValue = "traceabilityUntraced";
-        item.iconPath = new vscode.ThemeIcon("warning");
+        // An empty circle, not a warning triangle: an untraced scenario is work waiting, and the
+        // triangle is reserved for keys the remote proved broken.
+        item.iconPath = new vscode.ThemeIcon("circle-large-outline");
         item.command = revealCommand(scenario);
         return item;
       }
@@ -410,7 +430,9 @@ export class TraceabilityTreeDataProvider
         const item = new vscode.TreeItem(node.testKey, vscode.TreeItemCollapsibleState.None);
         if (node.summary) {item.description = node.summary;}
         item.contextValue = "traceabilityOrphan";
-        item.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("problemsWarningIcon.foreground"));
+        // A remote test nobody has mapped yet is inventory, not a fault: a beaker in the remote's own
+        // colour, so the eye can pick the mappable rows out of a long tree.
+        item.iconPath = new vscode.ThemeIcon("beaker", new vscode.ThemeColor("charts.blue"));
         item.tooltip = node.summary ? `${node.testKey} · ${node.summary}` : node.testKey;
         // A click opens the remote issue; the same key rides the node for openIssue/copyKey.
         item.command = {
