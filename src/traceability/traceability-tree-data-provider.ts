@@ -73,8 +73,8 @@ export interface ConnectionIndicator {
   // Present once a sync has produced cached data; drives the "synced Nm ago" description (§7,
   // display-only). Absent before the first sync so the row shows the bare connection state.
   sync?: ConnectionSyncStatus | undefined;
-  // The configured xray.defaultProjectKey, when set, so the row can append "· project KEY". Used
-  // only when creating tests or executions, which the tooltip spells out.
+  // The configured xray.defaultProjectKey, when set, so the row can append "· project KEY". It
+  // prefills new tests and executions and joins the sync scope, which the tooltip spells out.
   defaultProject?: string | undefined;
 }
 
@@ -192,7 +192,7 @@ function connectionTreeItem(node: ConnectionNode): vscode.TreeItem {
   const project = node.defaultProject;
   item.description = project ? `${description} · project ${project}` : description;
   item.tooltip = project
-    ? `${node.label}\n${tooltip}\nDefault project ${project}, used only when creating tests or executions.`
+    ? `${node.label}\n${tooltip}\nDefault project ${project}. Prefills new tests and executions and joins the sync scope.`
     : `${node.label}\n${tooltip}`;
   item.contextValue = "traceabilityConnection";
   item.iconPath = connectionIcon(node.state);

@@ -354,7 +354,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.treeProvider.setConnectionIndicator(indicator);
   }
 
-  // The configured create-time default project, or undefined when unset. Undefined-safe so a hand-
+  // The configured default project, or undefined when unset. Undefined-safe so a hand-
   // built config fake that omits the getter never throws here.
   private defaultProjectKey(): string | undefined {
     return this.config.xrayDefaultProjectKey || undefined;

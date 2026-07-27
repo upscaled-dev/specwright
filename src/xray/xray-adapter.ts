@@ -65,7 +65,7 @@ const xrayAutomationBinding: AutomationBindingCapability = {
   classify: classifyXrayBinding,
   bind: () =>
     Promise.reject(
-      new NotSupportedError("Establishing an Xray automation binding is a P3 write path — P2 only validates.")
+      new NotSupportedError("Establishing an Xray automation binding is a P3 write path: P2 only validates.")
     ),
 };
 

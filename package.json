@@ -169,7 +169,7 @@
         "playwrightBddRunner.useConfigReporters": {
           "type": "boolean",
           "default": false,
-          "description": "Run the reporters declared in your Playwright config instead of the extension injecting its own. Lets a custom reporter run alongside the extension's Test Results panel. Requires a bare ['json'] entry (no outputFile) in your config's reporter array — the extension steers it to its temp file via PLAYWRIGHT_JSON_OUTPUT_NAME and parses that."
+          "description": "Run the reporters declared in your Playwright config instead of the extension injecting its own. Lets a custom reporter run alongside the extension's Test Results panel. Requires a bare ['json'] entry (no outputFile) in your config's reporter array. The extension steers it to its temp file via PLAYWRIGHT_JSON_OUTPUT_NAME and parses that."
         },
         "playwrightBddRunner.tags": {
           "type": "string",
@@ -349,7 +349,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Project keys included in every traceability sync. Projects selected on the Coverage Board and projects referenced by local tags are synced as well."
+          "description": "Project keys included in every traceability sync. Tag-derived keys, the default project key, projects selected on the Coverage Board, and already synced projects join the scope as well."
         },
         "playwrightBddRunner.xray.cacheTtlMinutes": {
           "type": "number",
@@ -359,7 +359,7 @@
         "playwrightBddRunner.xray.defaultProjectKey": {
           "type": "string",
           "default": "",
-          "description": "Jira project key (e.g. 'CALC') that prefills the Project field when publishing a new Test Execution. Create-time only — it never defines orphan sync scope, and appending to an existing execution derives its project from the execution key."
+          "description": "Default Jira project key (e.g. 'CALC'). Prefills the Project field when publishing a new Test Execution, and joins the sync scope alongside tag-derived keys, the configured sync project keys, already synced projects, and the board's project selection. Appending to an existing execution derives its project from the execution key instead."
         },
         "playwrightBddRunner.xray.executionIssueType": {
           "type": "string",
@@ -702,7 +702,7 @@
       {
         "view": "playwrightBddRunner.traceability",
         "when": "playwrightBddRunner.traceability.connected",
-        "contents": "No Xray-tagged scenarios found yet.\n\nTag a scenario with `@TEST_KEY` (and optionally `@REQ_KEY`) in a .feature file to map it to an Xray test. The tree then groups scenarios by their Xray keys, lists untagged scenarios as coverage gaps, and shows pass/fail badges after a run.\n\nLive Xray Cloud sync — test status, coverage board, and publishing — arrives in a later release."
+        "contents": "No Xray-tagged scenarios found yet.\n\nTag a scenario with `@TEST_KEY` (and optionally `@REQ_KEY`) in a .feature file to map it to an Xray test. The tree then groups scenarios by their Xray keys, lists untagged scenarios as coverage gaps, and shows pass/fail badges after a run.\n\nSync loads the remote test catalog, the Coverage Board links scenarios to Xray tests, and publishing sends run results back to Jira."
       }
     ],
     "menus": {
@@ -1049,7 +1049,7 @@
           {
             "id": "specwright.setupXray.credentials",
             "title": "Paste your client id and secret",
-            "description": "Paste the client id and client secret into the setup panel. Specwright validates them with a live connection test and stores them in the OS secret store — never in settings or the repo.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
+            "description": "Paste the client id and client secret into the setup panel. Specwright validates them with a live connection test and stores them in the OS secret store, never in settings or the repo.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
             "media": {
               "markdown": "media/walkthrough/credentials.md"
             },
@@ -1060,7 +1060,7 @@
           {
             "id": "specwright.setupXray.jira",
             "title": "Add Jira access (optional)",
-            "description": "Add a Jira email and API token to unlock the real project view and issue attachments. This is optional — skip it to keep tag-derived project probes.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
+            "description": "Add a Jira email and API token to unlock the real project view and issue attachments. This is optional: skip it to keep tag-derived project probes.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
             "media": {
               "markdown": "media/walkthrough/jira.md"
             },

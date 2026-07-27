@@ -639,7 +639,7 @@ export class CommandManager {
     }
     const picks = linkScenarioPicks(metadata.snapshot());
     if (picks.length === 0 && !adapter.remoteSearch) {
-      vscode.window.showInformationMessage("No synced tests to link yet — run Sync first.");
+      vscode.window.showInformationMessage("No synced tests to link yet. Run Sync first.");
       return;
     }
 
@@ -867,7 +867,7 @@ export class CommandManager {
       },
     });
     if (!ran) {
-      vscode.window.showInformationMessage("Preflight cancelled — nothing was run.");
+      vscode.window.showInformationMessage("Preflight cancelled. Nothing was run.");
       return;
     }
     // A cancelled/partial batch, or one with nothing left after reconciliation, is reported here with
@@ -875,9 +875,9 @@ export class CommandManager {
     // to the dialog, which opens on it with the other publishable runs in the dropdown.
     if (sealed) {
       if (!isPublishable(sealed)) {
-        vscode.window.showWarningMessage(`This run is ${sealed.state} — only a complete run can be published.`);
+        vscode.window.showWarningMessage(`This run is ${sealed.state}. Only a complete run can be published.`);
       } else if (publishableResults(sealed).publishable.length === 0) {
-        vscode.window.showWarningMessage("Nothing to publish — every result was excluded by preflight or is unmapped.");
+        vscode.window.showWarningMessage("Nothing to publish. Every result was excluded by preflight or is unmapped.");
       } else {
         await this.runPublish(sealed.id);
       }
@@ -998,9 +998,9 @@ export class CommandManager {
     this.publishLedger?.setPendingAttachments(artifactId, site, failed);
     const attached = entry.pendingAttachments.length - failed.length;
     if (failed.length === 0) {
-      vscode.window.showInformationMessage(`${entry.executionRef} — ${attached} pending attachment(s) uploaded.`);
+      vscode.window.showInformationMessage(`${entry.executionRef}: ${attached} pending attachment(s) uploaded.`);
     } else {
-      vscode.window.showWarningMessage(`${entry.executionRef} — ${failed.length} attachment(s) still failed.`);
+      vscode.window.showWarningMessage(`${entry.executionRef}: ${failed.length} attachment(s) still failed.`);
     }
     return { remaining: failed.length };
   }
@@ -1077,11 +1077,11 @@ export class CommandManager {
     this.publishLedger?.setPendingAttachments(artifactId, site, failed);
     const attached = files.length - failed.length;
     if (failed.length === 0) {
-      vscode.window.showInformationMessage(`${executionKey} — ${attached} pending attachment(s) uploaded.`);
+      vscode.window.showInformationMessage(`${executionKey}: ${attached} pending attachment(s) uploaded.`);
       return;
     }
     Promise.resolve(
-      vscode.window.showWarningMessage(`${executionKey} — ${failed.length} attachment(s) still failed.`, "Retry")
+      vscode.window.showWarningMessage(`${executionKey}: ${failed.length} attachment(s) still failed.`, "Retry")
     )
       .then((choice) => (choice === "Retry" ? this.retryAttachments(artifactId, site, executionKey, failed) : undefined))
       .catch(() => undefined);
@@ -1090,8 +1090,8 @@ export class CommandManager {
   private reportPublishSuccess(outcome: PublishOutcome, request: PublishRequest, attachedCount: number): void {
     const base =
       request.mode === "create-new"
-        ? `${outcome.ref.key} created — ${outcome.imported} results imported`
-        : `appended to ${outcome.ref.key} — ${outcome.imported} results`;
+        ? `${outcome.ref.key} created: ${outcome.imported} results imported`
+        : `appended to ${outcome.ref.key}: ${outcome.imported} results`;
     const notes = [...outcome.warnings];
     if (attachedCount > 0) {
       notes.unshift(`${attachedCount} ${plural(attachedCount, "file")} attached`);
@@ -1112,8 +1112,8 @@ export class CommandManager {
   ): void {
     const base =
       request.mode === "create-new"
-        ? `${outcome.ref.key} created — ${outcome.imported} results imported`
-        : `appended to ${outcome.ref.key} — ${outcome.imported} results`;
+        ? `${outcome.ref.key} created: ${outcome.imported} results imported`
+        : `appended to ${outcome.ref.key}: ${outcome.imported} results`;
     const attachedNote = attachedCount > 0 ? ` · ${attachedCount} ${plural(attachedCount, "file")} attached` : "";
     const message = `${base}${attachedNote} · ${failed.length} ${plural(failed.length, "attachment")} failed`;
     const adapter = this.traceabilitySubsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
@@ -1190,7 +1190,7 @@ export class CommandManager {
       }
     }
     const picked = await vscode.window.showQuickPick(rows, {
-      placeHolder: "Preflight — resolve flagged scenarios before the batch runs",
+      placeHolder: "Preflight: resolve flagged scenarios before the batch runs",
       ignoreFocusOut: true,
     });
     return picked?.choice ?? { kind: "cancel" };
@@ -1610,9 +1610,9 @@ export class CommandManager {
     this.traceabilitySubsystem?.toggleGrouping();
   }
 
-  // Set xray.defaultProjectKey (create-time only): a project QuickPick when Jira credentials are
-  // present, a validated key input otherwise. Written back to whichever scope already holds the
-  // setting, preferring Workspace over Global when both are pinned.
+  // Set xray.defaultProjectKey: a project QuickPick when Jira credentials are present, a validated
+  // key input otherwise. Written back to whichever scope already holds the setting, preferring
+  // Workspace over Global when both are pinned.
   private async switchDefaultProject(): Promise<void> {
     const rawSite = this.context.config.xraySiteUrl;
     const current = this.context.config.xrayDefaultProjectKey;
@@ -1628,7 +1628,7 @@ export class CommandManager {
     const normalized = chosen.toUpperCase();
     await this.writeDefaultProjectKey(normalized);
     vscode.window.showInformationMessage(
-      `Default project set to ${normalized}, used only when creating tests or executions.`
+      `Default project set to ${normalized}. It prefills new tests and executions and joins the sync scope.`
     );
   }
 
@@ -1666,7 +1666,7 @@ export class CommandManager {
     }));
     const picker = vscode.window.createQuickPick<ProjectItem>();
     picker.title = "Switch Default Project";
-    picker.placeholder = "Select the default Jira project (used only when creating tests or executions)";
+    picker.placeholder = "Select the default Jira project (prefills new tests and executions and joins the sync scope)";
     picker.items = items;
     const currentItem = items.find((item) => item.key === current);
     if (currentItem) {
@@ -1687,7 +1687,7 @@ export class CommandManager {
   private async promptDefaultProjectKey(current: string): Promise<string | undefined> {
     const input = await vscode.window.showInputBox({
       title: "Switch Default Project",
-      prompt: "Jira project key, used only when creating tests or executions",
+      prompt: "Jira project key. Prefills new tests and executions and joins the sync scope",
       placeHolder: "e.g. CALC",
       value: current,
       validateInput: (value) =>

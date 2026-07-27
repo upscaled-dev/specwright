@@ -289,7 +289,7 @@ describe("createXrayResultPublishing: evidence resolution + attachTo", () => {
     const body = t.postJson.mock.calls[0]![1] as { tests: Array<{ evidence?: unknown[] }> };
     expect(body.tests[0]!.evidence).toHaveLength(1);
     expect(outcome.issueEvidenceFiles).toEqual([]);
-    expect(outcome.warnings).toContain("Jira credentials missing — evidence embedded in the payload instead.");
+    expect(outcome.warnings).toContain("Jira credentials missing: evidence embedded in the payload instead.");
   });
 
   it("both mode WITHOUT Jira creds embeds once and leaves no un-clearable pending upload", async () => {

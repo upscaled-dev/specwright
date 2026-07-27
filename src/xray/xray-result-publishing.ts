@@ -159,7 +159,7 @@ function planEvidence(
 
   const notes: string[] = [];
   if (issueFallback) {
-    notes.push("Jira credentials missing — evidence embedded in the payload instead.");
+    notes.push("Jira credentials missing: evidence embedded in the payload instead.");
   }
   const skipNote = summarizeEvidenceSkips([...embedder.skips, ...missing]);
   if (skipNote !== undefined) {

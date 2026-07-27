@@ -672,12 +672,12 @@ describe("TraceabilityTreeDataProvider orphan section", () => {
 });
 
 describe("TraceabilityTreeDataProvider connection default project", () => {
-  it("appends the default project to the connection row and spells out its create-time use", () => {
+  it("appends the default project to the connection row and spells out what the key does", () => {
     const p = provider(SNAPSHOT);
     p.setConnectionIndicator({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme", defaultProject: "CALC" });
     const item = p.getTreeItem(p.getChildren()[0]!);
     expect(item.description).toBe("Connected · project CALC");
-    expect(String(item.tooltip)).toContain("Default project CALC, used only when creating tests or executions.");
+    expect(String(item.tooltip)).toContain("Default project CALC. Prefills new tests and executions and joins the sync scope.");
   });
 
   it("omits the project segment when no default project is set", () => {
