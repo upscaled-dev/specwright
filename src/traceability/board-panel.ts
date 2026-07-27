@@ -59,7 +59,9 @@ export class BoardPanel {
       BoardPanel.current.panel.reveal();
       return BoardPanel.current;
     }
-    const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Coverage Board", vscode.ViewColumn.Active, {
+    // Beside, not Active: the board is worked alongside the feature file it links, so taking that
+    // editor's column would make the user park the board before they could drag anything into a tag.
+    const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Coverage Board", vscode.ViewColumn.Beside, {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [],
