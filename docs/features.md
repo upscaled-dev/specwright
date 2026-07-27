@@ -245,7 +245,7 @@ Important caveat: runs launched from the Test Explorer do **not** produce badges
 
 ### Jira project prerequisites
 
-Publishing test results writes a **Test Execution** issue to the target Jira project, so that project needs a "Test Execution" issue type before a publish can succeed.
+Publishing test results writes a **Test Execution** issue to the target Jira project, so that project needs a work type mapped to Xray's Test Execution entity before a publish can succeed. That work type has to be named "Test Execution" unless you point `playwrightBddRunner.xray.executionIssueType` at the name your project uses, for example "Sub-Test Execution". Either way it must be a standard-level work type, since a subtask type cannot hold a standalone execution.
 
 - **Company-managed projects** get it through Xray's own setup: the "Add Xray Issue Types" action in Xray settings, or membership in an issue type scheme that includes it.
 - **Team-managed projects** need it added by hand. Create a work type named "Test Execution" in the project settings, then map it under Xray Settings > Work Types Mapping. A team-managed project only has the Xray work types someone created, so it can carry Test, Test Set and others yet still lack Test Execution.

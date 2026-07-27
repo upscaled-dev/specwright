@@ -361,6 +361,11 @@
           "default": "",
           "description": "Jira project key (e.g. 'CALC') that prefills the Project field when publishing a new Test Execution. Create-time only — it never defines orphan sync scope, and appending to an existing execution derives its project from the execution key."
         },
+        "playwrightBddRunner.xray.executionIssueType": {
+          "type": "string",
+          "default": "Test Execution",
+          "description": "Jira work type name used for Xray Test Executions. Change it when your project maps a differently named work type to Xray's Test Execution entity, such as 'Sub-Test Execution' in some team-managed projects. The name must belong to a standard-level work type, since a subtask type cannot hold a standalone execution."
+        },
         "playwrightBddRunner.xray.reportGlob": {
           "type": "array",
           "items": {

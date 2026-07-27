@@ -67,6 +67,7 @@ const GETTER_FOR_SETTING: Record<string, (c: ExtensionConfig) => unknown> = {
   "xray.syncProjectKeys": (c) => c.xraySyncProjectKeys,
   "xray.cacheTtlMinutes": (c) => c.xrayCacheTtlMinutes,
   "xray.defaultProjectKey": (c) => c.xrayDefaultProjectKey,
+  "xray.executionIssueType": (c) => c.xrayExecutionIssueType,
   "xray.reportGlob": (c) => c.xrayReportGlob,
   "xray.attachTo": (c) => c.xrayAttachTo,
 };
@@ -145,7 +146,7 @@ describe("ExtensionConfig.validate", () => {
   });
 });
 
-describe("ExtensionConfig xray attachment settings", () => {
+describe("ExtensionConfig xray publish settings", () => {
   function configReturning(values: Record<string, unknown>): vscode.WorkspaceConfiguration {
     return {
       get: <T>(key: string, defaultValue?: T): T | undefined => (key in values ? (values[key] as T) : defaultValue),
@@ -176,6 +177,13 @@ describe("ExtensionConfig xray attachment settings", () => {
 
   it("falls back to 'evidence' for an unknown attachTo value", () => {
     expect(ExtensionConfig.create(configReturning({ "xray.attachTo": "elsewhere" }), false).xrayAttachTo).toBe("evidence");
+  });
+
+  it("trims the execution issue type and reads a blank one as the default", () => {
+    const configured = configReturning({ "xray.executionIssueType": "  Sub-Test Execution  " });
+    expect(ExtensionConfig.create(configured, false).xrayExecutionIssueType).toBe("Sub-Test Execution");
+    const blank = configReturning({ "xray.executionIssueType": "   " });
+    expect(ExtensionConfig.create(blank, false).xrayExecutionIssueType).toBe("Test Execution");
   });
 });
 

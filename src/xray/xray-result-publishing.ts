@@ -28,7 +28,7 @@ import {
   StepResolver,
   XrayJsonImporter,
 } from "./execution-importers";
-import { ISSUE_TYPE_NAME, JiraIssueKind, searchJiraIssues, JiraIssueSearchResult } from "./jira-issue-search";
+import { JiraIssueKind, searchJiraIssues, JiraIssueSearchResult } from "./jira-issue-search";
 import { IssueTypeResolution, resolveExecutionIssueType } from "./jira-issue-types";
 import { JiraProjectSearchResult, searchJiraProjects } from "./jira-project-search";
 
@@ -39,6 +39,7 @@ export type IssueSearcher = (deps: {
   credentials: XrayJiraCredentials;
   kind: JiraIssueKind;
   query: string;
+  executionIssueType: string;
   logger: Logger;
   signal?: AbortSignal | undefined;
 }) => Promise<JiraIssueSearchResult>;
@@ -55,6 +56,7 @@ export type IssueTypeResolver = (deps: {
   site: string;
   credentials: XrayJiraCredentials;
   projectKey: string;
+  executionIssueType: string;
   logger: Logger;
   signal?: AbortSignal | undefined;
 }) => Promise<IssueTypeResolution>;
@@ -71,6 +73,8 @@ export interface XrayResultPublishingDeps {
   // Where per-result evidence goes: `evidence` = in the payload, `issue` = uploaded to the execution
   // issue, `both`. Read fresh each publish so a settings change mid-session is honored.
   attachTo: () => AttachTo;
+  // The work type name this site maps to Xray's Test Execution entity, read fresh for the same reason.
+  executionIssueType: () => string;
   logger: Logger;
   // Injectable for tests; default to the live fs / Jira issue search.
   evidenceFs?: EvidenceFs | undefined;
@@ -166,16 +170,36 @@ function planEvidence(
 
 // A successful createmeta listing that lacks the execution type is proof the create would 400
 // (`issuetype: Specify a valid issue type`), so it fails fast with the project's actual types; an
-// `unknown` resolution (transient fault) never blocks a publish that might still succeed.
-function unavailableIssueTypeMessage(projectKey: string, availableNames: string[], teamManaged: boolean): string {
+// `unknown` resolution (transient fault) never blocks a publish that might still succeed. The
+// excluded subtask types are named too: without them a project whose only execution type is a
+// subtask reads as a project that has no such type at all.
+function unavailableIssueTypeMessage(
+  projectKey: string,
+  executionIssueType: string,
+  resolution: Extract<IssueTypeResolution, { kind: "unavailable" }>
+): string {
+  const { availableNames, subtaskNames, subtaskMatch, teamManaged } = resolution;
   const remedy = "Enable Xray for this project in Jira, or publish to a project that has the Xray issue types.";
+  const teamManagedTail = "work type in its project settings, map it under Xray Settings > Work Types Mapping, then retry.";
+  if (subtaskMatch !== undefined) {
+    const subtaskLead = `Project ${projectKey} has a "${executionIssueType}" work type, but it is a subtask type, and a standalone execution cannot be created as a subtask.`;
+    return teamManaged
+      ? `${subtaskLead} Recreate "${executionIssueType}" as a standard-level ${teamManagedTail}`
+      : `${subtaskLead} ${remedy}`;
+  }
   if (availableNames.length === 0) {
-    return `Project ${projectKey} has no "${ISSUE_TYPE_NAME.execution}" issue type, and no issue types are available to your account in this project. ${remedy}`;
+    const lead =
+      subtaskNames.length === 0
+        ? `Project ${projectKey} has no "${executionIssueType}" issue type, and no issue types are available to your account in this project.`
+        : `Project ${projectKey} has no "${executionIssueType}" issue type. The only issue types available to your account in this project are subtask types (cannot host a standalone execution): ${subtaskNames.join(", ")}.`;
+    return `${lead} ${remedy}`;
   }
+  const subtaskNote =
+    subtaskNames.length === 0 ? "" : ` Subtask types (cannot host a standalone execution): ${subtaskNames.join(", ")}.`;
   if (teamManaged) {
-    return `Project ${projectKey} has no "${ISSUE_TYPE_NAME.execution}" issue type. Its issue types are: ${availableNames.join(", ")}. This is a team-managed project: create a "${ISSUE_TYPE_NAME.execution}" work type in its project settings, map it under Xray Settings > Work Types Mapping, then retry.`;
+    return `Project ${projectKey} has no "${executionIssueType}" issue type. Its issue types are: ${availableNames.join(", ")}.${subtaskNote} This is a team-managed project: create a "${executionIssueType}" ${teamManagedTail}`;
   }
-  return `Project ${projectKey} has no "${ISSUE_TYPE_NAME.execution}" issue type. Its issue types are: ${availableNames.join(", ")}. ${remedy}`;
+  return `Project ${projectKey} has no "${executionIssueType}" issue type. Its issue types are: ${availableNames.join(", ")}.${subtaskNote} ${remedy}`;
 }
 
 async function publishCreate(
@@ -190,17 +214,21 @@ async function publishCreate(
   if (request.summary.trim() === "") {
     throw new Error("Enter a summary for the new execution before publishing.");
   }
-  let issueTypeName: string | undefined;
+  const executionIssueType = deps.executionIssueType();
+  // The configured name is what the create carries unless the project's own createmeta names it
+  // differently (its verbatim casing), so an unreachable Jira still publishes under the right type.
+  let issueTypeName = executionIssueType;
   if (credentials !== undefined) {
     const resolution = await resolveIssueType({
       site: deps.site(),
       credentials,
       projectKey: request.project,
+      executionIssueType,
       logger: deps.logger,
       ...(signal !== undefined ? { signal } : {}),
     });
     if (resolution.kind === "unavailable") {
-      throw new Error(unavailableIssueTypeMessage(request.project, resolution.availableNames, resolution.teamManaged));
+      throw new Error(unavailableIssueTypeMessage(request.project, executionIssueType, resolution));
     }
     if (resolution.kind === "resolved") {
       issueTypeName = resolution.name;
@@ -281,6 +309,7 @@ export function createXrayResultPublishing(deps: XrayResultPublishingDeps): Resu
         credentials,
         kind,
         query,
+        executionIssueType: deps.executionIssueType(),
         logger: deps.logger,
         ...(signal !== undefined ? { signal } : {}),
       });

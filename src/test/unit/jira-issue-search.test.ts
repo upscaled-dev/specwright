@@ -40,13 +40,15 @@ function run(
   fetchImpl: FetchLike,
   logger: Logger,
   kind: JiraIssueKind = "execution",
-  query = "CALC"
+  query = "CALC",
+  executionIssueType = "Test Execution"
 ): Promise<JiraIssueSearchResult> {
   return searchJiraIssues({
     site: SITE,
     credentials: { email: EMAIL, token: TOKEN },
     kind,
     query,
+    executionIssueType,
     logger,
     fetchImpl,
     sleep: () => Promise.resolve(),
@@ -91,6 +93,28 @@ describe("searchJiraIssues", () => {
     };
     await run(fetchImpl, logger, "test-plan", "");
     expect(jql).toBe('issuetype = "Test Plan" ORDER BY created DESC');
+  });
+
+  it("searches the configured execution work type name", async () => {
+    const { logger } = capturingLogger();
+    let jql = "";
+    const fetchImpl: FetchLike = (_url, init) => {
+      jql = (JSON.parse(init.body as string) as { jql: string }).jql;
+      return Promise.resolve(response(200, page([])));
+    };
+    await run(fetchImpl, logger, "execution", "APEX", "Sub-Test Execution");
+    expect(jql).toBe('project = "APEX" AND issuetype = "Sub-Test Execution" ORDER BY created DESC');
+  });
+
+  it("escapes a configured work type name carrying JQL metacharacters", async () => {
+    const { logger } = capturingLogger();
+    let jql = "";
+    const fetchImpl: FetchLike = (_url, init) => {
+      jql = (JSON.parse(init.body as string) as { jql: string }).jql;
+      return Promise.resolve(response(200, page([])));
+    };
+    await run(fetchImpl, logger, "execution", "APEX", String.raw`Sub "Test\Execution"`);
+    expect(jql).toBe(String.raw`project = "APEX" AND issuetype = "Sub \"Test\\Execution\"" ORDER BY created DESC`);
   });
 
   it("omits the issuetype clause for the requirement kind", async () => {
@@ -220,6 +244,7 @@ describe("searchJiraIssues retry/backoff", () => {
       credentials: { email: EMAIL, token: TOKEN },
       kind: "execution",
       query: "CALC",
+      executionIssueType: "Test Execution",
       logger,
       fetchImpl,
       sleep: (ms: number) => { sleeps.push(ms); return Promise.resolve(); },
@@ -233,6 +258,7 @@ describe("searchJiraIssues retry/backoff", () => {
         credentials: { email: EMAIL, token: TOKEN },
         kind: "execution",
         query: "CALC",
+        executionIssueType: "Test Execution",
         logger,
         fetchImpl,
         sleep: () => Promise.resolve(),

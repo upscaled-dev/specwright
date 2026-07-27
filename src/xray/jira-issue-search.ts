@@ -19,7 +19,8 @@ const BACKOFF_CAP_MS = 8_000;
 // all it has, a requirement search REQUIRES a project key: an unscoped one would sweep the whole site.
 export type JiraIssueKind = "execution" | "test-plan" | "requirement";
 
-// The Jira issuetype names Xray provisions for each container kind (verify at F5, site-configurable).
+// The Jira issuetype names Xray provisions for each container kind. The execution name is only the
+// default: a project can map a differently named work type, so `xray.executionIssueType` overrides it.
 export const ISSUE_TYPE_NAME: Record<Exclude<JiraIssueKind, "requirement">, string> = {
   execution: "Test Execution",
   "test-plan": "Test Plan",
@@ -44,6 +45,8 @@ export interface JiraIssueSearchDeps {
   kind: JiraIssueKind;
   // A project key that scopes the search (the brief's `project = <key>` clause). Empty = unscoped.
   query: string;
+  // The configured execution work type name. Every kind passes it; only the execution kind reads it.
+  executionIssueType: string;
   logger: Logger;
   fetchImpl?: FetchLike | undefined;
   sleep?: ((ms: number) => Promise<void>) | undefined;
@@ -137,14 +140,15 @@ function escapeJql(value: string): string {
   return value.replaceAll("\\", String.raw`\\`).replaceAll('"', String.raw`\"`);
 }
 
-function buildJql(kind: JiraIssueKind, query: string): string {
+function buildJql(kind: JiraIssueKind, query: string, executionIssueType: string): string {
   const project = query.trim();
   const clauses: string[] = [];
   if (project !== "") {
     clauses.push(`project = "${escapeJql(project)}"`);
   }
   if (kind !== "requirement") {
-    clauses.push(`issuetype = "${ISSUE_TYPE_NAME[kind]}"`);
+    const issueType = kind === "execution" ? executionIssueType : ISSUE_TYPE_NAME[kind];
+    clauses.push(`issuetype = "${escapeJql(issueType)}"`);
   }
   const where = clauses.length === 0 ? "" : `${clauses.join(" AND ")} `;
   return `${where}ORDER BY created DESC`;
@@ -162,7 +166,7 @@ class JiraIssueSearch {
     this.sleep = deps.sleep ?? defaultSleep;
     this.random = deps.random ?? Math.random;
     this.authHeader = basicAuthHeader(deps.credentials);
-    this.jql = buildJql(deps.kind, deps.query);
+    this.jql = buildJql(deps.kind, deps.query, deps.executionIssueType);
   }
 
   public async run(): Promise<JiraIssueSearchResult> {

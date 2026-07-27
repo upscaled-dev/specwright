@@ -100,6 +100,7 @@ export function createXrayAdapterFactory(
         resolveSteps: publishSupport.resolveSteps,
         workspaceRootFor: publishSupport.workspaceRootFor,
         attachTo: () => ctx.config.xrayAttachTo,
+        executionIssueType: () => ctx.config.xrayExecutionIssueType,
         logger: ctx.logger,
       });
       // A thin wrapper over the client's authoring mutations, with no cache/account state: each one

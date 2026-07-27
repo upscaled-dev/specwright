@@ -207,6 +207,15 @@ export class ExtensionConfig {
     return this.config.get<string>("xray.defaultProjectKey", "").trim();
   }
 
+  private static readonly EXECUTION_ISSUE_TYPE_DEFAULT = "Test Execution";
+
+  // An empty or whitespace-only value means "left unset", not "no work type", so it reads as the default.
+  public get xrayExecutionIssueType(): string {
+    const fallback = ExtensionConfig.EXECUTION_ISSUE_TYPE_DEFAULT;
+    const configured = this.config.get<string>("xray.executionIssueType", fallback).trim();
+    return configured === "" ? fallback : configured;
+  }
+
   private static readonly REPORT_GLOB_DEFAULT = ["playwright-report/**", "test-results/**/*.zip"];
 
   public get xrayReportGlob(): string[] {

@@ -56,6 +56,7 @@ function makeDeps(over: Partial<XrayResultPublishingDeps>): XrayResultPublishing
     resolveSteps: RESOLVE_ALL,
     workspaceRootFor: () => undefined,
     attachTo: () => "evidence",
+    executionIssueType: () => "Test Execution",
     logger: Logger.create(undefined, LogLevel.ERROR),
     ...over,
   };
@@ -331,7 +332,7 @@ describe("createXrayResultPublishing: create-mode issue type resolution", () => 
   it("rejects with the project's actual types when the execution type is unavailable, before any import", async () => {
     const t = spyTransport();
     const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
-      Promise.resolve({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"], teamManaged: false })
+      Promise.resolve({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"], subtaskNames: [], subtaskMatch: undefined, teamManaged: false })
     );
     const publishing = createXrayResultPublishing(
       makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
@@ -349,7 +350,7 @@ describe("createXrayResultPublishing: create-mode issue type resolution", () => 
   it("rejects with the team-managed remedy when the unavailable project is team-managed", async () => {
     const t = spyTransport();
     const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
-      Promise.resolve({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"], teamManaged: true })
+      Promise.resolve({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"], subtaskNames: [], subtaskMatch: undefined, teamManaged: true })
     );
     const publishing = createXrayResultPublishing(
       makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
@@ -367,7 +368,7 @@ describe("createXrayResultPublishing: create-mode issue type resolution", () => 
   it("rejects with the empty-project variant when the account sees no issue types", async () => {
     const t = spyTransport();
     const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
-      Promise.resolve({ kind: "unavailable", availableNames: [], teamManaged: false })
+      Promise.resolve({ kind: "unavailable", availableNames: [], subtaskNames: [], subtaskMatch: undefined, teamManaged: false })
     );
     const publishing = createXrayResultPublishing(
       makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
@@ -375,8 +376,145 @@ describe("createXrayResultPublishing: create-mode issue type resolution", () => 
 
     await expect(
       publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "SCRATCH", summary: "Run" })
-    ).rejects.toThrow("no issue types are available to your account in this project");
+    ).rejects.toThrow(
+      'Project SCRATCH has no "Test Execution" issue type, and no issue types are available to your account in this project. Enable Xray for this project in Jira, or publish to a project that has the Xray issue types.'
+    );
     expect(t.postMultipart).not.toHaveBeenCalled();
+  });
+
+  it("names the subtask-level execution type instead of claiming the project lacks it", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({
+        kind: "unavailable",
+        availableNames: ["Bug", "Story", "Task"],
+        subtaskNames: ["Test Execution"],
+        subtaskMatch: "Test Execution",
+        teamManaged: true,
+      })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "APEX", summary: "Run" })
+    ).rejects.toThrow(
+      'Project APEX has a "Test Execution" work type, but it is a subtask type, and a standalone execution cannot be created as a subtask. Recreate "Test Execution" as a standard-level work type in its project settings, map it under Xray Settings > Work Types Mapping, then retry.'
+    );
+    expect(t.postMultipart).not.toHaveBeenCalled();
+  });
+
+  it("offers the Xray remedy for a subtask-level execution type in a company-managed project", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({
+        kind: "unavailable",
+        availableNames: ["Bug"],
+        subtaskNames: ["TEST EXECUTION"],
+        subtaskMatch: "TEST EXECUTION",
+        teamManaged: false,
+      })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "APEX", summary: "Run" })
+    ).rejects.toThrow(
+      'Project APEX has a "Test Execution" work type, but it is a subtask type, and a standalone execution cannot be created as a subtask. Enable Xray for this project in Jira, or publish to a project that has the Xray issue types.'
+    );
+    expect(t.postMultipart).not.toHaveBeenCalled();
+  });
+
+  it("lists the excluded subtask types when none of them is the execution type", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({
+        kind: "unavailable",
+        availableNames: ["Bug", "Story"],
+        subtaskNames: ["Sub-task", "Test Step"],
+        subtaskMatch: undefined,
+        teamManaged: true,
+      })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "APEX", summary: "Run" })
+    ).rejects.toThrow(
+      'Project APEX has no "Test Execution" issue type. Its issue types are: Bug, Story. Subtask types (cannot host a standalone execution): Sub-task, Test Step. This is a team-managed project: create a "Test Execution" work type in its project settings, map it under Xray Settings > Work Types Mapping, then retry.'
+    );
+    expect(t.postMultipart).not.toHaveBeenCalled();
+  });
+
+  it("keeps the subtask lead when the account sees no standard-level types at all", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({
+        kind: "unavailable",
+        availableNames: [],
+        subtaskNames: ["Sub-task", "Test Execution"],
+        subtaskMatch: "Test Execution",
+        teamManaged: true,
+      })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "APEX", summary: "Run" })
+    ).rejects.toThrow(
+      'Project APEX has a "Test Execution" work type, but it is a subtask type, and a standalone execution cannot be created as a subtask. Recreate "Test Execution" as a standard-level work type in its project settings, map it under Xray Settings > Work Types Mapping, then retry.'
+    );
+  });
+
+  it("says the account's only types are subtask types instead of claiming it sees none", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({
+        kind: "unavailable",
+        availableNames: [],
+        subtaskNames: ["Sub-task", "Test Step"],
+        subtaskMatch: undefined,
+        teamManaged: false,
+      })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "APEX", summary: "Run" })
+    ).rejects.toThrow(
+      'Project APEX has no "Test Execution" issue type. The only issue types available to your account in this project are subtask types (cannot host a standalone execution): Sub-task, Test Step. Enable Xray for this project in Jira, or publish to a project that has the Xray issue types.'
+    );
+  });
+
+  it("lists the excluded subtask types on the company-managed branch too", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({
+        kind: "unavailable",
+        availableNames: ["Bug", "Story"],
+        subtaskNames: ["Sub-task"],
+        subtaskMatch: undefined,
+        teamManaged: false,
+      })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "APEX", summary: "Run" })
+    ).rejects.toThrow(
+      'Project APEX has no "Test Execution" issue type. Its issue types are: Bug, Story. Subtask types (cannot host a standalone execution): Sub-task. Enable Xray for this project in Jira, or publish to a project that has the Xray issue types.'
+    );
   });
 
   it("publishes with the default issue type name when resolution is unknown", async () => {
@@ -392,17 +530,88 @@ describe("createXrayResultPublishing: create-mode issue type resolution", () => 
     expect(infoOf(t.postMultipart).fields.issuetype.name).toBe("Test Execution");
   });
 
-  it("never calls the resolver without Jira creds and publishes with the default name", async () => {
+  it("never calls the resolver without Jira creds and publishes with the configured name", async () => {
     const t = spyTransport();
     const resolveIssueType = vi.fn<IssueTypeResolver>(() => Promise.resolve({ kind: "unknown" }));
     const publishing = createXrayResultPublishing(
-      makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(undefined), resolveIssueType })
+      makeDeps({
+        transport: t.transport,
+        jiraCredentials: () => Promise.resolve(undefined),
+        resolveIssueType,
+        executionIssueType: () => "Xray Execution",
+      })
     );
 
     await publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "CALC", summary: "Run" });
 
     expect(resolveIssueType).not.toHaveBeenCalled();
-    expect(infoOf(t.postMultipart).fields.issuetype.name).toBe("Test Execution");
+    expect(infoOf(t.postMultipart).fields.issuetype.name).toBe("Xray Execution");
+  });
+
+  it("quotes the configured work type name in the unavailable message and passes it to the resolver", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({ kind: "unavailable", availableNames: ["Bug", "Story"], subtaskNames: [], subtaskMatch: undefined, teamManaged: false })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({
+        transport: t.transport,
+        jiraCredentials: () => Promise.resolve(JIRA),
+        resolveIssueType,
+        executionIssueType: () => "Sub-Test Execution",
+      })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "APEX", summary: "Run" })
+    ).rejects.toThrow(
+      'Project APEX has no "Sub-Test Execution" issue type. Its issue types are: Bug, Story. Enable Xray for this project in Jira, or publish to a project that has the Xray issue types.'
+    );
+    expect(resolveIssueType.mock.calls[0]![0]).toMatchObject({ executionIssueType: "Sub-Test Execution" });
+  });
+
+  it("quotes the configured work type name in the subtask-level branch", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() =>
+      Promise.resolve({
+        kind: "unavailable",
+        availableNames: ["Bug"],
+        subtaskNames: ["Sub-Test Execution"],
+        subtaskMatch: "Sub-Test Execution",
+        teamManaged: true,
+      })
+    );
+    const publishing = createXrayResultPublishing(
+      makeDeps({
+        transport: t.transport,
+        jiraCredentials: () => Promise.resolve(JIRA),
+        resolveIssueType,
+        executionIssueType: () => "Sub-Test Execution",
+      })
+    );
+
+    await expect(
+      publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "APEX", summary: "Run" })
+    ).rejects.toThrow(
+      'Project APEX has a "Sub-Test Execution" work type, but it is a subtask type, and a standalone execution cannot be created as a subtask. Recreate "Sub-Test Execution" as a standard-level work type in its project settings, map it under Xray Settings > Work Types Mapping, then retry.'
+    );
+  });
+
+  it("publishes with the configured work type name when resolution is unknown", async () => {
+    const t = spyTransport();
+    const resolveIssueType = vi.fn<IssueTypeResolver>(() => Promise.resolve({ kind: "unknown" }));
+    const publishing = createXrayResultPublishing(
+      makeDeps({
+        transport: t.transport,
+        jiraCredentials: () => Promise.resolve(JIRA),
+        resolveIssueType,
+        executionIssueType: () => "Sub-Test Execution",
+      })
+    );
+
+    await publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "APEX", summary: "Run" });
+
+    expect(infoOf(t.postMultipart).fields.issuetype.name).toBe("Sub-Test Execution");
   });
 
   it("never calls the resolver on the append path", async () => {
@@ -444,7 +653,12 @@ describe("createXrayResultPublishing: searchTargets", () => {
     const targets = await publishing.searchTargets("execution", "XNP");
 
     expect(searchIssues).toHaveBeenCalledTimes(1);
-    expect(searchIssues.mock.calls[0]![0]).toMatchObject({ kind: "execution", query: "XNP", site: "acme.atlassian.net" });
+    expect(searchIssues.mock.calls[0]![0]).toMatchObject({
+      kind: "execution",
+      query: "XNP",
+      site: "acme.atlassian.net",
+      executionIssueType: "Test Execution",
+    });
     expect(targets).toEqual([
       { id: "XNP-1", label: "XNP-1 · Nightly", ref: { key: "XNP-1" } },
       { id: "XNP-2", label: "XNP-2 · Smoke", ref: { key: "XNP-2" } },

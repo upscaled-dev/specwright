@@ -247,6 +247,7 @@ describe("buildCucumberMultipartPayload", () => {
       results: CUCUMBER_RESULTS,
       request: { mode: "create-new", project: "CALC", summary: "Specwright run", testPlanKey: "CALC-100", environments: ["Chrome", "Windows"] },
       resolveSteps: CUCUMBER_RESOLVER,
+      issueTypeName: "Test Execution",
     });
 
     expect(payload.results).toEqual(EXPECTED_CUCUMBER_RESULTS);
@@ -267,6 +268,7 @@ describe("buildCucumberMultipartPayload", () => {
       ],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
+      issueTypeName: "Test Execution",
     });
     expect(payload.results.map((f) => f.uri)).toEqual(["features/calc.feature", "features/math.feature"]);
     expect(payload.results[0]!.elements.map((e) => e.name)).toEqual(["A", "B"]);
@@ -278,6 +280,7 @@ describe("buildCucumberMultipartPayload", () => {
       results: [pub(ref("f", 1, "a"), "C-1", { outcome: "passed", durationMs: 1500 })],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given a", "When b", "Then c"] }),
+      issueTypeName: "Test Execution",
     });
     const steps = payload.results[0]!.elements[0]!.steps;
     expect(steps.map((s) => s.result.status)).toEqual(["passed", "passed", "passed"]);
@@ -290,6 +293,7 @@ describe("buildCucumberMultipartPayload", () => {
       results: [pub(ref("f", 1, "a"), "C-1", { outcome: "timed-out", durationMs: 999 })],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given a", "When b", "Then c"] }),
+      issueTypeName: "Test Execution",
     });
     const steps = payload.results[0]!.elements[0]!.steps;
     expect(steps.map((s) => s.result.status)).toEqual(["failed", "skipped", "skipped"]);
@@ -302,6 +306,7 @@ describe("buildCucumberMultipartPayload", () => {
       results: [pub(ref("f", 1, "a"), "C-1", { outcome: "interrupted" })],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given a", "When b"] }),
+      issueTypeName: "Test Execution",
     });
     expect(payload.results[0]!.elements[0]!.steps.map((s) => s.result.status)).toEqual(["skipped", "skipped"]);
   });
@@ -312,6 +317,7 @@ describe("buildCucumberMultipartPayload", () => {
       results: [pub(ref("f", 1, "a"), "C-1")],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["And also this", "But not that", "* a bullet", "no keyword here"] }),
+      issueTypeName: "Test Execution",
     });
     expect(payload.results[0]!.elements[0]!.steps.map((s) => ({ keyword: s.keyword, name: s.name }))).toEqual([
       { keyword: "And ", name: "also this" },
@@ -334,6 +340,7 @@ describe("buildCucumberMultipartPayload", () => {
       ],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
+      issueTypeName: "Test Execution",
     });
     const elements = payload.results[0]!.elements;
     expect(elements.map((e) => e.name)).toEqual(["Divide (1/1)", "Divide (4/2)"]);
@@ -348,6 +355,7 @@ describe("buildCucumberMultipartPayload", () => {
       results: [pub(ref("features/calc.feature", 3, "Add"), "CALC-1"), pub(ref("features/calc.feature", 8, "Removed"), "CALC-2")],
       request: CREATE_REQUEST,
       resolveSteps: (scenario) => (scenario.name === "Add" ? { featureName: "Calc", steps: ["Given x"] } : undefined),
+      issueTypeName: "Test Execution",
     });
     expect(payload.droppedChangedCount).toBe(1);
     const tags = payload.results.flatMap((f) => f.elements.flatMap((e) => e.tags.map((t) => t.name)));
@@ -360,6 +368,7 @@ describe("buildCucumberMultipartPayload", () => {
       results: [pub(ref("f", 1, "a"), "C-1")],
       request: { mode: "create-new", project: "CALC", summary: "My run", testPlanKey: "CALC-9", environments: ["Chrome"] },
       resolveSteps: () => ({ steps: ["Given x"] }),
+      issueTypeName: "Test Execution",
     });
     expect(payload.info).toEqual({
       fields: { project: { key: "CALC" }, summary: "My run", issuetype: { name: "Test Execution" } },
@@ -375,11 +384,12 @@ describe("buildCucumberMultipartPayload", () => {
       results: [pub(ref("f", 1, "a"), "C-1")],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
+      issueTypeName: "Test Execution",
     });
     expect(payload.info.xrayFields).toEqual({});
   });
 
-  it("uses an explicit issueTypeName over the default when the project renamed the type", () => {
+  it("carries the given issueTypeName into the info fields when the project renamed the type", () => {
     const payload = buildCucumberMultipartPayload({
       artifact: refArtifact(),
       results: [pub(ref("f", 1, "a"), "C-1")],
@@ -388,16 +398,6 @@ describe("buildCucumberMultipartPayload", () => {
       issueTypeName: "Xray Test Execution",
     });
     expect(payload.info.fields.issuetype.name).toBe("Xray Test Execution");
-  });
-
-  it("falls back to the default issuetype name when issueTypeName is absent", () => {
-    const payload = buildCucumberMultipartPayload({
-      artifact: refArtifact(),
-      results: [pub(ref("f", 1, "a"), "C-1")],
-      request: CREATE_REQUEST,
-      resolveSteps: () => ({ steps: ["Given x"] }),
-    });
-    expect(payload.info.fields.issuetype.name).toBe("Test Execution");
   });
 });
 
@@ -425,6 +425,7 @@ describe("evidence embedding", () => {
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given a", "When b", "Then c"] }),
       evidenceFor: () => [SHOT],
+      issueTypeName: "Test Execution",
     });
     const steps = payload.results[0]!.elements[0]!.steps;
     expect(steps[0]!.embeddings).toEqual([{ data: "UE5H", mime_type: "image/png" }]);
@@ -440,6 +441,7 @@ describe("evidence embedding", () => {
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given a", "When b"] }),
       evidenceFor: () => [SHOT],
+      issueTypeName: "Test Execution",
     });
     const steps = payload.results[0]!.elements[0]!.steps;
     expect(steps[0]!.embeddings).toEqual([{ data: "UE5H", mime_type: "image/png" }]);
@@ -488,6 +490,7 @@ describe("CucumberMultipartImporter.import", () => {
       results: CUCUMBER_RESULTS,
       request: { mode: "create-new", project: "CALC", summary: "Specwright run" },
       resolveSteps: CUCUMBER_RESOLVER,
+      issueTypeName: "Test Execution",
     });
 
     const outcome = await new CucumberMultipartImporter().import(rec.transport, payload);
@@ -549,6 +552,7 @@ describe("reconcile → importer wiring", () => {
       results: reconciled.publishable,
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
+      issueTypeName: "Test Execution",
     });
     const cucumberTags = cucumber.results.flatMap((f) => f.elements.flatMap((e) => e.tags.map((t) => t.name)));
     expect(cucumberTags).toContain("@TEST_CALC-1");
@@ -583,6 +587,7 @@ describe("import() error seam", () => {
       results: [pub(ref("f", 1, "a"), "C-1")],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
+      issueTypeName: "Test Execution",
     });
 
     const error = await new CucumberMultipartImporter().import(rec.transport, payload).catch((e: unknown) => e);
@@ -629,6 +634,7 @@ describe("empty-payload guard", () => {
       results: [pub(ref("features/calc.feature", 3, "Gone"), "CALC-1")],
       request: CREATE_REQUEST,
       resolveSteps: () => undefined,
+      issueTypeName: "Test Execution",
     });
     expect(payload.results).toHaveLength(0);
 
@@ -659,6 +665,7 @@ describe("buildCucumberMultipartPayload uri", () => {
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
       workspaceRootFor: () => "/home/me/proj",
+      issueTypeName: "Test Execution",
     });
     expect(payload.results[0]!.uri).toBe("features/calc.feature");
   });
@@ -670,6 +677,7 @@ describe("buildCucumberMultipartPayload uri", () => {
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
       workspaceRootFor: () => "/home/me/proj",
+      issueTypeName: "Test Execution",
     });
     expect(payload.results[0]!.uri).toBe("/elsewhere/features/x.feature");
   });
@@ -684,6 +692,7 @@ describe("buildCucumberMultipartPayload uri", () => {
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
       workspaceRootFor: (filePath) => (filePath.startsWith("/roots/a/") ? "/roots/a" : "/roots/b"),
+      issueTypeName: "Test Execution",
     });
     expect(payload.results.map((f) => f.uri)).toEqual(["features/calc.feature", "features/math.feature"]);
   });
@@ -694,6 +703,7 @@ describe("buildCucumberMultipartPayload uri", () => {
       results: [pub(ref("C:\\repo\\features\\calc.feature", 3, "Add"), "C-1")],
       request: CREATE_REQUEST,
       resolveSteps: () => ({ steps: ["Given x"] }),
+      issueTypeName: "Test Execution",
     });
     expect(payload.results[0]!.uri).toBe("C:/repo/features/calc.feature");
   });

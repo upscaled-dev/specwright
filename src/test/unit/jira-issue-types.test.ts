@@ -42,11 +42,17 @@ function abortError(): Error {
   return error;
 }
 
-function resolve(fetchImpl: FetchLike, logger: Logger, projectKey = "SCRATCH"): Promise<IssueTypeResolution> {
+function resolve(
+  fetchImpl: FetchLike,
+  logger: Logger,
+  projectKey = "SCRATCH",
+  executionIssueType = "Test Execution"
+): Promise<IssueTypeResolution> {
   return resolveExecutionIssueType({
     site: SITE,
     credentials: { email: EMAIL, token: TOKEN },
     projectKey,
+    executionIssueType,
     logger,
     fetchImpl,
     sleep: () => Promise.resolve(),
@@ -86,6 +92,51 @@ describe("resolveExecutionIssueType", () => {
     expect(result).toEqual({ kind: "resolved", name: "TEST EXECUTION" });
   });
 
+  it("matches the configured work type name when the project maps its own", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(200, meta([
+        { id: "1", name: "Test Execution", subtask: false },
+        { id: "2", name: "Sub-Test Execution", subtask: false },
+      ])));
+    const result = await resolve(fetchImpl, logger, "APEX", "Sub-Test Execution");
+    expect(result).toEqual({ kind: "resolved", name: "Sub-Test Execution" });
+  });
+
+  it("reports the configured name as a subtask type when the project maps it subtask-level", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(200, meta([
+        { id: "1", name: "Sub-Test Execution", subtask: true },
+        { id: "2", name: "Test Execution", subtask: false },
+      ])));
+    const result = await resolve(fetchImpl, logger, "APEX", "Sub-Test Execution");
+    expect(result).toEqual({
+      kind: "unavailable",
+      availableNames: ["Test Execution"],
+      subtaskNames: ["Sub-Test Execution"],
+      subtaskMatch: "Sub-Test Execution",
+      teamManaged: false,
+    });
+  });
+
+  it("reports a localized subtask entry as the match when only its untranslatedName carries the target", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(200, meta([
+        { id: "1", name: "Ausführung", untranslatedName: "Test Execution", subtask: true },
+        { id: "2", name: "Story", subtask: false },
+      ])));
+    const result = await resolve(fetchImpl, logger);
+    expect(result).toEqual({
+      kind: "unavailable",
+      availableNames: ["Story"],
+      subtaskNames: ["Ausführung"],
+      subtaskMatch: "Ausführung",
+      teamManaged: false,
+    });
+  });
+
   it("matches on untranslatedName when the display name is localized", async () => {
     const { logger } = capturingLogger();
     const fetchImpl: FetchLike = () =>
@@ -94,7 +145,7 @@ describe("resolveExecutionIssueType", () => {
     expect(result).toEqual({ kind: "resolved", name: "Ausführung" });
   });
 
-  it("skips a subtask entry that happens to carry the execution name", async () => {
+  it("never matches a subtask entry carrying the execution name, but reports it as a subtask type", async () => {
     const { logger } = capturingLogger();
     const fetchImpl: FetchLike = () =>
       Promise.resolve(response(200, meta([
@@ -102,7 +153,13 @@ describe("resolveExecutionIssueType", () => {
         { id: "5", name: "Story", subtask: false },
       ])));
     const result = await resolve(fetchImpl, logger);
-    expect(result).toEqual({ kind: "unavailable", availableNames: ["Story"], teamManaged: false });
+    expect(result).toEqual({
+      kind: "unavailable",
+      availableNames: ["Story"],
+      subtaskNames: ["Test Execution"],
+      subtaskMatch: "Test Execution",
+      teamManaged: false,
+    });
   });
 
   it("returns unavailable with the non-subtask names when nothing matches", async () => {
@@ -115,14 +172,37 @@ describe("resolveExecutionIssueType", () => {
         { id: "4", name: "Task", subtask: false },
       ])));
     const result = await resolve(fetchImpl, logger);
-    expect(result).toEqual({ kind: "unavailable", availableNames: ["Bug", "Story", "Task"], teamManaged: false });
+    expect(result).toEqual({
+      kind: "unavailable",
+      availableNames: ["Bug", "Story", "Task"],
+      subtaskNames: ["Sub-task"],
+      teamManaged: false,
+    });
+  });
+
+  it("carries every subtask name in listing order", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(200, meta([
+        { id: "1", name: "Sub-task", subtask: true },
+        { id: "2", name: "Bug", subtask: false },
+        { id: "3", name: "Test Execution", subtask: true },
+      ])));
+    const result = await resolve(fetchImpl, logger);
+    expect(result).toEqual({
+      kind: "unavailable",
+      availableNames: ["Bug"],
+      subtaskNames: ["Sub-task", "Test Execution"],
+      subtaskMatch: "Test Execution",
+      teamManaged: false,
+    });
   });
 
   it("returns unavailable with an empty list when the project exposes no issue types", async () => {
     const { logger } = capturingLogger();
     const fetchImpl: FetchLike = () => Promise.resolve(response(200, meta([])));
     const result = await resolve(fetchImpl, logger);
-    expect(result).toEqual({ kind: "unavailable", availableNames: [], teamManaged: false });
+    expect(result).toEqual({ kind: "unavailable", availableNames: [], subtaskNames: [], teamManaged: false });
   });
 
   it("flags team-managed when any entry carries a PROJECT scope", async () => {
@@ -133,7 +213,12 @@ describe("resolveExecutionIssueType", () => {
         { id: "2", name: "Story", subtask: false, scope: { type: "PROJECT", project: { id: "10000" } } },
       ])));
     const result = await resolve(fetchImpl, logger);
-    expect(result).toEqual({ kind: "unavailable", availableNames: ["Bug", "Story"], teamManaged: true });
+    expect(result).toEqual({
+      kind: "unavailable",
+      availableNames: ["Bug", "Story"],
+      subtaskNames: [],
+      teamManaged: true,
+    });
   });
 
   it("flags team-managed even when only a subtask entry carries the PROJECT scope", async () => {
@@ -144,7 +229,12 @@ describe("resolveExecutionIssueType", () => {
         { id: "2", name: "Sub-task", subtask: true, scope: { type: "PROJECT", project: { id: "10000" } } },
       ])));
     const result = await resolve(fetchImpl, logger);
-    expect(result).toEqual({ kind: "unavailable", availableNames: ["Bug"], teamManaged: true });
+    expect(result).toEqual({
+      kind: "unavailable",
+      availableNames: ["Bug"],
+      subtaskNames: ["Sub-task"],
+      teamManaged: true,
+    });
   });
 
   it("does not flag team-managed for a TEMPLATE scope or a missing scope", async () => {
@@ -155,7 +245,12 @@ describe("resolveExecutionIssueType", () => {
         { id: "2", name: "Story", subtask: false },
       ])));
     const result = await resolve(fetchImpl, logger);
-    expect(result).toEqual({ kind: "unavailable", availableNames: ["Bug", "Story"], teamManaged: false });
+    expect(result).toEqual({
+      kind: "unavailable",
+      availableNames: ["Bug", "Story"],
+      subtaskNames: [],
+      teamManaged: false,
+    });
   });
 
   it("url-encodes a project key with reserved characters", async () => {
@@ -219,6 +314,7 @@ describe("resolveExecutionIssueType", () => {
       site: SITE,
       credentials: { email: EMAIL, token: TOKEN },
       projectKey: "SCRATCH",
+      executionIssueType: "Test Execution",
       logger,
       fetchImpl,
       sleep: (ms: number) => { sleeps.push(ms); return Promise.resolve(); },
@@ -253,6 +349,7 @@ describe("resolveExecutionIssueType", () => {
       site: SITE,
       credentials: { email: EMAIL, token: TOKEN },
       projectKey: "SCRATCH",
+      executionIssueType: "Test Execution",
       logger,
       fetchImpl,
       sleep: (ms: number) => { sleeps.push(ms); return Promise.resolve(); },
@@ -297,6 +394,7 @@ describe("resolveExecutionIssueType", () => {
         site: SITE,
         credentials: { email: EMAIL, token: TOKEN },
         projectKey: "SCRATCH",
+        executionIssueType: "Test Execution",
         logger,
         fetchImpl,
         sleep: () => Promise.resolve(),

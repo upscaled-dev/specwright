@@ -3,7 +3,6 @@ import type { PublishRequest, RunArtifact, RunArtifactIteration, RunArtifactOutc
 import type { PublishableResult } from "../traceability/publish-core";
 import type { EmbeddedEvidence } from "../traceability/evidence-resolution";
 import { normalizePath, type ScenarioRef } from "../traceability/scenario-ref";
-import { ISSUE_TYPE_NAME } from "./jira-issue-search";
 
 // Resolves a publishable result's evidence to base64-embeddable blobs (empty when none applies for the
 // active `xray.attachTo` mode). The Xray capability supplies it; `buildPayload` never touches disk.
@@ -302,9 +301,9 @@ export interface CucumberMultipartInput {
   // a given path → that path is forward-slashed but left as-is.
   readonly workspaceRootFor?: ((filePath: string) => string | undefined) | undefined;
   readonly evidenceFor?: EvidenceForResult | undefined;
-  // The execution issue type name resolved from the target project's createmeta. Absent → the shared
-  // ISSUE_TYPE_NAME.execution default (the publish flow only threads this when it has Jira access).
-  readonly issueTypeName?: string | undefined;
+  // The execution issue type name: the target project's own from createmeta when it resolved, else the
+  // configured `xray.executionIssueType`.
+  readonly issueTypeName: string;
 }
 
 interface FeatureDraft {
@@ -432,7 +431,7 @@ function featureUri(filePath: string, workspaceRoot: string | undefined): string
 
 function buildCucumberInfo(
   request: Extract<PublishRequest, { mode: "create-new" }>,
-  issueTypeName: string | undefined
+  issueTypeName: string
 ): CucumberInfo {
   const xrayFields: { testPlanKey?: string; environments?: readonly string[] } = {};
   if (request.testPlanKey !== undefined && request.testPlanKey !== "") {
@@ -445,13 +444,12 @@ function buildCucumberInfo(
   // without issuetype ("issuetype: Specify an issue type", verified live 2026-07-25). It also 400s with
   // a name the target project does not accept ("issuetype: Specify a valid issue type", verified live
   // 2026-07-25). The name is site AND project configurable, so the publish flow resolves it upstream
-  // from the project's createmeta and passes it here, falling back to the shared ISSUE_TYPE_NAME when
-  // it could not. `environments` (not `testEnvironments`) is the multipart xrayFields key (§5).
+  // and passes it here. `environments` (not `testEnvironments`) is the multipart xrayFields key (§5).
   return {
     fields: {
       project: { key: request.project },
       summary: request.summary,
-      issuetype: { name: issueTypeName ?? ISSUE_TYPE_NAME.execution },
+      issuetype: { name: issueTypeName },
     },
     xrayFields,
   };
