@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { KeyGrammar } from "./contracts";
+import type { KeyGrammar, SyncProgressEvent } from "./contracts";
 import type { LedgerEntry } from "./publish-ledger";
 import type { ScenarioRef } from "./scenario-ref";
 import type {
@@ -67,25 +67,38 @@ export interface BoardViewModel {
   readonly offerSync: boolean;
 }
 
-// The available group's empty state, by what the user can do about it. Without sync scope no sync
-// helps, since completeness never reaches "complete" without project keys. With scope but no complete
+// The available group's empty state, by what the user can do about it. With nothing in the resolved
+// sync scope no sync helps, since completeness never reaches "complete" without project keys, and the
+// header's project selector is the fastest way to put one there. With a scope but no complete
 // catalogue, a sync is the fix. A complete catalogue that yields nothing has nothing to offer, and
 // saying every test is mapped would be a lie when the sync catalogued no tests at all.
 function availableEmptyState(
-  syncScopeConfigured: boolean,
+  syncScopeResolved: boolean,
   completeness: TraceabilitySnapshot["completeness"] | undefined
 ): { availableEmptyText: string; offerSync: boolean } {
-  if (!syncScopeConfigured) {
-    return {
-      availableEmptyText: "Add project keys to playwrightBddRunner.xray.syncProjectKeys to list available tests.",
-      offerSync: false,
-    };
+  if (!syncScopeResolved) {
+    return { availableEmptyText: "Pick a project in the header to load its tests.", offerSync: false };
   }
   if (completeness !== "complete") {
     return { availableEmptyText: "No synced tests yet.", offerSync: true };
   }
   return { availableEmptyText: "No unmapped tests in the last sync.", offerSync: false };
 }
+
+/**
+ * The progress strip's live text while a sync pages a project's catalogue. The remote does not always
+ * report a total, so a page without one says only what is in hand.
+ */
+export function syncProgressText(event: SyncProgressEvent): string {
+  const tests = countLabel(event.total ?? event.fetched, "test");
+  return event.total === undefined
+    ? `Syncing ${event.projectKey}: ${tests}`
+    : `Syncing ${event.projectKey}: ${event.fetched} of ${tests}`;
+}
+
+// What the strip says between the last page and the repaint that carries the new tests; the render
+// itself clears it.
+export const RENDERING_PROGRESS = "Rendering…";
 
 // Best-fit workspace-relative path with forward slashes (a Playwright grep/path regex never sees a
 // backslash — see the regex-path gotcha). Picks the root that contains the file; falls back to the
@@ -279,10 +292,10 @@ export function buildBoardViewModel(
   snapshot: TraceabilitySnapshot | undefined,
   workspaceRoots: readonly string[],
   testTagPrefix: string,
-  syncScopeConfigured: boolean,
+  syncScopeResolved: boolean,
   projectOf?: KeyGrammar["projectOf"]
 ): BoardViewModel {
-  const emptyState = availableEmptyState(syncScopeConfigured, snapshot?.completeness);
+  const emptyState = availableEmptyState(syncScopeResolved, snapshot?.completeness);
   if (!snapshot) {
     return { scenarios: [], available: [], mapped: [], matrix: [], ...emptyState };
   }

@@ -286,6 +286,49 @@ describe("XrayClient pagination", () => {
     expect(outcome.pages[0]).toMatchObject({ query: "project = CALC", start: 0, total: 150 });
   });
 
+  it("reports each landed page with the records in hand and the total the remote gave", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        const start = Number(/start: (\d+)/.exec(query)?.[1] ?? "0");
+        return testsPage(Array.from({ length: Math.min(100, 150 - start) }, (_v, i) => `CALC-${start + i + 1}`), 150);
+      }),
+    });
+    const pages: Array<[number, number | undefined]> = [];
+
+    await client.fetchProjectCatalogue("CALC", undefined, (fetched, total) => pages.push([fetched, total]));
+
+    // Cumulative, so the strip counts up rather than restarting each page.
+    expect(pages).toEqual([[100, 150], [150, 150]]);
+  });
+
+  it("finishes the fetch when the progress sink throws, since reporting is best effort", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        const start = Number(/start: (\d+)/.exec(query)?.[1] ?? "0");
+        return testsPage(Array.from({ length: Math.min(100, 150 - start) }, (_v, i) => `CALC-${start + i + 1}`), 150);
+      }),
+    });
+
+    const outcome = await client.fetchProjectCatalogue("CALC", undefined, () => {
+      throw new Error("board closed");
+    });
+
+    expect(outcome.tests).toHaveLength(150);
+    expect(outcome.complete).toBe(true);
+    expect(outcome.errors).toEqual([]);
+  });
+
+  it("reports a page the remote gave no total for, so a countless scope still shows progress", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({ data: { getTests: { results: [] } } })),
+    });
+    const pages: Array<[number, number | undefined]> = [];
+
+    await client.fetchProjectCatalogue("CALC", undefined, (fetched, total) => pages.push([fetched, total]));
+
+    expect(pages).toEqual([[0, undefined]]);
+  });
+
   it("marks the scope incomplete when a page is empty before total is reached", async () => {
     const client = makeClient({
       fetchImpl: jwtThenGraphql((query) => {

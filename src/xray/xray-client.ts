@@ -61,6 +61,10 @@ export interface XrayFetchOutcome {
   readonly errors: string[];
 }
 
+// Called once per fetched page with the records collected for that scope so far and the total the
+// remote reported (undefined when it reported none), so a caller can show a live count while paging.
+export type XrayPageProgress = (fetched: number, total: number | undefined) => void;
+
 export interface XrayClientDeps {
   region: XrayRegion;
   logger: Logger;
@@ -411,8 +415,12 @@ export class XrayClient {
     return outcome;
   }
 
-  public fetchProjectCatalogue(projectKey: string, signal?: AbortSignal): Promise<XrayFetchOutcome> {
-    return this.fetchScope(`project = ${projectKey}`, signal);
+  public fetchProjectCatalogue(
+    projectKey: string,
+    signal?: AbortSignal,
+    onPage?: XrayPageProgress
+  ): Promise<XrayFetchOutcome> {
+    return this.fetchScope(`project = ${projectKey}`, signal, onPage);
   }
 
   // Forward a caller-built JQL through the shared scope engine (pagination/auth/backoff/normalization
@@ -423,7 +431,11 @@ export class XrayClient {
     return this.fetchScope(jql, signal);
   }
 
-  private async fetchScope(jql: string, signal?: AbortSignal): Promise<XrayFetchOutcome> {
+  private async fetchScope(
+    jql: string,
+    signal?: AbortSignal,
+    onPage?: XrayPageProgress
+  ): Promise<XrayFetchOutcome> {
     const outcome: XrayFetchOutcome = { tests: [], pages: [], complete: true, errors: [] };
     let start = 0;
     for (;;) {
@@ -443,6 +455,12 @@ export class XrayClient {
         }
       }
       outcome.pages.push({ fetchedAt: this.now(), query: jql, start, total: page.total });
+      // Progress is best effort, so a sink that throws costs its own report, never the fetch.
+      try {
+        onPage?.(outcome.tests.length, page.total);
+      } catch (error) {
+        this.deps.logger.warn(`${jql}: progress report failed: ${scrubJwtLike(errMsg(error))}`);
+      }
       const next = pageTermination(jql, start, page);
       if (next.done) {
         if (next.error !== undefined) {

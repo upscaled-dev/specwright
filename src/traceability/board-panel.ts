@@ -82,6 +82,12 @@ export class BoardPanel {
     return BoardPanel.current?.board.selectedTests() ?? [];
   }
 
+  // The sync progress strip's line, or "" to clear it. Static like the selection readers: the command
+  // layer reports a run's progress without holding a board, and a closed board drops it.
+  public static reportSyncProgress(text: string): void {
+    BoardPanel.current?.board.syncProgress(text);
+  }
+
   private hostFor(surface: SurfaceName): SurfaceHost {
     return {
       post: (message) => this.postRaw({ ...message, surface }),
@@ -213,7 +219,12 @@ const SHELL_CSS = `
   }
   .search input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   main { padding: 1rem 1.1rem; }
-  .pane[hidden] { display: none; }`;
+  .pane[hidden] { display: none; }
+  .sync-strip { display: flex; align-items: center; gap: 0.7rem; padding: 0.3rem 1.1rem 0.4rem; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); color: var(--vscode-descriptionForeground); font-size: 0.82em; }
+  .sync-strip[hidden] { display: none; }
+  .sync-strip .bar { position: relative; flex: 1; height: 2px; overflow: hidden; background: var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
+  .sync-strip .bar::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 25%; background: var(--vscode-progressBar-background, var(--vscode-textLink-foreground)); animation: sync-strip-slide 1.6s linear infinite; }
+  @keyframes sync-strip-slide { from { transform: translateX(-100%); } to { transform: translateX(400%); } }`;
 
 const ROUTER_SCRIPT = `
   (function () {
@@ -298,6 +309,7 @@ function renderDocument(providerLabel: string): string {
     <div class="scope"><select id="scope-select" title="Scope the board to one project"></select></div>
     <div class="search"><input id="search" type="text" spellcheck="false" autocomplete="off" placeholder="Filter by key, tag, file…"></div>
   </header>
+  <div id="sync-strip" class="sync-strip" role="status" hidden><span id="sync-strip-text"></span><span class="bar"></span></div>
   <main>
 ${panes}
   </main>

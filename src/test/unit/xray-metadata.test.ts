@@ -2,11 +2,11 @@ import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
 import { ExtensionConfig } from "../../core/extension-config";
-import { XrayFetchOutcome, XrayTestRecord, XrayClient } from "../../xray/xray-client";
+import { XrayFetchOutcome, XrayPageProgress, XrayTestRecord, XrayClient } from "../../xray/xray-client";
 import { CachedMetadata, CACHE_SCHEMA_VERSION, XrayMetadataCache } from "../../xray/xray-metadata-cache";
 import { XrayMetadataCapability } from "../../xray/xray-metadata";
 import { JiraProjectSearchResult } from "../../xray/jira-project-search";
-import { TestCaseMetadata } from "../../traceability/contracts";
+import { SyncProgressEvent, TestCaseMetadata } from "../../traceability/contracts";
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -46,7 +46,11 @@ function outcome(tests: XrayTestRecord[], opts: { complete?: boolean; errors?: s
 }
 
 interface FakeClient {
-  fetchProjectCatalogue?: (projectKey: string, signal?: AbortSignal) => Promise<XrayFetchOutcome>;
+  fetchProjectCatalogue?: (
+    projectKey: string,
+    signal?: AbortSignal,
+    onPage?: XrayPageProgress
+  ) => Promise<XrayFetchOutcome>;
   fetchTestsByKeys?: (keys: readonly string[], signal?: AbortSignal) => Promise<XrayFetchOutcome>;
   searchTests?: (jql: string, signal?: AbortSignal) => Promise<XrayFetchOutcome>;
   invalidateAuth?: () => void;
@@ -285,6 +289,28 @@ describe("XrayMetadataCapability sync", () => {
     expect(snap.completeness).toBe("complete");
     expect(snap.tests.get("CALC-1")?.summary).toBe("kept");
     expect(snap.errors).toContain("transport failure");
+  });
+
+  it("stamps each catalogue's pages with its project key on the way to the progress sink", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: (projectKey, _signal, onPage) => {
+          onPage?.(50, 120);
+          onPage?.(120, 120);
+          return Promise.resolve(outcome([{ key: `${projectKey}-1` }]));
+        },
+      }),
+    });
+    const events: SyncProgressEvent[] = [];
+
+    await capability.sync({ projectKeys: ["CALC", "PAY"] }, undefined, (event) => events.push(event));
+
+    expect(events).toEqual([
+      { projectKey: "CALC", fetched: 50, total: 120 },
+      { projectKey: "CALC", fetched: 120, total: 120 },
+      { projectKey: "PAY", fetched: 50, total: 120 },
+      { projectKey: "PAY", fetched: 120, total: 120 },
+    ]);
   });
 
   it("does not touch the snapshot when the sync is aborted", async () => {

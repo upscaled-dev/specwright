@@ -119,6 +119,8 @@ const BOARD_SCRIPT = `
   const executionsRows = document.getElementById('executions-rows');
   const executionsEmpty = document.getElementById('executions-empty');
   const executionsScroll = document.getElementById('executions-scroll');
+  const syncStrip = document.getElementById('sync-strip');
+  const syncStripText = document.getElementById('sync-strip-text');
 
   // A scenario card carries kind 'scenario' + its drop id; a test card kind 'test' + its key. A drop is
   // valid only across the two kinds, so a scenario lands on any test card and an available test on a
@@ -409,6 +411,13 @@ const BOARD_SCRIPT = `
     }
   }
 
+  // The strip sits above the panes, so a sync reads the same on every tab. The host owns its words: an
+  // empty text clears it, and so does every render, so a finished or failed sync cannot strand it.
+  function renderSyncProgress(text) {
+    syncStripText.textContent = text;
+    syncStrip.hidden = text === '';
+  }
+
   search.addEventListener('input', function () { window.__spec.post('board', { type: 'search', value: search.value }); });
   scopeSelect.addEventListener('change', function () { window.__spec.post('board', { type: 'scope', project: scopeSelect.value }); });
   createTests.addEventListener('click', function () { window.__spec.post('board', { type: 'bulkCreate' }); });
@@ -428,6 +437,9 @@ const BOARD_SCRIPT = `
       renderTests(msg.available || [], msg.mapped || [], msg.availableEmptyText || '', msg.offerSync === true);
       renderMatrix(msg.matrix || []);
       renderExecutions(msg.executions || []);
+      renderSyncProgress('');
+    } else if (msg.type === 'syncProgress') {
+      renderSyncProgress(msg.text || '');
     }
   });`;
 

@@ -10,6 +10,7 @@ import {
   resolveBoardUnlink,
   scenarioDropId,
   scopeBoardViewModel,
+  syncProgressText,
 } from "../../traceability/board-data";
 import { projectFromKey } from "../../xray/xray-adapter";
 import type { LedgerEntry } from "../../traceability/publish-ledger";
@@ -27,9 +28,9 @@ const PREFIX = "TEST_";
 function build(
   snapshot: TraceabilitySnapshot | undefined,
   roots: readonly string[] = ROOTS,
-  syncScopeConfigured = true
+  syncScopeResolved = true
 ): BoardViewModel {
-  return buildBoardViewModel(snapshot, roots, PREFIX, syncScopeConfigured);
+  return buildBoardViewModel(snapshot, roots, PREFIX, syncScopeResolved);
 }
 
 function ref(over: Partial<ScenarioRef> = {}): ScenarioRef {
@@ -141,7 +142,7 @@ describe("buildBoardViewModel: workspace-relative paths", () => {
 
 describe("buildBoardViewModel: test cards", () => {
   const loginRow = { name: "Log in", location: "features/login.feature:5", unlinkId: scenarioDropId(ref()) };
-  const SCOPE_HINT = "Add project keys to playwrightBddRunner.xray.syncProjectKeys to list available tests.";
+  const SCOPE_HINT = "Pick a project in the header to load its tests.";
 
   it("groups mapped links by key into one card carrying the linked-scenario count and a row per link", () => {
     const model = build(
@@ -253,8 +254,9 @@ describe("buildBoardViewModel: test cards", () => {
     expect(model.available.map((c) => c.key)).toEqual(["PAY-1", "PAY-9"]);
   });
 
-  it("points the empty available group at the sync scope setting when no project keys are configured, snapshot or not", () => {
-    // No sync can help here: completeness never reaches "complete" without a project scope.
+  it("points the empty available group at the project selector when the resolved sync scope is empty, snapshot or not", () => {
+    // No sync can help here: completeness never reaches "complete" without a project scope, so the
+    // selector, not a Sync now button, is the affordance.
     expect(build(undefined, ROOTS, false)).toMatchObject({ availableEmptyText: SCOPE_HINT, offerSync: false });
     expect(build(snapshot({ completeness: "complete" }), ROOTS, false)).toMatchObject({
       availableEmptyText: SCOPE_HINT,
@@ -744,5 +746,20 @@ describe("filterExecutionRows", () => {
 
   it("matches on the summary, case-insensitively", () => {
     expect(filterExecutionRows(rows, "CHECKOUT").map((r) => r.key)).toEqual(["XNP-1"]);
+  });
+});
+
+describe("syncProgressText", () => {
+  it("counts a page against the total the remote reported", () => {
+    expect(syncProgressText({ projectKey: "APEX", fetched: 100, total: 350 })).toBe("Syncing APEX: 100 of 350 tests");
+  });
+
+  it("says only what is in hand when the remote reported no total", () => {
+    expect(syncProgressText({ projectKey: "APEX", fetched: 40 })).toBe("Syncing APEX: 40 tests");
+  });
+
+  it("agrees with a single test either way", () => {
+    expect(syncProgressText({ projectKey: "CALC", fetched: 1, total: 1 })).toBe("Syncing CALC: 1 of 1 test");
+    expect(syncProgressText({ projectKey: "CALC", fetched: 1 })).toBe("Syncing CALC: 1 test");
   });
 });

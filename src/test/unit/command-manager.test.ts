@@ -13,7 +13,7 @@ import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { TestOrganizationManager } from "../../core/test-organization";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { CommandBuilder } from "../../core/command-builder";
-import { ExternalRef, RunArtifact, TraceabilityAdapter } from "../../traceability/contracts";
+import { ExternalRef, RunArtifact, SyncProgress, SyncScope, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayAdapter } from "../../xray/xray-adapter";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
@@ -28,6 +28,20 @@ import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { PreflightChoice } from "../../traceability/preflight-flow";
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
 import type { Memento } from "vscode";
+
+// The webview-panel stub the board opens onto: `__posted` records what the host sent, `__receive`
+// delivers an inbound message, and the reset disposes every panel between tests.
+interface StubBoardPanel {
+  title: string;
+  webview: { __posted: Array<{ surface?: string; type: string; projects?: string[]; text?: string }> };
+  __revealCount: number;
+  dispose: () => void;
+  __receive: (message: unknown) => Promise<void>;
+}
+const win = vscode.window as unknown as {
+  __webviewPanels: StubBoardPanel[];
+  __resetWebviewPanels: () => void;
+};
 
 function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): PlaywrightBddExtensionContext {
   const logger = Logger.create();
@@ -718,7 +732,10 @@ describe("traceability linkScenario contributions", () => {
 });
 
 describe("traceability sync command handler", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    win.__resetWebviewPanels();
+    vi.restoreAllMocks();
+  });
 
   it("guides the user when no metadata capability is active", async () => {
     const info = vi.spyOn(vscode.window, "showInformationMessage");
@@ -727,79 +744,155 @@ describe("traceability sync command handler", () => {
     expect(String(info.mock.calls[0]?.[0])).toContain("Connect");
   });
 
+  // A subsystem whose adapter derives projects from its keys, with every seam the sync scope reads:
+  // the tag-derived keys, the catalogue the last sync left, the provider directory, and the board's
+  // stored project selection. Its sync commits like the real one (a fresh `syncedAt` per run) unless
+  // `commits: false` reproduces a run that discarded its pages and left the snapshot untouched.
+  function syncSubsystem(over: {
+    sync?: (scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress) => Promise<void>;
+    snapshotErrors?: string[];
+    tests?: Map<string, unknown>;
+    catalogueProjects?: string[];
+    tagDerived?: string[];
+    testKeys?: string[];
+    directory?: string[];
+    scope?: ProjectScopeStore;
+    completeness?: TraceabilitySnapshot["completeness"];
+    commits?: boolean;
+    connected?: boolean;
+  } = {}): TraceabilitySubsystem {
+    const run = over.sync ?? ((): Promise<void> => Promise.resolve());
+    let syncedAt: number | undefined;
+    const adapter = {
+      keyGrammar: { testPrefix: "TEST_", projectOf: (k: string) => k.split("-")[0] },
+      metadata: {
+        sync: async (scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress): Promise<void> => {
+          await run(scope, signal, onProgress);
+          if (over.commits !== false) {
+            syncedAt = (syncedAt ?? 0) + 1;
+          }
+        },
+        snapshot: () => ({
+          tests: over.tests ?? new Map(),
+          fetchedScopes: [],
+          catalogueProjects: over.catalogueProjects ?? [],
+          verifiedAbsentKeys: [],
+          stale: false,
+          completeness: "unknown",
+          errors: over.snapshotErrors ?? [],
+          syncedAt,
+        }),
+      },
+      ...(over.directory
+        ? {
+            projectDirectory: {
+              cached: () => ({ projects: over.directory!.map((key) => ({ key, name: key })), truncated: false }),
+              list: () => Promise.resolve({ projects: [], truncated: false }),
+            },
+          }
+        : {}),
+    };
+    return {
+      traceabilityPanelActive: true,
+      connected: over.connected ?? true,
+      getSnapshot: () => ({
+        links: [],
+        untraced: [],
+        orphans: [],
+        stale: false,
+        completeness: over.completeness ?? "complete",
+        errors: [],
+      }),
+      getActiveAdapter: () => adapter,
+      knownTestKeys: () => over.testKeys ?? [],
+      tagDerivedProjectKeys: () => over.tagDerived ?? [],
+      projectScope: () => over.scope ?? NO_PROJECT_SCOPE,
+      onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
+    } as unknown as TraceabilitySubsystem;
+  }
+
+  function managerFor(
+    subsystem: TraceabilitySubsystem,
+    settings: Record<string, unknown> = {},
+    logger = Logger.create()
+  ): CommandManager {
+    const workspaceConfig = {
+      get: (key: string, fallback: unknown) => (key in settings ? settings[key] : fallback),
+    } as unknown as vscode.WorkspaceConfiguration;
+    const mgr = CommandManager.create(
+      makeContext({ config: ExtensionConfig.create(workspaceConfig, false), logger })
+    );
+    mgr.setTraceabilitySubsystem(subsystem);
+    return mgr;
+  }
+
+  const runSyncOn = (mgr: CommandManager): Promise<void> =>
+    (mgr as unknown as { syncTraceability: () => Promise<void> }).syncTraceability();
+
+  // The board's two ways into the sync: the Sync now button and the quiet per-project load.
+  const boardLoads = (mgr: CommandManager): { runSync: () => Promise<void>; autoSync: (key: string) => Promise<void> } =>
+    (mgr as unknown as {
+      boardDeps: () => { runSync: () => Promise<void>; autoSync: (key: string) => Promise<void> };
+    }).boardDeps();
+
+  const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
   it("syncs with the workspace + configured project scope and surfaces snapshot errors as a toast", async () => {
     const sync = vi.fn(() => Promise.resolve());
-    const adapter = {
-      metadata: {
-        sync,
-        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], verifiedAbsentKeys: [], stale: false, completeness: "unknown", errors: ["boom"] }),
-      },
-    };
-    const subsystem = {
-      getActiveAdapter: () => adapter,
-      knownTestKeys: () => ["CALC-1"],
-      tagDerivedProjectKeys: () => [],
-    } as unknown as TraceabilitySubsystem;
     const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
 
-    const mgr = CommandManager.create(makeContext());
-    mgr.setTraceabilitySubsystem(subsystem);
-    await (mgr as unknown as { syncTraceability: () => Promise<void> }).syncTraceability();
+    await runSyncOn(managerFor(syncSubsystem({ sync, snapshotErrors: ["boom"], testKeys: ["CALC-1"] })));
 
-    expect(sync).toHaveBeenCalledWith({ testKeys: ["CALC-1"], projectKeys: [] }, expect.anything());
+    expect(sync).toHaveBeenCalledWith({ testKeys: ["CALC-1"], projectKeys: [] }, expect.anything(), expect.anything());
     expect(errorToast).toHaveBeenCalled();
   });
 
   it("scopes the sync to the tags, the setting and the already-synced catalogue, never the provider directory", async () => {
     const sync = vi.fn(() => Promise.resolve());
-    const adapter = {
-      keyGrammar: { projectOf: (k: string) => k.split("-")[0] },
-      metadata: {
-        sync,
-        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: ["MATH"], verifiedAbsentKeys: [], stale: false, completeness: "complete", errors: [] }),
-      },
-      projectDirectory: { cached: () => ({ projects: [{ key: "OPS", name: "Ops" }], truncated: false }), list: () => Promise.resolve({ projects: [], truncated: false }) },
-    };
-    const subsystem = {
-      getActiveAdapter: () => adapter,
-      knownTestKeys: () => ["CALC-1"],
-      tagDerivedProjectKeys: () => ["CALC"],
-    } as unknown as TraceabilitySubsystem;
-    const workspaceConfig = {
-      get: (key: string, fallback: unknown) => (key === "xray.syncProjectKeys" ? ["shop"] : fallback),
-    } as unknown as vscode.WorkspaceConfiguration;
+    const subsystem = syncSubsystem({
+      sync,
+      testKeys: ["CALC-1"],
+      tagDerived: ["CALC"],
+      catalogueProjects: ["MATH"],
+      directory: ["OPS"],
+    });
 
-    const mgr = CommandManager.create(makeContext({ config: ExtensionConfig.create(workspaceConfig, false) }));
-    mgr.setTraceabilitySubsystem(subsystem);
-    await (mgr as unknown as { syncTraceability: () => Promise<void> }).syncTraceability();
+    await runSyncOn(managerFor(subsystem, { "xray.syncProjectKeys": ["shop"] }));
 
     expect(sync).toHaveBeenCalledWith(
       { testKeys: ["CALC-1"], projectKeys: ["CALC", "MATH", "SHOP"] },
+      expect.anything(),
       expect.anything()
     );
+  });
+
+  it("carries the default project key into the sync scope, so a create target is also a sync target", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+
+    await runSyncOn(managerFor(syncSubsystem({ sync }), { "xray.defaultProjectKey": " pay " }));
+
+    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["PAY"] }, expect.anything(), expect.anything());
+  });
+
+  // The directory rung stays out of the sync scope, so a project only the connection knows about is
+  // fetched precisely because the board is scoped to it.
+  it("carries the board's stored project selection into the sync scope", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const scope = projectScopeStore(memento(), () => undefined);
+    scope.set("PAY");
+
+    await runSyncOn(managerFor(syncSubsystem({ sync, directory: ["PAY", "OPS"], scope })));
+
+    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["PAY"] }, expect.anything(), expect.anything());
   });
 
   it("coalesces concurrent invocations into a single in-flight run", async () => {
     let resolveSync!: () => void;
     const sync = vi.fn(() => new Promise<void>((resolve) => { resolveSync = resolve; }));
-    const adapter = {
-      metadata: {
-        sync,
-        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], verifiedAbsentKeys: [], stale: false, completeness: "unknown", errors: [] }),
-      },
-    };
-    const subsystem = {
-      getActiveAdapter: () => adapter,
-      knownTestKeys: () => [],
-      tagDerivedProjectKeys: () => [],
-    } as unknown as TraceabilitySubsystem;
+    const mgr = managerFor(syncSubsystem({ sync }));
 
-    const mgr = CommandManager.create(makeContext());
-    mgr.setTraceabilitySubsystem(subsystem);
-    const run = mgr as unknown as { syncTraceability: () => Promise<void> };
-
-    const first = run.syncTraceability();
-    const second = run.syncTraceability();
+    const first = runSyncOn(mgr);
+    const second = runSyncOn(mgr);
     resolveSync();
     await Promise.all([first, second]);
 
@@ -807,25 +900,107 @@ describe("traceability sync command handler", () => {
     expect(sync).toHaveBeenCalledTimes(1);
   });
 
+  // A project picked mid-run cannot be in the running scope, which was resolved before the pick, so it
+  // is not allowed to join: it earns exactly one follow-up whose scope covers it.
+  it("reruns once for a project picked while a sync is in flight, with the picked key in scope", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const resolvers: Array<() => void> = [];
+    const sync = vi.fn((_scope: SyncScope) => new Promise<void>((resolve) => resolvers.push(resolve)));
+    const mgr = managerFor(syncSubsystem({ sync }));
+    const { autoSync } = boardLoads(mgr);
+
+    const first = runSyncOn(mgr);
+    void autoSync("PAY");
+    void autoSync("PAY");
+    expect(sync).toHaveBeenCalledTimes(1);
+
+    resolvers[0]!();
+    await first;
+    await flush();
+
+    expect(sync).toHaveBeenCalledTimes(2);
+    expect(sync.mock.calls[0]![0]).toEqual({ testKeys: [], projectKeys: [] });
+    expect(sync.mock.calls[1]![0]).toEqual({ testKeys: [], projectKeys: ["PAY"] });
+
+    // One slot, so the two picks produced one follow-up and that follow-up queues nothing further.
+    resolvers[1]!();
+    await flush();
+    expect(sync).toHaveBeenCalledTimes(2);
+    // Only the run the user asked for spoke; the load it replayed stayed quiet.
+    expect(info).toHaveBeenCalledOnce();
+    expect(info).toHaveBeenCalledWith("Synced 0 remote tests.");
+  });
+
+  // The gates belong to the moment the follow-up runs, not the moment it was queued: the run in flight
+  // may well be the one that catalogues the picked project.
+  it("re-checks the gates when it replays a queued pick, so nothing is fetched twice", async () => {
+    const catalogueProjects: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const sync = vi.fn((_scope: SyncScope) => new Promise<void>((resolve) => resolvers.push(resolve)));
+    const mgr = managerFor(syncSubsystem({ sync, catalogueProjects }));
+
+    const first = runSyncOn(mgr);
+    void boardLoads(mgr).autoSync("PAY");
+    catalogueProjects.push("PAY");
+    resolvers[0]!();
+    await first;
+    await flush();
+
+    expect(sync).toHaveBeenCalledOnce();
+  });
+
+  it("loads a project the catalogue has never held, quietly", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const mgr = managerFor(syncSubsystem({ sync, tagDerived: ["CALC"] }));
+
+    await boardLoads(mgr).autoSync("PAY");
+
+    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["CALC", "PAY"] }, expect.anything(), expect.anything());
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it("loads nothing for a project an earlier sync already catalogued", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const mgr = managerFor(syncSubsystem({ sync, catalogueProjects: ["PAY"] }));
+
+    await boardLoads(mgr).autoSync("PAY");
+
+    expect(sync).not.toHaveBeenCalled();
+  });
+
+  // A quiet load that fails is a log line, not a notification: nobody asked for it, and a stale
+  // connection verdict would raise the same red toast on every board open.
+  it("logs a quiet load's failure rather than raising a notification", async () => {
+    const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn");
+    const mgr = managerFor(syncSubsystem({ snapshotErrors: ["boom"] }), {}, logger);
+
+    await boardLoads(mgr).autoSync("PAY");
+
+    expect(errorToast).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith("A board load's sync failed", {
+      error: "Sync completed with errors: see the output channel for details.",
+    });
+  });
+
+  it("loads nothing while the tracker is not known to be reachable", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const mgr = managerFor(syncSubsystem({ sync, connected: false }));
+
+    await boardLoads(mgr).autoSync("PAY");
+
+    expect(sync).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+  });
+
   it("wires the board's Sync now button to the serialized sync, so two clicks share one run", async () => {
     let resolveSync!: () => void;
     const sync = vi.fn(() => new Promise<void>((resolve) => { resolveSync = resolve; }));
-    const adapter = {
-      metadata: {
-        sync,
-        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], verifiedAbsentKeys: [], stale: false, completeness: "unknown", errors: [] }),
-      },
-    };
-    const subsystem = {
-      getActiveAdapter: () => adapter,
-      knownTestKeys: () => [],
-      tagDerivedProjectKeys: () => [],
-      projectScope: () => NO_PROJECT_SCOPE,
-    } as unknown as TraceabilitySubsystem;
-
-    const mgr = CommandManager.create(makeContext());
-    mgr.setTraceabilitySubsystem(subsystem);
-    const { runSync } = (mgr as unknown as { boardDeps: () => { runSync: () => Promise<void> } }).boardDeps();
+    const mgr = managerFor(syncSubsystem({ sync }));
+    const { runSync } = boardLoads(mgr);
 
     const first = runSync();
     const second = runSync();
@@ -836,20 +1011,116 @@ describe("traceability sync command handler", () => {
     expect(sync).toHaveBeenCalledTimes(1);
   });
 
-  it("passes the configured sync scope into the board model, so the empty available group says the right thing", () => {
-    const built = (projectKeys: string[]): BoardViewModel => {
-      const workspaceConfig = {
-        get: (key: string, fallback: unknown) => (key === "xray.syncProjectKeys" ? projectKeys : fallback),
-      } as unknown as vscode.WorkspaceConfiguration;
-      const mgr = CommandManager.create(makeContext({ config: ExtensionConfig.create(workspaceConfig, false) }));
-      return (mgr as unknown as { boardDeps: () => { buildModel: () => BoardViewModel } }).boardDeps().buildModel();
+  it("reports a finished sync as an information toast, zero tests included", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+
+    await runSyncOn(managerFor(syncSubsystem()));
+
+    expect(info).toHaveBeenCalledWith("Synced 0 remote tests.");
+  });
+
+  it("reports a cancelled sync as information rather than an error", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+    // A token that is already cancelled aborts the run's signal the moment the task subscribes.
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((_opts, task) =>
+      (task as (p: unknown, t: unknown) => Thenable<unknown>)(
+        { report: () => {} },
+        { isCancellationRequested: true, onCancellationRequested: (cb: () => void) => { cb(); return { dispose: () => {} }; } }
+      )
+    );
+
+    await runSyncOn(managerFor(syncSubsystem()));
+
+    expect(info).toHaveBeenCalledWith("Sync cancelled.");
+    expect(errorToast).not.toHaveBeenCalled();
+  });
+
+  // The strip's whole lifecycle: the pages it counts, the handover to the repaint, and the clear that
+  // keeps a failed run from stranding it.
+  async function openBoardFor(mgr: CommandManager): Promise<StubBoardPanel> {
+    (mgr as unknown as { openBoard: () => void }).openBoard();
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+    return panel;
+  }
+
+  const strips = (panel: StubBoardPanel): Array<string | undefined> =>
+    panel.webview.__posted.filter((m) => m.type === "syncProgress").map((m) => m.text);
+
+  const reportingSync = (): ((scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress) => Promise<void>) =>
+    (_scope, _signal, onProgress) => {
+      onProgress?.({ projectKey: "PAY", fetched: 100, total: 350 });
+      return Promise.resolve();
     };
 
+  it("counts a sync's pages onto the board's strip, then hands over to the repaint", async () => {
+    const mgr = managerFor(syncSubsystem({ sync: reportingSync(), tagDerived: ["PAY"] }));
+    const panel = await openBoardFor(mgr);
+
+    await runSyncOn(mgr);
+
+    expect(strips(panel)).toEqual(["Syncing PAY: 100 of 350 tests", "Rendering…"]);
+  });
+
+  it("clears the strip when the sync reports errors, so a failed run cannot strand it", async () => {
+    vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+    const mgr = managerFor(syncSubsystem({ sync: reportingSync(), tagDerived: ["PAY"], snapshotErrors: ["boom"] }));
+    const panel = await openBoardFor(mgr);
+
+    await runSyncOn(mgr);
+
+    expect(strips(panel).at(-1)).toBe("");
+  });
+
+  it("posts only a clear when a sync reported no pages at all", async () => {
+    const mgr = managerFor(syncSubsystem());
+    const panel = await openBoardFor(mgr);
+
+    await runSyncOn(mgr);
+
+    expect(strips(panel)).toEqual([""]);
+  });
+
+  // A run that fetched pages and then discarded them (a credential change mid-sync) commits nothing and
+  // fires no change event, so there is no repaint to hand over to.
+  it("clears the strip when a run counted pages but committed nothing", async () => {
+    const mgr = managerFor(syncSubsystem({ sync: reportingSync(), tagDerived: ["PAY"], commits: false }));
+    const panel = await openBoardFor(mgr);
+
+    await runSyncOn(mgr);
+
+    expect(strips(panel).at(-1)).toBe("");
+  });
+
+  it("still counts a quiet load onto the strip, since that is all it says", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const mgr = managerFor(syncSubsystem({ sync: reportingSync() }));
+    const panel = await openBoardFor(mgr);
+
+    await boardLoads(mgr).autoSync("PAY");
+
+    expect(strips(panel)).toEqual(["Syncing PAY: 100 of 350 tests", "Rendering…"]);
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it("passes the resolved sync scope into the board model, so the empty available group says the right thing", () => {
+    const built = (settings: Record<string, unknown>, tagDerived: string[] = []): BoardViewModel =>
+      (managerFor(syncSubsystem({ tagDerived, completeness: "unknown" }), settings) as unknown as {
+        boardDeps: () => { buildModel: () => BoardViewModel };
+      }).boardDeps().buildModel();
+
     // Either half catches an inverted scope bit at the call site, since it flips both branches at once.
-    expect(built(["CALC"])).toMatchObject({ availableEmptyText: "No synced tests yet.", offerSync: true });
-    const unset = built([]);
-    expect(unset.availableEmptyText).toContain("playwrightBddRunner.xray.syncProjectKeys");
-    expect(unset.offerSync).toBe(false);
+    expect(built({ "xray.syncProjectKeys": ["CALC"] })).toMatchObject({
+      availableEmptyText: "No synced tests yet.",
+      offerSync: true,
+    });
+    // The setting is only one rung: a tag-derived project is scope enough for a sync to be worth offering.
+    expect(built({}, ["CALC"])).toMatchObject({ availableEmptyText: "No synced tests yet.", offerSync: true });
+    expect(built({})).toMatchObject({
+      availableEmptyText: "Pick a project in the header to load its tests.",
+      offerSync: false,
+    });
   });
 });
 
@@ -981,17 +1252,6 @@ describe("traceability runAndPublish: preflight batch flow", () => {
 });
 
 describe("traceability openBoard command handler", () => {
-  const win = vscode.window as unknown as {
-    __webviewPanels: Array<{
-      title: string;
-      webview: { __posted: Array<{ surface?: string; type: string; projects?: string[] }> };
-      __revealCount: number;
-      dispose: () => void;
-      __receive: (message: unknown) => Promise<void>;
-    }>;
-    __resetWebviewPanels: () => void;
-  };
-
   afterEach(() => {
     win.__resetWebviewPanels();
     vi.restoreAllMocks();

@@ -25,9 +25,22 @@ import {
 } from "../traceability/link-scenario";
 import { applyTagInsert, applyTagRemove, TagWrite } from "../traceability/tag-edit";
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
-import { BoardDropResolution, buildBoardViewModel, buildExecutionRows, resolveBoardDrop, resolveBoardUnlink } from "../traceability/board-data";
+import {
+  BoardDropResolution,
+  buildBoardViewModel,
+  buildExecutionRows,
+  RENDERING_PROGRESS,
+  resolveBoardDrop,
+  resolveBoardUnlink,
+  syncProgressText,
+} from "../traceability/board-data";
 import { BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
-import { NO_PROJECT_SCOPE, resolveProjectUniverse } from "../traceability/project-scope";
+import {
+  NO_PROJECT_SCOPE,
+  ProjectUniverseSources,
+  resolveProjectUniverse,
+  resolveSyncProjectKeys,
+} from "../traceability/project-scope";
 import { linkedTestsForScenario, ScenarioRef } from "../traceability/traceability-model";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
 import {
@@ -73,6 +86,15 @@ const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
   "automation-binding-required": "automation binding required",
   "not-in-target-plan": "not in the target plan",
 };
+
+// What a sync run needs to know about who asked for it: whether its outcome is worth a toast (a
+// machine-initiated load stays quiet and lets the board's progress strip speak), and a project the run
+// must cover whatever the other scope sources say. The key travels with the request rather than being
+// re-read from the board's store, so a pick is covered even before its write settles.
+interface SyncRequest {
+  readonly announce: boolean;
+  readonly explicitKey?: string | undefined;
+}
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -148,6 +170,11 @@ export class CommandManager {
   private traceabilitySubsystem: TraceabilitySubsystem | undefined;
   private publishLedger: PublishLedger | undefined;
   private syncInFlight: Promise<void> | undefined;
+  // At most one queued rerun, held as the project that needs covering: a project picked mid-run is not
+  // in the running scope, so its load starts when this one settles. Later picks overwrite it, so the
+  // queue can never grow past a single follow-up. Only the board's quiet loads name a project, so a
+  // user-initiated request never lands here; it joins the run already in flight.
+  private pendingLoad: string | undefined;
   // The board's snapshot-change source when no subsystem is wired (unit rigs); it never fires.
   private readonly boardChange = new vscode.EventEmitter<void>();
 
@@ -244,7 +271,9 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.linkScenario", title: "Link Scenario to Test", category: CATEGORY, handler: this.linkScenario.bind(this) },
         { command: "playwrightBddRunner.traceability.runAndPublish", title: "Run Locally and Publish…", category: CATEGORY, handler: this.runAndPublish.bind(this) },
         { command: "playwrightBddRunner.traceability.publishLastRun", title: "Publish Last Run…", category: CATEGORY, handler: this.publishLastRun.bind(this) },
-        { command: "playwrightBddRunner.traceability.sync", title: "Sync Traceability", category: CATEGORY, handler: this.syncTraceability.bind(this) },
+        // Wrapped rather than bound: a command handler is called with the invoking context's arguments,
+        // which must never be read as a sync request. The palette and the view title always announce.
+        { command: "playwrightBddRunner.traceability.sync", title: "Sync Traceability", category: CATEGORY, handler: () => this.syncTraceability() },
         { command: "playwrightBddRunner.traceability.openBoard", title: "Open Coverage Board", category: CATEGORY, handler: this.openBoard.bind(this) },
         { command: "playwrightBddRunner.traceability.manageConnection", title: "Manage Xray Connection", category: CATEGORY, handler: () => this.getXrayConnectionCommands().manageConnection() },
         { command: "playwrightBddRunner.traceability.connect", title: "Connect to Xray", category: CATEGORY, handler: () => this.getXrayConnectionCommands().connect() },
@@ -1260,21 +1289,28 @@ export class CommandManager {
     return resolveProjectUniverse({
       directoryProjects: adapter.projectDirectory?.cached().projects.map((project) => project.key),
       ...this.localProjectSources(adapter),
-      defaultKey: this.context.config.xrayDefaultProjectKey,
     }).projects;
   }
 
   // The workspace's own project sources, shared by the universe above and the sync scope below.
-  private localProjectSources(adapter: TraceabilityAdapter | undefined): {
-    tagDerivedKeys: readonly string[];
-    syncSettingKeys: readonly string[];
-    catalogueKeys: readonly string[];
-  } {
+  private localProjectSources(adapter: TraceabilityAdapter | undefined): ProjectUniverseSources {
     return {
       tagDerivedKeys: this.traceabilitySubsystem?.tagDerivedProjectKeys() ?? [],
       syncSettingKeys: this.context.config.xraySyncProjectKeys,
       catalogueKeys: adapter?.metadata?.snapshot().catalogueProjects ?? [],
+      defaultKey: this.context.config.xrayDefaultProjectKey,
     };
+  }
+
+  // The workspace's sources plus the one project this run must cover: the caller's explicit key when it
+  // has one, else the board's stored selection, coerced against the universe so a selection the user
+  // could no longer pick cannot keep resurrecting itself through the catalogue rung. An explicit key
+  // skips that read entirely, which is also what keeps a just-picked project in scope before its write
+  // has settled.
+  private syncProjectKeys(adapter: TraceabilityAdapter | undefined, explicitKey?: string): string[] {
+    const sources = this.localProjectSources(adapter);
+    const selectedKey = explicitKey ?? this.traceabilitySubsystem?.projectScope().get(this.projectUniverse(adapter));
+    return resolveSyncProjectKeys({ ...sources, selectedKey });
   }
 
   // The board's dependencies, shared by openBoard, runPublish, and linkScenarioForRef. The board reads
@@ -1291,7 +1327,7 @@ export class CommandManager {
           subsystem?.getSnapshot(),
           roots,
           subsystem?.getActiveAdapter()?.keyGrammar.testPrefix ?? "",
-          this.context.config.xraySyncProjectKeys.length > 0,
+          this.syncProjectKeys(subsystem?.getActiveAdapter()).length > 0,
           subsystem?.getActiveAdapter()?.keyGrammar.projectOf
         ),
       knownProjects: () => this.projectUniverse(subsystem?.getActiveAdapter()),
@@ -1308,6 +1344,7 @@ export class CommandManager {
           });
       },
       runSync: () => this.syncTraceability(),
+      autoSync: (projectKey) => this.autoSyncProject(projectKey),
       openExecution: (key) => {
         const adapter = subsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
         this.browseIssue(adapter, key).catch((error) => {
@@ -1437,49 +1474,105 @@ export class CommandManager {
     }
   }
 
-  // Serialize sync: the palette entry and the view-title button can both fire; a second invoke while
-  // one run is in flight awaits the same run rather than starting a second (interleaved state writes,
-  // two AbortControllers).
-  private syncTraceability(): Promise<void> {
+  // Serialize sync: the palette entry and the view-title button can both fire; a second invoke while one
+  // run is in flight awaits the same run rather than starting a second (interleaved state writes, two
+  // AbortControllers). A request naming a project is the exception: the running scope was frozen before
+  // that project was picked, so it takes the single pending slot and earns exactly one follow-up load.
+  // Joining a quiet run means a click can go untoasted; the strip still speaks.
+  private syncTraceability(request: SyncRequest = { announce: true }): Promise<void> {
     if (this.syncInFlight) {
+      if (request.explicitKey !== undefined) {
+        this.pendingLoad = request.explicitKey;
+      }
       return this.syncInFlight;
     }
-    this.syncInFlight = this.runTraceabilitySyncCommand().finally(() => {
+    this.syncInFlight = this.runTraceabilitySyncCommand(request).finally(() => {
       this.syncInFlight = undefined;
+      const pending = this.pendingLoad;
+      this.pendingLoad = undefined;
+      if (pending !== undefined) {
+        // Replayed through the gates rather than around them, so a project the run that just finished
+        // catalogued, or a tracker that has gone since the pick, costs nothing.
+        this.autoSyncProject(pending).catch((error) => {
+          this.logger.warn("Follow-up traceability sync failed", { error: errMsg(error) });
+        });
+      }
     });
     return this.syncInFlight;
   }
 
+  // The board's quiet loads: opening on a stored project, and picking one in the header. Only worth a
+  // run when a tracker is actually reachable and no sync has ever catalogued that project, so a board
+  // reopened on a project that legitimately holds no tests does not re-fetch it every time.
+  private autoSyncProject(projectKey: string): Promise<void> {
+    const subsystem = this.traceabilitySubsystem;
+    if (!subsystem?.connected) {
+      return Promise.resolve();
+    }
+    const catalogued = subsystem.getActiveAdapter()?.metadata?.snapshot().catalogueProjects ?? [];
+    if (catalogued.includes(projectKey)) {
+      return Promise.resolve();
+    }
+    return this.syncTraceability({ announce: false, explicitKey: projectKey });
+  }
+
   // Gated on the connected context key, but the metadata capability can still be absent (browse-only
   // adapter, provider without a client); guide the user rather than throwing. Progress renders on the
-  // tree view; cancellation flows through to the fetch's AbortSignal.
-  private async runTraceabilitySyncCommand(): Promise<void> {
+  // tree view; cancellation flows through to the fetch's AbortSignal. A machine-initiated run raises no
+  // notification at all: the board's progress strip is its report, and a failure goes to the log.
+  private async runTraceabilitySyncCommand(request: SyncRequest): Promise<void> {
     const adapter = this.traceabilitySubsystem?.getActiveAdapter();
     const metadata = adapter?.metadata;
     if (!metadata) {
-      vscode.window.showInformationMessage("Connect to your test tracker before syncing.");
+      if (request.announce) {
+        vscode.window.showInformationMessage("Connect to your test tracker before syncing.");
+      }
       return;
     }
     const scope: SyncScope = {
       testKeys: this.traceabilitySubsystem?.knownTestKeys() ?? [],
-      // The same resolver as the project universe, minus the provider directory: a sync fetches one full
-      // catalogue per project, so it may only ever cover projects this workspace already names. Handing
-      // it every accessible project would fetch hundreds of catalogues nobody asked for.
-      projectKeys: resolveProjectUniverse(this.localProjectSources(adapter)).projects,
+      projectKeys: this.syncProjectKeys(adapter, request.explicitKey),
     };
     const controller = new AbortController();
+    const syncedAtBefore = metadata.snapshot().syncedAt;
+    let counted = false;
     const result = await vscode.window.withProgress(
       { location: { viewId: "playwrightBddRunner.traceability" }, title: "Syncing traceability…" },
       (_progress, token) => {
         token.onCancellationRequested(() => controller.abort());
-        return runTraceabilitySync({ metadata, scope, signal: controller.signal, logger: this.logger });
+        return runTraceabilitySync({
+          metadata,
+          scope,
+          signal: controller.signal,
+          logger: this.logger,
+          onProgress: (event) => {
+            counted = true;
+            BoardPanel.reportSyncProgress(syncProgressText(event));
+          },
+        });
       }
     );
-    if (!result.ok) {
-      const pick = await vscode.window.showErrorMessage(result.message, "Show Output");
-      if (pick === "Show Output") {
-        this.logger.showOutput();
+    // The strip may only hand over to a repaint that is actually coming, which is exactly what a fresh
+    // `syncedAt` proves: a run that discarded its pages (a credential change mid-sync) commits nothing
+    // and fires no change event, so it clears the strip rather than stranding it on "Rendering".
+    const committed = metadata.snapshot().syncedAt !== syncedAtBefore;
+    BoardPanel.reportSyncProgress(counted && committed && !result.cancelled && result.ok ? RENDERING_PROGRESS : "");
+    if (result.ok) {
+      if (request.announce) {
+        vscode.window.showInformationMessage(result.message);
       }
+      return;
+    }
+    // A load nobody asked for does not get to raise a red notification, and a stale connection verdict
+    // would raise the same one on every board open. The channel keeps the detail, the strip has already
+    // cleared, and the empty group still offers Sync now, which reports the same failure out loud.
+    if (!request.announce) {
+      this.logger.warn("A board load's sync failed", { error: result.message });
+      return;
+    }
+    const pick = await vscode.window.showErrorMessage(result.message, "Show Output");
+    if (pick === "Show Output") {
+      this.logger.showOutput();
     }
   }
 

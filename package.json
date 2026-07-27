@@ -349,7 +349,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Jira project keys (e.g. 'CALC') to fetch in full when syncing, so orphan Xray tests (a test with no local scenario) can be detected for those projects. Empty means only the projects your local @TEST_ tags reference are fetched — orphans are not reported."
+          "description": "Project keys included in every traceability sync. Projects selected on the Coverage Board and projects referenced by local tags are synced as well."
         },
         "playwrightBddRunner.xray.cacheTtlMinutes": {
           "type": "number",

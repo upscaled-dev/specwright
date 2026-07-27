@@ -114,6 +114,7 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     applyUnlink: () => Promise.resolve(),
     pushText: () => undefined,
     runSync: () => Promise.resolve(),
+    autoSync: () => Promise.resolve(),
     openExecution: () => undefined,
     bulkCreate: () => undefined,
     createTestSet: () => undefined,
@@ -176,6 +177,19 @@ describe("BoardPanel", () => {
     expect(html).toContain("Mapped Xray tests");
     expect(html).toContain('id="mapped-count"');
     expect(html).toContain('id="mapped-cards"');
+  });
+
+  // Source-level only: the webview JS never runs here, so this pins that the strip ships above the panes
+  // (so it shows on any tab) and that a render clears it, not that the rendered bar animates.
+  it("carries the sync progress strip above the panes, cleared by every render", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain('id="sync-strip"');
+    expect(html).toContain('id="sync-strip-text"');
+    expect(html.indexOf('id="sync-strip"')).toBeLessThan(html.indexOf("<main>"));
+    expect(html).toContain(".sync-strip[hidden] { display: none; }");
+    expect(html).toContain("renderSyncProgress('')");
   });
 
   it("carries no Mapped tree markup and no drag-to-unlink drop zone", () => {
@@ -314,6 +328,84 @@ describe("BoardPanel", () => {
     await panel.__receive({ surface: "board", type: "drop", scenario: "features/login.feature:5", key: "PAY-9" });
 
     expect(applyDrop).toHaveBeenCalledWith("features/login.feature:5", "PAY-9");
+  });
+
+  it("hands the picked project to the host's load, storing the selection first", async () => {
+    const order: string[] = [];
+    const stored = fakeScope();
+    const projectScope: ProjectScopeStore = {
+      get: (known) => stored.get(known),
+      set: (project) => {
+        order.push(`set:${String(project)}`);
+        stored.set(project);
+      },
+    };
+    const autoSync = vi.fn((project: string) => {
+      order.push(`load:${project}`);
+      return Promise.resolve();
+    });
+    const { panel } = await openReady({ autoSync, projectScope });
+
+    await panel.__receive({ surface: "board", type: "scope", project: "PAY" });
+
+    expect(order).toEqual(["set:PAY", "load:PAY"]);
+    expect(lastRender(panel)!.project).toBe("PAY");
+  });
+
+  it("asks for no load when the selector goes back to All projects", async () => {
+    const autoSync = vi.fn(() => Promise.resolve());
+    const { panel } = await openReady({ autoSync, projectScope: fakeScope("PAY") });
+    autoSync.mockClear();
+
+    await panel.__receive({ surface: "board", type: "scope", project: "" });
+
+    expect(autoSync).not.toHaveBeenCalled();
+  });
+
+  // Whether the load is worth running is the host's call: mapped cards come from local tags, so a board
+  // that looks populated can still have nothing catalogued for that project.
+  it("hands a stored project to the host's load on open, tag-derived cards or not", async () => {
+    const autoSync = vi.fn(() => Promise.resolve());
+    const runSync = vi.fn(() => Promise.resolve());
+
+    await openReady({ autoSync, runSync, projectScope: fakeScope("CALC") });
+
+    expect(autoSync).toHaveBeenCalledWith("CALC");
+    expect(runSync).not.toHaveBeenCalled();
+  });
+
+  it("asks for no load on open under All projects, however empty the board is", async () => {
+    const autoSync = vi.fn(() => Promise.resolve());
+
+    await openReady({ autoSync, buildModel: () => ({ ...MODEL, available: [], mapped: [] }) });
+
+    expect(autoSync).not.toHaveBeenCalled();
+  });
+
+  it("asks for no load for a selection the store no longer knows, matching what it paints", async () => {
+    const autoSync = vi.fn(() => Promise.resolve());
+
+    await openReady({ autoSync, projectScope: fakeScope("GONE") });
+
+    expect(autoSync).not.toHaveBeenCalled();
+  });
+
+  it("posts the host's progress line to the strip and drops it once the board is gone", async () => {
+    const { instance, panel } = await openReady();
+
+    BoardPanel.reportSyncProgress("Syncing PAY: 100 of 350 tests");
+    expect(panel.webview.__posted.at(-1)).toEqual({
+      surface: "board",
+      type: "syncProgress",
+      text: "Syncing PAY: 100 of 350 tests",
+    });
+
+    BoardPanel.reportSyncProgress("");
+    expect(panel.webview.__posted.at(-1)).toMatchObject({ type: "syncProgress", text: "" });
+
+    instance.dispose();
+
+    expect(() => BoardPanel.reportSyncProgress("Syncing PAY: 1 test")).not.toThrow();
   });
 
   it("routes a sync message to runSync so the empty available group can load tests", async () => {

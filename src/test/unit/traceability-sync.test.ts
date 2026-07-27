@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { runTraceabilitySync } from "../../traceability/traceability-sync";
-import { MetadataCapability, RemoteMetadataSnapshot, SyncScope } from "../../traceability/contracts";
+import { MetadataCapability, RemoteMetadataSnapshot, SyncProgress, SyncScope } from "../../traceability/contracts";
 import { Logger, LogLevel } from "../../utils/logger";
 
 function snapshot(overrides: Partial<RemoteMetadataSnapshot> = {}): RemoteMetadataSnapshot {
@@ -17,7 +17,7 @@ function snapshot(overrides: Partial<RemoteMetadataSnapshot> = {}): RemoteMetada
 }
 
 function fakeMetadata(opts: {
-  sync?: (scope: SyncScope, signal?: AbortSignal) => Promise<void>;
+  sync?: (scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress) => Promise<void>;
   snapshot: RemoteMetadataSnapshot;
 }): MetadataCapability {
   return {
@@ -41,14 +41,15 @@ describe("runTraceabilitySync", () => {
     expect(result).toEqual({ ok: true, message: "Synced 2 remote tests.", cancelled: false });
   });
 
-  it("passes the scope and signal through to the capability sync", async () => {
+  it("passes the scope, the signal and the progress sink through to the capability sync", async () => {
     const sync = vi.fn(() => Promise.resolve());
     const metadata = fakeMetadata({ sync, snapshot: snapshot() });
     const controller = new AbortController();
+    const onProgress = vi.fn();
 
-    await runTraceabilitySync({ metadata, scope, signal: controller.signal, logger });
+    await runTraceabilitySync({ metadata, scope, signal: controller.signal, logger, onProgress });
 
-    expect(sync).toHaveBeenCalledWith(scope, controller.signal);
+    expect(sync).toHaveBeenCalledWith(scope, controller.signal, onProgress);
   });
 
   it("surfaces a failure when the snapshot records sync errors, without throwing", async () => {

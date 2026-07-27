@@ -123,6 +123,13 @@ interface RenderMessage {
   executionVerb: CreateVerb;
 }
 
+// The sync progress strip above the panes. The host composes the whole line, so the webview only paints
+// it; an empty text clears the strip, as does the next render.
+interface SyncProgressMessage {
+  type: "syncProgress";
+  text: string;
+}
+
 // The board is a document-like surface, so its data source is the stable subsystem, not a one-shot
 // snapshot, letting it re-render across syncs and provider swaps while the panel stays open.
 // `applyDrop` is the drag-to-link seam: the webview posts a normalized {scenario, key} and the host
@@ -144,6 +151,10 @@ export interface BoardSurfaceDeps {
   // successful run re-renders through the snapshot rebuild; the settled promise is what repaints after
   // a failure, so the button never stays stuck on "Syncing".
   runSync(): Promise<void>;
+  // The board's own loads, on open and on a project pick. Whether such a load is worth running at all
+  // (a reachable tracker, a project no sync has catalogued) is the host's call, not the board's: the
+  // board only says which project it is looking at, and the host keeps the run quiet.
+  autoSync(projectKey: string): Promise<void>;
   // An Executions row's key link: routed through the host's browseIssue path.
   openExecution(key: string): void;
   // The Create tests button: authors one remote test per checked scenario card. The command layer owns
@@ -202,6 +213,10 @@ export class BoardSurface {
     const subscription = deps.onDidChange(() => this.refresh());
     host.onDidDispose(() => subscription.dispose());
     this.render();
+    const stored = deps.projectScope.get(this.projects);
+    if (stored !== undefined) {
+      this.autoSync(stored);
+    }
   }
 
   // Field initializers run before the constructor body, so every route may only CLOSE OVER `this.deps`
@@ -261,9 +276,27 @@ export class BoardSurface {
       .catch(() => undefined);
   }
 
+  // The board's quiet load. Nothing is posted and nothing repaints here: the host reports it through the
+  // progress strip, and the snapshot rebuild is what brings the new tests in.
+  private autoSync(project: string): void {
+    this.deps.autoSync(project).catch(() => undefined);
+  }
+
   private scopeTo(project: string): void {
     this.deps.projectScope.set(project === "" ? undefined : project);
     this.render();
+    // Picking a project is also a load instruction. The key rides the request, so the run covers what was
+    // just picked whether or not the store's write has settled; All projects asks for nothing.
+    if (project !== "") {
+      this.autoSync(project);
+    }
+  }
+
+  // A sync's live line for the strip above the panes, or "" to clear it. Posted straight through the
+  // shell's queue, so a board that has closed simply drops it.
+  public syncProgress(text: string): void {
+    const message: SyncProgressMessage = { type: "syncProgress", text };
+    this.host.post(message);
   }
 
   private toggleSelection(target: SelectMessage["target"], id: string, on: boolean): void {

@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import type * as vscode from "vscode";
-import { normalizeProjectKeys, projectScopeStore, resolveProjectUniverse } from "../../traceability/project-scope";
+import {
+  normalizeProjectKeys,
+  projectScopeStore,
+  resolveProjectUniverse,
+  resolveSyncProjectKeys,
+} from "../../traceability/project-scope";
 
 const KEY = "playwrightBddRunner.board.projectScope";
 
@@ -67,11 +72,40 @@ describe("resolveProjectUniverse", () => {
     expect(resolveProjectUniverse({ syncSettingKeys: ["shop"], defaultKey: "pay" }).projects).toEqual(["PAY", "SHOP"]);
   });
 
+  // The sync scope is this resolver minus the directory, so the board's selection is the rung that puts a
+  // project nobody has tagged or configured into the next sync.
+  it("takes the board's selection as a rung of its own, deduped and uppercased with the rest", () => {
+    expect(resolveProjectUniverse({ selectedKey: " pay " }).projects).toEqual(["PAY"]);
+    expect(resolveProjectUniverse({ tagDerivedKeys: ["PAY"], selectedKey: "pay" }).projects).toEqual(["PAY"]);
+    expect(resolveProjectUniverse({ selectedKey: "  " }).projects).toEqual([]);
+  });
+
   it("returns nothing when every source is empty", () => {
     expect(resolveProjectUniverse({ tagDerivedKeys: [], syncSettingKeys: [], defaultKey: "   " })).toEqual({
       projects: [],
       tier: "xray-only",
     });
+  });
+});
+
+describe("resolveSyncProjectKeys", () => {
+  // Same ladder, one rung short: a sync fetches a whole catalogue per project, so the directory can
+  // never reach it, however the caller assembled the sources.
+  it("drops the provider directory and keeps every other rung", () => {
+    expect(
+      resolveSyncProjectKeys({
+        directoryProjects: ["ops"],
+        tagDerivedKeys: ["CALC"],
+        syncSettingKeys: ["shop"],
+        catalogueKeys: ["MATH"],
+        defaultKey: "pay",
+        selectedKey: "calc",
+      })
+    ).toEqual(["CALC", "MATH", "PAY", "SHOP"]);
+  });
+
+  it("returns nothing when the workspace names no project at all", () => {
+    expect(resolveSyncProjectKeys({ directoryProjects: ["OPS", "PAY"] })).toEqual([]);
   });
 });
 

@@ -59,6 +59,9 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // async probe captures the epoch at entry and only commits if it is still current, so a late
   // resolution (panel already torn down, or a newer probe already landed) discards silently.
   private connectionEpoch = 0;
+  // Mirrors the value last written to the connected context key, so callers that cannot read a context
+  // key back (the board's quiet loads) gate on the same verdict the UI does.
+  private connectedState = false;
   // The last committed verify state, recomposed with fresh sync staleness on every metadata change
   // so "synced Nm ago" updates without re-running the (network) verify.
   private lastConnection: { state: ConnectionIndicator["state"]; label: string; message: string } | undefined;
@@ -100,6 +103,13 @@ export class TraceabilitySubsystem implements vscode.Disposable {
 
   public get traceabilityPanelActive(): boolean {
     return this.treeView !== undefined;
+  }
+
+  // The last committed connection verdict, the same one the `connected` context key gates the palette
+  // and the view-title sync on. False until the first probe lands, so a machine-initiated load never
+  // fires at a tracker nobody has reached yet.
+  public get connected(): boolean {
+    return this.connectedState;
   }
 
   // Flip the tree between the by-test and by-file layouts. The provider persists the choice through
@@ -351,6 +361,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   }
 
   private commitConnectedContext(connected: boolean): void {
+    this.connectedState = connected;
     Promise.resolve(
       vscode.commands.executeCommand("setContext", CONNECTED_CONTEXT_KEY, connected)
     ).catch((error) => {

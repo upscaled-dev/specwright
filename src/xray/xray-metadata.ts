@@ -8,6 +8,7 @@ import {
   RemoteMetadataSnapshot,
   RemoteSearchCapability,
   RemoteSearchResult,
+  SyncProgress,
   SyncScope,
   TestCaseMetadata,
 } from "../traceability/contracts";
@@ -303,7 +304,7 @@ export class XrayMetadataCapability
     this._onDidChange.fire();
   }
 
-  public async sync(scope: SyncScope, signal?: AbortSignal): Promise<void> {
+  public async sync(scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress): Promise<void> {
     if (signal?.aborted) {
       return;
     }
@@ -329,7 +330,9 @@ export class XrayMetadataCapability
 
     try {
       for (const projectKey of projectKeys) {
-        const outcome = await this.deps.client.fetchProjectCatalogue(projectKey, signal);
+        const outcome = await this.deps.client.fetchProjectCatalogue(projectKey, signal, (fetched, total) =>
+          onProgress?.({ projectKey, fetched, total })
+        );
         this.absorb(merged, pages, errors, outcome);
         if (!outcome.complete || outcome.errors.length > 0) {
           catalogueComplete = false;

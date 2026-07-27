@@ -470,6 +470,27 @@ describe("TraceabilitySubsystem connection state", () => {
     subsystem.dispose();
   });
 
+  // The board's quiet loads cannot read a context key back, so they gate on this getter instead; it must
+  // track the same verdict, and start closed until a probe has actually landed.
+  it("exposes the same verdict as a getter, false until the first probe lands", async () => {
+    const { config } = makeConfig();
+    const conn = makeConnection(false);
+    const { subsystem } = build(config, undefined, Logger.create(), conn);
+    expect(subsystem.connected).toBe(false);
+
+    subsystem.applyCurrent();
+    await flush();
+    expect(subsystem.connected).toBe(false);
+
+    conn.setConnected(true);
+    conn.fire();
+    await flush();
+
+    expect(subsystem.connected).toBe(true);
+    subsystem.dispose();
+    expect(subsystem.connected).toBe(false);
+  });
+
   it("re-evaluates when the credential store fires a change", async () => {
     const exec = vi.spyOn(vscode.commands, "executeCommand");
     const { config } = makeConfig();

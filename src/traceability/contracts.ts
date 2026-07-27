@@ -63,6 +63,18 @@ export interface SyncScope {
   readonly testKeys?: readonly string[] | undefined;
 }
 
+// One page of a running sync, reported as it lands: the project whose catalogue is being read, how many
+// of its tests are in hand, and the total the remote reported when it reported one.
+export interface SyncProgressEvent {
+  readonly projectKey: string;
+  readonly fetched: number;
+  readonly total?: number | undefined;
+}
+
+// A sync's progress sink. Reporting is best effort and never awaited, so a surface that has gone away
+// simply stops being called.
+export type SyncProgress = (event: SyncProgressEvent) => void;
+
 // The offline-first metadata snapshot. `completeness` describes catalogue integrity only (project
 // scope present, every project's pages complete, no catalogue errors; a supplemental key batch,
 // present or failed, never affects it) and gates orphan derivation: orphans are only authoritative
@@ -255,7 +267,7 @@ export interface ConnectionCapability {
 export interface MetadataCapability {
   readonly onDidChange: Event<void>;
   snapshot(): RemoteMetadataSnapshot;
-  sync(scope: SyncScope, signal?: AbortSignal): Promise<void>;
+  sync(scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress): Promise<void>;
 }
 
 export interface CoverageCapability {

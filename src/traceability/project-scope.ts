@@ -28,6 +28,8 @@ export interface ProjectUniverseSources {
   // Projects an earlier sync already pulled a catalogue for, so their cards keep a scope to select.
   readonly catalogueKeys?: readonly string[] | undefined;
   readonly defaultKey?: string | undefined;
+  // The board's current project selection, so picking a project there is enough to have it synced.
+  readonly selectedKey?: string | undefined;
 }
 
 export interface ProjectUniverse {
@@ -38,8 +40,7 @@ export interface ProjectUniverse {
 /**
  * The projects a surface may offer, unioned down the source ladder and normalized. One owner for the
  * list the publish dialog's project dropdown and the board's scope selector read, so they can never
- * disagree. The sync scope resolves the same way minus the directory, since syncing every accessible
- * project is not a scope.
+ * disagree. The sync scope resolves the same way minus the directory (see `resolveSyncProjectKeys`).
  */
 export function resolveProjectUniverse(sources: ProjectUniverseSources): ProjectUniverse {
   const projects = normalizeProjectKeys([
@@ -48,11 +49,22 @@ export function resolveProjectUniverse(sources: ProjectUniverseSources): Project
     ...(sources.syncSettingKeys ?? []),
     ...(sources.catalogueKeys ?? []),
     sources.defaultKey ?? "",
+    sources.selectedKey ?? "",
   ]);
   // The tier answers whether the provider could enumerate at all, not how many it returned: a connection
   // that legitimately reaches zero projects is still the jira tier, so its empty state can say the token
   // reaches nothing rather than telling the user to add keys to settings.
   return { projects, tier: sources.directoryProjects !== undefined ? "jira" : "xray-only" };
+}
+
+/**
+ * The projects one sync fetches a full catalogue for: the same ladder minus the provider directory,
+ * since a sync fetches one catalogue per project and covering every accessible project is not a scope.
+ * The directory is dropped here rather than left to the caller, so a source bag built for a dropdown
+ * cannot leak a site-wide fetch into a sync.
+ */
+export function resolveSyncProjectKeys(sources: ProjectUniverseSources): string[] {
+  return resolveProjectUniverse({ ...sources, directoryProjects: undefined }).projects;
 }
 
 // The board's project scope, persisted per workspace. All Projects is the absence of a selection, so
