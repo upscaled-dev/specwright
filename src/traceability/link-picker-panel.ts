@@ -196,7 +196,7 @@ const LINK_CSS = `
     border-radius: 3px;
   }
   #pane-link input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-  #pane-link .results { list-style: none; margin: 0.6rem 0 0; padding: 0; max-height: 45vh; overflow-y: auto; }
+  #pane-link .results { list-style: none; margin: 0.6rem 0 0; padding: 0; }
   #pane-link .row { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.35rem 0.5rem; cursor: pointer; border-radius: 3px; }
   #pane-link .row.active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   #pane-link .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); white-space: nowrap; }
@@ -207,8 +207,7 @@ const LINK_CSS = `
   #pane-link .row.active .create-label { color: inherit; }
   #pane-link .hint-row { cursor: default; color: var(--vscode-descriptionForeground); font-style: italic; }
   #pane-link .footer { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin: 0.75rem 0 0; }
-  #pane-link .busy { font-style: italic; }
-  #pane-link [hidden] { display: none !important; }`;
+  #pane-link .busy { font-style: italic; }`;
 
 const LINK_PANE = `<h1 id="link-title"></h1>
       <div id="link-linked-section" hidden>

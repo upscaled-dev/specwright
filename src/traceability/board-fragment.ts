@@ -1,51 +1,60 @@
 import { escapeHtml } from "../utils/webview";
 import { SurfaceFragment } from "./webview-host";
 
+// Each board pane fills main and owns its own scrolling. Mapping is a flex column whose two card
+// columns scroll independently; Matrix and Executions hand all their leftover height to the one
+// scroller that holds the sticky-headed table. `minmax(0, 1fr)` is what lets the card columns compress
+// below their content: plain `1fr` refuses to, and the whole document scrolls sideways instead.
 const BOARD_CSS = `
-  .board-pane .mapping-hint { margin: 0 0 1rem; padding: 0.5rem 0.7rem; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); color: var(--vscode-descriptionForeground); font-size: 0.85em; line-height: 1.4; }
-  .board-pane .columns { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: start; }
+  .board-pane { display: flex; flex-direction: column; }
+  .board-pane .mapping-hint { flex: none; margin: 0 0 0.6rem; padding: 0.5rem 0.7rem; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); color: var(--vscode-descriptionForeground); font-size: 0.85em; line-height: 1.4; }
+  .board-pane .columns { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 0.75rem; }
+  .board-pane .column { min-width: 0; min-height: 0; overflow-y: auto; }
   .board-pane .column h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-descriptionForeground); font-weight: 600; margin: 0 0 0.6rem; }
   .board-pane .count { color: var(--vscode-descriptionForeground); font-weight: 400; }
-  .board-pane .cards { display: flex; flex-direction: column; gap: 0.5rem; }
+  .board-pane .cards { display: flex; flex-direction: column; gap: 0.375rem; }
   .board-pane .card {
     border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
     border-radius: 5px;
-    padding: 0.55rem 0.65rem;
+    padding: 0.45rem 0.55rem;
     background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   }
   .board-pane .card .title { font-weight: 600; word-break: break-word; }
   .board-pane .card .pick { display: flex; align-items: flex-start; gap: 0.45rem; }
   .board-pane .card .pick input { margin: 0.15rem 0 0; }
-  .board-pane .create-tests { display: block; margin: 0 0 0.6rem; padding: 0.25rem 0.7rem; font-family: inherit; font-size: 0.78rem; border: none; border-radius: 3px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; }
-  .board-pane .create-tests:hover:enabled { background: var(--vscode-button-hoverBackground); }
-  .board-pane .create-tests:disabled { opacity: 0.55; cursor: default; }
-  .board-pane .verbs { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.6rem; }
-  .board-pane .verbs .create-tests { margin: 0; }
+  .board-pane .verb { padding: 0.25rem 0.7rem; font-family: inherit; font-size: 0.78rem; border: none; border-radius: 3px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; }
+  .board-pane .verb:hover:enabled { background: var(--vscode-button-hoverBackground); }
+  .board-pane .verb:disabled { opacity: 0.55; cursor: default; }
+  .board-pane .verbs { flex: none; display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.6rem; }
   .board-pane .card .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
-  .board-pane .card .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 0.2rem; word-break: break-all; }
+  .board-pane .card .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 0.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .board-pane .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
   .board-pane .pill { font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
-  .board-pane .group + .group { margin-top: 1.2rem; }
-  .board-pane .gutter { display: flex; align-items: center; justify-content: center; align-self: stretch; min-width: 5.5rem; }
-  .board-pane .gutter span { color: var(--vscode-descriptionForeground); font-style: italic; font-size: 0.85em; text-align: center; }
+  .board-pane .group + .group { margin-top: 0.9rem; }
   .board-pane .empty { color: var(--vscode-descriptionForeground); font-style: italic; padding: 0.4rem 0; }
-  .board-pane .empty .sync-now { display: block; margin-top: 0.4rem; font-family: inherit; font-size: 0.72rem; padding: 0.05rem 0.45rem; border: none; border-radius: 999px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
-  .board-pane .empty .sync-now:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
-  .board-pane .empty .sync-now:disabled { cursor: default; background: var(--vscode-button-secondaryBackground, transparent); }
+  .board-pane .pill-button { font-family: inherit; font-size: 0.72rem; padding: 0.05rem 0.45rem; border: none; border-radius: 999px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
+  .board-pane .pill-button:hover:enabled { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
+  .board-pane .pill-button:disabled { cursor: default; }
+  .board-pane .empty .sync-now { display: block; margin-top: 0.4rem; }
   .board-pane .card[draggable="true"] { cursor: grab; }
   .board-pane .card.drop-target { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -2px; }
-  .board-pane .link-row { display: flex; align-items: flex-start; gap: 0.5rem; padding-top: 0.4rem; margin-top: 0.45rem; border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
-  .board-pane .link-row .name { flex: 1; min-width: 0; word-break: break-word; }
-  .board-pane .link-row .row-action { font-family: inherit; font-size: 0.72rem; padding: 0.05rem 0.45rem; border: none; border-radius: 999px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
-  .board-pane .link-row .row-action:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
-  .board-pane .matrix-scroll { overflow: auto; max-height: calc(100vh - 9rem); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; }
+  .board-pane .link-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.35rem 0.5rem; padding-top: 0.4rem; margin-top: 0.45rem; border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
+  .board-pane .link-row .name { flex: 1 1 12rem; min-width: 0; word-break: break-word; }
+  .board-pane .link-row .row-actions { display: flex; flex-wrap: nowrap; gap: 0.3rem; margin-left: auto; }
+  .board-pane .matrix-scroll { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 5px; }
   .board-pane table.matrix { border-collapse: collapse; width: 100%; font-size: 0.9em; }
   .board-pane table.matrix th, .board-pane table.matrix td { text-align: left; padding: 0.4rem 0.6rem; white-space: nowrap; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
   .board-pane table.matrix thead th { position: sticky; top: 0; z-index: 1; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); font-weight: 600; }
   .board-pane table.matrix td.hole { background: var(--vscode-inputValidation-warningBackground, transparent); }
   .board-pane table.matrix .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
+  .board-pane table.matrix .wrap { white-space: normal; overflow-wrap: anywhere; min-width: 10rem; }
   .board-pane table.matrix a.link { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
-  .board-pane table.matrix a.link:hover { text-decoration: underline; }`;
+  .board-pane table.matrix a.link:hover { text-decoration: underline; }
+  #executions-empty { flex: none; }
+  @media (max-width: 540px) {
+    .board-pane .columns { flex: none; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
+    .board-pane .column { overflow: visible; }
+  }`;
 
 function boardPanesHtml(providerLabel: string): string {
   const availableHeading = escapeHtml(`Available ${providerLabel} tests`);
@@ -56,14 +65,15 @@ function boardPanesHtml(providerLabel: string): string {
       <div class="columns">
         <div class="column">
           <h2>Untraced scenarios <span id="scenario-count" class="count"></span></h2>
-          <button id="create-tests" class="create-tests" type="button" disabled>Create tests</button>
+          <div class="verbs">
+            <button id="create-tests" class="verb" type="button" disabled>Create tests</button>
+          </div>
           <div id="scenario-cards" class="cards"></div>
         </div>
-        <div class="gutter"><span>drag to link</span></div>
         <div class="column">
           <div class="verbs">
-            <button id="create-test-set" class="create-tests" type="button" disabled>Create Test Set</button>
-            <button id="create-test-plan" class="create-tests" type="button" disabled>Create Test Plan</button>
+            <button id="create-test-set" class="verb" type="button" disabled>Create Test Set</button>
+            <button id="create-test-plan" class="verb" type="button" disabled>Create Test Plan</button>
           </div>
           <div class="group">
             <h2>${availableHeading} <span id="available-count" class="count"></span></h2>
@@ -88,7 +98,7 @@ function boardPanesHtml(providerLabel: string): string {
     </section>
     <section id="pane-executions" class="pane board-pane" data-tab="executions" hidden>
       <div class="verbs">
-        <button id="create-execution" class="create-tests" type="button" disabled>Create Execution</button>
+        <button id="create-execution" class="verb" type="button" disabled>Create Execution</button>
       </div>
       <div id="executions-empty" class="empty" hidden>Publishes from this workspace appear here.</div>
       <div id="executions-scroll" class="matrix-scroll">
@@ -175,6 +185,16 @@ const BOARD_SCRIPT = `
     return wrap;
   }
 
+  // A card's secondary line: one line, ellipsized when it does not fit, with the whole text on hover so
+  // a truncated path is still readable.
+  function metaEl(text) {
+    const el = document.createElement('div');
+    el.className = 'meta';
+    el.textContent = text;
+    el.title = text;
+    return el;
+  }
+
   // Carried by the render, not read off the search box: the host filtered these lists against its own
   // query, and a snapshot-driven render can arrive before a keystroke or a clear reaches it.
   let filtering = false;
@@ -244,11 +264,8 @@ const BOARD_SCRIPT = `
       title.textContent = card.name;
       head.appendChild(title);
       el.appendChild(head);
-      const meta = document.createElement('div');
-      meta.className = 'meta';
-      meta.textContent = card.location;
-      el.appendChild(meta);
-      el.appendChild(pillsEl(card.pills));
+      el.appendChild(metaEl(card.location));
+      if (card.pills.length > 0) { el.appendChild(pillsEl(card.pills)); }
       wireCardDrag(el, 'scenario', card.dropId, true);
       scenarioCards.appendChild(el);
     }
@@ -259,7 +276,7 @@ const BOARD_SCRIPT = `
   function rowAction(label, title, type, link, key) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'row-action';
+    btn.className = 'pill-button';
     btn.textContent = label;
     btn.title = title;
     btn.setAttribute('aria-label', label + ' scenario ' + link.name);
@@ -270,20 +287,22 @@ const BOARD_SCRIPT = `
   }
 
   // A linked scenario on a mapped test card: its name, its location, and the two buttons that act on
-  // just this link. The unlink id is the scenario's drop id, the host's only handle back to the tag.
+  // just this link. The unlink id is the scenario's drop id, the host's only handle back to the tag. The
+  // buttons share one nowrap group, so a long name pushes them onto their own line rather than being
+  // squeezed to a couple of characters.
   function linkRow(link, key) {
     const row = document.createElement('div');
     row.className = 'link-row';
     const name = document.createElement('div');
     name.className = 'name';
     name.textContent = link.name;
-    const loc = document.createElement('div');
-    loc.className = 'meta';
-    loc.textContent = link.location;
-    name.appendChild(loc);
+    name.appendChild(metaEl(link.location));
     row.appendChild(name);
-    row.appendChild(rowAction('Push', 'Sends the local text of this scenario to the test.', 'pushText', link, key));
-    row.appendChild(rowAction('Unlink', 'Removes only this test link.', 'unlink', link, key));
+    const actions = document.createElement('div');
+    actions.className = 'row-actions';
+    actions.appendChild(rowAction('Push', 'Sends the local text of this scenario to the test.', 'pushText', link, key));
+    actions.appendChild(rowAction('Unlink', 'Removes only this test link.', 'unlink', link, key));
+    row.appendChild(actions);
     return row;
   }
 
@@ -293,7 +312,7 @@ const BOARD_SCRIPT = `
   function syncButton() {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'sync-now';
+    btn.className = 'pill-button sync-now';
     btn.textContent = 'Sync now';
     btn.addEventListener('click', function () {
       btn.disabled = true;
@@ -323,12 +342,7 @@ const BOARD_SCRIPT = `
       title.textContent = card.key;
       head.appendChild(title);
       el.appendChild(head);
-      if (card.summary) {
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        meta.textContent = card.summary;
-        el.appendChild(meta);
-      }
+      if (card.summary) { el.appendChild(metaEl(card.summary)); }
       if (card.pills.length > 0) { el.appendChild(pillsEl(card.pills)); }
       for (const link of card.links) { el.appendChild(linkRow(link, card.key)); }
       wireCardDrag(el, 'test', card.key, draggable);
@@ -343,13 +357,13 @@ const BOARD_SCRIPT = `
     renderTestGroup(mappedCards, mappedCount, mapped, false, emptyEl('No mapped tests yet.'));
   }
 
-  function matrixCell(text, isKey) {
+  // Cells are nowrap by default so keys, dates and counts stay on one line; only the prose columns ask
+  // for 'wrap' and give the table somewhere to lose width when the board is narrow.
+  function matrixCell(text, cls) {
     const td = document.createElement('td');
-    if (text === '') { td.className = 'hole'; }
-    else {
-      td.textContent = text;
-      if (isKey) { td.className = 'key'; }
-    }
+    if (text === '') { td.className = 'hole'; return td; }
+    td.textContent = text;
+    if (cls) { td.className = cls; }
     return td;
   }
 
@@ -367,18 +381,19 @@ const BOARD_SCRIPT = `
     }
     for (const row of rows) {
       const tr = document.createElement('tr');
-      tr.appendChild(matrixCell(row.requirement, false));
-      tr.appendChild(matrixCell(row.test, true));
-      tr.appendChild(matrixCell(row.scenario, false));
-      tr.appendChild(matrixCell(row.tag, true));
-      tr.appendChild(matrixCell(row.result, false));
+      tr.appendChild(matrixCell(row.requirement, 'wrap'));
+      tr.appendChild(matrixCell(row.test, 'key'));
+      tr.appendChild(matrixCell(row.scenario, 'wrap'));
+      tr.appendChild(matrixCell(row.tag, 'key'));
+      tr.appendChild(matrixCell(row.result, ''));
       matrixRows.appendChild(tr);
     }
   }
 
-  function executionCell(text) {
+  function executionCell(text, cls) {
     const td = document.createElement('td');
     td.textContent = text;
+    if (cls) { td.className = cls; }
     return td;
   }
 
@@ -401,7 +416,7 @@ const BOARD_SCRIPT = `
       });
       keyTd.appendChild(link);
       tr.appendChild(keyTd);
-      tr.appendChild(executionCell(row.summary));
+      tr.appendChild(executionCell(row.summary, 'wrap'));
       tr.appendChild(executionCell(row.action));
       tr.appendChild(executionCell(row.resultsImported));
       tr.appendChild(executionCell(row.passRate));

@@ -10,9 +10,10 @@ import type {
 
 // An untraced scenario rendered as a card in the board's left column. `location` is the
 // workspace-relative "path:line" the card shows; `dropId` is its unambiguous drag-to-link identity
-// (see `scenarioDropId`), never shown. `pills` are the short markers ("no tag" for a plain scenario,
-// "outline" + an example count for an untagged outline). `reqKeys` are carried for the header filter
-// but not shown as pills.
+// (see `scenarioDropId`), never shown. `pills` are the short markers an outline needs ("outline" plus
+// an example count); a plain scenario carries none, since every card in this column is untraced and a
+// pill saying so on all of them marks nothing. `reqKeys` are carried for the header filter but not
+// shown as pills.
 export interface BoardScenarioCard {
   readonly name: string;
   readonly location: string;
@@ -119,14 +120,14 @@ function countLabel(count: number, word: string): string {
 }
 
 function scenarioPills(item: UntracedScenario): string[] {
-  if (item.scenario.kind === "outline") {
-    const pills = ["outline"];
-    if (item.examples !== undefined) {
-      pills.push(countLabel(item.examples, "example"));
-    }
-    return pills;
+  if (item.scenario.kind !== "outline") {
+    return [];
   }
-  return ["no tag"];
+  const pills = ["outline"];
+  if (item.examples !== undefined) {
+    pills.push(countLabel(item.examples, "example"));
+  }
+  return pills;
 }
 
 // The drag-to-link identity for a scenario card: its absolute path, line, and name together, so a

@@ -63,8 +63,8 @@ afterEach(() => win.__resetWebviewPanels());
 
 const MODEL: BoardViewModel = {
   scenarios: [
-    { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: ["no tag"], reqKeys: [] },
-    { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: ["no tag"], reqKeys: ["REQ-7"] },
+    { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: [], reqKeys: [] },
+    { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: [], reqKeys: ["REQ-7"] },
   ],
   available: [{ key: "PAY-9", project: "PAY", pills: [], links: [] }],
   mapped: [
@@ -144,7 +144,7 @@ async function openReady(over: Partial<BoardPanelDeps> = {}): Promise<{ instance
 }
 
 describe("BoardPanel", () => {
-  it("renders the shell: title, tabs, the drag-to-link gutter, the provider label, the matrix header, and the executions table", () => {
+  it("renders the shell: title, tabs, the drag-to-link hint, the provider label, the matrix header, and the executions table", () => {
     BoardPanel.open(deps());
     const panel = win.__webviewPanels[0]!;
 
@@ -154,7 +154,6 @@ describe("BoardPanel", () => {
     expect(panel.webview.html).toContain("Matrix");
     expect(panel.webview.html).toContain("Executions");
     expect(panel.webview.html).toContain("Filter by key, tag, file");
-    expect(panel.webview.html).toContain("drag to link");
     expect(panel.webview.html).toContain(
       "Drag a scenario from the left onto a test on the right to link them. An available test can also be dragged onto a scenario."
     );
@@ -188,15 +187,68 @@ describe("BoardPanel", () => {
     expect(html).toContain('id="sync-strip"');
     expect(html).toContain('id="sync-strip-text"');
     expect(html.indexOf('id="sync-strip"')).toBeLessThan(html.indexOf("<main>"));
-    expect(html).toContain(".sync-strip[hidden] { display: none; }");
     expect(html).toContain("renderSyncProgress('')");
   });
 
-  it("carries no Mapped tree markup and no drag-to-unlink drop zone", () => {
+  // The app frame: the document is a flex column whose only scrollers are the panes, and one global
+  // [hidden] rule (with the !important a pane's own display: flex would otherwise beat) hides every
+  // surface's collapsed parts. Source-level pins, since no unit rig lays the document out.
+  it("frames the document so only the panes scroll, with one hidden rule for every surface", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("html, body { height: 100%; }");
+    expect(html).toContain("[hidden] { display: none !important; }");
+    expect(html).toContain("main { flex: 1; min-height: 0;");
+    expect(html).toContain(".pane { height: 100%; box-sizing: border-box; overflow-y: auto; }");
+    expect(html).toContain(".board-pane { display: flex; flex-direction: column; }");
+    // One left edge for the toolbar, the strip, and the panes.
+    expect(html.split("1.1rem").length - 1).toBe(3);
+    // The per-surface duplicates are gone, including the two the publish and link fragments carried.
+    expect(html.split("[hidden] { display: none").length - 1).toBe(1);
+  });
+
+  // The two load-bearing pieces of the half-window layout: tracks that may compress below their content,
+  // and the stacking breakpoint that turns the columns into one scrolling list.
+  it("gives the mapping columns compressible tracks and a stacking breakpoint", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);");
+    expect(html).toContain("@media (max-width: 540px)");
+    expect(html).toContain("grid-template-columns: minmax(0, 1fr); grid-template-rows: auto;");
+    expect(html).toContain(".board-pane .column { min-width: 0; min-height: 0; overflow-y: auto; }");
+    // The table scroller owns the leftover height instead of guessing at the viewport.
+    expect(html).toContain(".board-pane .matrix-scroll { flex: 1; min-height: 0; overflow: auto;");
+    expect(html).not.toContain("100vh");
+  });
+
+  it("carries no Mapped tree markup, no drag-to-unlink drop zone, and no decorative gutter", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
     expect(html).not.toContain("mapped-groups");
     expect(html).not.toContain("unlink-ready");
+    // The gutter spent 88px on the word "drag to link"; the hint bar already says it.
+    expect(html).not.toContain("gutter");
+    expect(html).not.toContain("drag to link");
+  });
+
+  it("skins every board button with the one verb class, each inside a verbs row", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html.split('class="verb"').length - 1).toBe(4);
+    expect(html).not.toContain('class="create-tests"');
+    expect(html.split('<div class="verbs">').length - 1).toBe(3);
+  });
+
+  // Both card renderers skip the pills row when there is nothing to put in it, which is most scenario
+  // cards now that the constant "no tag" pill is gone.
+  it("paints a pills row only when a card has pills", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html.split("if (card.pills.length > 0)").length - 1).toBe(2);
   });
 
   it("acquires the vscode api exactly once (the router owns the single acquireVsCodeApi)", () => {

@@ -70,10 +70,12 @@ describe("buildBoardViewModel: untraced scenario cards", () => {
     expect(build(undefined, ROOTS)).toMatchObject({ scenarios: [], available: [], mapped: [], matrix: [] });
   });
 
-  it("renders a plain untraced scenario with a workspace-relative location and a 'no tag' pill", () => {
+  // Every card in this column is untraced by definition, so a "no tag" pill on all of them marked
+  // nothing and cost each card a row of height. Only an outline still says something.
+  it("renders a plain untraced scenario with a workspace-relative location and no pills", () => {
     const model = build(snapshot({ untraced: [untraced()] }), ROOTS);
     expect(model.scenarios).toEqual([
-      { name: "Log in", location: "features/login.feature:5", dropId: scenarioDropId(ref()), pills: ["no tag"], reqKeys: [] },
+      { name: "Log in", location: "features/login.feature:5", dropId: scenarioDropId(ref()), pills: [], reqKeys: [] },
     ]);
   });
 
@@ -417,8 +419,8 @@ describe("scopeBoardViewModel", () => {
 describe("filterBoardViewModel", () => {
   const model: BoardViewModel = {
     scenarios: [
-      { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: ["no tag"], reqKeys: ["REQ-7"] },
-      { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: ["no tag"], reqKeys: [] },
+      { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: [], reqKeys: ["REQ-7"] },
+      { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: [], reqKeys: [] },
     ],
     available: [{ key: "PAY-9", pills: [], links: [] }],
     mapped: [

@@ -219,11 +219,10 @@ const PUBLISH_CSS = `
   #pane-publish .results li:hover { background: var(--vscode-list-hoverBackground); }
   #pane-publish .attach-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
   #pane-publish .attach-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; }
-  #pane-publish .attach-row .name { flex: 1; }
+  #pane-publish .attach-row .name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   #pane-publish .attach-row .size { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
   #pane-publish .attach-row .over { color: var(--vscode-errorForeground); font-size: 0.85em; }
   #pane-publish .disabled-note { color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-top: 0.5rem; font-style: italic; }
-  #pane-publish [hidden] { display: none !important; }
   #pane-publish .actions { display: flex; gap: 0.6rem; margin-top: 1.5rem; }
   #pane-publish button { padding: 0.45rem 0.9rem; border: none; border-radius: 2px; cursor: pointer; font-family: inherit; }
   #pane-publish button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }

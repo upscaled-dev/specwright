@@ -188,17 +188,23 @@ function tabFor(surface: SurfaceName): ShellTab {
   return "mapping";
 }
 
+// The document is an app frame, not a page: the body is a flex column of header, sync strip, and main,
+// and only the panes inside main scroll. `padding: 0` cancels the padding the webview host injects,
+// which is worth about 40px of a half-window board. One `[hidden]` rule serves every surface, and its
+// `!important` is what keeps a hidden pane hidden against the `display: flex` the panes now carry.
 const SHELL_CSS = `
-  body { margin: 0; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); }
-  header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding: 0.9rem 1.1rem 0.7rem; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
-  header h1 { font-size: 1.2rem; font-weight: 600; margin: 0; }
+  html, body { height: 100%; }
+  body { margin: 0; padding: 0; display: flex; flex-direction: column; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); }
+  [hidden] { display: none !important; }
+  header { flex: none; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; padding: 0.5rem 1.1rem; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
+  header h1 { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
   .tabs { display: inline-flex; border: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); border-radius: 4px; overflow: hidden; }
   .tab { padding: 0.35rem 0.8rem; background: transparent; color: var(--vscode-foreground); border: none; cursor: pointer; font-family: inherit; font-size: inherit; }
   .tab + .tab { border-left: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); }
   .tab.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-  .tab[hidden] { display: none; }
-  .scope[hidden] { display: none; }
   .scope select {
+    max-width: 11rem;
+    text-overflow: ellipsis;
     padding: 0.4rem 0.5rem;
     color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
     background: var(--vscode-dropdown-background, var(--vscode-input-background));
@@ -208,8 +214,7 @@ const SHELL_CSS = `
     font-size: inherit;
   }
   .scope select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-  .search { flex: 1; min-width: 12rem; }
-  .search[hidden] { display: none; }
+  .search { flex: 1; min-width: 8rem; }
   .search input {
     width: 100%;
     box-sizing: border-box;
@@ -220,10 +225,9 @@ const SHELL_CSS = `
     border-radius: 3px;
   }
   .search input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-  main { padding: 1rem 1.1rem; }
-  .pane[hidden] { display: none; }
-  .sync-strip { display: flex; align-items: center; gap: 0.7rem; padding: 0.3rem 1.1rem 0.4rem; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); color: var(--vscode-descriptionForeground); font-size: 0.82em; }
-  .sync-strip[hidden] { display: none; }
+  main { flex: 1; min-height: 0; padding: 0.75rem 1.1rem; }
+  .pane { height: 100%; box-sizing: border-box; overflow-y: auto; }
+  .sync-strip { flex: none; display: flex; align-items: center; gap: 0.7rem; padding: 0.3rem 1.1rem 0.4rem; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); color: var(--vscode-descriptionForeground); font-size: 0.82em; }
   .sync-strip .bar { position: relative; flex: 1; height: 2px; overflow: hidden; background: var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
   .sync-strip .bar::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 25%; background: var(--vscode-progressBar-background, var(--vscode-textLink-foreground)); animation: sync-strip-slide 1.6s linear infinite; }
   @keyframes sync-strip-slide { from { transform: translateX(-100%); } to { transform: translateX(400%); } }`;
