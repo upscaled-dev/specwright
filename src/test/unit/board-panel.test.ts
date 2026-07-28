@@ -31,7 +31,7 @@ interface RenderMessage {
   scenarios: Array<{ name: string; dropId: string; selected: boolean }>;
   available: Array<{ key: string; selected: boolean; links: Array<{ name: string; location: string; unlinkId: string }> }>;
   mapped: Array<{ key: string; selected: boolean; links: Array<{ name: string; location: string; unlinkId: string }> }>;
-  matrix: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }>;
+  matrix: Array<{ file: string; count: number; rows: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }> }>;
   executions: Array<{ key: string; summary: string }>;
   availableEmptyText: string;
   offerSync: boolean;
@@ -79,8 +79,16 @@ const MODEL: BoardViewModel = {
     },
   ],
   matrix: [
-    { requirement: "REQ-7", test: "CALC-1", scenario: "Checkout", tag: "@TEST_CALC-1", result: "passed", projects: ["CALC"] },
-    { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage", projects: ["PAY"] },
+    {
+      requirement: "REQ-7",
+      test: "CALC-1",
+      scenario: "Checkout",
+      tag: "@TEST_CALC-1",
+      result: "passed",
+      file: "features/cart.feature",
+      projects: ["CALC"],
+    },
+    { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage", file: "", projects: ["PAY"] },
   ],
   availableEmptyText: "No unmapped tests in the last sync.",
   offerSync: false,
@@ -135,6 +143,9 @@ const lastRender = (panel: StubPanel): RenderMessage | undefined =>
   [...panel.webview.__posted].reverse().find(isRender);
 const lastActivate = (panel: StubPanel): string | undefined =>
   [...panel.webview.__posted].reverse().find((m): m is ActivateMessage => m.type === "activate")?.tab;
+// The matrix arrives folded by feature file, so a test about which rows survived a filter or a scope
+// reads them back out of their groups.
+const matrixTests = (render: RenderMessage): string[] => render.matrix.flatMap((g) => g.rows).map((r) => r.test);
 
 // Open the board and drive the webview `ready` handshake so the shell flushes its queued render and
 // activation; subsequent posts then land immediately.
@@ -273,6 +284,57 @@ describe("BoardPanel", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
     expect(html.split("acquireVsCodeApi()").length - 1).toBe(1);
+  });
+
+  // The one place a fragment's display state survives a window reload rebuilding the document. A write
+  // merges, so two fragments saving different keys cannot erase each other.
+  it("lends the fragments the webview's own state through the router, merging every write", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("state: function () { return vscodeApi.getState() || {}; }");
+    expect(html).toContain("vscodeApi.setState(Object.assign({}, vscodeApi.getState(), patch))");
+  });
+
+  // Source-level only: the webview JS never runs here. These pin the shape of the fold, that a collapsed
+  // group builds no row elements at all, and that the expanded set rides the webview's state.
+  it("renders the matrix as feature-file groups whose rows exist only while the group is open", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("function renderMatrixGroup(group)");
+    expect(html).toContain("let open = filtering || matrixOpen.has(group.file);");
+    expect(html).toContain("rows = group.rows.map(matrixRowEl);");
+    expect(html).toContain("for (const el of rows) { el.remove(); }");
+    expect(html).toContain("saveState({ matrixOpen: Array.from(matrixOpen) })");
+    // A toggle under a query is display only, so a search can neither save a fold nor drop one.
+    expect(html).toContain("if (!filtering) {");
+    // The rows with no feature file are the tests no scenario covers, the word the tree and the board
+    // already share for them.
+    expect(html).toContain("group.file || 'Available tests'");
+  });
+
+  // The persisted state outlives the version that wrote it, so a key that is not what this script expects
+  // is read as data rather than trusted: a throw here would land before the fragment registers its
+  // message handler, and the bad value persists, so the pane would come back blank on every reload.
+  it("falls back rather than throwing when a persisted display-state key is not what it expects", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("Array.isArray(boardState.matrixOpen) ? boardState.matrixOpen : []");
+    expect(html).toContain("Number(boardState.executionsShown) || EXECUTIONS_PAGE");
+  });
+
+  // The ledger arrives whole and the cap is a render cap: the newest page is painted, and Show older
+  // appends the next one in place rather than repainting the table.
+  it("windows the executions rows behind a Show older control that says how many remain", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("const EXECUTIONS_PAGE = 50;");
+    expect(html).toContain("'Show older (' + remaining + ' more)'");
+    expect(html).toContain("executionsShown = from + EXECUTIONS_PAGE;");
+    expect(html).toContain("saveState({ executionsShown: executionsShown })");
   });
 
   it("carries the permanent Publish tab and its pane in the shell", () => {
@@ -475,7 +537,18 @@ describe("BoardPanel", () => {
     expect(render.scenarios.map((s) => s.name)).toEqual(["Log in", "Checkout"]);
     expect(render.available.map((t) => t.key)).toEqual(["PAY-9"]);
     expect(render.mapped.map((t) => t.key)).toEqual(["CALC-1"]);
-    expect(render.matrix.map((r) => r.test)).toEqual(["CALC-1", "PAY-9"]);
+    expect(matrixTests(render)).toEqual(["CALC-1", "PAY-9"]);
+  });
+
+  // Folded host-side so the webview can render a collapsed group as a header and nothing else, which is
+  // what keeps a workspace of thousands of rows off the page until a file is opened.
+  it("folds the matrix into one group per feature file, the rows with no file last", async () => {
+    const { panel } = await openReady();
+
+    expect(lastRender(panel)!.matrix).toEqual([
+      { file: "features/cart.feature", count: 1, rows: [expect.objectContaining({ test: "CALC-1" })] },
+      { file: "", count: 1, rows: [expect.objectContaining({ test: "PAY-9" })] },
+    ]);
   });
 
   it("posts the executions rows from the ledger on render", async () => {
@@ -524,7 +597,10 @@ describe("BoardPanel", () => {
     await panel.__receive({ surface: "board", type: "search", value: "PAY" });
 
     const render = lastRender(panel)!;
-    expect(render.matrix.map((r) => r.test)).toEqual(["PAY-9"]);
+    expect(matrixTests(render)).toEqual(["PAY-9"]);
+    // The fold runs after the query, so the group whose only row the query dropped never reaches the
+    // webview at all.
+    expect(render.matrix.map((g) => g.file)).toEqual([""]);
     expect(render.available.map((t) => t.key)).toEqual(["PAY-9"]);
     expect(render.mapped).toEqual([]);
   });
@@ -800,7 +876,7 @@ describe("BoardPanel", () => {
     expect(render.scoped).toBe(true);
     expect(render.available.map((t) => t.key)).toEqual(["PAY-9"]);
     expect(render.mapped).toEqual([]);
-    expect(render.matrix.map((r) => r.test)).toEqual(["PAY-9"]);
+    expect(matrixTests(render)).toEqual(["PAY-9"]);
     expect(render.scenarios.map((s) => s.name)).toEqual(["Log in", "Checkout"]);
     expect(render.executions.map((e) => e.key)).toEqual(["XNP-1", "PAY-9"]);
   });

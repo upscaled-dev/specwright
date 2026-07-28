@@ -5,6 +5,7 @@ import {
   buildExecutionRows,
   filterBoardViewModel,
   filterExecutionRows,
+  groupMatrixRows,
   MatrixRow,
   resolveBoardDrop,
   resolveBoardUnlink,
@@ -435,8 +436,8 @@ describe("filterBoardViewModel", () => {
       },
     ],
     matrix: [
-      { requirement: "REQ-7", test: "CALC-1", scenario: "Log in", tag: "@TEST_CALC-1", result: "passed", projects: ["CALC"] },
-      { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage", projects: ["PAY"] },
+      { requirement: "REQ-7", test: "CALC-1", scenario: "Log in", tag: "@TEST_CALC-1", result: "passed", file: "features/login.feature", projects: ["CALC"] },
+      { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage", file: "", projects: ["PAY"] },
     ],
     availableEmptyText: "No unmapped tests in the last sync.",
     offerSync: false,
@@ -504,7 +505,15 @@ describe("buildBoardViewModel: matrix rows", () => {
   it("joins a mapped link into requirement, test, scenario, the in-file tag, and its result", () => {
     const model = build(snapshot({ links: [link({ testKey: "CALC-1", reqKeys: ["REQ-7"], lastResult: "passed" })] }));
     expect(model.matrix).toEqual([
-      { requirement: "REQ-7", test: "CALC-1", scenario: "Log in", tag: "@TEST_CALC-1", result: "passed", projects: [] },
+      {
+        requirement: "REQ-7",
+        test: "CALC-1",
+        scenario: "Log in",
+        tag: "@TEST_CALC-1",
+        result: "passed",
+        file: "features/login.feature",
+        projects: [],
+      },
     ]);
   });
 
@@ -536,7 +545,7 @@ describe("buildBoardViewModel: matrix rows", () => {
   it("leaves the test and tag cells empty for an untraced scenario and marks it 'no run'", () => {
     const model = build(snapshot({ untraced: [untraced({ reqKeys: ["REQ-9"] })] }));
     expect(model.matrix).toEqual([
-      { requirement: "REQ-9", test: "", scenario: "Log in", tag: "", result: "no run", projects: [] },
+      { requirement: "REQ-9", test: "", scenario: "Log in", tag: "", result: "no run", file: "features/login.feature", projects: [] },
     ]);
   });
 
@@ -548,7 +557,7 @@ describe("buildBoardViewModel: matrix rows", () => {
   it("leaves requirement, scenario, and tag empty for an orphan and marks it 'no coverage'", () => {
     const model = build(snapshot({ orphans: [orphan({ testKey: "CALC-9" })] }));
     expect(model.matrix).toEqual([
-      { requirement: "", test: "CALC-9", scenario: "", tag: "", result: "no coverage", projects: [] },
+      { requirement: "", test: "CALC-9", scenario: "", tag: "", result: "no coverage", file: "", projects: [] },
     ]);
   });
 
@@ -564,6 +573,77 @@ describe("buildBoardViewModel: matrix rows", () => {
       ["CALC-1", "Log in"],
       ["CALC-9", ""],
       ["", "Zeta"],
+    ]);
+  });
+
+  it("stamps each row with its workspace-relative feature file, leaving an orphan's empty", () => {
+    const model = build(
+      snapshot({
+        links: [link({ scenario: ref({ filePath: "/ws/features/calc.feature" }) })],
+        orphans: [orphan({ testKey: "CALC-9" })],
+      })
+    );
+    expect(model.matrix.map((r) => r.file)).toEqual(["features/calc.feature", ""]);
+  });
+});
+
+function matrixRow(over: Partial<MatrixRow> = {}): MatrixRow {
+  return {
+    requirement: "",
+    test: "",
+    scenario: "",
+    tag: "",
+    result: "no run",
+    file: "features/login.feature",
+    projects: [],
+    ...over,
+  };
+}
+
+describe("groupMatrixRows", () => {
+  it("returns no groups for no rows", () => {
+    expect(groupMatrixRows([])).toEqual([]);
+  });
+
+  it("returns one group when every row is in the same file", () => {
+    const rows = [matrixRow({ test: "CALC-1" }), matrixRow({ test: "CALC-2" })];
+    expect(groupMatrixRows(rows)).toEqual([{ file: "features/login.feature", count: 2, rows }]);
+  });
+
+  it("folds rows into one group per feature file, counting what each holds", () => {
+    const groups = groupMatrixRows([
+      matrixRow({ file: "features/calc.feature", test: "CALC-1" }),
+      matrixRow({ file: "features/login.feature", test: "AUTH-1" }),
+      matrixRow({ file: "features/calc.feature", test: "CALC-2" }),
+    ]);
+    expect(groups.map((g) => [g.file, g.count])).toEqual([
+      ["features/calc.feature", 2],
+      ["features/login.feature", 1],
+    ]);
+    expect(groups[0]!.rows.map((r) => r.test)).toEqual(["CALC-1", "CALC-2"]);
+  });
+
+  it("orders groups by file and keeps the given row order inside a group", () => {
+    const groups = groupMatrixRows([
+      matrixRow({ file: "features/zeta.feature", scenario: "Zed" }),
+      matrixRow({ file: "features/alpha.feature", scenario: "Second" }),
+      matrixRow({ file: "features/alpha.feature", scenario: "First" }),
+    ]);
+    expect(groups.map((g) => g.file)).toEqual(["features/alpha.feature", "features/zeta.feature"]);
+    expect(groups[0]!.rows.map((r) => r.scenario)).toEqual(["Second", "First"]);
+  });
+
+  // The rows with no feature file are the orphan tests, a coverage hole like any other empty cell, so
+  // they fold under one group and sort last rather than alphabetically among the files.
+  it("groups the rows with no feature file under an empty file, last", () => {
+    const groups = groupMatrixRows([
+      matrixRow({ file: "", test: "PAY-9", result: "no coverage" }),
+      matrixRow({ file: "features/login.feature" }),
+      matrixRow({ file: "", test: "PAY-8", result: "no coverage" }),
+    ]);
+    expect(groups.map((g) => [g.file, g.count])).toEqual([
+      ["features/login.feature", 1],
+      ["", 2],
     ]);
   });
 });

@@ -4,9 +4,10 @@ import {
   BoardTestCard,
   BoardViewModel,
   ExecutionRow,
-  MatrixRow,
+  MatrixGroup,
   filterBoardViewModel,
   filterExecutionRows,
+  groupMatrixRows,
   scopeBoardViewModel,
 } from "./board-data";
 import { ProjectScopeStore } from "./project-scope";
@@ -104,7 +105,7 @@ interface RenderMessage {
   scenarios: readonly SelectableScenarioCard[];
   available: readonly SelectableTestCard[];
   mapped: readonly SelectableTestCard[];
-  matrix: readonly MatrixRow[];
+  matrix: readonly MatrixGroup[];
   executions: readonly ExecutionRow[];
   availableEmptyText: string;
   offerSync: boolean;
@@ -190,7 +191,9 @@ function prune(selection: Set<string>, live: readonly string[]): void {
 // The Mapping/Matrix/Executions surface. It paints all three board panes from one filtered view model
 // (the shell owns which pane is visible), forwards drops and execution-link clicks, and re-renders on
 // the subsystem's snapshot-change event. Every render round-trips through the vscode-free
-// `scopeBoardViewModel` and `filterBoardViewModel`, so the webview JS stays thin and untested.
+// `scopeBoardViewModel`, `filterBoardViewModel`, and `groupMatrixRows`, so the webview JS stays thin and
+// untested; what it does own is display state the host never sees (which matrix groups are folded open,
+// how far the executions window is pulled down).
 export class BoardSurface {
   private query = "";
   private model: BoardViewModel;
@@ -412,7 +415,7 @@ export class BoardSurface {
       scenarios: filtered.scenarios.map((card) => ({ ...card, selected: this.selectedScenarioIds.has(card.dropId) })),
       available: filtered.available.map(checkedTest),
       mapped: filtered.mapped.map(checkedTest),
-      matrix: filtered.matrix,
+      matrix: groupMatrixRows(filtered.matrix),
       executions: filterExecutionRows(this.executions, this.query),
       availableEmptyText: filtered.availableEmptyText,
       offerSync: filtered.offerSync,

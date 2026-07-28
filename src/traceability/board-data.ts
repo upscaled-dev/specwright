@@ -46,15 +46,28 @@ export interface BoardTestCard {
 // One row of the Matrix tab, columns left to right. A coverage hole is an empty string: a requirement
 // with no test leaves `test` empty, a test with no scenario leaves `scenario` empty, an untraced
 // scenario leaves `tag` empty. `result` is always spelled out ("no run" for an untraced scenario,
-// "no coverage" for an orphan test that covers nothing). `projects` are the projects the row evidences,
-// which is what the board's scope selector compares against; empty means it evidences none.
+// "no coverage" for an orphan test that covers nothing). `file` is the workspace-relative feature file
+// the row's scenario lives in, the axis the tab folds by; a row with no scenario carries none.
+// `projects` are the projects the row evidences, which is what the board's scope selector compares
+// against; empty means it evidences none.
 export interface MatrixRow {
   readonly requirement: string;
   readonly test: string;
   readonly scenario: string;
   readonly tag: string;
   readonly result: string;
+  readonly file: string;
   readonly projects: readonly string[];
+}
+
+// One feature file's fold on the Matrix tab. `file` is both the header label and the group's identity in
+// the webview's expanded set; the rows with no feature file (the available tests, which no scenario
+// covers) group under "" and, like an empty cell, sort last. `count` is what a collapsed header reports,
+// since a collapsed group renders none of its rows.
+export interface MatrixGroup {
+  readonly file: string;
+  readonly count: number;
+  readonly rows: readonly MatrixRow[];
 }
 
 export interface BoardViewModel {
@@ -243,7 +256,12 @@ function compareMatrixRows(a: MatrixRow, b: MatrixRow): number {
   return byCell(a.requirement, b.requirement) || byCell(a.test, b.test) || byCell(a.scenario, b.scenario);
 }
 
-function matrixRows(snapshot: TraceabilitySnapshot, testTagPrefix: string, projectOf: KeyGrammar["projectOf"]): MatrixRow[] {
+function matrixRows(
+  snapshot: TraceabilitySnapshot,
+  roots: readonly string[],
+  testTagPrefix: string,
+  projectOf: KeyGrammar["projectOf"]
+): MatrixRow[] {
   const rows: MatrixRow[] = [];
   for (const link of snapshot.links) {
     rows.push({
@@ -252,6 +270,7 @@ function matrixRows(snapshot: TraceabilitySnapshot, testTagPrefix: string, proje
       scenario: link.scenario.name,
       tag: `@${testTagPrefix}${link.testKey}`,
       result: linkResult(link),
+      file: toWorkspaceRelative(link.scenario.filePath, roots),
       projects: rowProjects(projectOf, link.testKey, link.reqKeys),
     });
   }
@@ -262,6 +281,7 @@ function matrixRows(snapshot: TraceabilitySnapshot, testTagPrefix: string, proje
       scenario: item.scenario.name,
       tag: "",
       result: "no run",
+      file: toWorkspaceRelative(item.scenario.filePath, roots),
       projects: rowProjects(projectOf, "", item.reqKeys),
     });
   }
@@ -272,10 +292,29 @@ function matrixRows(snapshot: TraceabilitySnapshot, testTagPrefix: string, proje
       scenario: "",
       tag: "",
       result: "no coverage",
+      file: "",
       projects: rowProjects(projectOf, orphan.testKey, []),
     });
   }
   return rows.sort(compareMatrixRows);
+}
+
+/**
+ * Fold matrix rows into one group per feature file, the shape the Matrix tab renders. Groups are ordered
+ * by file, the rows with no feature file last, and each group holds its rows in the order it was given
+ * them, so the row sort survives the fold. Run after the scope and the query, so a group holds exactly
+ * the rows on screen and an empty one never reaches the webview.
+ */
+export function groupMatrixRows(rows: readonly MatrixRow[]): MatrixGroup[] {
+  const byFile = new Map<string, MatrixRow[]>();
+  for (const row of rows) {
+    const group = byFile.get(row.file) ?? [];
+    group.push(row);
+    byFile.set(row.file, group);
+  }
+  return [...byFile]
+    .map(([file, group]) => ({ file, count: group.length, rows: group }))
+    .sort((a, b) => byCell(a.file, b.file));
 }
 
 /**
@@ -319,7 +358,7 @@ export function buildBoardViewModel(
     scenarios,
     available,
     mapped: mappedTestCards(snapshot.links, workspaceRoots, projectOf),
-    matrix: matrixRows(snapshot, testTagPrefix, projectOf),
+    matrix: matrixRows(snapshot, workspaceRoots, testTagPrefix, projectOf),
     ...emptyState,
   };
 }

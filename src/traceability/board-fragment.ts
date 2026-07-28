@@ -50,6 +50,10 @@ const BOARD_CSS = `
   .board-pane table.matrix .wrap { white-space: normal; overflow-wrap: anywhere; min-width: 10rem; }
   .board-pane table.matrix a.link { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
   .board-pane table.matrix a.link:hover { text-decoration: underline; }
+  .board-pane table.matrix td.group-cell { padding: 0; }
+  .board-pane table.matrix td.older-cell { text-align: center; }
+  .board-pane .group-toggle { display: flex; width: 100%; align-items: baseline; gap: 0.4rem; padding: 0.4rem 0.6rem; border: none; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); color: var(--vscode-foreground); font-family: inherit; font-size: inherit; font-weight: 600; text-align: left; cursor: pointer; }
+  .board-pane .group-toggle:hover { background: var(--vscode-list-hoverBackground, var(--vscode-editorWidget-background)); }
   #executions-empty { flex: none; }
   @media (max-width: 540px) {
     .board-pane .columns { flex: none; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
@@ -131,6 +135,19 @@ const BOARD_SCRIPT = `
   const executionsScroll = document.getElementById('executions-scroll');
   const syncStrip = document.getElementById('sync-strip');
   const syncStripText = document.getElementById('sync-strip-text');
+
+  // What the board looks like rather than what it holds: which matrix files are unfolded and how far the
+  // executions window has been pulled down. Both ride the webview's own state, so a window reload gets
+  // the board back the way it was left, and both are the webview's alone: neither reaches the host.
+  // State outlives the script that wrote it, so a key left by another version is read as data, never
+  // trusted: a throw on this line would take the fragment's message handler with it, and the bad value
+  // persists, so the pane would come back blank on every reload.
+  const boardState = window.__spec.state();
+  const matrixOpen = new Set(Array.isArray(boardState.matrixOpen) ? boardState.matrixOpen : []);
+  const EXECUTIONS_PAGE = 50;
+  let executionsShown = Number(boardState.executionsShown) || EXECUTIONS_PAGE;
+  let ledgerRows = [];
+  let olderRow = null;
 
   // A scenario card carries kind 'scenario' + its drop id; a test card kind 'test' + its key. A drop is
   // valid only across the two kinds, so a scenario lands on any test card and an available test on a
@@ -367,9 +384,72 @@ const BOARD_SCRIPT = `
     return td;
   }
 
-  function renderMatrix(rows) {
+  function matrixRowEl(row) {
+    const tr = document.createElement('tr');
+    tr.appendChild(matrixCell(row.requirement, 'wrap'));
+    tr.appendChild(matrixCell(row.test, 'key'));
+    tr.appendChild(matrixCell(row.scenario, 'wrap'));
+    tr.appendChild(matrixCell(row.tag, 'key'));
+    tr.appendChild(matrixCell(row.result, ''));
+    return tr;
+  }
+
+  // One feature file's fold. A collapsed group holds no row elements at all, which is the point of the
+  // fold: a workspace of thousands of rows never builds the ones nobody is looking at. Toggling touches
+  // only this group's rows, so no repaint and no host round-trip.
+  function renderMatrixGroup(group) {
+    const head = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 5;
+    cell.className = 'group-cell';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'group-toggle';
+    const twisty = document.createElement('span');
+    twisty.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.textContent = group.file || 'Available tests';
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = '(' + group.count + ')';
+    toggle.appendChild(twisty);
+    toggle.appendChild(name);
+    toggle.appendChild(count);
+    cell.appendChild(toggle);
+    head.appendChild(cell);
+    matrixRows.appendChild(head);
+
+    let open = filtering || matrixOpen.has(group.file);
+    let rows = [];
+    function paint() {
+      twisty.textContent = open ? '▾' : '▸';
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (!open) {
+        for (const el of rows) { el.remove(); }
+        rows = [];
+        return;
+      }
+      rows = group.rows.map(matrixRowEl);
+      const frag = document.createDocumentFragment();
+      for (const el of rows) { frag.appendChild(el); }
+      matrixRows.insertBefore(frag, head.nextSibling);
+    }
+    // A query opens the groups it matched, and a toggle under one is display only, neither touching the
+    // persisted set, so clearing the box folds the board back the way the user left it.
+    toggle.addEventListener('click', function () {
+      open = !open;
+      if (!filtering) {
+        if (open) { matrixOpen.add(group.file); } else { matrixOpen.delete(group.file); }
+        window.__spec.saveState({ matrixOpen: Array.from(matrixOpen) });
+      }
+      paint();
+    });
+    paint();
+  }
+
+  function renderMatrix(groups) {
     matrixRows.textContent = '';
-    if (rows.length === 0) {
+    if (groups.length === 0) {
       const tr = document.createElement('tr');
       const td = document.createElement('td');
       td.colSpan = 5;
@@ -379,15 +459,7 @@ const BOARD_SCRIPT = `
       matrixRows.appendChild(tr);
       return;
     }
-    for (const row of rows) {
-      const tr = document.createElement('tr');
-      tr.appendChild(matrixCell(row.requirement, 'wrap'));
-      tr.appendChild(matrixCell(row.test, 'key'));
-      tr.appendChild(matrixCell(row.scenario, 'wrap'));
-      tr.appendChild(matrixCell(row.tag, 'key'));
-      tr.appendChild(matrixCell(row.result, ''));
-      matrixRows.appendChild(tr);
-    }
+    for (const group of groups) { renderMatrixGroup(group); }
   }
 
   function executionCell(text, cls) {
@@ -397,33 +469,70 @@ const BOARD_SCRIPT = `
     return td;
   }
 
+  function executionRowEl(row) {
+    const tr = document.createElement('tr');
+    const keyTd = document.createElement('td');
+    const link = document.createElement('a');
+    link.className = 'link';
+    link.href = '#';
+    link.textContent = row.key;
+    link.addEventListener('click', function (e) {
+      e.preventDefault();
+      window.__spec.post('board', { type: 'open', key: row.key });
+    });
+    keyTd.appendChild(link);
+    tr.appendChild(keyTd);
+    tr.appendChild(executionCell(row.summary, 'wrap'));
+    tr.appendChild(executionCell(row.action));
+    tr.appendChild(executionCell(row.resultsImported));
+    tr.appendChild(executionCell(row.passRate));
+    tr.appendChild(executionCell(row.publishedAt));
+    tr.appendChild(executionCell(String(row.timesFromHere)));
+    return tr;
+  }
+
+  function olderRowEl(remaining) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.className = 'older-cell';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'pill-button';
+    btn.textContent = 'Show older (' + remaining + ' more)';
+    btn.addEventListener('click', function () {
+      const from = Math.min(executionsShown, ledgerRows.length);
+      executionsShown = from + EXECUTIONS_PAGE;
+      window.__spec.saveState({ executionsShown: executionsShown });
+      paintExecutions(from);
+    });
+    td.appendChild(btn);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  // Paint the rows from the given index up to the revealed count, then re-hang the control that reveals
+  // the next page. The whole ledger arrives on every render, but only the window is built, and a reveal
+  // appends its page rather than repainting the table.
+  function paintExecutions(from) {
+    if (olderRow) { olderRow.remove(); olderRow = null; }
+    const shown = Math.min(executionsShown, ledgerRows.length);
+    for (let i = from; i < shown; i++) { executionsRows.appendChild(executionRowEl(ledgerRows[i])); }
+    if (shown < ledgerRows.length) {
+      olderRow = olderRowEl(ledgerRows.length - shown);
+      executionsRows.appendChild(olderRow);
+    }
+  }
+
   function renderExecutions(rows) {
     executionsRows.textContent = '';
+    olderRow = null;
+    ledgerRows = rows;
     const empty = rows.length === 0;
     executionsEmpty.hidden = !empty;
     executionsScroll.hidden = empty;
     if (empty) { return; }
-    for (const row of rows) {
-      const tr = document.createElement('tr');
-      const keyTd = document.createElement('td');
-      const link = document.createElement('a');
-      link.className = 'link';
-      link.href = '#';
-      link.textContent = row.key;
-      link.addEventListener('click', function (e) {
-        e.preventDefault();
-        window.__spec.post('board', { type: 'open', key: row.key });
-      });
-      keyTd.appendChild(link);
-      tr.appendChild(keyTd);
-      tr.appendChild(executionCell(row.summary, 'wrap'));
-      tr.appendChild(executionCell(row.action));
-      tr.appendChild(executionCell(row.resultsImported));
-      tr.appendChild(executionCell(row.passRate));
-      tr.appendChild(executionCell(row.publishedAt));
-      tr.appendChild(executionCell(String(row.timesFromHere)));
-      executionsRows.appendChild(tr);
-    }
+    paintExecutions(0);
   }
 
   // The strip sits above the panes, so a sync reads the same on every tab. The host owns its words: an

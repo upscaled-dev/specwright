@@ -291,6 +291,11 @@ const ROUTER_SCRIPT = `
     postShell: function (msg) { vscodeApi.postMessage(msg); },
     register: function (surface, handler) { handlers[surface] = handler; },
     registerShell: function (handler) { shellHandler = handler; },
+    // The webview's own display state (which matrix groups are open, how far the executions window is
+    // pulled down), the only thing that survives the host rebuilding this document on a window reload.
+    // One object shared by the fragments, so a write merges rather than replaces.
+    state: function () { return vscodeApi.getState() || {}; },
+    saveState: function (patch) { vscodeApi.setState(Object.assign({}, vscodeApi.getState(), patch)); },
   };
   window.addEventListener('message', function (event) {
     const msg = event.data;
