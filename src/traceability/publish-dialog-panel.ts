@@ -106,12 +106,14 @@ export class PublishSurface {
   }
 
   // Called in the flow's finally: clears the busy state to an idle placeholder, staying on the Publish
-  // tab (toasts convey the outcome). A no-op when a newer present has already superseded this one.
-  public markSettled(): void {
+  // tab (toasts convey the outcome). False when a newer present has already superseded this one, which
+  // is also what tells the settling flow it no longer owns the tab.
+  public markSettled(): boolean {
     if (this.pending) {
-      return;
+      return false;
     }
     this.host.post({ type: "settled" });
+    return true;
   }
 
   // The user activated the Publish tab: start a fresh publish only when none is underway; otherwise the

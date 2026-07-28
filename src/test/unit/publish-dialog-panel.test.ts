@@ -234,8 +234,8 @@ describe("PublishSurface: hydrate on present", () => {
 
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await promise;
-    publish.markSettled();
 
+    expect(publish.markSettled()).toBe(true);
     expect(rig.posted.filter((m) => m.type === "settled")).toHaveLength(1);
     expect(rig.activations).not.toContain("board");
   });
@@ -247,8 +247,8 @@ describe("PublishSurface: hydrate on present", () => {
     const first = publish.present(makeModel());
     void publish.present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
     await first;
-    publish.markSettled();
 
+    expect(publish.markSettled()).toBe(false);
     expect(rig.posted.filter((m) => m.type === "settled")).toHaveLength(0);
   });
 

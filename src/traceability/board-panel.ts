@@ -127,6 +127,12 @@ export class BoardPanel {
     BoardPanel.current?.board.syncProgress(text);
   }
 
+  // The Executions tab, where a published run's row lands. The publish flow holds the panel it opened,
+  // so this one is an instance method rather than a static like the readers above.
+  public showExecutions(): void {
+    this.activateTab("executions");
+  }
+
   private hostFor(surface: SurfaceName): SurfaceHost {
     return {
       post: (message) => this.postRaw({ ...message, surface }),

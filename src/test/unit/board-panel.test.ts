@@ -743,6 +743,15 @@ describe("BoardPanel", () => {
     expect(lastActivate(panel)).toBe("matrix");
   });
 
+  // The publish flow's way of landing the user on the row it just wrote.
+  it("brings the Executions tab forward on showExecutions", async () => {
+    const { instance, panel } = await openReady();
+
+    instance.showExecutions();
+
+    expect(lastActivate(panel)).toBe("executions");
+  });
+
   it("keeps the query across a search after a tab switch", async () => {
     const { panel } = await openReady();
 

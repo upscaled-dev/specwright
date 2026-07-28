@@ -790,10 +790,21 @@ export class CommandManager {
     });
   }
 
+  // The board's surfaces repaint on the snapshot-change beat, so a forced rebuild is what carries a
+  // just-written row onto them without a reopen. `what` names the write in the warn line. A failed
+  // rebuild costs only that repaint, never the write, so it returns false rather than throwing.
+  private async refreshBoard(what: string): Promise<boolean> {
+    try {
+      await this.traceabilitySubsystem?.rebuildNow();
+      return true;
+    } catch (error) {
+      this.logger.warn(`Refreshing the board after ${what} failed`, { error: errMsg(error) });
+      return false;
+    }
+  }
+
   // A standalone execution create's ledger entry: no run behind it, so it carries no counts and nothing
-  // pending, and its artifact id is namespaced away from every run's. The Executions tab reads the ledger
-  // on the board's snapshot-change beat, so a forced rebuild is what makes the new row appear without a
-  // reopen; a failed rebuild only costs that repaint, never the recorded entry.
+  // pending, and its artifact id is namespaced away from every run's.
   private async recordCreatedExecution(key: string, summary: string): Promise<void> {
     const rawSite = this.context.config.xraySiteUrl;
     const site = normalizeSiteUrl(rawSite);
@@ -810,11 +821,7 @@ export class CommandManager {
       summary,
       mode: "created-empty",
     });
-    try {
-      await this.traceabilitySubsystem?.rebuildNow();
-    } catch (error) {
-      this.logger.warn("Refreshing the board after creating an execution failed", { error: errMsg(error) });
-    }
+    await this.refreshBoard("creating an execution");
   }
 
   private async resolveProjectForCreate(): Promise<string | undefined> {
@@ -933,6 +940,10 @@ export class CommandManager {
     const jiraSearchAvailable = (await this.credentialStore?.hasJiraCredentials(rawSite)) ?? false;
     const resolveSteps = makeFeatureStepResolver(this.context.featureParser);
     const known = this.projectUniverse(adapter);
+    // A ledger entry means the import landed (partial attachments included), so the board has a new row
+    // to carry; a clean success is the narrower case that also earns the tab switch.
+    let published = false;
+    let succeeded = false;
     try {
       await runPublishFlow({
         publishing,
@@ -952,11 +963,17 @@ export class CommandManager {
         priorEntryFor: (artifactId) => this.publishLedger?.find(artifactId, site),
         presentDialog: (model) => board.publish.present(model),
         attachFiles: (executionKey, files) => this.attachFiles(executionKey, files),
-        recordPublish: (entry) => this.publishLedger?.record(entry),
+        recordPublish: (entry) => {
+          published = true;
+          this.publishLedger?.record(entry);
+        },
         reportNoRuns: () => {
           vscode.window.showInformationMessage(NO_PUBLISHABLE_RUNS_MESSAGE);
         },
-        reportSuccess: (outcome, request, attachedCount) => this.reportPublishSuccess(outcome, request, attachedCount),
+        reportSuccess: (outcome, request, attachedCount) => {
+          succeeded = true;
+          this.reportPublishSuccess(outcome, request, attachedCount);
+        },
         reportPartialAttachments: (outcome, request, attachedCount, failed, artifactId) =>
           this.reportPartialAttachments(artifactId, site, outcome, request, attachedCount, failed),
         reportFailure: (error) => this.reportPublishFailure(error),
@@ -965,7 +982,13 @@ export class CommandManager {
         now: () => Date.now(),
       });
     } finally {
-      board.publish.markSettled();
+      const settled = board.publish.markSettled();
+      const refreshed = published && (await this.refreshBoard("publishing"));
+      // The switch is earned, not automatic: a clean publish, a settle this flow still owned (a false one
+      // means a newer dialog holds the tab), and a rebuild that actually put the row on the board.
+      if (succeeded && settled && refreshed) {
+        board.showExecutions();
+      }
     }
   }
 
@@ -994,13 +1017,7 @@ export class CommandManager {
     if (runs === 0 && entries === 0) {
       return;
     }
-    // An open board repaints on the subsystem's snapshot-change event, which a forced rebuild fires, so
-    // the Executions tab drops the wiped runs without a reopen.
-    try {
-      await this.traceabilitySubsystem?.rebuildNow();
-    } catch (error) {
-      this.logger.warn("Refreshing the board after clearing run history failed", { error: errMsg(error) });
-    }
+    await this.refreshBoard("clearing run history");
   }
 
   // The pending-attachments banner's action: upload the run's ledgered pending files WITHOUT a reimport

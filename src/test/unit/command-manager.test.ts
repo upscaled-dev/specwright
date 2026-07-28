@@ -1454,7 +1454,7 @@ describe("traceability publishLastRun: Publish tab", () => {
   const win = vscode.window as unknown as {
     __webviewPanels: Array<{
       title: string;
-      webview: { __posted: Array<{ surface?: string; type: string }> };
+      webview: { __posted: Array<{ surface?: string; type: string; tab?: string }> };
       __receive: (message: unknown) => Promise<void>;
       dispose: () => void;
     }>;
@@ -1495,15 +1495,21 @@ describe("traceability publishLastRun: Publish tab", () => {
     return scope;
   }
 
-  function connectedSubsystem(catalogueProjects: string[] = [], scope: ProjectScopeStore = NO_PROJECT_SCOPE): TraceabilitySubsystem {
+  function connectedSubsystem(
+    catalogueProjects: string[] = [],
+    scope: ProjectScopeStore = NO_PROJECT_SCOPE,
+    publish: () => Promise<unknown> = () =>
+      Promise.resolve({ ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [] })
+  ): TraceabilitySubsystem {
     const adapter = {
       id: "xray",
       label: "Xray",
       keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", projectOf: (k: string) => k.split("-")[0] },
+      browseUrl: () => undefined,
       metadata: { snapshot: () => ({ catalogueProjects }) },
       resultPublishing: {
         searchTargets: () => Promise.resolve([]),
-        publish: () => Promise.resolve({ ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [] }),
+        publish,
       },
     } as unknown as TraceabilityAdapter;
     return {
@@ -1619,6 +1625,82 @@ describe("traceability publishLastRun: Publish tab", () => {
     const model = await publishModel(mgr);
 
     expect(model.runs[0]!.project).toEqual({ value: "CALC", fromDerivation: true });
+  });
+
+  const CONFIRM = {
+    type: "confirm",
+    runId: "run-1",
+    request: { mode: "create-new", project: "CALC", summary: "Nightly" },
+    attachments: [] as string[],
+  };
+
+  // One publish driven to completion: open the dialog, answer it with `reply`, then report the tabs the
+  // shell was told to activate and how many board rebuilds the flow forced.
+  async function publishOnce(
+    reply: Record<string, unknown>,
+    over: { publish?: () => Promise<unknown>; rebuild?: () => Promise<void> } = {}
+  ): Promise<{ tabs: Array<string | undefined>; rebuilds: number }> {
+    let rebuilds = 0;
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem({
+      ...connectedSubsystem([], NO_PROJECT_SCOPE, over.publish),
+      rebuildNow: () => {
+        rebuilds += 1;
+        return over.rebuild?.() ?? Promise.resolve();
+      },
+    } as unknown as TraceabilitySubsystem);
+
+    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    await flush();
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+    await panel.__receive({ surface: "publish", ...reply });
+    await expect(promise).resolves.toBeUndefined();
+    return { tabs: panel.webview.__posted.filter((m) => m.type === "activate").map((m) => m.tab), rebuilds };
+  }
+
+  // The settle leaves the Publish tab on its idle hint, so a publish that landed has to hand the user the
+  // row it just created: rebuild the board first, then bring the Executions tab forward.
+  it("rebuilds the board and shows the Executions tab after a successful publish", async () => {
+    const { tabs, rebuilds } = await publishOnce(CONFIRM);
+
+    expect(rebuilds).toBe(1);
+    expect(tabs.at(-1)).toBe("executions");
+  });
+
+  // A partial upload still landed the import, so the row is real and the board must carry it. The tab
+  // stays put: the warning toast owns the retry.
+  it("rebuilds the board but stays off the Executions tab when attachments partly fail", async () => {
+    const { tabs, rebuilds } = await publishOnce({ ...CONFIRM, attachments: ["/ws/evidence.png"] });
+
+    expect(rebuilds).toBe(1);
+    expect(tabs).not.toContain("executions");
+  });
+
+  it("neither rebuilds nor switches tabs when the publish fails", async () => {
+    const { tabs, rebuilds } = await publishOnce(CONFIRM, { publish: () => Promise.reject(new Error("HTTP 400")) });
+
+    expect(rebuilds).toBe(0);
+    expect(tabs).not.toContain("executions");
+  });
+
+  it("neither rebuilds nor switches tabs on cancel, routing back to the Mapping tab", async () => {
+    const { tabs, rebuilds } = await publishOnce({ type: "cancel" });
+
+    expect(rebuilds).toBe(0);
+    expect(tabs.at(-1)).toBe("mapping");
+  });
+
+  // A repaint that faulted has no new row on it, so the user is left on the Publish tab with the toast
+  // rather than in front of an Executions table that is missing what they just published.
+  it("stays off the Executions tab when the board rebuild fails", async () => {
+    const { tabs, rebuilds } = await publishOnce(CONFIRM, {
+      rebuild: () => Promise.reject(new Error("discovery down")),
+    });
+
+    expect(rebuilds).toBe(1);
+    expect(tabs).not.toContain("executions");
   });
 
   it("guides the user and opens no board when no publishing capability is connected", async () => {
