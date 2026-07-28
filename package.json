@@ -1,8 +1,8 @@
 {
   "name": "specwright",
   "displayName": "Specwright - BDD Authoring for Playwright in VS Code",
-  "description": "A first-class BDD authoring experience for Playwright in VS Code. Write, navigate, validate, and generate Gherkin step definitions, then run and debug them in Test Explorer.",
-  "version": "0.4.18",
+  "description": "BDD authoring for playwright-bdd in VS Code: write and maintain Gherkin, run and debug scenarios, manage step definitions, and use experimental Xray Cloud traceability.",
+  "version": "0.4.35",
   "icon": "media/specwright-icon.png",
   "publisher": "upscaled-dev",
   "license": "MIT",
@@ -43,19 +43,19 @@
     "test explorer",
     "vs code test explorer",
     "test runner",
-    "feature files",
+    "xray cloud",
     "scenario outline",
     "step definitions",
     "step definition generator",
     "generate step definitions",
-    "unmatched steps",
-    "given when then",
-    "run gherkin tests",
-    "debug gherkin tests",
+    "test management",
+    "jira",
+    "jira xray",
+    "test traceability",
     "bdd authoring",
     "gherkin authoring",
-    "feature file editor",
-    "step definition navigation"
+    "test coverage",
+    "test result publishing"
   ],
   "activationEvents": [
     "onStartupFinished"

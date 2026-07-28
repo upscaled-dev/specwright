@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.35] - 2026-07-29
+### Fixed
+
+- **Traceability sync now judges each project on its own fetch.** A single project whose catalogue failed to load used to blank the verdicts for every project in scope, hiding healthy projects' unmapped tests and orphan rows; a failure now costs only its own project. A sync that fetched nothing and only reported errors keeps the previous data instead of presenting itself as freshly synced. Cached remote metadata is refetched once on the first launch after this release.
+- A publish whose import response names no execution now says so. The imported count is still reported, no dead browse link is offered, and file attachments are skipped rather than recorded against an execution nothing can reach.
+- A failed publish leaves the Publish tab on the run you picked, ready for a retry. The run list also stays current while the tab is open, so a run recorded in the meantime can be selected without reopening it.
+- The Executions tab shows its empty line once the publish history is cleared, instead of an empty table frame.
+- Reloading the window no longer leaves the Coverage Board blank when one of its panes fails to repaint. The remaining panes come back and the failure is logged to the output channel.
+- The Coverage Board rebuilds when a setting it renders from changes (sync project keys, default project key, site URL), instead of showing the previous values until something else rebuilds it.
+
+### Changed
+
+- The packaged extension no longer carries the repository's internal working-agreement file.
+
 ## [0.3.9] - 2026-07-18
 ### Fixed
 
