@@ -251,6 +251,31 @@ describe("PublishSurface: hydrate on present", () => {
 
     expect(rig.posted.filter((m) => m.type === "settled")).toHaveLength(0);
   });
+
+  // A rebuilt webview comes back on the idle hint, so the tab is dead for a present still waiting.
+  it("re-posts the live run model on a re-hydration", () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    void publish.present(makeModel({ runs: [runOption({ id: "run-2", label: "second" })], selectedRunId: "run-2" }));
+
+    publish.rehydrate();
+
+    const models = rig.posted.filter((m) => m.type === "model");
+    expect(models).toHaveLength(2);
+    expect((models[1] as unknown as { model: PublishDialogModel }).model.selectedRunId).toBe("run-2");
+  });
+
+  it("posts nothing on a re-hydration with no publish underway, leaving the idle hint alone", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const promise = publish.present(makeModel());
+    rig.receive({ type: "cancel" });
+    await promise;
+
+    publish.rehydrate();
+
+    expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(1);
+  });
 });
 
 describe("PublishSurface: manual activation", () => {
@@ -390,6 +415,43 @@ describe("PublishSurface: attachments", () => {
 
     expect(rig.attachPending).toHaveBeenCalledWith("run-1");
     expect(host.posted.filter((m) => m.type === "pending-result")).toEqual([{ type: "pending-result", runId: "run-1", remaining: 1 }]);
+  });
+
+  // The picked files and the retried banner are dialog state the host owns; a re-hydration that replayed
+  // the present-time model would drop them and let the user publish without evidence they chose.
+  it("carries the browsed files into what a re-hydration replays", async () => {
+    const rig = deferredDelegate();
+    rig.browseResult = [{ path: "/ws/trace.zip", name: "trace.zip", size: 2048 }];
+    const { rig: host, publish } = surface(rig.delegate);
+    void publish.present(makeModel());
+
+    host.receive({ type: "browse" });
+    await flush();
+    publish.rehydrate();
+
+    const replayed = host.posted.filter((m) => m.type === "model").at(-1) as unknown as { model: PublishDialogModel };
+    expect(replayed.model.attachments.suggestions).toEqual([{ path: "/ws/trace.zip", name: "trace.zip", size: 2048 }]);
+  });
+
+  it("carries the retried pending count into what a re-hydration replays, dropping the banner at zero", async () => {
+    const rig = deferredDelegate();
+    rig.pendingResult = { remaining: 1 };
+    const { rig: host, publish } = surface(rig.delegate);
+    void publish.present(makeModel({ runs: [runOption({ pendingAttachments: { key: "XNP-9", count: 2 } })] }));
+
+    host.receive({ type: "attachPending", runId: "run-1" });
+    await flush();
+    publish.rehydrate();
+    const retried = host.posted.filter((m) => m.type === "model").at(-1) as unknown as { model: PublishDialogModel };
+    expect(retried.model.runs[0]!.pendingAttachments).toEqual({ key: "XNP-9", count: 1 });
+
+    rig.pendingResult = { remaining: 0 };
+    host.receive({ type: "attachPending", runId: "run-1" });
+    await flush();
+    publish.rehydrate();
+
+    const cleared = host.posted.filter((m) => m.type === "model").at(-1) as unknown as { model: PublishDialogModel };
+    expect(cleared.model.runs[0]!.pendingAttachments).toBeUndefined();
   });
 
   it("drops an attach-pending response that resolves after the surface settled", async () => {

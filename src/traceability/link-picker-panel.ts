@@ -27,11 +27,22 @@ interface UnlinkMessage {
 }
 type LinkIncoming = SearchMessage | ConfirmMessage | CancelMessage | OpenLinkedMessage | UnlinkMessage;
 
+// What a session paints into its pane: the reset that clears it, the two row lists, and the search
+// spinner. Kept as data so the pane can be painted again from scratch.
+type LinkOutgoing =
+  | { type: "reset"; title: string; searchPlaceholder: string }
+  | { type: "rows"; rows: readonly LinkPickerRow[] }
+  | { type: "linked"; rows: readonly LinkedRow[] }
+  | { type: "busy"; busy: boolean };
+
 // One live link-picker session on the board's contextual Link tab. It implements the vscode-free
 // `LinkPickerUi` port so `runLinkPickerFlow` drives it; the webview JS stays thin (render + keyboard +
 // forward intent). `settled` guards the terminal confirm/cancel; `closed` stops posts once the flow
 // closes it.
 class LinkSession implements LinkPickerUi {
+  // The last of each message this session put on screen, in the order it first posted them, so a
+  // rebuilt webview can be painted back to where the flow left it.
+  private readonly painted = new Map<LinkOutgoing["type"], LinkOutgoing>();
   private searchHandler: ((value: string) => void) | undefined;
   private confirmHandler: ((id: string) => void) | undefined;
   private cancelHandler: (() => void) | undefined;
@@ -42,8 +53,28 @@ class LinkSession implements LinkPickerUi {
 
   constructor(
     private readonly host: SurfaceHost,
+    private readonly options: LinkPickerPanelOptions,
     private readonly onClose: () => void
-  ) {}
+  ) {
+    this.painted.set("reset", {
+      type: "reset",
+      title: options.title,
+      searchPlaceholder: options.searchPlaceholder,
+    });
+  }
+
+  // Everything this session owns on screen: its contextual tab and every message it has painted since,
+  // starting with the reset that clears the pane. Drives both the first paint and a re-hydration; the
+  // tab it brings forward is the shell's call, not the session's.
+  public paint(): void {
+    if (!this.live()) {
+      return;
+    }
+    this.host.setTabVisible(true, this.options.title);
+    for (const message of this.painted.values()) {
+      this.post(message);
+    }
+  }
 
   public setRows(rows: readonly LinkPickerRow[]): void {
     this.post({ type: "rows", rows });
@@ -125,10 +156,16 @@ class LinkSession implements LinkPickerUi {
     this.confirmHandler?.(id);
   }
 
-  private post(message: object): void {
-    if (this.closed || this.host.isDisposed()) {
+  // Nothing this session emits, pane message or contextual tab, may outlive the session or the document.
+  private live(): boolean {
+    return !this.closed && !this.host.isDisposed();
+  }
+
+  private post(message: LinkOutgoing): void {
+    if (!this.live()) {
       return;
     }
+    this.painted.set(message.type, message);
     this.host.post(message);
   }
 }
@@ -149,16 +186,21 @@ export class LinkSurface {
 
   public begin(options: LinkPickerPanelOptions): LinkPickerUi {
     this.session?.fireCancel();
-    const session = new LinkSession(this.host, () => {
+    const session = new LinkSession(this.host, options, () => {
       if (this.session === session) {
         this.session = undefined;
       }
     });
     this.session = session;
-    this.host.post({ type: "reset", title: options.title, searchPlaceholder: options.searchPlaceholder });
-    this.host.setTabVisible(true, options.title);
+    session.paint();
     this.host.activate();
     return session;
+  }
+
+  // A rebuilt webview lost the pane and the contextual tab with it, so a live session paints itself
+  // back. Nothing to do when none is live: the fresh document already hides the tab.
+  public rehydrate(): void {
+    this.session?.paint();
   }
 
   public dispose(): void {

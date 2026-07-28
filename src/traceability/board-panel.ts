@@ -8,6 +8,10 @@ import { SurfaceHost, SurfaceName } from "./webview-host";
 
 const VIEW_TYPE = "playwrightBddRunner.coverageBoard";
 
+// One options object for both entry points, since a restored panel's webview is re-configured rather
+// than trusted: the board is a blank page with scripts off.
+const WEBVIEW_OPTIONS: vscode.WebviewOptions = { enableScripts: true, localResourceRoots: [] };
+
 type BoardTab = "mapping" | "matrix" | "executions";
 type ShellTab = BoardTab | "publish" | "link";
 
@@ -65,10 +69,37 @@ export class BoardPanel {
     // Beside, not Active: the board is worked alongside the feature file it links, so taking that
     // editor's column would make the user park the board before they could drag anything into a tag.
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Coverage Board", vscode.ViewColumn.Beside, {
-      enableScripts: true,
+      ...WEBVIEW_OPTIONS,
       retainContextWhenHidden: true,
-      localResourceRoots: [],
     });
+    return BoardPanel.adopt(panel, deps);
+  }
+
+  // A board tab a window reload restored comes back as a bare panel with a blank document, and the
+  // extension host restarted holding none of its state, so it is wired from scratch like a fresh open.
+  // Anything that stops that wiring takes the tab down with it: a panel left behind here is a blank
+  // document nothing will ever paint.
+  public static registerSerializer(deps: () => BoardPanelDeps): vscode.Disposable {
+    return vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
+      deserializeWebviewPanel: (panel: vscode.WebviewPanel) => {
+        try {
+          if (BoardPanel.current) {
+            // Show the board the user already has rather than let the restored tab just vanish.
+            BoardPanel.current.panel.reveal();
+            panel.dispose();
+          } else {
+            BoardPanel.adopt(panel, deps());
+          }
+        } catch {
+          panel.dispose();
+        }
+        return Promise.resolve();
+      },
+    });
+  }
+
+  private static adopt(panel: vscode.WebviewPanel, deps: BoardPanelDeps): BoardPanel {
+    panel.webview.options = WEBVIEW_OPTIONS;
     if (deps.tabIcon) {
       panel.iconPath = deps.tabIcon;
     }
@@ -121,7 +152,7 @@ export class BoardPanel {
       return;
     }
     if (msg.type === "ready") {
-      this.flush();
+      this.hydrate();
     } else if (msg.type === "tab" && msg.tab) {
       this.activateTab(msg.tab);
       if (msg.tab === "publish") {
@@ -155,15 +186,22 @@ export class BoardPanel {
     Promise.resolve(this.panel.webview.postMessage(message)).catch(() => undefined);
   }
 
-  private flush(): void {
-    if (this.ready) {
+  // `ready` arrives again whenever VS Code rebuilds the webview's DOM (a window reload, a move between
+  // editor groups), and that fresh document starts with every pane hidden and no data in it. The first
+  // ready only flushes, since the queue it drains already holds that opening activation and render.
+  private hydrate(): void {
+    const first = !this.ready;
+    this.ready = true;
+    for (const message of this.queue.splice(0)) {
+      this.postRaw(message);
+    }
+    if (first) {
       return;
     }
-    this.ready = true;
-    for (const message of this.queue) {
-      Promise.resolve(this.panel.webview.postMessage(message)).catch(() => undefined);
-    }
-    this.queue.length = 0;
+    this.activateTab(this.activeTab);
+    this.board.rehydrate();
+    this.publish.rehydrate();
+    this.link.rehydrate();
   }
 
   public dispose(): void {
@@ -239,52 +277,48 @@ const SHELL_CSS = `
   @keyframes sync-strip-slide { from { transform: translateX(-100%); } to { transform: translateX(400%); } }`;
 
 const ROUTER_SCRIPT = `
-  (function () {
-    const vscodeApi = acquireVsCodeApi();
-    const handlers = {};
-    let shellHandler = null;
-    window.__spec = {
-      post: function (surface, msg) { msg.surface = surface; vscodeApi.postMessage(msg); },
-      postShell: function (msg) { vscodeApi.postMessage(msg); },
-      register: function (surface, handler) { handlers[surface] = handler; },
-      registerShell: function (handler) { shellHandler = handler; },
-    };
-    window.addEventListener('message', function (event) {
-      const msg = event.data;
-      if (msg && msg.surface) { const handler = handlers[msg.surface]; if (handler) { handler(msg); } }
-      else if (shellHandler) { shellHandler(msg); }
-    });
-  })();`;
+  const vscodeApi = acquireVsCodeApi();
+  const handlers = {};
+  let shellHandler = null;
+  window.__spec = {
+    post: function (surface, msg) { msg.surface = surface; vscodeApi.postMessage(msg); },
+    postShell: function (msg) { vscodeApi.postMessage(msg); },
+    register: function (surface, handler) { handlers[surface] = handler; },
+    registerShell: function (handler) { shellHandler = handler; },
+  };
+  window.addEventListener('message', function (event) {
+    const msg = event.data;
+    if (msg && msg.surface) { const handler = handlers[msg.surface]; if (handler) { handler(msg); } }
+    else if (shellHandler) { shellHandler(msg); }
+  });`;
 
 const SHELL_SCRIPT = `
-  (function () {
-    const tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tab'));
-    const panes = Array.prototype.slice.call(document.querySelectorAll('.pane'));
-    const searchBox = document.querySelector('.search');
-    const scopeBox = document.querySelector('.scope');
-    const boardTabs = { mapping: true, matrix: true, executions: true };
+  const tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  const panes = Array.prototype.slice.call(document.querySelectorAll('.pane'));
+  const searchBox = document.querySelector('.search');
+  const scopeBox = document.querySelector('.scope');
+  const boardTabs = { mapping: true, matrix: true, executions: true };
 
-    function showTab(tab) {
-      tabButtons.forEach(function (btn) { btn.classList.toggle('active', btn.dataset.tab === tab); });
-      panes.forEach(function (pane) { pane.hidden = pane.dataset.tab !== tab; });
-      if (searchBox) { searchBox.hidden = !boardTabs[tab]; }
-      if (scopeBox) { scopeBox.hidden = !boardTabs[tab]; }
+  function showTab(tab) {
+    tabButtons.forEach(function (btn) { btn.classList.toggle('active', btn.dataset.tab === tab); });
+    panes.forEach(function (pane) { pane.hidden = pane.dataset.tab !== tab; });
+    if (searchBox) { searchBox.hidden = !boardTabs[tab]; }
+    if (scopeBox) { scopeBox.hidden = !boardTabs[tab]; }
+  }
+
+  tabButtons.forEach(function (btn) {
+    btn.addEventListener('click', function () { window.__spec.postShell({ type: 'tab', tab: btn.dataset.tab }); });
+  });
+
+  window.__spec.registerShell(function (msg) {
+    if (msg.type === 'activate') { showTab(msg.tab); }
+    else if (msg.type === 'linkTab') {
+      const linkBtn = document.querySelector('.tab[data-tab="link"]');
+      if (linkBtn) { linkBtn.hidden = !msg.visible; if (msg.title) { linkBtn.title = msg.title; } }
     }
+  });
 
-    tabButtons.forEach(function (btn) {
-      btn.addEventListener('click', function () { window.__spec.postShell({ type: 'tab', tab: btn.dataset.tab }); });
-    });
-
-    window.__spec.registerShell(function (msg) {
-      if (msg.type === 'activate') { showTab(msg.tab); }
-      else if (msg.type === 'linkTab') {
-        const linkBtn = document.querySelector('.tab[data-tab="link"]');
-        if (linkBtn) { linkBtn.hidden = !msg.visible; if (msg.title) { linkBtn.title = msg.title; } }
-      }
-    });
-
-    window.__spec.postShell({ type: 'ready' });
-  })();`;
+  window.__spec.postShell({ type: 'ready' });`;
 
 function renderDocument(providerLabel: string): string {
   const nonce = createNonce();
@@ -295,8 +329,10 @@ function renderDocument(providerLabel: string): string {
     `    <section id="pane-publish" class="pane" data-tab="publish" hidden>\n      ${PUBLISH_FRAGMENT.paneHtml}\n    </section>`,
     `    <section id="pane-link" class="pane" data-tab="link" hidden>\n      ${LINK_FRAGMENT.paneHtml}\n    </section>`,
   ].join("\n");
+  // Each script gets its own function scope: the fragments share nothing but `window.__spec`, and two
+  // top-level `const`s of the same name across sibling scripts is a parse error that kills the second.
   const scripts = [ROUTER_SCRIPT, SHELL_SCRIPT, board.script, PUBLISH_FRAGMENT.script, LINK_FRAGMENT.script]
-    .map((script) => `<script nonce="${nonce}">${script}</script>`)
+    .map((script) => `<script nonce="${nonce}">(function () {${script}\n})();</script>`)
     .join("\n");
   return `<!DOCTYPE html>
 <html lang="en">

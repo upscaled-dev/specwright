@@ -20,6 +20,7 @@ interface StubPanel {
   title: string;
   webview: { html: string; __posted: Posted[] };
   __revealCount: number;
+  __disposed: boolean;
   dispose: () => void;
   __receive: (message: unknown) => Promise<void>;
 }
@@ -57,6 +58,7 @@ type Posted = RenderMessage | ActivateMessage | { type: string; [key: string]: u
 const win = vscode.window as unknown as {
   __webviewPanels: StubPanel[];
   __resetWebviewPanels: () => void;
+  __webviewSerializers: Map<string, { deserializeWebviewPanel: (panel: StubPanel, state: unknown) => Promise<void> }>;
 };
 
 afterEach(() => win.__resetWebviewPanels());
@@ -141,6 +143,22 @@ async function openReady(over: Partial<BoardPanelDeps> = {}): Promise<{ instance
   const panel = win.__webviewPanels[0]!;
   await panel.__receive({ type: "ready" });
   return { instance, panel };
+}
+
+// A window reload's restored board tab: a bare panel of the board's view type handed to the registered
+// serializer, which is all the host gives back.
+function restoreTab(build: () => BoardPanelDeps = () => deps()): StubPanel {
+  const serializer = BoardPanel.registerSerializer(build);
+  const restored = vscode.window.createWebviewPanel(
+    "playwrightBddRunner.coverageBoard",
+    "Coverage Board",
+    vscode.ViewColumn.Beside,
+    {}
+  ) as unknown as StubPanel;
+  void win.__webviewSerializers.get("playwrightBddRunner.coverageBoard")!.deserializeWebviewPanel(restored, undefined);
+  // The host allows one serializer per view type, so this one retires with the revival it drove.
+  serializer.dispose();
+  return restored;
 }
 
 describe("BoardPanel", () => {
@@ -327,6 +345,125 @@ describe("BoardPanel", () => {
     await panel.__receive({ type: "ready" });
 
     expect(lastRender(panel)).toBeDefined();
+    expect(panel.webview.__posted.filter(isRender)).toHaveLength(1);
+    expect(panel.webview.__posted.filter((m) => m.type === "activate")).toHaveLength(1);
+  });
+
+  // VS Code rebuilds the webview's DOM on a window reload or a move between editor groups, and that
+  // fresh document opens with every pane hidden and nothing painted in it.
+  it("re-activates the current tab and re-renders from a fresh model when a rebuilt webview readies again", async () => {
+    let current = MODEL;
+    const { panel } = await openReady({ buildModel: () => current });
+    await panel.__receive({ type: "tab", tab: "matrix" });
+    current = { ...MODEL, available: [{ key: "NEW-1", pills: [], links: [] }] };
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ type: "ready" });
+
+    const rehydration = panel.webview.__posted.slice(before);
+    expect(rehydration.filter((m): m is ActivateMessage => m.type === "activate").map((m) => m.tab)).toEqual(["matrix"]);
+    expect(rehydration.filter(isRender)).toHaveLength(1);
+    expect(lastRender(panel)!.available.map((t) => t.key)).toEqual(["NEW-1"]);
+  });
+
+  // The rebuilt document brings back an empty search box, so a query kept host-side would narrow the
+  // board against a filter nothing on screen still shows.
+  it("drops the search query when the webview comes back", async () => {
+    const { panel } = await openReady();
+    await panel.__receive({ surface: "board", type: "search", value: "cart.feature" });
+    expect(lastRender(panel)!.scenarios.map((s) => s.name)).toEqual(["Checkout"]);
+
+    await panel.__receive({ type: "ready" });
+
+    expect(lastRender(panel)!.filtering).toBe(false);
+    expect(lastRender(panel)!.scenarios.map((s) => s.name)).toEqual(["Log in", "Checkout"]);
+  });
+
+  it("re-posts the run of a publish still awaiting its answer when the webview comes back", async () => {
+    const { instance, panel } = await openReady();
+    void instance.publish.present({
+      title: "Publish run results",
+      runs: [],
+      selectedRunId: "",
+      jiraSearchAvailable: false,
+      knownProjectKeys: [],
+      attachments: { available: false, suggestions: [], uploadLimitBytes: 0, evidenceStream: "evidence" },
+    });
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ type: "ready" });
+
+    expect(panel.webview.__posted.slice(before).filter((m) => m.type === "model")).toHaveLength(1);
+  });
+
+  it("repaints a live link session onto a rebuilt webview: its tab and everything it had on screen", async () => {
+    const { instance, panel } = await openReady();
+    const session = instance.link.begin({ title: "Link scenario", searchPlaceholder: "Search tests" });
+    session.setRows([{ id: "CALC-1", key: "CALC-1", summary: "Add two numbers", kind: "test" }]);
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ type: "ready" });
+
+    const replay = panel.webview.__posted.slice(before);
+    expect(replay).toContainEqual({ type: "linkTab", visible: true, title: "Link scenario" });
+    expect(replay.filter((m) => m.type === "reset")).toHaveLength(1);
+    expect(replay.filter((m) => m.type === "rows")).toHaveLength(1);
+    expect(lastActivate(panel)).toBe("link");
+  });
+
+  it("posts no link paint on a re-hydration with no session live", async () => {
+    const { panel } = await openReady();
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ type: "ready" });
+
+    expect(panel.webview.__posted.slice(before).filter((m) => m.type === "linkTab")).toEqual([]);
+  });
+
+  it("adopts a board tab a window reload restored, so it paints and activates like a fresh open", async () => {
+    const restored = restoreTab();
+    await restored.__receive({ type: "ready" });
+
+    expect(restored.webview.html).toContain('id="pane-mapping"');
+    expect(lastActivate(restored)).toBe("mapping");
+    expect(lastRender(restored)!.scenarios.map((s) => s.name)).toEqual(["Log in", "Checkout"]);
+  });
+
+  it("drops a restored tab when a board is already open, revealing the live one instead", async () => {
+    const { instance, panel } = await openReady();
+
+    const restored = restoreTab();
+
+    expect(restored.webview.html).toBe("");
+    expect(restored.__disposed).toBe(true);
+    expect(panel.__revealCount).toBe(1);
+    expect(BoardPanel.open(deps())).toBe(instance);
+  });
+
+  // A half-wired revival would leave a tab nothing can ever paint, so the panel goes instead.
+  it("drops a restored tab whose deps cannot be built, without failing the revival", () => {
+    const restored = restoreTab(() => {
+      throw new Error("no workspace");
+    });
+
+    expect(restored.__disposed).toBe(true);
+    expect(BoardPanel.selectedTests()).toEqual([]);
+  });
+
+  // The board and link fragments both declare a top-level `const search`; as sibling classic scripts that
+  // is a parse error that kills the second, so each fragment is emitted in its own function scope.
+  it("emits every fragment script inside its own scope", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("const search = document.getElementById('search');");
+    expect(html).toContain("const search = document.getElementById('link-search');");
+    const bodies = [...html.matchAll(/<script nonce="[^"]+">([\s\S]*?)<\/script>/g)].map((m) => m[1]!.trim());
+    expect(bodies.length).toBeGreaterThan(1);
+    for (const body of bodies) {
+      expect(body.startsWith("(function () {")).toBe(true);
+      expect(body.endsWith("})();")).toBe(true);
+    }
   });
 
   it("tags every board render with surface board and activates the Mapping tab on open", async () => {

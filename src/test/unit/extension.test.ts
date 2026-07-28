@@ -29,8 +29,10 @@ function stubMemento(): StubMemento {
   };
 }
 
+const contexts: StubContext[] = [];
+
 function makeStubContext(): StubContext {
-  return {
+  const context: StubContext = {
     subscriptions: [],
     workspaceState: stubMemento(),
     // The Xray metadata cache keys off globalState; a realistic stub keeps activation honest.
@@ -42,10 +44,19 @@ function makeStubContext(): StubContext {
       onDidChange: vi.fn().mockReturnValue({ dispose: vi.fn() }),
     },
   };
+  contexts.push(context);
+  return context;
 }
 
+// Activation registers host-wide singletons (the board's webview serializer among them) on the
+// context's subscriptions, so an undrained context makes the next activation fail.
 afterEach(() => {
   deactivate();
+  for (const context of contexts.splice(0)) {
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+  }
 });
 
 describe("activate", () => {

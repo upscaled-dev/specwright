@@ -131,7 +131,13 @@ interface StubWebviewPanel {
   __receive: (message: unknown) => Promise<void>;
 }
 
+interface StubWebviewPanelSerializer {
+  deserializeWebviewPanel: (panel: StubWebviewPanel, state: unknown) => Thenable<void>;
+}
+
 const __webviewPanels: StubWebviewPanel[] = [];
+// Keyed by view type, like the real host: tests revive a panel by calling the registered serializer.
+const __webviewSerializers = new Map<string, StubWebviewPanelSerializer>();
 
 function createStubWebviewPanel(
   viewType: string,
@@ -292,6 +298,17 @@ export const window = {
     showOptions?: unknown,
     options?: unknown
   ): StubWebviewPanel => createStubWebviewPanel(viewType, title, showOptions, options),
+  // Throws on a second serializer for the same view type, as the real host does.
+  registerWebviewPanelSerializer: (
+    viewType: string,
+    serializer: StubWebviewPanelSerializer
+  ): { dispose: () => void } => {
+    if (__webviewSerializers.has(viewType)) {
+      throw new Error(`A webview with viewType '${viewType}' is already registered`);
+    }
+    __webviewSerializers.set(viewType, serializer);
+    return { dispose: (): void => { __webviewSerializers.delete(viewType); } };
+  },
   createQuickPick: (): StubQuickPick => createStubQuickPick(),
   __quickPicks,
   __resetQuickPicks: (): void => { __quickPicks.length = 0; },
@@ -303,9 +320,11 @@ export const window = {
     __lastTreeView = undefined;
   },
   __webviewPanels,
+  __webviewSerializers,
   __resetWebviewPanels: (): void => {
     for (const panel of [...__webviewPanels]) { panel.dispose(); }
     __webviewPanels.length = 0;
+    __webviewSerializers.clear();
   },
 };
 

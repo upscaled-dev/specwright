@@ -327,6 +327,13 @@ export class BoardSurface {
     this.render();
   }
 
+  // A rebuilt webview comes back with an empty search box, so the query it was filtering behind goes
+  // with it; keeping it would leave the board narrowed by a filter nothing on screen still shows.
+  public rehydrate(): void {
+    this.query = "";
+    this.refresh();
+  }
+
   // Drop checked ids the board no longer offers, against the model rather than the rendered slice, so a
   // search that hides a card never silently unchecks it. Scenario cards are never scoped away, so they
   // are pruned against the whole model; test cards are pruned against the SCOPED one, so a container can

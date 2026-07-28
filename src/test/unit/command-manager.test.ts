@@ -325,6 +325,23 @@ describe("command contributions ↔ handler registrations parity", () => {
     return registered;
   }
 
+  // The board's webview serializer must stay out of the re-runnable path: the host refuses a second one
+  // for the same view type, and registerCommands is re-run on purpose.
+  it("survives a re-run of registerCommands once the board serializer is registered", () => {
+    const subscriptions: Array<{ dispose: () => void }> = [];
+    const context = { subscriptions } as unknown as vscode.ExtensionContext;
+    const mgr = CommandManager.create(makeContext());
+
+    mgr.registerCommands(context);
+    mgr.registerBoardSerializer(context);
+
+    expect(() => mgr.registerCommands(context)).not.toThrow();
+    mgr.dispose();
+    for (const subscription of subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+  });
+
   it("every contributed playwrightBddRunner command has a handler and vice versa", () => {
     const contributed = pkg.contributes.commands.map((c) => c.command).sort();
     const registered = registeredCommandIds().sort();

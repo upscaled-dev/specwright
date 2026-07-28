@@ -274,6 +274,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandManager.setXrayProbe(probe);
     commandManager.setPublishLedger(publishLedger);
     commandManager.setTraceabilitySubsystem(traceabilitySubsystem);
+    // After the setters above, so a Coverage Board tab revived from the previous window reads deps that
+    // are fully wired.
+    commandManager.registerBoardSerializer(context);
 
     providerRegistry.applyCurrent();
     traceabilitySubsystem.applyCurrent();

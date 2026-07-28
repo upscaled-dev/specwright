@@ -305,6 +305,22 @@ export class CommandManager {
     }
   }
 
+  // Called once per activation, and after the subsystem and ledger are wired: the host refuses a second
+  // serializer for the same view type, and a board revived before those are set would read empty deps.
+  // A revival that cannot build its deps drops the user's tab, so the reason is logged on the way out.
+  public registerBoardSerializer(context: vscode.ExtensionContext): void {
+    context.subscriptions.push(
+      BoardPanel.registerSerializer(() => {
+        try {
+          return this.boardDeps();
+        } catch (error) {
+          this.logger.error("Reviving the Coverage Board tab failed", { error: errMsg(error) });
+          throw error;
+        }
+      })
+    );
+  }
+
   private registerCommand(context: vscode.ExtensionContext, options: CommandOptions): void {
     const disposable = vscode.commands.registerCommand(options.command, async (...args: CommandArguments) => {
       try {

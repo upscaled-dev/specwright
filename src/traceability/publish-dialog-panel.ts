@@ -1,7 +1,7 @@
 import { escapeHtml } from "../utils/webview";
 import { errMsg, scrubJwtLike } from "../utils/text";
 import { PublishRequest, PublishTarget } from "./contracts";
-import { AttachmentSuggestion, PublishDialogModel, PublishDialogResult } from "./publish-flow";
+import { AttachmentSuggestion, PublishDialogModel, PublishDialogResult, PublishRunOption } from "./publish-flow";
 import { SurfaceFragment, SurfaceHost } from "./webview-host";
 
 const IMPORT_HINT = "Create → POST /import/execution/cucumber/multipart · Append → POST /import/execution";
@@ -51,6 +51,15 @@ interface CancelMessage {
 }
 type PublishIncoming = SearchMessage | BrowseMessage | ConfirmMessage | AttachPendingMessage | CancelMessage;
 
+// A run's pending-attachments banner after an in-dialog retry: the still-failing count, or no banner at
+// all once nothing is left. The same move the webview makes on a `pending-result`.
+function withPending(run: PublishRunOption, remaining: number): PublishRunOption {
+  if (remaining > 0 && run.pendingAttachments) {
+    return { ...run, pendingAttachments: { key: run.pendingAttachments.key, count: remaining } };
+  }
+  return { ...run, pendingAttachments: undefined };
+}
+
 /**
  * The View 3 publish dialog, hosted as the board's permanent Publish tab. Constructed once with a
  * `SurfaceHost`, the delegate, and a `startPublish` callback (invoked when the user activates the tab
@@ -60,7 +69,10 @@ type PublishIncoming = SearchMessage | BrowseMessage | ConfirmMessage | AttachPe
  * banners, and form from the posted model.
  */
 export class PublishSurface {
-  private pending: { resolve: (result: PublishDialogResult | undefined) => void } | undefined;
+  // The live present: its resolver and the model the tab is currently showing. The model is amended as
+  // the dialog's own actions change it, so what a re-hydration replays is the run the user last saw and
+  // never the present-time snapshot.
+  private pending: { model: PublishDialogModel; resolve: (result: PublishDialogResult | undefined) => void } | undefined;
   private searchController: AbortController | undefined;
 
   constructor(
@@ -81,8 +93,16 @@ export class PublishSurface {
     this.host.post({ type: "model", model });
     this.host.activate();
     return new Promise<PublishDialogResult | undefined>((resolve) => {
-      this.pending = { resolve };
+      this.pending = { model, resolve };
     });
+  }
+
+  // A rebuilt webview (window reload, a move between editor groups) comes back on the idle hint, so a
+  // present still waiting repaints its run rather than stranding the user in front of a dead tab.
+  public rehydrate(): void {
+    if (this.pending) {
+      this.host.post({ type: "model", model: this.pending.model });
+    }
   }
 
   // Called in the flow's finally: clears the busy state to an idle placeholder, staying on the Publish
@@ -132,11 +152,17 @@ export class PublishSurface {
     pending.resolve(result);
   }
 
+  // The picked files ride the model as further suggestions, which is how the webview paints them, so a
+  // re-hydration brings back the rows the user chose instead of an empty attachment list.
   private async runBrowse(): Promise<void> {
     const files = await this.delegate.browseFiles();
     if (this.settled()) {
       return;
     }
+    this.amend((model) => ({
+      ...model,
+      attachments: { ...model.attachments, suggestions: [...model.attachments.suggestions, ...files] },
+    }));
     this.host.post({ type: "browse-result", items: files.map((f) => ({ path: f.path, name: f.name, size: f.size })) });
   }
 
@@ -145,7 +171,17 @@ export class PublishSurface {
     if (this.settled()) {
       return;
     }
+    this.amend((model) => ({
+      ...model,
+      runs: model.runs.map((run) => (run.id === message.runId ? withPending(run, result.remaining) : run)),
+    }));
     this.host.post({ type: "pending-result", runId: message.runId, remaining: result.remaining });
+  }
+
+  private amend(update: (model: PublishDialogModel) => PublishDialogModel): void {
+    if (this.pending) {
+      this.pending = { ...this.pending, model: update(this.pending.model) };
+    }
   }
 
   private async runSearch(message: SearchMessage): Promise<void> {
