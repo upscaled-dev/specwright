@@ -12,6 +12,7 @@ eslint.config.mjs
 commitlint.config.mjs
 .husky/**
 .claude/**
+CLAUDE.md
 
 # Build/test artifacts
 dist/*.vsix
