@@ -12,6 +12,7 @@ import { NotSupportedError, PreflightDecision, RunArtifact, RunArtifactResult, S
 import { EvidenceFs } from "../../traceability/evidence-resolution";
 import { ScenarioRef } from "../../traceability/scenario-ref";
 import { Logger, LogLevel } from "../../utils/logger";
+import type { OutputChannel } from "vscode";
 
 let nextLine = 3;
 function ref(name: string): ScenarioRef {
@@ -96,6 +97,27 @@ describe("createXrayResultPublishing: publish routing (pin: create vs append map
     expect(body.testExecutionKey).toBe("XNP-77");
     expect(body.tests).toHaveLength(1);
     expect(outcome.ref.key).toBe("XNP-100");
+  });
+
+  // Whether a real Xray response can carry neither field is an open wire question, so the guard is the
+  // honest one: the results landed somewhere this session cannot name, and no key is invented for them.
+  it("leaves the ref empty and logs when a create response carries neither key nor id", async () => {
+    const lines: string[] = [];
+    const channel = { appendLine: (line: string) => lines.push(line), show: () => {}, clear: () => {}, dispose: () => {} };
+    const t = spyTransport({ status: 200, ok: true, body: { self: "https://x/1001" } });
+    const publishing = createXrayResultPublishing(
+      makeDeps({ transport: t.transport, logger: Logger.create(channel as unknown as OutputChannel, LogLevel.WARN) })
+    );
+
+    const outcome = await publishing.publish(artifact([mapped("a", "CALC-1")]), {
+      mode: "create-new",
+      project: "CALC",
+      summary: "Run",
+    });
+
+    expect(outcome.ref.key).toBe("");
+    expect(outcome.imported).toBe(1);
+    expect(lines.some((line) => line.includes("The import response named no execution"))).toBe(true);
   });
 
   it("falls back to the sent execution key when the append response omits one", async () => {

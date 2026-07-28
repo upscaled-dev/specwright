@@ -68,7 +68,7 @@ describe("linkScenarioPicks", () => {
 
   it("lists synced test cases sorted by key with their summaries", async () => {
     const adapter = new InMemoryTraceabilityAdapter();
-    adapter.seedCatalogue([{ key: "12", summary: "twelve" }, { key: "3", summary: "three" }], "complete");
+    adapter.seedCatalogue([{ key: "12", summary: "twelve" }, { key: "3", summary: "three" }], []);
     await adapter.metadata.sync({ testKeys: ["12", "3"] });
     expect(linkScenarioPicks(adapter.metadata.snapshot())).toEqual([
       { key: "12", summary: "twelve" },

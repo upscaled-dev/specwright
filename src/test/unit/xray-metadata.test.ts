@@ -106,7 +106,7 @@ describe("XrayMetadataCapability sync", () => {
     await capability.sync({ projectKeys: ["CALC"] });
 
     const snap = capability.snapshot();
-    expect(snap.completeness).toBe("complete");
+    expect(snap.completeProjects).toEqual(["CALC"]);
     expect(snap.syncedAt).toBe(10_000);
     expect([...snap.tests.keys()].sort()).toEqual(["CALC-1", "CALC-2"]);
     expect(snap.catalogueProjects).toEqual(["CALC"]);
@@ -114,7 +114,7 @@ describe("XrayMetadataCapability sync", () => {
     expect(fired).toBeGreaterThan(0);
   });
 
-  it("stays partial for a test-key-only fetch so orphans are never authoritative", async () => {
+  it("completes no project for a test-key-only fetch so orphans are never authoritative", async () => {
     const capability = makeCapability({
       client: fakeClient({
         fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "CALC-1" }])),
@@ -122,10 +122,10 @@ describe("XrayMetadataCapability sync", () => {
     });
 
     await capability.sync({ testKeys: ["CALC-1"] });
-    expect(capability.snapshot().completeness).toBe("partial");
+    expect(capability.snapshot().completeProjects).toEqual([]);
   });
 
-  it("demotes to partial when the catalogue fetch reports it is incomplete", async () => {
+  it("leaves out a project whose catalogue fetch reports it is incomplete", async () => {
     const capability = makeCapability({
       client: fakeClient({
         fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1" }], { complete: false })),
@@ -133,7 +133,7 @@ describe("XrayMetadataCapability sync", () => {
     });
 
     await capability.sync({ projectKeys: ["CALC"] });
-    expect(capability.snapshot().completeness).toBe("partial");
+    expect(capability.snapshot().completeProjects).toEqual([]);
   });
 
   it("reaches complete on the production combined scope (project catalogue + tag-derived key batch)", async () => {
@@ -145,7 +145,7 @@ describe("XrayMetadataCapability sync", () => {
     });
 
     await capability.sync({ projectKeys: ["CALC"], testKeys: ["CALC-1"] });
-    expect(capability.snapshot().completeness).toBe("complete");
+    expect(capability.snapshot().completeProjects).toEqual(["CALC"]);
   });
 
   it("stays complete when the supplemental key batch errors, surfacing the error without demoting", async () => {
@@ -158,20 +158,20 @@ describe("XrayMetadataCapability sync", () => {
 
     await capability.sync({ projectKeys: ["CALC"], testKeys: ["CALC-9"] });
     const snap = capability.snapshot();
-    expect(snap.completeness).toBe("complete");
+    expect(snap.completeProjects).toEqual(["CALC"]);
     expect(snap.errors).toEqual(["key batch failed"]);
   });
 
-  it("stays unknown for a test-key-only fetch that returns no data", async () => {
+  it("completes no project for a test-key-only fetch that returns no data", async () => {
     const capability = makeCapability({
       client: fakeClient({ fetchTestsByKeys: () => Promise.resolve(outcome([])) }),
     });
 
     await capability.sync({ testKeys: ["CALC-1"] });
-    expect(capability.snapshot().completeness).toBe("unknown");
+    expect(capability.snapshot().completeProjects).toEqual([]);
   });
 
-  it("demotes to partial when a catalogue page errors even with a key batch present", async () => {
+  it("leaves out a project whose catalogue page errored even with a key batch present", async () => {
     const capability = makeCapability({
       client: fakeClient({
         fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1" }], { errors: ["page 2 failed"] })),
@@ -180,7 +180,94 @@ describe("XrayMetadataCapability sync", () => {
     });
 
     await capability.sync({ projectKeys: ["CALC"], testKeys: ["CALC-1"] });
-    expect(capability.snapshot().completeness).toBe("partial");
+    expect(capability.snapshot().completeProjects).toEqual([]);
+  });
+
+  it("completes only the project whose catalogue landed when a sibling project errors", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: (projectKey) =>
+          Promise.resolve(
+            projectKey === "PAY"
+              ? outcome([], { complete: false, errors: ["PAY unreadable"] })
+              : outcome([{ key: "CALC-1", summary: "one" }])
+          ),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC", "PAY"] });
+
+    const snap = capability.snapshot();
+    expect(snap.catalogueProjects).toEqual(["CALC", "PAY"]);
+    expect(snap.completeProjects).toEqual(["CALC"]);
+    expect(snap.errors).toEqual(["PAY unreadable"]);
+  });
+
+  it("completes an error-free catalogue that legitimately holds no tests, and stamps it", async () => {
+    const capability = makeCapability({
+      client: fakeClient({ fetchProjectCatalogue: () => Promise.resolve(outcome([])) }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"] });
+
+    const snap = capability.snapshot();
+    expect(snap.completeProjects).toEqual(["CALC"]);
+    expect(snap.syncedAt).toBe(10_000);
+    expect(snap.errors).toEqual([]);
+  });
+
+  // The empty-but-complete project is the case a whole-run "learned nothing" test gets wrong: it fetched
+  // no tests, so only its own landed catalogue proves the run is worth committing.
+  it("keeps an empty project's completed catalogue and the stamp when a sibling project errors", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: (projectKey) =>
+          Promise.resolve(
+            projectKey === "PAY" ? outcome([], { complete: false, errors: ["PAY unreadable"] }) : outcome([])
+          ),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC", "PAY"] });
+
+    const snap = capability.snapshot();
+    expect(snap.completeProjects).toEqual(["CALC"]);
+    expect(snap.syncedAt).toBe(10_000);
+    expect(snap.errors).toEqual(["PAY unreadable"]);
+  });
+
+  // A clean key batch proves absence even when the catalogue half of the run errored; discarding the
+  // whole run would silently drop that evidence.
+  it("commits a clean key batch's verified-absence when the catalogue errored", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: () => Promise.resolve(outcome([], { complete: false, errors: ["CALC unreadable"] })),
+        fetchTestsByKeys: () => Promise.resolve(outcome([])),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"], testKeys: ["CALC-404"] });
+
+    const snap = capability.snapshot();
+    expect(snap.verifiedAbsentKeys).toEqual(["CALC-404"]);
+    expect(snap.completeProjects).toEqual([]);
+    expect(snap.syncedAt).toBe(10_000);
+    expect(snap.errors).toEqual(["CALC unreadable"]);
+  });
+
+  it("leaves a wholly failed first sync unsynced rather than stamping an unknown catalogue", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: () => Promise.resolve(outcome([], { complete: false, errors: ["transport failure"] })),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"] });
+
+    const snap = capability.snapshot();
+    expect(snap.syncedAt).toBeUndefined();
+    expect(snap.completeProjects).toEqual([]);
+    expect(snap.errors).toEqual(["transport failure"]);
   });
 
   it("records a queried key the successful batch did not return as verified-absent", async () => {
@@ -258,7 +345,7 @@ describe("XrayMetadataCapability sync", () => {
     expect(snap.errors).toEqual(["boom"]);
   });
 
-  it("keeps previous data and completeness on a total fetch failure, surfacing only the errors", async () => {
+  it("keeps previous data and catalogue on a total fetch failure, surfacing only the errors", async () => {
     const memento = fakeMemento();
     const capability = makeCapability({
       client: fakeClient({
@@ -267,7 +354,7 @@ describe("XrayMetadataCapability sync", () => {
       memento,
     });
     await capability.sync({ projectKeys: ["CALC"] });
-    expect(capability.snapshot().completeness).toBe("complete");
+    expect(capability.snapshot().completeProjects).toEqual(["CALC"]);
 
     // Re-sync with a client that returns no data plus an error: the previous complete snapshot stands.
     const failing = new XrayMetadataCapability({
@@ -286,7 +373,8 @@ describe("XrayMetadataCapability sync", () => {
     await failing.sync({ projectKeys: ["CALC"] });
 
     const snap = failing.snapshot();
-    expect(snap.completeness).toBe("complete");
+    expect(snap.completeProjects).toEqual(["CALC"]);
+    expect(snap.syncedAt).toBe(10_000);
     expect(snap.tests.get("CALC-1")?.summary).toBe("kept");
     expect(snap.errors).toContain("transport failure");
   });
@@ -372,7 +460,7 @@ describe("XrayMetadataCapability offline cache load", () => {
 
     expect(fired).toBe(1);
     expect(offline.snapshot().tests.get("CALC-1")?.summary).toBe("cached");
-    expect(offline.snapshot().completeness).toBe("complete");
+    expect(offline.snapshot().completeProjects).toEqual(["CALC"]);
   });
 });
 
@@ -424,7 +512,7 @@ describe("XrayMetadataCapability empty scope", () => {
     await capability.sync({ projectKeys: [], testKeys: [] });
 
     const after = capability.snapshot();
-    expect(after.completeness).toBe(before.completeness);
+    expect(after.completeProjects).toEqual(before.completeProjects);
     expect(after.syncedAt).toBe(before.syncedAt);
     expect([...after.tests.keys()]).toEqual([...before.tests.keys()]);
     expect(fired).toBe(0);
@@ -465,9 +553,9 @@ describe("XrayMetadataCapability account isolation", () => {
     const cached: CachedMetadata = {
       schemaVersion: CACHE_SCHEMA_VERSION,
       syncedAt: 5,
-      completeness: "complete",
       fetchedScopes: [],
       catalogueProjects: [],
+      completeProjects: [],
       verifiedAbsentKeys: [],
       errors: [],
       tests,

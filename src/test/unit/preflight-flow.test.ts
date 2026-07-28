@@ -19,7 +19,7 @@ const MAPPED = ref({ name: "Mapped", line: 8 });
 const SELECTION: BatchSelection = { kind: "multi-select", scenarios: [UNMAPPED, MAPPED] };
 
 function snapshot(over: Partial<TraceabilitySnapshot> = {}): TraceabilitySnapshot {
-  return { links: [], untraced: [], orphans: [], stale: false, completeness: "complete", errors: [], ...over };
+  return { links: [], untraced: [], orphans: [], stale: false, completeProjects: ["CALC"], errors: [], ...over };
 }
 
 // One unmapped + one ready-mapped scenario; the resolved invocations mirror them.

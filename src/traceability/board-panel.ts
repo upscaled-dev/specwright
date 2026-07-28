@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import { errMsg } from "../utils/text";
+import { Logger } from "../utils/logger";
 import { contentSecurityPolicy, createNonce } from "../utils/webview";
 import { boardFragment } from "./board-fragment";
 import { BoardSurface, BoardSurfaceDeps } from "./board-surface";
@@ -17,6 +19,7 @@ type ShellTab = BoardTab | "publish" | "link";
 
 export interface BoardPanelDeps extends BoardSurfaceDeps {
   readonly providerLabel: string;
+  readonly logger: Logger;
   // The editor tab's icon, one file per theme. Absent in rigs with no extension root to resolve media
   // against, where the tab is not painted anyway.
   readonly tabIcon?: { light: vscode.Uri; dark: vscode.Uri } | undefined;
@@ -43,6 +46,7 @@ export class BoardPanel {
   private ready = false;
   private disposed = false;
   private activeTab: ShellTab = "mapping";
+  private readonly logger: Logger;
   public readonly board: BoardSurface;
   public readonly publish: PublishSurface;
   public readonly link: LinkSurface;
@@ -51,6 +55,7 @@ export class BoardPanel {
     private readonly panel: vscode.WebviewPanel,
     deps: BoardPanelDeps
   ) {
+    this.logger = deps.logger;
     this.disposables.push(
       this.panel.onDidDispose(() => this.dispose()),
       this.panel.webview.onDidReceiveMessage((message) => this.handleInbound(message))
@@ -205,9 +210,19 @@ export class BoardPanel {
       return;
     }
     this.activateTab(this.activeTab);
-    this.board.rehydrate();
-    this.publish.rehydrate();
-    this.link.rehydrate();
+    this.replay("board", () => this.board.rehydrate());
+    this.replay("publish", () => this.publish.rehydrate());
+    this.replay("link", () => this.link.rehydrate());
+  }
+
+  // The replays are independent paints of one blank document, so a section that throws must cost only its
+  // own pane: swallowing it here is what keeps a failing rehydrate from leaving the whole board empty.
+  private replay(surface: SurfaceName, rehydrate: () => void): void {
+    try {
+      rehydrate();
+    } catch (error) {
+      this.logger.warn(`Repainting the ${surface} surface failed`, { error: errMsg(error) });
+    }
   }
 
   public dispose(): void {

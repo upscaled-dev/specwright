@@ -14,12 +14,9 @@ export function normalizeProjectKeys(keys: readonly string[]): string[] {
   return [...seen].sort((a, b) => a.localeCompare(b));
 }
 
-// Which rung of the source ladder the universe came from: `jira` when the provider enumerated its own
-// project directory, `xray-only` when the workspace's own keys are all there is to go on.
-export type ProjectUniverseTier = "jira" | "xray-only";
-
 export interface ProjectUniverseSources {
-  // Every project the provider's connection can enumerate. Its presence is what makes the tier `jira`.
+  // Every project the provider's connection can enumerate. Absent when it cannot enumerate at all,
+  // which is not the same as reaching zero projects.
   readonly directoryProjects?: readonly string[] | undefined;
   // Projects the workspace's own test and requirement tags reference. Never a prerequisite: a workspace
   // with no tags still gets the setting, the catalogue, and the default key.
@@ -32,18 +29,13 @@ export interface ProjectUniverseSources {
   readonly selectedKey?: string | undefined;
 }
 
-export interface ProjectUniverse {
-  readonly projects: string[];
-  readonly tier: ProjectUniverseTier;
-}
-
 /**
  * The projects a surface may offer, unioned down the source ladder and normalized. One owner for the
  * list the publish dialog's project dropdown and the board's scope selector read, so they can never
  * disagree. The sync scope resolves the same way minus the directory (see `resolveSyncProjectKeys`).
  */
-export function resolveProjectUniverse(sources: ProjectUniverseSources): ProjectUniverse {
-  const projects = normalizeProjectKeys([
+export function resolveProjectUniverse(sources: ProjectUniverseSources): string[] {
+  return normalizeProjectKeys([
     ...(sources.directoryProjects ?? []),
     ...(sources.tagDerivedKeys ?? []),
     ...(sources.syncSettingKeys ?? []),
@@ -51,10 +43,6 @@ export function resolveProjectUniverse(sources: ProjectUniverseSources): Project
     sources.defaultKey ?? "",
     sources.selectedKey ?? "",
   ]);
-  // The tier answers whether the provider could enumerate at all, not how many it returned: a connection
-  // that legitimately reaches zero projects is still the jira tier, so its empty state can say the token
-  // reaches nothing rather than telling the user to add keys to settings.
-  return { projects, tier: sources.directoryProjects !== undefined ? "jira" : "xray-only" };
 }
 
 /**
@@ -64,7 +52,7 @@ export function resolveProjectUniverse(sources: ProjectUniverseSources): Project
  * cannot leak a site-wide fetch into a sync.
  */
 export function resolveSyncProjectKeys(sources: ProjectUniverseSources): string[] {
-  return resolveProjectUniverse({ ...sources, directoryProjects: undefined }).projects;
+  return resolveProjectUniverse({ ...sources, directoryProjects: undefined });
 }
 
 // The board's project scope, persisted per workspace. All Projects is the absence of a selection, so

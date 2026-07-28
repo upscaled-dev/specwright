@@ -53,7 +53,8 @@ export interface XrayTestRecord {
 }
 
 // The result of fetching one or more scopes. `complete` is false when any page failed or pagination
-// was cut short; the capability demotes completeness so orphans are never derived from it.
+// was cut short; the capability then leaves that project out of `completeProjects`, so orphans are
+// never derived from it.
 export interface XrayFetchOutcome {
   readonly tests: XrayTestRecord[];
   readonly pages: XrayCachePage[];

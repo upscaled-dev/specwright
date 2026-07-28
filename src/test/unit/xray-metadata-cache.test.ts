@@ -37,9 +37,9 @@ function sample(): CachedMetadata {
   return {
     schemaVersion: CACHE_SCHEMA_VERSION,
     syncedAt: 1234,
-    completeness: "complete",
     fetchedScopes: ["CALC"],
     catalogueProjects: ["CALC"],
+    completeProjects: ["CALC"],
     verifiedAbsentKeys: ["CALC-404"],
     errors: [],
     tests: [{ key: "CALC-1", summary: "one" }],
@@ -54,8 +54,8 @@ describe("metadataCacheStorageKey", () => {
     ).toBe(`traceability:xray:eu.xray.cloud.getxray.app:client-42:wsh:${CACHE_SCHEMA_VERSION}`);
   });
 
-  it("is at schema version 3: the bump that orphans v2 entries stored before issueId was added", () => {
-    expect(CACHE_SCHEMA_VERSION).toBe(3);
+  it("is at schema version 4: the bump that orphans v3 entries stored with whole-sync completeness", () => {
+    expect(CACHE_SCHEMA_VERSION).toBe(4);
   });
 });
 
@@ -91,7 +91,7 @@ describe("XrayMetadataCache", () => {
     await new XrayMetadataCache(memento, identity("client-a")).save(sample());
 
     const reloaded = await new XrayMetadataCache(memento, identity("client-a")).load();
-    expect(reloaded?.completeness).toBe("complete");
+    expect(reloaded?.completeProjects).toEqual(["CALC"]);
     expect(reloaded?.tests[0]?.summary).toBe("one");
   });
 

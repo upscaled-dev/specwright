@@ -7,7 +7,7 @@ import {
   ResultPublishingCapability,
   RunArtifact,
 } from "../traceability/contracts";
-import { publishableResults, PublishableResult } from "../traceability/publish-core";
+import { hasExecutionRef, publishableResults, PublishableResult } from "../traceability/publish-core";
 import {
   EmbeddedEvidence,
   EvidenceEmbedder,
@@ -86,6 +86,9 @@ export interface XrayResultPublishingDeps {
 const cucumberImporter = new CucumberMultipartImporter();
 const xrayJsonImporter = new XrayJsonImporter();
 
+// The execution this publish landed on. An append falls back to the key it addressed, so only a create
+// whose response carries neither field can come back empty, and nothing here invents one: "" is the
+// unknown reference every surface downstream reads as "no execution to point at".
 function executionKeyOf(response: ExecutionImportResponse, request: PublishRequest): string {
   if (response.key !== undefined) {
     return response.key;
@@ -247,6 +250,14 @@ async function publishCreate(
   const response = await cucumberImporter.import(deps.transport, payload, signal);
   const ref: ExecutionRef = { kind: "execution", key: executionKeyOf(response, request) };
   const warnings: string[] = [];
+  if (!hasExecutionRef(ref.key)) {
+    // The import itself succeeded, so this is a note rather than a failure, but the results now sit in an
+    // execution this session cannot name. Said once here, where the absence is first known, and with what
+    // it costs: no browse link, and no issue for the attachment upload to reach.
+    deps.logger.warn("The import response named no execution: no browse link, and attachments cannot upload", {
+      project: request.project,
+    });
+  }
   if (payload.droppedChangedCount > 0) {
     warnings.push(`${payload.droppedChangedCount} scenario(s) changed since the run and were not published.`);
   }

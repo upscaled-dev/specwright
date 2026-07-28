@@ -10,7 +10,7 @@ function snapshot(overrides: Partial<RemoteMetadataSnapshot> = {}): RemoteMetada
     catalogueProjects: [],
     verifiedAbsentKeys: [],
     stale: false,
-    completeness: "unknown",
+    completeProjects: [],
     errors: [],
     ...overrides,
   };

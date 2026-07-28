@@ -58,7 +58,13 @@ import {
 } from "../traceability/contracts";
 import { BatchInvocation, resolveBatchSelection } from "../traceability/batch-selection";
 import { PreflightChoice, runPreflightFlow } from "../traceability/preflight-flow";
-import { isPublishable, publishableResults } from "../traceability/publish-core";
+import {
+  hasExecutionRef,
+  isPublishable,
+  publishableResults,
+  publishOutcomeLead,
+  UNKNOWN_EXECUTION,
+} from "../traceability/publish-core";
 import { AttachmentSuggestion, PublishAttachmentsModel, runPublishFlow } from "../traceability/publish-flow";
 import { PendingAttachmentsResult, PublishDialogDelegate } from "../traceability/publish-dialog-panel";
 import { PublishLedger, STANDALONE_ARTIFACT_PREFIX } from "../traceability/publish-ledger";
@@ -962,6 +968,7 @@ export class CommandManager {
         attachments: () => this.buildPublishAttachments(rawSite),
         priorEntryFor: (artifactId) => this.publishLedger?.find(artifactId, site),
         presentDialog: (model) => board.publish.present(model),
+        presentRetry: (selectedRunId) => board.publish.presentRetry(selectedRunId),
         attachFiles: (executionKey, files) => this.attachFiles(executionKey, files),
         recordPublish: (entry) => {
           published = true;
@@ -1026,6 +1033,9 @@ export class CommandManager {
     const entry = this.publishLedger?.find(artifactId, site);
     if (entry === undefined || entry.pendingAttachments.length === 0) {
       return { remaining: 0 };
+    }
+    if (!this.canReplayAttachments(entry.executionRef)) {
+      return { remaining: entry.pendingAttachments.length };
     }
     const { failed } = await this.attachFiles(entry.executionRef, entry.pendingAttachments);
     this.publishLedger?.setPendingAttachments(artifactId, site, failed);
@@ -1098,6 +1108,18 @@ export class CommandManager {
     return { failed: result.failed };
   }
 
+  // A ledgered upload can only be replayed against an execution the import response actually named; an
+  // older entry carrying a blank reference has no issue to POST to, so it says so once instead of firing
+  // a request that can only 404.
+  private canReplayAttachments(executionRef: string): boolean {
+    if (hasExecutionRef(executionRef)) {
+      return true;
+    }
+    this.logger.warn("Pending attachments cannot be replayed: the ledger entry names no execution");
+    vscode.window.showWarningMessage(`Cannot upload the pending files: they were published to ${UNKNOWN_EXECUTION}.`);
+    return false;
+  }
+
   // Replay the ledgered pending files (toast-Retry or resume). Clears the ones that upload; a still-
   // partial replay re-offers Retry. Never re-imports — the execution already carries its results.
   private async retryAttachments(
@@ -1106,6 +1128,9 @@ export class CommandManager {
     executionKey: string,
     files: readonly string[]
   ): Promise<void> {
+    if (!this.canReplayAttachments(executionKey)) {
+      return;
+    }
     const { failed } = await this.attachFiles(executionKey, files);
     this.publishLedger?.setPendingAttachments(artifactId, site, failed);
     const attached = files.length - failed.length;
@@ -1121,10 +1146,7 @@ export class CommandManager {
   }
 
   private reportPublishSuccess(outcome: PublishOutcome, request: PublishRequest, attachedCount: number): void {
-    const base =
-      request.mode === "create-new"
-        ? `${outcome.ref.key} created: ${outcome.imported} results imported`
-        : `appended to ${outcome.ref.key}: ${outcome.imported} results`;
+    const base = publishOutcomeLead(outcome, request);
     const notes = [...outcome.warnings];
     if (attachedCount > 0) {
       notes.unshift(`${attachedCount} ${plural(attachedCount, "file")} attached`);
@@ -1143,10 +1165,7 @@ export class CommandManager {
     attachedCount: number,
     failed: readonly string[]
   ): void {
-    const base =
-      request.mode === "create-new"
-        ? `${outcome.ref.key} created: ${outcome.imported} results imported`
-        : `appended to ${outcome.ref.key}: ${outcome.imported} results`;
+    const base = publishOutcomeLead(outcome, request);
     const attachedNote = attachedCount > 0 ? ` · ${attachedCount} ${plural(attachedCount, "file")} attached` : "";
     const message = `${base}${attachedNote} · ${failed.length} ${plural(failed.length, "attachment")} failed`;
     const adapter = this.traceabilitySubsystem?.getActiveAdapter() ?? this.context.traceabilityAdapter;
@@ -1325,7 +1344,7 @@ export class CommandManager {
     return resolveProjectUniverse({
       directoryProjects: adapter.projectDirectory?.cached().projects.map((project) => project.key),
       ...this.localProjectSources(adapter),
-    }).projects;
+    });
   }
 
   // The workspace's own project sources, shared by the universe above and the sync scope below.
@@ -1371,6 +1390,7 @@ export class CommandManager {
     const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
     return {
       providerLabel: subsystem?.getActiveAdapter()?.label ?? "Xray",
+      logger: this.logger,
       tabIcon: this.boardTabIcon(),
       buildModel: () =>
         buildBoardViewModel(

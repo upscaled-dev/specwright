@@ -55,7 +55,7 @@ type PublishIncoming = SearchMessage | BrowseMessage | ConfirmMessage | AttachPe
 // all once nothing is left. The same move the webview makes on a `pending-result`.
 function withPending(run: PublishRunOption, remaining: number): PublishRunOption {
   if (remaining > 0 && run.pendingAttachments) {
-    return { ...run, pendingAttachments: { key: run.pendingAttachments.key, count: remaining } };
+    return { ...run, pendingAttachments: { target: run.pendingAttachments.target, count: remaining } };
   }
   return { ...run, pendingAttachments: undefined };
 }
@@ -69,10 +69,14 @@ function withPending(run: PublishRunOption, remaining: number): PublishRunOption
  * banners, and form from the posted model.
  */
 export class PublishSurface {
-  // The live present: its resolver and the model the tab is currently showing. The model is amended as
-  // the dialog's own actions change it, so what a re-hydration replays is the run the user last saw and
-  // never the present-time snapshot.
-  private pending: { model: PublishDialogModel; resolve: (result: PublishDialogResult | undefined) => void } | undefined;
+  // The live present's resolver, when one is waiting.
+  private pending: { resolve: (result: PublishDialogResult | undefined) => void } | undefined;
+  // The model the tab is showing, amended as the dialog's own actions change it, so a re-hydration and a
+  // retry both replay the run the user last saw and never the present-time snapshot.
+  private model: PublishDialogModel | undefined;
+  // Whether the document that painted `model` is still standing. A rebuilt webview comes back blank, so
+  // the retry's lightweight reveal would show an empty form with a live Publish button.
+  private painted = false;
   private searchController: AbortController | undefined;
 
   constructor(
@@ -90,28 +94,65 @@ export class PublishSurface {
     this.resolvePending(undefined);
     this.searchController?.abort();
     this.searchController = undefined;
-    this.host.post({ type: "model", model });
+    this.model = model;
+    this.paint();
     this.host.activate();
+    return this.arm();
+  }
+
+  // A publish that failed leaves the dialog unfinished, so the tab comes back off Publishing… on the run
+  // the user picked, and the present goes live again so the retry's confirm has a resolver waiting. While
+  // the document that painted the form is still standing that is a reveal, keeping every field they filled
+  // in; once it has been rebuilt there is nothing left to reveal, so the model is painted in full instead.
+  // Resolves undefined at once when the board is gone or a newer present already owns the tab.
+  public presentRetry(selectedRunId: string): Promise<PublishDialogResult | undefined> {
+    if (this.pending || this.model === undefined || this.host.isDisposed()) {
+      return Promise.resolve(undefined);
+    }
+    this.model = { ...this.model, selectedRunId };
+    if (this.painted) {
+      this.host.post({ type: "retry" });
+    } else {
+      this.paint();
+    }
+    this.host.activate();
+    return this.arm();
+  }
+
+  private arm(): Promise<PublishDialogResult | undefined> {
     return new Promise<PublishDialogResult | undefined>((resolve) => {
-      this.pending = { model, resolve };
+      this.pending = { resolve };
     });
   }
 
-  // A rebuilt webview (window reload, a move between editor groups) comes back on the idle hint, so a
-  // present still waiting repaints its run rather than stranding the user in front of a dead tab.
+  private paint(): void {
+    this.host.post({ type: "model", model: this.model });
+    this.painted = true;
+  }
+
+  // A rebuilt webview (window reload, a move between editor groups) comes back on the idle hint with a
+  // blank form, so a present still waiting repaints its run rather than stranding the user in front of a
+  // dead tab, and one that has already been answered records that its paint is gone.
   public rehydrate(): void {
-    if (this.pending) {
-      this.host.post({ type: "model", model: this.pending.model });
+    this.painted = false;
+    if (this.pending && this.model !== undefined) {
+      this.paint();
     }
   }
 
   // Called in the flow's finally: clears the busy state to an idle placeholder, staying on the Publish
   // tab (toasts convey the outcome). False when a newer present has already superseded this one, which
   // is also what tells the settling flow it no longer owns the tab.
+  //
+  // Settling for a flow that still owned the tab also retires the model: the tab now shows the idle hint,
+  // so there is nothing left for a retry to come back to. Without that, a publish still in flight from an
+  // EARLIER flow could fail later and re-arm itself over whatever model a newer one had left behind.
   public markSettled(): boolean {
     if (this.pending) {
       return false;
     }
+    this.model = undefined;
+    this.painted = false;
     this.host.post({ type: "settled" });
     return true;
   }
@@ -181,8 +222,8 @@ export class PublishSurface {
   }
 
   private amend(update: (model: PublishDialogModel) => PublishDialogModel): void {
-    if (this.pending) {
-      this.pending = { ...this.pending, model: update(this.pending.model) };
+    if (this.model !== undefined) {
+      this.model = update(this.model);
     }
   }
 
@@ -371,15 +412,17 @@ const PUBLISH_SCRIPT = `
 
   function findRun(id) { return runs.find(function (r) { return r.id === id; }); }
 
+  // Both banners print the target the host resolved (a key, or its phrase for a publish the import
+  // response never named); neither works out what to call it.
   function republishText(n) {
     const when = new Date(n.publishedAt).toLocaleString();
     const mode = n.mode === 'append' ? 'appended' : (n.mode === 'create-new' ? 'new execution' : '');
     const modePart = mode ? ' (' + mode + ')' : '';
-    return 'Already published to ' + n.key + ' on ' + when + modePart + '. Publishing again creates a duplicate.';
+    return 'Already published to ' + n.target + ' on ' + when + modePart + '. Publishing again creates a duplicate.';
   }
   function pendingText(n) {
     const files = n.count === 1 ? 'file' : 'files';
-    return n.count + ' attachment ' + files + ' from the last publish to ' + n.key + ' did not upload.';
+    return n.count + ' attachment ' + files + ' from the last publish to ' + n.target + ' did not upload.';
   }
   function evidenceStreamLine(stream) {
     if (stream === 'issue') { return "Per-test evidence uploads to the execution's Jira issue (xray.attachTo)."; }
@@ -645,6 +688,8 @@ const PUBLISH_SCRIPT = `
   window.__spec.register('publish', function (msg) {
     if (msg.type === 'model') {
       applyModel(msg.model);
+    } else if (msg.type === 'retry') {
+      show('form');
     } else if (msg.type === 'settled') {
       show('idle');
     } else if (msg.type === 'search-result') {
@@ -658,7 +703,7 @@ const PUBLISH_SCRIPT = `
       const run = findRun(msg.runId);
       if (run) {
         run.pendingAttachments = msg.remaining > 0 && run.pendingAttachments
-          ? { key: run.pendingAttachments.key, count: msg.remaining }
+          ? { target: run.pendingAttachments.target, count: msg.remaining }
           : undefined;
         if (msg.runId === selectedRunId) { renderBanners(run); }
       }

@@ -18,6 +18,7 @@ import {
   RunArtifactState,
 } from "../../traceability/contracts";
 import { ScenarioRef } from "../../traceability/scenario-ref";
+import { UNKNOWN_EXECUTION } from "../../traceability/publish-core";
 import { projectFromKey } from "../../xray/xray-adapter";
 
 const CREATED_AT = Date.UTC(2026, 6, 22, 9, 0, 0);
@@ -94,6 +95,9 @@ function deps(runs: readonly RunArtifact[], over: Partial<PublishFlowDeps> = {})
     attachments: () => Promise.resolve(ATTACHMENTS_MODEL),
     priorEntryFor: () => undefined,
     presentDialog: vi.fn<(m: PublishDialogModel) => Promise<PublishDialogResult | undefined>>(() =>
+      Promise.resolve(undefined)
+    ),
+    presentRetry: vi.fn<(selectedRunId: string) => Promise<PublishDialogResult | undefined>>(() =>
       Promise.resolve(undefined)
     ),
     attachFiles: vi.fn(() => Promise.resolve({ failed: [] })),
@@ -289,13 +293,25 @@ describe("runPublishFlow: banners", () => {
   it("surfaces the republish banner (target, time, mode) when the run is on the ledger", async () => {
     const cap = captureModel({ priorEntryFor: () => priorEntry });
     await runPublishFlow(deps([artifact()], cap.over));
-    expect(cap.models[0]!.runs[0]!.republish).toEqual({ key: "XNP-9", publishedAt: 1_699_000_000_000, mode: "append" });
+    expect(cap.models[0]!.runs[0]!.republish).toEqual({ target: "XNP-9", publishedAt: 1_699_000_000_000, mode: "append" });
   });
 
   it("surfaces the pending-attachments banner only when files are pending", async () => {
     const cap = captureModel({ priorEntryFor: () => ({ ...priorEntry, pendingAttachments: ["/ws/a.zip", "/ws/b.zip"] }) });
     await runPublishFlow(deps([artifact()], cap.over));
-    expect(cap.models[0]!.runs[0]!.pendingAttachments).toEqual({ key: "XNP-9", count: 2 });
+    expect(cap.models[0]!.runs[0]!.pendingAttachments).toEqual({ target: "XNP-9", count: 2 });
+  });
+
+  // Both banners speak for a ledger entry, so an entry the import response never named prints the one
+  // phrase for a missing reference rather than an empty target.
+  it("names a missing reference on both banners of an entry the response never named", async () => {
+    const blank = { ...priorEntry, executionRef: "", pendingAttachments: ["/ws/a.zip"] };
+    const cap = captureModel({ priorEntryFor: () => blank });
+
+    await runPublishFlow(deps([artifact()], cap.over));
+
+    expect(cap.models[0]!.runs[0]!.republish?.target).toBe(UNKNOWN_EXECUTION);
+    expect(cap.models[0]!.runs[0]!.pendingAttachments?.target).toBe(UNKNOWN_EXECUTION);
   });
 
   it("shows no banners for a run that was never published", async () => {
@@ -465,6 +481,48 @@ describe("runPublishFlow: publish", () => {
     expect(d.recordPublish).not.toHaveBeenCalled();
     expect(d.reportSuccess).not.toHaveBeenCalled();
   });
+
+  // A failed import leaves the dialog unfinished: the retry comes back on the run the user picked, so
+  // they never re-pick it, and the confirm it sends publishes that same run.
+  it("comes back to the picked run after a failure and publishes it on the retry", async () => {
+    const publish = vi
+      .fn<(a: RunArtifact, r: PublishRequest) => Promise<PublishOutcome>>()
+      .mockRejectedValueOnce(new Error("HTTP 500"))
+      .mockResolvedValueOnce(OUTCOME);
+    const retryRunIds: string[] = [];
+    const d = deps([artifact({ id: "run-2", createdAt: CREATED_AT + 1000 }), artifact({ id: "run-1" })], {
+      publishing: { publish, searchTargets: vi.fn(() => Promise.resolve([])) },
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, [], "run-1"))),
+      presentRetry: vi.fn((selectedRunId: string) => {
+        retryRunIds.push(selectedRunId);
+        return Promise.resolve(dialogResult(CREATE_REQUEST, [], "run-1"));
+      }),
+    });
+
+    await runPublishFlow(d);
+
+    expect(d.reportFailure).toHaveBeenCalledTimes(1);
+    expect(retryRunIds).toEqual(["run-1"]);
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(publish.mock.calls[1]![0].id).toBe("run-1");
+    expect(d.reportSuccess).toHaveBeenCalledTimes(1);
+    expect(d.recordPublish).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends the flow when the retry is cancelled, recording nothing", async () => {
+    const publish = vi.fn(() => Promise.reject(new Error("HTTP 500")));
+    const d = deps([artifact()], {
+      publishing: { publish, searchTargets: vi.fn(() => Promise.resolve([])) },
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
+      presentRetry: vi.fn(() => Promise.resolve(undefined)),
+    });
+
+    await runPublishFlow(d);
+
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(d.presentRetry).toHaveBeenCalledTimes(1);
+    expect(d.recordPublish).not.toHaveBeenCalled();
+  });
 });
 
 describe("runPublishFlow: attachments", () => {
@@ -516,6 +574,45 @@ describe("runPublishFlow: attachments", () => {
 
     expect(attachFiles).toHaveBeenCalledWith("XNP-100", ["/ws/report.zip", shared]);
     expect(d.reportSuccess).toHaveBeenCalledWith(outcome, CREATE_REQUEST, 2);
+  });
+
+  // With no reference there is no issue to POST to, and pending files recorded against a blank one could
+  // never be replayed, so the upload is skipped whole and the toast carries the reason.
+  it("uploads nothing, ledgers nothing pending, and says so when the outcome names no execution", async () => {
+    const outcome: PublishOutcome = { ref: { kind: "execution", key: "" }, imported: 1, warnings: [] };
+    const publishing = spyPublishing(outcome);
+    const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
+    const d = deps([artifact()], {
+      publishing: publishing.capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
+      attachFiles,
+    });
+
+    await runPublishFlow(d);
+
+    expect(attachFiles).not.toHaveBeenCalled();
+    expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ executionRef: "", pendingAttachments: [] }));
+    expect(d.reportPartialAttachments).not.toHaveBeenCalled();
+    expect(d.reportSuccess).toHaveBeenCalledWith(
+      { ...outcome, warnings: ["attachments not uploaded: there is no issue to attach them to"] },
+      CREATE_REQUEST,
+      0
+    );
+  });
+
+  it("still reports a clean success with no attachments to lose when the outcome names no execution", async () => {
+    const outcome: PublishOutcome = { ref: { kind: "execution", key: "" }, imported: 1, warnings: [] };
+    const attachFiles = vi.fn(() => Promise.resolve({ failed: [] as string[] }));
+    const d = deps([artifact()], {
+      publishing: spyPublishing(outcome).capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
+      attachFiles,
+    });
+
+    await runPublishFlow(d);
+
+    expect(attachFiles).not.toHaveBeenCalled();
+    expect(d.reportSuccess).toHaveBeenCalledWith(outcome, CREATE_REQUEST, 0);
   });
 
   it("records failed uploads as pendingAttachments and reports a partial (never rolls back the import)", async () => {

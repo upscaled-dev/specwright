@@ -14,6 +14,7 @@ import {
   syncProgressText,
 } from "../../traceability/board-data";
 import { projectFromKey } from "../../xray/xray-adapter";
+import { UNKNOWN_EXECUTION } from "../../traceability/publish-core";
 import type { LedgerEntry } from "../../traceability/publish-ledger";
 import type {
   OrphanTest,
@@ -48,7 +49,7 @@ function snapshot(over: Partial<TraceabilitySnapshot> = {}): TraceabilitySnapsho
     untraced: [],
     orphans: [],
     stale: false,
-    completeness: "complete",
+    completeProjects: ["CALC"],
     errors: [],
     ...over,
   };
@@ -258,10 +259,10 @@ describe("buildBoardViewModel: test cards", () => {
   });
 
   it("points the empty available group at the project selector when the resolved sync scope is empty, snapshot or not", () => {
-    // No sync can help here: completeness never reaches "complete" without a project scope, so the
-    // selector, not a Sync now button, is the affordance.
+    // No sync can help here: no project's catalogue can land without a project scope, so the selector,
+    // not a Sync now button, is the affordance.
     expect(build(undefined, ROOTS, false)).toMatchObject({ availableEmptyText: SCOPE_HINT, offerSync: false });
-    expect(build(snapshot({ completeness: "complete" }), ROOTS, false)).toMatchObject({
+    expect(build(snapshot({ completeProjects: ["CALC"] }), ROOTS, false)).toMatchObject({
       availableEmptyText: SCOPE_HINT,
       offerSync: false,
     });
@@ -270,12 +271,11 @@ describe("buildBoardViewModel: test cards", () => {
   it("offers a sync when the scope is configured but no complete catalogue has landed", () => {
     const expected = { availableEmptyText: "No synced tests yet.", offerSync: true };
     expect(build(undefined, ROOTS, true)).toMatchObject(expected);
-    expect(build(snapshot({ completeness: "partial" }), ROOTS, true)).toMatchObject(expected);
-    expect(build(snapshot({ completeness: "unknown" }), ROOTS, true)).toMatchObject(expected);
+    expect(build(snapshot({ completeProjects: [] }), ROOTS, true)).toMatchObject(expected);
   });
 
   it("offers nothing once a complete sync simply turned up no unmapped tests", () => {
-    expect(build(snapshot({ completeness: "complete" }), ROOTS, true)).toMatchObject({
+    expect(build(snapshot({ completeProjects: ["CALC"] }), ROOTS, true)).toMatchObject({
       availableEmptyText: "No unmapped tests in the last sync.",
       offerSync: false,
     });
@@ -408,12 +408,47 @@ describe("scopeBoardViewModel", () => {
     expect(scopeBoardViewModel(scopedModel(), "CALC").scenarios.map((card) => card.name)).toEqual(names);
   });
 
-  it("passes the available group's empty state through untouched", () => {
-    const model = scopedModel();
-    const out = scopeBoardViewModel({ ...model, offerSync: true }, "CALC");
-    expect(out.available).toEqual([]);
-    expect(out.availableEmptyText).toBe(model.availableEmptyText);
-    expect(out.offerSync).toBe(true);
+  // The empty state is re-decided for the scoped project alone. PAY's catalogue never landed, so it has
+  // no orphans to show and must offer a sync, not inherit CALC's authoritative "nothing unmapped".
+  it("re-decides the available group's empty state for the scoped project", () => {
+    const model = buildBoardViewModel(
+      snapshot({
+        links: [link({ testKey: "CALC-1" })],
+        completeProjects: ["CALC"],
+      }),
+      ROOTS,
+      PREFIX,
+      true,
+      projectFromKey
+    );
+
+    const calc = scopeBoardViewModel(model, "CALC");
+    expect(calc.available).toEqual([]);
+    expect(calc.availableEmptyText).toBe("No unmapped tests in the last sync.");
+    expect(calc.offerSync).toBe(false);
+
+    const pay = scopeBoardViewModel(model, "PAY");
+    expect(pay.available).toEqual([]);
+    expect(pay.availableEmptyText).toBe("No synced tests yet.");
+    expect(pay.offerSync).toBe(true);
+  });
+
+  // The scope selector's keys are uppercased; `completeProjects` is whatever the adapter reported. The
+  // model already compares these case-insensitively, so the board must too or a landed lowercase project
+  // reads as never synced.
+  it("matches the landed projects case-insensitively, like the model does", () => {
+    const model = buildBoardViewModel(
+      snapshot({ links: [link({ testKey: "CALC-1" })], completeProjects: ["calc"] }),
+      ROOTS,
+      PREFIX,
+      true,
+      projectFromKey
+    );
+
+    expect(scopeBoardViewModel(model, "CALC")).toMatchObject({
+      availableEmptyText: "No unmapped tests in the last sync.",
+      offerSync: false,
+    });
   });
 });
 
@@ -441,6 +476,7 @@ describe("filterBoardViewModel", () => {
     ],
     availableEmptyText: "No unmapped tests in the last sync.",
     offerSync: false,
+    completeProjects: ["CALC", "PAY"],
   };
 
   it("returns the model untouched for an empty query", () => {
@@ -810,6 +846,22 @@ describe("buildExecutionRows", () => {
       ["XNP-9", 1],
     ]);
   });
+
+  // An entry whose ref is unknown names no execution, so two of them are two unrelated publishes rather
+  // than one execution published to twice.
+  it("counts an entry with no execution ref as its own row, printing the phrase for it", () => {
+    const rows = buildExecutionRows([
+      ledgerEntry({ executionRef: "", publishedAt: 2000 }),
+      ledgerEntry({ executionRef: "", publishedAt: 1000 }),
+    ]);
+    expect(rows.map((r) => r.timesFromHere)).toEqual([1, 1]);
+    expect(rows.map((r) => r.keyLabel)).toEqual([UNKNOWN_EXECUTION, UNKNOWN_EXECUTION]);
+    expect(rows.map((r) => r.key)).toEqual(["", ""]);
+  });
+
+  it("labels a row that has a reference with the reference itself", () => {
+    expect(buildExecutionRows([ledgerEntry({ executionRef: "XNP-1" })])[0]!.keyLabel).toBe("XNP-1");
+  });
 });
 
 describe("filterExecutionRows", () => {
@@ -828,6 +880,17 @@ describe("filterExecutionRows", () => {
 
   it("matches on the summary, case-insensitively", () => {
     expect(filterExecutionRows(rows, "CHECKOUT").map((r) => r.key)).toEqual(["XNP-1"]);
+  });
+
+  // The reference is matched AS PRINTED, so the one row the user cannot search by key is still findable
+  // by the words on it.
+  it("finds a row with no reference by the phrase it displays", () => {
+    const withBlank = buildExecutionRows([
+      ledgerEntry({ executionRef: "XNP-1", summary: "Checkout suite", publishedAt: 3000 }),
+      ledgerEntry({ executionRef: "", summary: "Payments", publishedAt: 1000 }),
+    ]);
+
+    expect(filterExecutionRows(withBlank, "no key").map((r) => r.keyLabel)).toEqual([UNKNOWN_EXECUTION]);
   });
 });
 

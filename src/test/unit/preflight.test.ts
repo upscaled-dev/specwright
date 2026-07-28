@@ -13,7 +13,7 @@ function link(over: Partial<TraceLink> = {}): TraceLink {
 }
 
 function snapshot(over: Partial<TraceabilitySnapshot> = {}): TraceabilitySnapshot {
-  return { links: [], untraced: [], orphans: [], stale: false, completeness: "complete", errors: [], ...over };
+  return { links: [], untraced: [], orphans: [], stale: false, completeProjects: ["CALC"], errors: [], ...over };
 }
 
 const gherkin: TestCaseMetadata = { key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } };
@@ -86,7 +86,7 @@ describe("classifyPreflight", () => {
   it("never blocks on `unknown`: a metadata-less target maps to `ready` with an honest note", () => {
     const scenario = ref();
     // Partial snapshot: the link exists but no metadata was fetched, so the Xray hook returns unknown.
-    const snap = snapshot({ completeness: "partial", links: [link({ meta: undefined })] });
+    const snap = snapshot({ completeProjects: [], links: [link({ meta: undefined })] });
     const item = classifyPreflight([scenario], snap, { classifyBinding: classifyXrayBinding })[0];
     expect(item?.state).toBe("ready");
     expect(item?.detail).toMatch(/not verified/i);

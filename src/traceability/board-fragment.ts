@@ -469,19 +469,25 @@ const BOARD_SCRIPT = `
     return td;
   }
 
-  function executionRowEl(row) {
-    const tr = document.createElement('tr');
-    const keyTd = document.createElement('td');
+  // The host decides what this cell says; the only call left here is whether there is a reference to open.
+  function executionKeyCell(row) {
+    if (!row.key) { return executionCell(row.keyLabel); }
+    const td = document.createElement('td');
     const link = document.createElement('a');
     link.className = 'link';
     link.href = '#';
-    link.textContent = row.key;
+    link.textContent = row.keyLabel;
     link.addEventListener('click', function (e) {
       e.preventDefault();
       window.__spec.post('board', { type: 'open', key: row.key });
     });
-    keyTd.appendChild(link);
-    tr.appendChild(keyTd);
+    td.appendChild(link);
+    return td;
+  }
+
+  function executionRowEl(row) {
+    const tr = document.createElement('tr');
+    tr.appendChild(executionKeyCell(row));
     tr.appendChild(executionCell(row.summary, 'wrap'));
     tr.appendChild(executionCell(row.action));
     tr.appendChild(executionCell(row.resultsImported));

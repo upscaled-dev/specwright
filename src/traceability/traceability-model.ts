@@ -45,7 +45,7 @@ export interface TraceLink {
   // until a snapshot populates `meta.gherkin`.
   drift?: boolean | undefined;
   // Provably absent from a complete remote catalogue covering the key's project (display-only
-  // verdict). Never set on a partial/unknown snapshot or a project outside the catalogue scope.
+  // verdict). Never set for a project whose catalogue fell short or was never fetched.
   remoteMissing?: boolean | undefined;
 }
 
@@ -73,7 +73,10 @@ export interface TraceabilitySnapshot {
   orphans: OrphanTest[];
   syncedAt?: number | undefined;
   stale: boolean;
-  completeness: "complete" | "partial" | "unknown";
+  // The projects whose catalogue the last sync fetched whole; empty means nothing on this snapshot is
+  // authoritative about what the remote holds. `orphans` is already filtered to these projects, so a
+  // surface reads this only to decide whether an EMPTY orphan list means anything.
+  completeProjects: string[];
   errors: string[];
 }
 
@@ -87,7 +90,7 @@ const EMPTY_SNAPSHOT: TraceabilitySnapshot = {
   untraced: [],
   orphans: [],
   stale: false,
-  completeness: "unknown",
+  completeProjects: [],
   errors: [],
 };
 
@@ -248,7 +251,7 @@ export function buildTraceabilitySnapshot(
       if (meta.gherkin !== undefined && localGherkin !== undefined && hasGherkinDrift(localGherkin, meta.gherkin)) {
         link.drift = true;
       }
-    } else if (isProvablyAbsent(link.project, remote) || isVerifiedAbsent(testKey, remote)) {
+    } else if (inCompleteCatalogue(link.project, remote) || isVerifiedAbsent(testKey, remote)) {
       link.remoteMissing = true;
     }
     links.push(link);
@@ -389,44 +392,52 @@ export function buildTraceabilitySnapshot(
   return {
     links,
     untraced,
-    orphans: remote ? computeOrphans(links, remote) : [],
+    orphans: remote ? computeOrphans(links, remote, keyGrammar.projectOf) : [],
     syncedAt: remote?.syncedAt,
     stale: remote?.stale ?? false,
-    completeness: remote?.completeness ?? "unknown",
+    completeProjects: remote ? [...remote.completeProjects] : [],
     errors: remote ? [...remote.errors] : [],
   };
 }
 
-// A key is provably absent only when the same gate that authorizes orphans holds: a complete
-// catalogue that covered the key's project, yet the key never appeared. A partial/unknown snapshot,
-// or a key whose project was outside the fetched catalogue scope, proves nothing either way.
-function isProvablyAbsent(
+// Whether a key sits inside a catalogue this snapshot fetched whole. A key whose project fell short,
+// was never fetched, or cannot be derived proves nothing either way. The absence verdict stops here:
+// with no derivable project there is no catalogue to have looked in. Orphans go one step further, since
+// a grammar without project derivation still has one catalogue to be absent from (see `computeOrphans`).
+function inCompleteCatalogue(
   project: string | undefined,
   remote: RemoteMetadataSnapshot | undefined
 ): boolean {
-  if (project === undefined || remote?.completeness !== "complete") {
+  if (project === undefined) {
     return false;
   }
-  return remote.catalogueProjects.some((p) => p.toLowerCase() === project.toLowerCase());
+  return (remote?.completeProjects ?? []).some((p) => p.toLowerCase() === project.toLowerCase());
 }
 
 // A successful key-batch fetch that queried this key and did not get it back proves absence outright
-// (§5), independent of catalogue scope or completeness; this covers a tag whose project is not in
-// the configured catalogue scope.
+// (§5), independent of catalogue scope; this covers a tag whose project is not in the configured
+// catalogue scope.
 function isVerifiedAbsent(testKey: string, remote: RemoteMetadataSnapshot | undefined): boolean {
   return remote?.verifiedAbsentKeys.some((key) => key.toLowerCase() === testKey.toLowerCase()) ?? false;
 }
 
-// Orphans are only authoritative on a complete catalogue fetch; a partial or unknown snapshot may
-// be missing the very scenarios that would cover a key, so it can never yield orphan counts.
-function computeOrphans(links: TraceLink[], remote: RemoteMetadataSnapshot): OrphanTest[] {
-  if (remote.completeness !== "complete") {
-    return [];
-  }
+// Orphans are only authoritative inside a catalogue that was fetched whole, so they are derived per
+// project: a project whose fetch fell short may be missing the very scenarios that would cover a key,
+// while its siblings keep every orphan they earned.
+function computeOrphans(
+  links: TraceLink[],
+  remote: RemoteMetadataSnapshot,
+  projectOf: KeyGrammar["projectOf"]
+): OrphanTest[] {
   const covered = new Set(links.map((l) => l.testKey));
+  // A grammar with no project derivation (the reference adapter's numeric keys) has a single
+  // undifferentiated catalogue, so any complete fetch speaks for every key in it.
+  const authoritative = projectOf
+    ? (key: string): boolean => inCompleteCatalogue(projectOf(key), remote)
+    : (): boolean => remote.completeProjects.length > 0;
   const orphans: OrphanTest[] = [];
   for (const [key, meta] of remote.tests) {
-    if (!covered.has(key)) {
+    if (!covered.has(key) && authoritative(key)) {
       orphans.push({ testKey: key, meta });
     }
   }

@@ -4,6 +4,8 @@ import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import { BoardViewModel, ExecutionRow } from "../../traceability/board-data";
 import { NO_PROJECT_SCOPE, ProjectScopeStore } from "../../traceability/project-scope";
 import { PublishDialogDelegate } from "../../traceability/publish-dialog-panel";
+import { UNKNOWN_EXECUTION } from "../../traceability/publish-core";
+import { Logger, LogLevel } from "../../utils/logger";
 
 const noopDelegate: PublishDialogDelegate = {
   searchTargets: () => Promise.resolve([]),
@@ -92,6 +94,7 @@ const MODEL: BoardViewModel = {
   ],
   availableEmptyText: "No unmapped tests in the last sync.",
   offerSync: false,
+  completeProjects: ["CALC", "PAY"],
 };
 
 const PROJECTS = ["CALC", "PAY"];
@@ -110,13 +113,14 @@ function fakeScope(initial?: string): ProjectScopeStore {
 }
 
 const EXECUTIONS: ExecutionRow[] = [
-  { key: "XNP-1", summary: "Checkout suite", action: "Created", resultsImported: "6", passRate: "5/6 passed", publishedAt: "2026-07-22", timesFromHere: 1 },
-  { key: "PAY-9", summary: "Payments", action: "Appended", resultsImported: "-", passRate: "-", publishedAt: "2026-07-20", timesFromHere: 2 },
+  { key: "XNP-1", keyLabel: "XNP-1", summary: "Checkout suite", action: "Created", resultsImported: "6", passRate: "5/6 passed", publishedAt: "2026-07-22", timesFromHere: 1 },
+  { key: "PAY-9", keyLabel: "PAY-9", summary: "Payments", action: "Appended", resultsImported: "-", passRate: "-", publishedAt: "2026-07-20", timesFromHere: 2 },
 ];
 
 function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
   return {
     providerLabel: "Xray",
+    logger: Logger.create(undefined, LogLevel.ERROR),
     buildModel: () => MODEL,
     buildExecutions: () => EXECUTIONS,
     onDidChange: new vscode.EventEmitter<void>().event,
@@ -337,12 +341,36 @@ describe("BoardPanel", () => {
     expect(html).toContain("saveState({ executionsShown: executionsShown })");
   });
 
+  // Source-level only: the webview JS never runs here. The phrase for a missing reference is decided
+  // host-side, so every script here only prints the label it is handed and never invents wording; the one
+  // call the row still makes is whether there is a reference to hang a link on.
+  it("leaves the wording of a missing execution reference to the host", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("if (!row.key) { return executionCell(row.keyLabel); }");
+    expect(html).toContain("link.textContent = row.keyLabel;");
+    expect(html).toContain("'Already published to ' + n.target");
+    expect(html).toContain("' from the last publish to ' + n.target");
+    expect(html).not.toContain(UNKNOWN_EXECUTION);
+  });
+
   it("carries the permanent Publish tab and its pane in the shell", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
     expect(html).toContain('data-tab="publish"');
     expect(html).toContain('id="pane-publish"');
     expect(html).toContain(">Publish</button>");
+  });
+
+  // Source-level only: the webview JS never runs here. A retry brings the filled-in form back, where
+  // settling drops the tab to the idle hint.
+  it("brings the publish form back on a retry rather than the idle hint", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("msg.type === 'retry'");
+    expect(html).toContain("msg.type === 'settled'");
   });
 
   it("fires startPublish when the Publish tab is activated with no publish underway", async () => {
@@ -456,6 +484,41 @@ describe("BoardPanel", () => {
     await panel.__receive({ type: "ready" });
 
     expect(panel.webview.__posted.slice(before).filter((m) => m.type === "model")).toHaveLength(1);
+  });
+
+  // The rebuilt document starts blank, so a section that throws on its replay must cost only its own pane.
+  it("replays the other surfaces, and logs, when one section's rehydrate throws", async () => {
+    const lines: string[] = [];
+    const channel = { appendLine: (line: string) => lines.push(line), show: () => {}, clear: () => {}, dispose: () => {} };
+    let broken = false;
+    const { instance, panel } = await openReady({
+      logger: Logger.create(channel as unknown as vscode.OutputChannel, LogLevel.WARN),
+      buildModel: () => {
+        if (broken) {
+          throw new Error("snapshot gone");
+        }
+        return MODEL;
+      },
+    });
+    void instance.publish.present({
+      title: "Publish run results",
+      runs: [],
+      selectedRunId: "",
+      jiraSearchAvailable: false,
+      knownProjectKeys: [],
+      attachments: { available: false, suggestions: [], uploadLimitBytes: 0, evidenceStream: "evidence" },
+    });
+    instance.link.begin({ title: "Link scenario", searchPlaceholder: "Search tests" });
+    broken = true;
+    const before = panel.webview.__posted.length;
+
+    await panel.__receive({ type: "ready" });
+
+    const replay = panel.webview.__posted.slice(before);
+    expect(replay.filter(isRender)).toEqual([]);
+    expect(replay.filter((m) => m.type === "model")).toHaveLength(1);
+    expect(replay.filter((m) => m.type === "reset")).toHaveLength(1);
+    expect(lines.some((line) => line.includes("Repainting the board surface failed"))).toBe(true);
   });
 
   it("repaints a live link session onto a rebuilt webview: its tab and everything it had on screen", async () => {

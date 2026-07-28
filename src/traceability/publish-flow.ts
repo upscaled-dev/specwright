@@ -9,6 +9,8 @@ import { normalizeProjectKeys } from "./project-scope";
 import {
   defaultPublishSummary,
   derivePublishProject,
+  executionLabel,
+  hasExecutionRef,
   isPublishable,
   PublishableResult,
   PublishProjectPrefill,
@@ -38,10 +40,11 @@ export interface PublishAttachmentsModel {
 }
 
 // The already-published banner (§ point 3): the run carries a publish-ledger entry, so the dialog
-// states when it was published, the target key, and the mode BEFORE submit. There is no re-confirm
-// modal anymore; the banner is the whole notice and submit proceeds directly.
+// states when it was published, the target, and the mode BEFORE submit. There is no re-confirm
+// modal anymore; the banner is the whole notice and submit proceeds directly. `target` is the reference
+// AS PRINTED (the phrase, for an entry the import response never named), so the webview only paints it.
 export interface RepublishNotice {
-  readonly key: string;
+  readonly target: string;
   readonly publishedAt: number;
   readonly mode?: "create-new" | "append" | undefined;
 }
@@ -49,7 +52,7 @@ export interface RepublishNotice {
 // The pending-attachments banner (§ point 4): the run's prior publish left files that failed to
 // upload. The banner's action attaches them WITHOUT a reimport (the panel's `attachPending` delegate).
 export interface PendingAttachmentsNotice {
-  readonly key: string;
+  readonly target: string;
   readonly count: number;
 }
 
@@ -116,6 +119,10 @@ export interface PublishFlowDeps {
   // Renders the dialog and returns the user's selected run + request + attachments, or undefined on
   // cancel/close (→ zero transport).
   presentDialog(model: PublishDialogModel): Promise<PublishDialogResult | undefined>;
+  // The same wait after a failed publish, over the form the user already filled in: the surface clears the
+  // busy state on the model it is CURRENTLY showing (amendments and all), so this only names the run they
+  // picked. Undefined on cancel/close/supersede/closed board, exactly like `presentDialog`.
+  presentRetry(selectedRunId: string): Promise<PublishDialogResult | undefined>;
   // Uploads run-level picks + issue-routed evidence to the execution issue AFTER a successful import,
   // returning which failed. The same routine backs toast-retry and the pending-attachments banner.
   attachFiles(executionKey: string, files: readonly string[]): Promise<{ readonly failed: readonly string[] }>;
@@ -165,7 +172,7 @@ function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps, scopedProj
       ...(prior
         ? {
             republish: {
-              key: prior.executionRef,
+              target: executionLabel(prior.executionRef),
               publishedAt: prior.publishedAt,
               // The banner describes a prior PUBLISH, and `prior` is looked up by a run's artifact id,
               // which a standalone execution create can never carry (its id is namespaced), so the two
@@ -175,10 +182,43 @@ function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps, scopedProj
           }
         : {}),
       ...(prior && prior.pendingAttachments.length > 0
-        ? { pendingAttachments: { key: prior.executionRef, count: prior.pendingAttachments.length } }
+        ? { pendingAttachments: { target: executionLabel(prior.executionRef), count: prior.pendingAttachments.length } }
         : {}),
     },
   };
+}
+
+// The run the user confirmed, together with what publishing it returned.
+interface ConfirmedPublish {
+  readonly artifact: RunArtifact;
+  readonly dialog: PublishDialogResult;
+  readonly outcome: PublishOutcome;
+}
+
+// Present, publish, and on a failure come back to the same dialog instead of dropping the user on an idle
+// tab: the retry keeps the run they picked and the form they filled in, so a bad key or a transient 500 is
+// one more click rather than a re-pick. Undefined once they cancel, or when the run behind the pick is
+// gone.
+async function confirmAndPublish(
+  deps: PublishFlowDeps,
+  model: PublishDialogModel,
+  runnable: readonly RunArtifact[]
+): Promise<ConfirmedPublish | undefined> {
+  let answer = await deps.presentDialog(model);
+  while (answer !== undefined) {
+    const dialog = answer;
+    const artifact = runnable.find((candidate) => candidate.id === dialog.runId);
+    if (artifact === undefined) {
+      return undefined;
+    }
+    try {
+      return { artifact, dialog, outcome: await deps.publishing.publish(artifact, dialog.request) };
+    } catch (error) {
+      deps.reportFailure(error);
+      answer = await deps.presentRetry(dialog.runId);
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -189,6 +229,7 @@ function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps, scopedProj
  * remotely. Only AFTER a successful import are run-level attachments and issue-routed evidence uploaded;
  * a failed upload records the pending files on the ledger and offers Retry, never rolling back the import.
  * A run already on the ledger shows an inline republish banner (no modal); submit proceeds directly.
+ * A failed import keeps the dialog on the picked run for a retry rather than settling the tab.
  * No publishable run, or cancel/close, makes ZERO transport calls.
  */
 export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
@@ -213,41 +254,37 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
       ? deps.preselectId
       : newest.id;
 
-  const dialog = await deps.presentDialog({
-    title: "Publish run results",
-    runs: built.map((run) => run.option),
-    selectedRunId,
-    jiraSearchAvailable: deps.jiraSearchAvailable,
-    // Under a selection the run-derived keys are no longer the prefill, so they join the dropdown
-    // to stay one pick away.
-    knownProjectKeys: normalizeProjectKeys([
-      ...deps.knownProjectKeys,
-      ...(scopedProject === undefined ? [] : built.map((run) => run.derivedProject)),
-    ]),
-    attachments,
-  });
-  if (dialog === undefined) {
+  const confirmed = await confirmAndPublish(
+    deps,
+    {
+      title: "Publish run results",
+      runs: built.map((run) => run.option),
+      selectedRunId,
+      jiraSearchAvailable: deps.jiraSearchAvailable,
+      // Under a selection the run-derived keys are no longer the prefill, so they join the dropdown
+      // to stay one pick away.
+      knownProjectKeys: normalizeProjectKeys([
+        ...deps.knownProjectKeys,
+        ...(scopedProject === undefined ? [] : built.map((run) => run.derivedProject)),
+      ]),
+      attachments,
+    },
+    runnable
+  );
+  if (confirmed === undefined) {
     return;
   }
-  const artifact = runnable.find((candidate) => candidate.id === dialog.runId);
-  if (artifact === undefined) {
-    return;
-  }
-
+  const { artifact, dialog, outcome } = confirmed;
   const summary = summarizePublishable(publishableResults(artifact));
-  let outcome: PublishOutcome;
-  try {
-    outcome = await deps.publishing.publish(artifact, dialog.request);
-  } catch (error) {
-    deps.reportFailure(error);
-    return;
-  }
 
   // Dedupe by absolute path (exact match, mirroring the dialog's own `seenPaths`) so a run-level pick
   // that also happens to be an issue-routed evidence file uploads exactly once.
   const files = [...new Set([...dialog.attachments, ...(outcome.issueEvidenceFiles ?? [])])];
+  // An unnamed execution has no issue to upload to, and files recorded as pending against it could never
+  // be replayed, so the upload is skipped whole rather than attempted and ledgered as unrecoverable work.
+  const uploadable = hasExecutionRef(outcome.ref.key);
   let failed: readonly string[] = [];
-  if (files.length > 0) {
+  if (uploadable && files.length > 0) {
     try {
       failed = (await deps.attachFiles(outcome.ref.key, files)).failed;
     } catch {
@@ -272,10 +309,20 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
     total: summary.total,
   });
 
-  const attachedCount = files.length - failed.length;
+  const attachedCount = uploadable ? files.length - failed.length : 0;
   if (failed.length > 0) {
     deps.reportPartialAttachments(outcome, dialog.request, attachedCount, failed, artifact.id);
-  } else {
-    deps.reportSuccess(outcome, dialog.request, attachedCount);
+    return;
   }
+  // The skip rides the outcome's own notes channel, which is where the toast already reads its honest
+  // asides from, so a publish that quietly kept the user's files cannot look like a clean one. The lead
+  // has already named the missing reference, so the note only has to say what it cost.
+  const skipped = !uploadable && files.length > 0;
+  deps.reportSuccess(
+    skipped
+      ? { ...outcome, warnings: [...outcome.warnings, "attachments not uploaded: there is no issue to attach them to"] }
+      : outcome,
+    dialog.request,
+    attachedCount
+  );
 }

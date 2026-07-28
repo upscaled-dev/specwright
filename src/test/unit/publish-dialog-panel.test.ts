@@ -265,6 +265,119 @@ describe("PublishSurface: hydrate on present", () => {
     expect((models[1] as unknown as { model: PublishDialogModel }).model.selectedRunId).toBe("run-2");
   });
 
+  // The retry is the same wait over the form the user already filled in, so nothing is repainted: a fresh
+  // model would clear exactly the fields the retry needs.
+  it("presentRetry clears the busy state without repainting, and takes the next confirm", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+
+    const retry = publish.presentRetry("run-1");
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-2" }, attachments: [] });
+
+    expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(1);
+    expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(1);
+    await expect(retry).resolves.toMatchObject({ request: { mode: "append", executionKey: "XNP-2" } });
+  });
+
+  it("presentRetry resolves undefined at once when a newer present already owns the tab", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+    void publish.present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
+
+    await expect(publish.presentRetry("run-1")).resolves.toBeUndefined();
+    expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(0);
+  });
+
+  // A settle retires the dialog, so a publish still in flight from an earlier flow cannot fail later and
+  // re-arm itself over the model a newer flow left on the tab.
+  it("presentRetry resolves undefined once a settled flow has retired the dialog", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+    // A second flow presents, is cancelled, and settles the tab it still owned.
+    const second = publish.present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
+    rig.receive({ type: "cancel" });
+    await second;
+    expect(publish.markSettled()).toBe(true);
+
+    await expect(publish.presentRetry("run-1")).resolves.toBeUndefined();
+    expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(0);
+    expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(2);
+  });
+
+  // A board closed while the publish was in flight has nothing left to come back to, so the retry resolves
+  // rather than arming a present nothing can ever answer.
+  it("presentRetry resolves undefined on a disposed host instead of hanging the flow", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+    rig.dispose();
+
+    await expect(publish.presentRetry("run-1")).resolves.toBeUndefined();
+    expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(0);
+  });
+
+  it("re-posts the model a retry is waiting on, with the picked run, when the webview comes back", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const first = publish.present(makeModel({ runs: [runOption(), runOption({ id: "run-2" })] }));
+    rig.receive({ type: "confirm", runId: "run-2", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+    void publish.presentRetry("run-2");
+
+    publish.rehydrate();
+
+    const models = rig.posted.filter((m) => m.type === "model");
+    expect(models).toHaveLength(2);
+    expect((models[1] as unknown as { model: PublishDialogModel }).model.selectedRunId).toBe("run-2");
+  });
+
+  // The retry re-arms over the model the tab is CURRENTLY showing, so files the user browsed to before the
+  // failed publish are still on it when a rebuilt webview asks for a repaint.
+  it("keeps an amendment made before the failure across a retry and a re-hydration", async () => {
+    const rig0 = deferredDelegate();
+    rig0.browseResult = [{ path: "/ws/report.zip", name: "report.zip", size: 10 }];
+    const { rig, publish } = surface(rig0.delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "browse" });
+    await flush();
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+    void publish.presentRetry("run-1");
+
+    publish.rehydrate();
+
+    const models = rig.posted.filter((m) => m.type === "model");
+    const replayed = (models.at(-1) as unknown as { model: PublishDialogModel }).model;
+    expect(replayed.attachments.suggestions.map((s) => s.path)).toEqual(["/ws/report.zip"]);
+  });
+
+  // A webview rebuilt between the confirm and the failure comes back blank, so revealing the form would
+  // hand the user empty fields under a live Publish button.
+  it("repaints the whole model when the retry lands on a rebuilt document", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+    publish.rehydrate();
+
+    void publish.presentRetry("run-1");
+
+    expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(0);
+    expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(2);
+  });
+
   it("posts nothing on a re-hydration with no publish underway, leaving the idle hint alone", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
@@ -408,7 +521,7 @@ describe("PublishSurface: attachments", () => {
     const rig = deferredDelegate();
     rig.pendingResult = { remaining: 1 };
     const { rig: host, publish } = surface(rig.delegate);
-    void publish.present(makeModel({ runs: [runOption({ pendingAttachments: { key: "XNP-9", count: 2 } })] }));
+    void publish.present(makeModel({ runs: [runOption({ pendingAttachments: { target: "XNP-9", count: 2 } })] }));
 
     host.receive({ type: "attachPending", runId: "run-1" });
     await flush();
@@ -437,13 +550,13 @@ describe("PublishSurface: attachments", () => {
     const rig = deferredDelegate();
     rig.pendingResult = { remaining: 1 };
     const { rig: host, publish } = surface(rig.delegate);
-    void publish.present(makeModel({ runs: [runOption({ pendingAttachments: { key: "XNP-9", count: 2 } })] }));
+    void publish.present(makeModel({ runs: [runOption({ pendingAttachments: { target: "XNP-9", count: 2 } })] }));
 
     host.receive({ type: "attachPending", runId: "run-1" });
     await flush();
     publish.rehydrate();
     const retried = host.posted.filter((m) => m.type === "model").at(-1) as unknown as { model: PublishDialogModel };
-    expect(retried.model.runs[0]!.pendingAttachments).toEqual({ key: "XNP-9", count: 1 });
+    expect(retried.model.runs[0]!.pendingAttachments).toEqual({ target: "XNP-9", count: 1 });
 
     rig.pendingResult = { remaining: 0 };
     host.receive({ type: "attachPending", runId: "run-1" });

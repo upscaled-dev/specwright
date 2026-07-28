@@ -15,6 +15,7 @@ import {
   TestCaseMetadata,
   TraceabilityAdapter,
 } from "../traceability/contracts";
+import { hasExecutionRef } from "../traceability/publish-core";
 import { XrayCredentialStore } from "./xray-credential-store";
 
 // A Jira/Xray issue key: a project part (which may itself contain hyphens/underscores), then a
@@ -142,9 +143,11 @@ export class XrayAdapter implements TraceabilityAdapter {
     };
   }
 
+  // `/browse/` with nothing after it is a dead link, so a ref the provider never named gets no URL at all
+  // rather than a broken one.
   public browseUrl(ref: ExternalRef): string | undefined {
     const site = normalizeSiteUrl(this.config.xraySiteUrl);
-    return site ? `https://${site}/browse/${ref.key}` : undefined;
+    return site && hasExecutionRef(ref.key) ? `https://${site}/browse/${ref.key}` : undefined;
   }
 
   public dispose(): void {

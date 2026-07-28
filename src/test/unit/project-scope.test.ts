@@ -31,60 +31,42 @@ describe("normalizeProjectKeys", () => {
 });
 
 describe("resolveProjectUniverse", () => {
-  it("lists the provider directory on the jira tier, still unioned with the workspace's own keys", () => {
-    const universe = resolveProjectUniverse({
-      directoryProjects: ["ops", "PAY"],
-      tagDerivedKeys: ["CALC"],
-      syncSettingKeys: ["shop"],
-      catalogueKeys: ["MATH"],
-      defaultKey: " pay ",
-    });
-
-    expect(universe.tier).toBe("jira");
-    expect(universe.projects).toEqual(["CALC", "MATH", "OPS", "PAY", "SHOP"]);
+  it("lists the provider directory, still unioned with the workspace's own keys", () => {
+    expect(
+      resolveProjectUniverse({
+        directoryProjects: ["ops", "PAY"],
+        tagDerivedKeys: ["CALC"],
+        syncSettingKeys: ["shop"],
+        catalogueKeys: ["MATH"],
+        defaultKey: " pay ",
+      })
+    ).toEqual(["CALC", "MATH", "OPS", "PAY", "SHOP"]);
   });
 
-  it("falls back to the xray-only tier when there is no directory to enumerate", () => {
-    const universe = resolveProjectUniverse({
-      tagDerivedKeys: ["calc"],
-      syncSettingKeys: ["SHOP"],
-      defaultKey: "pay",
-    });
-
-    expect(universe.tier).toBe("xray-only");
-    expect(universe.projects).toEqual(["CALC", "PAY", "SHOP"]);
-  });
-
-  // A token that legitimately reaches nothing is still the jira tier, so the surface can say so instead
-  // of sending the user to the sync setting.
-  it("stays on the jira tier when the directory enumerated zero projects", () => {
-    expect(resolveProjectUniverse({ directoryProjects: [] })).toEqual({ projects: [], tier: "jira" });
+  it("falls back to the workspace's own keys when there is no directory to enumerate", () => {
+    expect(
+      resolveProjectUniverse({ tagDerivedKeys: ["calc"], syncSettingKeys: ["SHOP"], defaultKey: "pay" })
+    ).toEqual(["CALC", "PAY", "SHOP"]);
   });
 
   it("keeps requirement-derived keys, so a workspace that tags only requirements is never empty", () => {
-    expect(resolveProjectUniverse({ tagDerivedKeys: ["REQ", "REQ", "calc"] })).toEqual({
-      projects: ["CALC", "REQ"],
-      tier: "xray-only",
-    });
+    expect(resolveProjectUniverse({ tagDerivedKeys: ["REQ", "REQ", "calc"] })).toEqual(["CALC", "REQ"]);
   });
 
   it("offers the setting and the default key with no tags at all", () => {
-    expect(resolveProjectUniverse({ syncSettingKeys: ["shop"], defaultKey: "pay" }).projects).toEqual(["PAY", "SHOP"]);
+    expect(resolveProjectUniverse({ syncSettingKeys: ["shop"], defaultKey: "pay" })).toEqual(["PAY", "SHOP"]);
   });
 
   // The sync scope is this resolver minus the directory, so the board's selection is the rung that puts a
   // project nobody has tagged or configured into the next sync.
   it("takes the board's selection as a rung of its own, deduped and uppercased with the rest", () => {
-    expect(resolveProjectUniverse({ selectedKey: " pay " }).projects).toEqual(["PAY"]);
-    expect(resolveProjectUniverse({ tagDerivedKeys: ["PAY"], selectedKey: "pay" }).projects).toEqual(["PAY"]);
-    expect(resolveProjectUniverse({ selectedKey: "  " }).projects).toEqual([]);
+    expect(resolveProjectUniverse({ selectedKey: " pay " })).toEqual(["PAY"]);
+    expect(resolveProjectUniverse({ tagDerivedKeys: ["PAY"], selectedKey: "pay" })).toEqual(["PAY"]);
+    expect(resolveProjectUniverse({ selectedKey: "  " })).toEqual([]);
   });
 
   it("returns nothing when every source is empty", () => {
-    expect(resolveProjectUniverse({ tagDerivedKeys: [], syncSettingKeys: [], defaultKey: "   " })).toEqual({
-      projects: [],
-      tier: "xray-only",
-    });
+    expect(resolveProjectUniverse({ tagDerivedKeys: [], syncSettingKeys: [], defaultKey: "   " })).toEqual([]);
   });
 });
 

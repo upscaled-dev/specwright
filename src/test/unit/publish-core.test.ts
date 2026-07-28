@@ -3,11 +3,15 @@ import * as vscode from "vscode";
 import {
   defaultPublishSummary,
   derivePublishProject,
+  executionLabel,
+  hasExecutionRef,
   isPublishable,
   publishableResults,
   publishDialogSubtitle,
+  publishOutcomeLead,
   publishRunLabel,
   summarizePublishable,
+  UNKNOWN_EXECUTION,
   type PublishableResult,
   type PublishableSummary,
 } from "../../traceability/publish-core";
@@ -17,6 +21,7 @@ import { refIdentity, sameScenario, scenarioRefFromScenario } from "../../tracea
 import type {
   BatchSelection,
   PreflightDecision,
+  PublishOutcome,
   RunArtifact,
   RunArtifactResult,
 } from "../../traceability/contracts";
@@ -230,6 +235,57 @@ describe("defaultPublishSummary", () => {
   it("names the run date and the publishable count", () => {
     expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 4)).toBe("Specwright run 2026-07-22 (4 scenarios)");
     expect(defaultPublishSummary(Date.UTC(2026, 6, 22, 9, 0, 0), 1)).toBe("Specwright run 2026-07-22 (1 scenario)");
+  });
+});
+
+describe("publishOutcomeLead", () => {
+  const outcome = (key: string, imported = 3): PublishOutcome => ({
+    ref: { kind: "execution", key },
+    imported,
+    warnings: [],
+  });
+
+  it("names the created execution and what the import carried", () => {
+    expect(publishOutcomeLead(outcome("XNP-1"), { mode: "create-new", project: "XNP", summary: "s" })).toBe(
+      "XNP-1 created: 3 results imported"
+    );
+  });
+
+  it("counts a single result in the singular, whichever mode carried it", () => {
+    expect(publishOutcomeLead(outcome("XNP-1", 1), { mode: "create-new", project: "XNP", summary: "s" })).toBe(
+      "XNP-1 created: 1 result imported"
+    );
+    expect(publishOutcomeLead(outcome("XNP-1", 1), { mode: "append", executionKey: "XNP-1" })).toBe(
+      "appended to XNP-1: 1 result"
+    );
+  });
+
+  it("names the execution an append landed on", () => {
+    expect(publishOutcomeLead(outcome("XNP-1"), { mode: "append", executionKey: "XNP-1" })).toBe(
+      "appended to XNP-1: 3 results"
+    );
+  });
+
+  // The response named no execution, so there is no key to print and none to invent.
+  it("says the key is unknown rather than opening on a blank", () => {
+    expect(publishOutcomeLead(outcome(""), { mode: "create-new", project: "XNP", summary: "s" })).toBe(
+      `created ${UNKNOWN_EXECUTION}: 3 results imported`
+    );
+  });
+});
+
+// One predicate and one phrase behind every surface that has to speak about a reference the provider
+// never named, so the toast, the board row, and the dialog's banners cannot drift apart.
+describe("hasExecutionRef / executionLabel", () => {
+  it("treats only the empty reference as unnamed", () => {
+    expect(hasExecutionRef("XNP-1")).toBe(true);
+    expect(hasExecutionRef("")).toBe(false);
+  });
+
+  it("prints the reference when there is one and the shared phrase when there is not", () => {
+    expect(executionLabel("XNP-1")).toBe("XNP-1");
+    expect(executionLabel("")).toBe(UNKNOWN_EXECUTION);
+    expect(UNKNOWN_EXECUTION).toBe("an execution with no key");
   });
 });
 

@@ -452,13 +452,15 @@ export class TraceabilityTreeDataProvider
       covered: "Mapped tests",
       orphan: `Available ${this.providerLabel} tests`,
     };
-    const counts: Record<SectionNode["section"], number> = {
-      untraced: snap.untraced.length,
-      covered: new Set(snap.links.map((l) => l.testKey)).size,
-      orphan: snap.orphans.length,
+    const descriptions: Record<SectionNode["section"], string> = {
+      untraced: String(snap.untraced.length),
+      covered: String(new Set(snap.links.map((l) => l.testKey)).size),
+      // The orphan list speaks only for the projects whose catalogue landed whole, so the header names
+      // them: a project that fell short is represented neither in the count nor in the claim.
+      orphan: `${snap.orphans.length} in ${snap.completeProjects.join(", ")}`,
     };
     const item = new vscode.TreeItem(labels[node.section], vscode.TreeItemCollapsibleState.Expanded);
-    item.description = String(counts[node.section]);
+    item.description = descriptions[node.section];
     return item;
   }
 
@@ -492,14 +494,15 @@ export class TraceabilityTreeDataProvider
   }
 
   // Untraced first (the gap bucket is the work queue), then covered, then orphans last. Orphans
-  // render only on a complete catalogue fetch; a partial/unknown snapshot can never distinguish a
-  // genuine orphan from a key whose covering scenario simply wasn't fetched (§2).
+  // render once at least one project's catalogue was fetched whole; with none, no orphan list can
+  // distinguish a genuine orphan from a key whose covering scenario simply wasn't fetched (§2). One
+  // project's failed fetch never hides the section, since the list is already per project.
   private testRoots(): TraceabilityNode[] {
     const sections: TraceabilityNode[] = [
       { kind: "section", section: "untraced" },
       { kind: "section", section: "covered" },
     ];
-    if (this.model.snapshot.completeness === "complete") {
+    if (this.model.snapshot.completeProjects.length > 0) {
       sections.push({ kind: "section", section: "orphan" });
     }
     return this.withConnectionRow(sections);
@@ -509,7 +512,7 @@ export class TraceabilityTreeDataProvider
   // file). The orphan gate matches the by-test layout's.
   private fileRoots(): TraceabilityNode[] {
     const roots: TraceabilityNode[] = [...this.fileNodes()];
-    if (this.model.snapshot.completeness === "complete") {
+    if (this.model.snapshot.completeProjects.length > 0) {
       roots.push({ kind: "section", section: "orphan" });
     }
     return this.withConnectionRow(roots);
@@ -587,9 +590,9 @@ export class TraceabilityTreeDataProvider
   }
 
   private orphanNodes(): TraceabilityNode[] {
-    const orphans = this.model.snapshot.orphans;
+    const { orphans, completeProjects } = this.model.snapshot;
     if (orphans.length === 0) {
-      return [{ kind: "info", label: `No available ${this.providerLabel} tests in the synced scope.` }];
+      return [{ kind: "info", label: `No available ${this.providerLabel} tests in ${completeProjects.join(", ")}.` }];
     }
     return [...orphans]
       .sort((a, b) => a.testKey.localeCompare(b.testKey))

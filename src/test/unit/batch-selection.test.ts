@@ -21,7 +21,7 @@ const SNAP: TraceabilitySnapshot = {
   untraced: [{ scenario: UNTAGGED, reqKeys: [], malformedTags: [] }],
   orphans: [],
   stale: false,
-  completeness: "complete",
+  completeProjects: ["CALC"],
   errors: [],
 };
 

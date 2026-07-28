@@ -25,9 +25,9 @@ interface MetadataState {
   tests: Map<string, TestCaseMetadata>;
   fetchedScopes: string[];
   catalogueProjects: string[];
+  completeProjects: string[];
   verifiedAbsentKeys: string[];
   syncedAt: number | undefined;
-  completeness: "complete" | "partial" | "unknown";
   errors: string[];
   pages: XrayCachePage[];
 }
@@ -37,9 +37,9 @@ function emptyState(): MetadataState {
     tests: new Map(),
     fetchedScopes: [],
     catalogueProjects: [],
+    completeProjects: [],
     verifiedAbsentKeys: [],
     syncedAt: undefined,
-    completeness: "unknown",
     errors: [],
     pages: [],
   };
@@ -50,9 +50,9 @@ function stateFromCached(cached: CachedMetadata): MetadataState {
     tests: new Map(cached.tests.map((test) => [test.key, test])),
     fetchedScopes: [...cached.fetchedScopes],
     catalogueProjects: [...(cached.catalogueProjects ?? [])],
+    completeProjects: [...(cached.completeProjects ?? [])],
     verifiedAbsentKeys: [...(cached.verifiedAbsentKeys ?? [])],
     syncedAt: cached.syncedAt,
-    completeness: cached.completeness,
     errors: [...cached.errors],
     pages: [...cached.pages],
   };
@@ -94,8 +94,9 @@ export interface XrayMetadataDeps {
  * The Xray `metadata` capability. Offline-first: it loads last-known state from the cache on
  * construction (rendering the tree instantly without a network call), then `sync` batch-fetches
  * test keys plus the configured project catalogue, maps to a neutral snapshot with honest
- * `completeness`/`errors`, persists it, and fires `onDidChange`. A partial or failed fetch never
- * upgrades completeness to a value that would let the model derive authoritative orphans.
+ * `completeProjects`/`errors`, persists it, and fires `onDidChange`. A project whose catalogue paged
+ * short or errored is left out of `completeProjects`, so the model derives no orphans for it while
+ * its siblings keep theirs.
  *
  * State is stamped with the account it belongs to and guarded by an account epoch, so an account
  * switch on the same site never surfaces the prior account's metadata: the JWT is dropped, in-memory
@@ -179,10 +180,10 @@ export class XrayMetadataCapability
       tests: new Map(this.state.tests),
       fetchedScopes: [...this.state.fetchedScopes],
       catalogueProjects: [...this.state.catalogueProjects],
+      completeProjects: [...this.state.completeProjects],
       verifiedAbsentKeys: [...this.state.verifiedAbsentKeys],
       syncedAt: this.state.syncedAt,
       stale,
-      completeness: this.state.completeness,
       errors: [...this.state.errors],
     };
   }
@@ -262,8 +263,8 @@ export class XrayMetadataCapability
   }
 
   // Additive background merge for a test picked from remote search: fetch its metadata and fold it
-  // into the in-memory snapshot without disturbing the catalogue (no completeness change, like a key
-  // batch). No per-key fallback; `fetchTestsByKeys` batches, and one stale key never poisons it.
+  // into the in-memory snapshot without disturbing the catalogue scope (like a key batch). No per-key
+  // fallback; `fetchTestsByKeys` batches, and one stale key never poisons it.
   public async mergeKeys(keys: readonly string[], signal?: AbortSignal): Promise<void> {
     const wanted = dedupe(keys.map((key) => this.canonicalizeKey(key))).filter((key) => key !== "");
     if (wanted.length === 0) {
@@ -325,7 +326,7 @@ export class XrayMetadataCapability
     const merged = new Map<string, TestCaseMetadata>();
     const pages: XrayCachePage[] = [];
     const errors: string[] = [];
-    let catalogueComplete = projectKeys.length > 0;
+    const completeProjects: string[] = [];
     let verifiedAbsent: string[] = [];
 
     try {
@@ -334,8 +335,10 @@ export class XrayMetadataCapability
           onProgress?.({ projectKey, fetched, total })
         );
         this.absorb(merged, pages, errors, outcome);
-        if (!outcome.complete || outcome.errors.length > 0) {
-          catalogueComplete = false;
+        // Per project: a catalogue that paged short or reported an error authorizes nothing for its
+        // own project and says nothing about the others, which keep whatever they earned.
+        if (outcome.complete && outcome.errors.length === 0) {
+          completeProjects.push(this.canonicalizeKey(projectKey));
         }
       }
       if (testKeys.length > 0) {
@@ -378,44 +381,29 @@ export class XrayMetadataCapability
 
     this.logDriftBasis(merged);
 
-    const gotData = merged.size > 0;
-    // Total failure with data already on screen: keep the previous tests + completeness rather than
-    // blanking the panel or lying about coverage; only surface the errors and re-emit.
-    if (!gotData && errors.length > 0 && this.state.tests.size > 0) {
+    // A run that errored and learned nothing at all (no catalogue landed, no absence proved, no
+    // metadata fetched) is not a sync: keep the last-known state whole, stamp no `syncedAt`, and
+    // surface the errors alone. With data already on screen that avoids blanking the panel; on a first
+    // sync it is what keeps an unknown catalogue from presenting as "synced just now". A run that
+    // learned anything commits it, so one project's failure never discards its siblings' work.
+    if (completeProjects.length === 0 && verifiedAbsent.length === 0 && merged.size === 0 && errors.length > 0) {
       this.state = { ...this.state, errors };
       this._onDidChange.fire();
       return;
     }
 
-    const completeness = this.completenessFor(projectKeys.length > 0, catalogueComplete, gotData);
-
     this.state = {
       tests: merged,
       fetchedScopes: [...projectKeys, ...testKeys],
       catalogueProjects: projectKeys.map((key) => this.canonicalizeKey(key)),
+      completeProjects,
       verifiedAbsentKeys: verifiedAbsent,
       syncedAt: this.now(),
-      completeness,
       errors,
       pages,
     };
     await this.persist(account);
     this._onDidChange.fire();
-  }
-
-  // Completeness describes catalogue integrity only: project scope present, every project's pages
-  // complete, no catalogue errors; all already folded into `catalogueComplete` by the per-project
-  // loop. A key batch, present or failed, never demotes it (its errors surface in `errors` only).
-  // A key-batch-only or otherwise-incomplete fetch is "partial"; no data at all is "unknown".
-  private completenessFor(
-    hadProjectScope: boolean,
-    catalogueComplete: boolean,
-    gotData: boolean
-  ): MetadataState["completeness"] {
-    if (hadProjectScope && catalogueComplete) {
-      return "complete";
-    }
-    return gotData ? "partial" : "unknown";
   }
 
   private absorb(
@@ -481,9 +469,9 @@ export class XrayMetadataCapability
     const data: CachedMetadata = {
       schemaVersion: CACHE_SCHEMA_VERSION,
       syncedAt: this.state.syncedAt,
-      completeness: this.state.completeness,
       fetchedScopes: [...this.state.fetchedScopes],
       catalogueProjects: [...this.state.catalogueProjects],
+      completeProjects: [...this.state.completeProjects],
       verifiedAbsentKeys: [...this.state.verifiedAbsentKeys],
       errors: [...this.state.errors],
       tests: [...this.state.tests.values()],

@@ -62,14 +62,14 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
   private tests = new Map<string, TestCaseMetadata>();
   private fetchedScopes: string[] = [];
   private catalogueProjects: string[] = [];
+  private completeProjects: string[] = [];
   private verifiedAbsentKeys: string[] = [];
-  private completeness: RemoteMetadataSnapshot["completeness"] = "unknown";
   private syncedAt: number | undefined;
   private errors: string[] = [];
 
   // Seeded fixture the next sync draws from, plus the outcome that sync should simulate.
   private catalogue = new Map<string, TestCaseMetadata>();
-  private nextCompleteness: "complete" | "partial" = "complete";
+  private landedProjects: string[] = [];
   private nextError: string | undefined;
 
   private targets: PublishTarget[];
@@ -111,12 +111,11 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
     this._onConnectionChange.fire();
   }
 
-  public seedCatalogue(
-    tests: readonly TestCaseMetadata[],
-    completeness: "complete" | "partial" = "complete"
-  ): void {
+  // `landedProjects` names the projects whose catalogue the next sync fetches whole; every other
+  // project in the scope pages short, which is how a per-project partial is simulated.
+  public seedCatalogue(tests: readonly TestCaseMetadata[], landedProjects: readonly string[]): void {
     this.catalogue = new Map(tests.map((test) => [test.key, test]));
-    this.nextCompleteness = completeness;
+    this.landedProjects = landedProjects.map((key) => key.toUpperCase());
     this.nextError = undefined;
   }
 
@@ -135,10 +134,10 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
       tests: new Map(this.tests),
       fetchedScopes: [...this.fetchedScopes],
       catalogueProjects: [...this.catalogueProjects],
+      completeProjects: [...this.completeProjects],
       verifiedAbsentKeys: [...this.verifiedAbsentKeys],
       syncedAt: this.syncedAt,
       stale: false,
-      completeness: this.completeness,
       errors: [...this.errors],
     };
   }
@@ -147,28 +146,28 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
     if (signal?.aborted) {
       return Promise.resolve();
     }
+    if (this.nextError !== undefined) {
+      // A fetch that learned nothing surfaces in `errors` and changes nothing else (offline-first):
+      // the last-known snapshot stays whole, down to its catalogue scope, and `syncedAt` does not
+      // advance. Staleness is the stamp not moving, never a catalogue withdrawn from under the
+      // surfaces, and a first sync that wholly failed never presents as synced.
+      this.errors = [this.nextError];
+      this.nextError = undefined;
+      this._onMetadataChange.fire();
+      return Promise.resolve();
+    }
+    this.errors = [];
+    this.tests = new Map(this.catalogue);
+    this.syncedAt = Date.now();
     this.fetchedScopes = [...(scope.projectKeys ?? []), ...(scope.testKeys ?? [])];
     this.catalogueProjects = (scope.projectKeys ?? []).map((key) => key.toUpperCase());
-    this.syncedAt = Date.now();
-    if (this.nextError !== undefined) {
-      // A failed fetch surfaces in `errors` and demotes completeness (offline-first: last-known
-      // metadata is kept, orphans are suppressed) rather than throwing. A failed batch proves no
-      // absence.
-      this.errors = [this.nextError];
-      this.completeness = "unknown";
-      this.verifiedAbsentKeys = [];
-      this.nextError = undefined;
-    } else {
-      this.errors = [];
-      this.tests = new Map(this.catalogue);
-      this.completeness = this.nextCompleteness;
-      // Canonicalize through the grammar (numeric here, not uppercase) so "007" and "7" collapse to
-      // one key; the model derives its link keys the same way, so absence verdicts stay honest.
-      const present = new Set([...this.catalogue.keys()].map((key) => this.keyGrammar.canonicalizeKey(key)));
-      this.verifiedAbsentKeys = (scope.testKeys ?? [])
-        .map((key) => this.keyGrammar.canonicalizeKey(key))
-        .filter((key) => !present.has(key));
-    }
+    this.completeProjects = this.catalogueProjects.filter((key) => this.landedProjects.includes(key));
+    // Canonicalize through the grammar (numeric here, not uppercase) so "007" and "7" collapse to
+    // one key; the model derives its link keys the same way, so absence verdicts stay honest.
+    const present = new Set([...this.catalogue.keys()].map((key) => this.keyGrammar.canonicalizeKey(key)));
+    this.verifiedAbsentKeys = (scope.testKeys ?? [])
+      .map((key) => this.keyGrammar.canonicalizeKey(key))
+      .filter((key) => !present.has(key));
     this._onMetadataChange.fire();
     return Promise.resolve();
   }

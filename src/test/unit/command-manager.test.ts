@@ -637,7 +637,7 @@ describe("traceability linkScenario command", () => {
 
   async function syncedAdapter(): Promise<InMemoryTraceabilityAdapter> {
     const adapter = new InMemoryTraceabilityAdapter();
-    adapter.seedCatalogue([{ key: "5", summary: "Five" }], "complete");
+    adapter.seedCatalogue([{ key: "5", summary: "Five" }], []);
     await adapter.metadata.sync({ testKeys: ["5"] });
     return adapter;
   }
@@ -733,7 +733,7 @@ describe("traceability linkScenario command", () => {
 
   async function reMap(feature: string): Promise<string> {
     const adapter = new InMemoryTraceabilityAdapter();
-    adapter.seedCatalogue([{ key: "9", summary: "Nine" }], "complete");
+    adapter.seedCatalogue([{ key: "9", summary: "Nine" }], []);
     await adapter.metadata.sync({ testKeys: ["9"] });
     vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(fakeDoc(feature));
     const applied: EditEntry[][] = [];
@@ -824,7 +824,7 @@ describe("traceability sync command handler", () => {
     testKeys?: string[];
     directory?: string[];
     scope?: ProjectScopeStore;
-    completeness?: TraceabilitySnapshot["completeness"];
+    completeProjects?: string[];
     commits?: boolean;
     connected?: boolean;
   } = {}): TraceabilitySubsystem {
@@ -843,9 +843,9 @@ describe("traceability sync command handler", () => {
           tests: over.tests ?? new Map(),
           fetchedScopes: [],
           catalogueProjects: over.catalogueProjects ?? [],
+          completeProjects: [],
           verifiedAbsentKeys: [],
           stale: false,
-          completeness: "unknown",
           errors: over.snapshotErrors ?? [],
           syncedAt,
         }),
@@ -867,7 +867,7 @@ describe("traceability sync command handler", () => {
         untraced: [],
         orphans: [],
         stale: false,
-        completeness: over.completeness ?? "complete",
+        completeProjects: over.completeProjects ?? ["CALC"],
         errors: [],
       }),
       getActiveAdapter: () => adapter,
@@ -1173,7 +1173,7 @@ describe("traceability sync command handler", () => {
 
   it("passes the resolved sync scope into the board model, so the empty available group says the right thing", () => {
     const built = (settings: Record<string, unknown>, tagDerived: string[] = []): BoardViewModel =>
-      (managerFor(syncSubsystem({ tagDerived, completeness: "unknown" }), settings) as unknown as {
+      (managerFor(syncSubsystem({ tagDerived, completeProjects: [] }), settings) as unknown as {
         boardDeps: () => { buildModel: () => BoardViewModel };
       }).boardDeps().buildModel();
 
@@ -1229,7 +1229,7 @@ describe("traceability runAndPublish: preflight batch flow", () => {
   const FLAGGED_LINK: TraceLink = { testKey: "CALC-2", scenario: B, reqKeys: [], remoteMissing: true };
 
   function snapshot(links: TraceLink[]): TraceabilitySnapshot {
-    return { links, untraced: [], orphans: [], stale: false, completeness: "complete", errors: [] };
+    return { links, untraced: [], orphans: [], stale: false, completeProjects: ["CALC"], errors: [] };
   }
 
   function harness(links: TraceLink[]) {
@@ -1333,7 +1333,7 @@ describe("traceability openBoard command handler", () => {
     const directory = ladder.directory;
     return {
       traceabilityPanelActive: panelActive,
-      getSnapshot: () => ({ links: [], untraced: [], orphans: [], stale: false, completeness: "complete", errors: [] }),
+      getSnapshot: () => ({ links: [], untraced: [], orphans: [], stale: false, completeProjects: ["CALC"], errors: [] }),
       getActiveAdapter: () => ({
         label: "Xray",
         keyGrammar: { testPrefix: "TEST_", ...(derivesProjects ? { projectOf: (k: string) => k.split("-")[0] } : {}) },
@@ -1634,10 +1634,11 @@ describe("traceability publishLastRun: Publish tab", () => {
     attachments: [] as string[],
   };
 
-  // One publish driven to completion: open the dialog, answer it with `reply`, then report the tabs the
-  // shell was told to activate and how many board rebuilds the flow forced.
+  // One publish driven to completion: open the dialog and answer it with each reply in turn (a failed
+  // import leaves the dialog live on the picked run, so its retry takes an answer of its own), then report
+  // the tabs the shell was told to activate and how many board rebuilds the flow forced.
   async function publishOnce(
-    reply: Record<string, unknown>,
+    replies: Array<Record<string, unknown>>,
     over: { publish?: () => Promise<unknown>; rebuild?: () => Promise<void> } = {}
   ): Promise<{ tabs: Array<string | undefined>; rebuilds: number }> {
     let rebuilds = 0;
@@ -1655,7 +1656,9 @@ describe("traceability publishLastRun: Publish tab", () => {
     await flush();
     const panel = win.__webviewPanels[0]!;
     await panel.__receive({ type: "ready" });
-    await panel.__receive({ surface: "publish", ...reply });
+    for (const reply of replies) {
+      await panel.__receive({ surface: "publish", ...reply });
+    }
     await expect(promise).resolves.toBeUndefined();
     return { tabs: panel.webview.__posted.filter((m) => m.type === "activate").map((m) => m.tab), rebuilds };
   }
@@ -1663,7 +1666,7 @@ describe("traceability publishLastRun: Publish tab", () => {
   // The settle leaves the Publish tab on its idle hint, so a publish that landed has to hand the user the
   // row it just created: rebuild the board first, then bring the Executions tab forward.
   it("rebuilds the board and shows the Executions tab after a successful publish", async () => {
-    const { tabs, rebuilds } = await publishOnce(CONFIRM);
+    const { tabs, rebuilds } = await publishOnce([CONFIRM]);
 
     expect(rebuilds).toBe(1);
     expect(tabs.at(-1)).toBe("executions");
@@ -1672,21 +1675,41 @@ describe("traceability publishLastRun: Publish tab", () => {
   // A partial upload still landed the import, so the row is real and the board must carry it. The tab
   // stays put: the warning toast owns the retry.
   it("rebuilds the board but stays off the Executions tab when attachments partly fail", async () => {
-    const { tabs, rebuilds } = await publishOnce({ ...CONFIRM, attachments: ["/ws/evidence.png"] });
+    const { tabs, rebuilds } = await publishOnce([{ ...CONFIRM, attachments: ["/ws/evidence.png"] }]);
 
     expect(rebuilds).toBe(1);
     expect(tabs).not.toContain("executions");
   });
 
+  // A failed import keeps the dialog on the run the user picked, so the flow ends only once they answer
+  // the retry; cancelling it settles the tab with nothing rebuilt.
   it("neither rebuilds nor switches tabs when the publish fails", async () => {
-    const { tabs, rebuilds } = await publishOnce(CONFIRM, { publish: () => Promise.reject(new Error("HTTP 400")) });
+    const { tabs, rebuilds } = await publishOnce([CONFIRM, { type: "cancel" }], {
+      publish: () => Promise.reject(new Error("HTTP 400")),
+    });
 
     expect(rebuilds).toBe(0);
     expect(tabs).not.toContain("executions");
   });
 
+  it("publishes the picked run again on the retry that follows a failure", async () => {
+    let attempts = 0;
+    const { tabs, rebuilds } = await publishOnce([CONFIRM, CONFIRM], {
+      publish: () => {
+        attempts += 1;
+        return attempts === 1
+          ? Promise.reject(new Error("HTTP 400"))
+          : Promise.resolve({ ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [] });
+      },
+    });
+
+    expect(attempts).toBe(2);
+    expect(rebuilds).toBe(1);
+    expect(tabs.at(-1)).toBe("executions");
+  });
+
   it("neither rebuilds nor switches tabs on cancel, routing back to the Mapping tab", async () => {
-    const { tabs, rebuilds } = await publishOnce({ type: "cancel" });
+    const { tabs, rebuilds } = await publishOnce([{ type: "cancel" }]);
 
     expect(rebuilds).toBe(0);
     expect(tabs.at(-1)).toBe("mapping");
@@ -1695,7 +1718,7 @@ describe("traceability publishLastRun: Publish tab", () => {
   // A repaint that faulted has no new row on it, so the user is left on the Publish tab with the toast
   // rather than in front of an Executions table that is missing what they just published.
   it("stays off the Executions tab when the board rebuild fails", async () => {
-    const { tabs, rebuilds } = await publishOnce(CONFIRM, {
+    const { tabs, rebuilds } = await publishOnce([CONFIRM], {
       rebuild: () => Promise.reject(new Error("discovery down")),
     });
 
@@ -1767,7 +1790,7 @@ describe("traceability board drag-to-link drop handler", () => {
       untraced: [{ scenario: A, reqKeys: [] }],
       orphans: [{ testKey: "5", meta: { key: "5" } }],
       stale: false,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       errors: [],
     };
   }
@@ -1880,7 +1903,7 @@ describe("traceability board unlink handler", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       errors: [],
     };
   }
@@ -1957,7 +1980,7 @@ describe("traceability bulkCreateTests wiring", () => {
   function subsystemWithAuthoring(): TraceabilitySubsystem {
     return {
       traceabilityPanelActive: true,
-      getSnapshot: () => ({ links: [], untraced: [{ scenario: A, reqKeys: [] }], orphans: [], stale: false, completeness: "complete", errors: [] }),
+      getSnapshot: () => ({ links: [], untraced: [{ scenario: A, reqKeys: [] }], orphans: [], stale: false, completeProjects: ["CALC"], errors: [] }),
       getActiveAdapter: () => ({
         label: "Xray",
         keyGrammar: { testPrefix: "TEST_", projectOf: (key: string) => key.split("-")[0] },
@@ -2097,5 +2120,55 @@ describe("traceability clearLocalRunHistory", () => {
     await expect(clear(mgr)).resolves.toBeUndefined();
     expect(store.list()).toEqual([]);
     expect(info).toHaveBeenCalledWith("Cleared 2 local runs.");
+  });
+});
+
+// An older ledger entry can carry a blank reference (a publish whose import response named no execution),
+// and a POST to /issue//attachments can only 404, so both replay paths refuse it and say why.
+describe("traceability pending attachments against a reference the response never named", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const SITE = "acme.atlassian.net";
+
+  function harness(): { mgr: CommandManager; ledger: PublishLedger } {
+    const ledger = new PublishLedger(memento(), Logger.create());
+    ledger.record({
+      artifactId: "run-1",
+      executionRef: "",
+      site: SITE,
+      account: "id",
+      publishedAt: 1,
+      pendingAttachments: ["/ws/report.zip"],
+    });
+    const mgr = CommandManager.create(makeContext());
+    mgr.setPublishLedger(ledger);
+    return { mgr, ledger };
+  }
+
+  it("leaves the banner's files pending and warns instead of uploading", async () => {
+    const { mgr, ledger } = harness();
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+
+    const result = await (
+      mgr as unknown as { attachPendingForRun: (id: string, site: string) => Promise<{ remaining: number }> }
+    ).attachPendingForRun("run-1", SITE);
+
+    expect(result).toEqual({ remaining: 1 });
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain("an execution with no key");
+    expect(ledger.find("run-1", SITE)?.pendingAttachments).toEqual(["/ws/report.zip"]);
+  });
+
+  it("refuses the toast Retry the same way, leaving the ledger untouched", async () => {
+    const { mgr, ledger } = harness();
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+
+    await (
+      mgr as unknown as {
+        retryAttachments: (id: string, site: string, key: string, files: readonly string[]) => Promise<void>;
+      }
+    ).retryAttachments("run-1", SITE, "", ["/ws/report.zip"]);
+
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain("an execution with no key");
+    expect(ledger.find("run-1", SITE)?.pendingAttachments).toEqual(["/ws/report.zip"]);
   });
 });

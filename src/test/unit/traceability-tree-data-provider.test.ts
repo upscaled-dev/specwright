@@ -9,7 +9,7 @@ import {
 } from "../../traceability/traceability-tree-data-provider";
 import type { TraceabilityModel, TraceabilitySnapshot } from "../../traceability/traceability-model";
 
-const EMPTY: TraceabilitySnapshot = { links: [], untraced: [], orphans: [], stale: false, completeness: "unknown", errors: [] };
+const EMPTY: TraceabilitySnapshot = { links: [], untraced: [], orphans: [], stale: false, completeProjects: [], errors: [] };
 
 function makeModel(snapshot: TraceabilitySnapshot): {
   model: TraceabilityModel;
@@ -57,7 +57,7 @@ const SNAPSHOT: TraceabilitySnapshot = {
   ],
   orphans: [],
   stale: false,
-  completeness: "unknown",
+  completeProjects: [],
   errors: [],
 };
 
@@ -141,7 +141,7 @@ describe("TraceabilityTreeDataProvider", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "unknown",
+      completeProjects: [],
       errors: [],
     });
     const testKeys = p.getChildren(p.getChildren()[1]);
@@ -160,7 +160,7 @@ describe("TraceabilityTreeDataProvider", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "unknown",
+      completeProjects: [],
       errors: [],
     });
     const testKeys = p.getChildren(p.getChildren()[1]);
@@ -219,7 +219,7 @@ describe("TraceabilityTreeDataProvider", () => {
     ],
     orphans: [],
     stale: false,
-    completeness: "unknown",
+    completeProjects: [],
     errors: [],
   });
 
@@ -243,7 +243,7 @@ describe("TraceabilityTreeDataProvider", () => {
       ],
       orphans: [],
       stale: false,
-      completeness: "unknown",
+      completeProjects: [],
       errors: [],
     });
     const untraced = p.getChildren(p.getChildren()[0]);
@@ -257,7 +257,7 @@ describe("TraceabilityTreeDataProvider", () => {
   });
 
   it("templates the empty-section message with the provider label", () => {
-    const p = provider({ links: [], untraced: SNAPSHOT.untraced, orphans: [], stale: false, completeness: "unknown", errors: [] }, "Azure DevOps");
+    const p = provider({ links: [], untraced: SNAPSHOT.untraced, orphans: [], stale: false, completeProjects: [], errors: [] }, "Azure DevOps");
     const covered = p.getChildren(p.getChildren()[1]);
     expect(p.getTreeItem(covered[0]!).label).toBe("No scenarios are mapped to a Azure DevOps test yet.");
   });
@@ -276,7 +276,7 @@ describe("TraceabilityTreeDataProvider", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       errors: [],
     });
     const testKeys = p.getChildren(p.getChildren()[1]);
@@ -308,7 +308,7 @@ describe("TraceabilityTreeDataProvider", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       errors: [],
     });
     const item = p.getTreeItem(p.getChildren(p.getChildren()[1])[0]!);
@@ -336,7 +336,7 @@ describe("TraceabilityTreeDataProvider", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       errors: [],
     });
     const item = p.getTreeItem(p.getChildren(p.getChildren()[1])[0]!);
@@ -364,7 +364,7 @@ describe("TraceabilityTreeDataProvider", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "partial",
+      completeProjects: [],
       errors: [],
     });
     const item = p.getTreeItem(p.getChildren(p.getChildren()[1])[0]!);
@@ -388,7 +388,7 @@ describe("TraceabilityTreeDataProvider", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       errors: [],
     });
     const testKeys = p.getChildren(p.getChildren()[1]);
@@ -511,7 +511,7 @@ describe("TraceabilityTreeDataProvider remote summaries and N/M badges", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       errors: [],
     });
     const testKeys = p.getChildren(p.getChildren()[1]);
@@ -536,7 +536,7 @@ describe("TraceabilityTreeDataProvider remote summaries and N/M badges", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       errors: [],
     });
     const testKeys = p.getChildren(p.getChildren()[1]);
@@ -558,7 +558,7 @@ describe("TraceabilityTreeDataProvider remote summaries and N/M badges", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "unknown",
+      completeProjects: [],
       errors: [],
     });
     const testKeys = p.getChildren(p.getChildren()[1]);
@@ -586,7 +586,7 @@ describe("TraceabilityTreeDataProvider remote summaries and N/M badges", () => {
       untraced: [],
       orphans: [],
       stale: false,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       errors: [],
     });
     const testKeys = p.getChildren(p.getChildren()[1]);
@@ -595,7 +595,7 @@ describe("TraceabilityTreeDataProvider remote summaries and N/M badges", () => {
 });
 
 describe("TraceabilityTreeDataProvider orphan section", () => {
-  const withOrphans = (completeness: TraceabilitySnapshot["completeness"]): TraceabilitySnapshot => ({
+  const withOrphans = (completeProjects: string[]): TraceabilitySnapshot => ({
     links: SNAPSHOT.links,
     untraced: SNAPSHOT.untraced,
     orphans: [
@@ -603,12 +603,12 @@ describe("TraceabilityTreeDataProvider orphan section", () => {
       { testKey: "CALC-9000", meta: { key: "CALC-9000", summary: "Another ghost" } },
     ],
     stale: false,
-    completeness,
+    completeProjects,
     errors: [],
   });
 
   it("renders orphans as the last section, untraced → covered → orphan", () => {
-    const p = provider(withOrphans("complete"));
+    const p = provider(withOrphans(["CALC"]));
     expect(p.getChildren().map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
       "untraced",
       "covered",
@@ -617,17 +617,18 @@ describe("TraceabilityTreeDataProvider orphan section", () => {
   });
 
   // "Available" is the board's word for the same rows, so the tree says it too; only the label moved,
-  // the section's own identity ("orphan", traceabilityOrphan) is what the menus bind to.
-  it("labels the orphan header with the provider and shows the count, like the other sections", () => {
-    const p = provider(withOrphans("complete"), "Xray");
+  // the section's own identity ("orphan", traceabilityOrphan) is what the menus bind to. The count is
+  // followed by the projects it speaks for, since a project whose catalogue fell short is not in it.
+  it("labels the orphan header with the provider and counts only the projects that landed", () => {
+    const p = provider(withOrphans(["CALC", "MATH"]), "Xray");
     const orphanSection = p.getChildren()[2]!;
     const header = p.getTreeItem(orphanSection);
     expect(header.label).toBe("Available Xray tests");
-    expect(header.description).toBe("2");
+    expect(header.description).toBe("2 in CALC, MATH");
   });
 
   it("renders each orphan row with key + remote summary and the open/copy affordances", () => {
-    const p = provider(withOrphans("complete"));
+    const p = provider(withOrphans(["CALC"]));
     const rows = p.getChildren(p.getChildren()[2]);
     expect(rows.map((n) => (n.kind === "orphan" ? n.testKey : n.kind))).toEqual(["CALC-9000", "CALC-9999"]);
     const item = p.getTreeItem(rows[1]!);
@@ -642,32 +643,29 @@ describe("TraceabilityTreeDataProvider orphan section", () => {
   // An unmapped remote test is inventory to pick up, not a fault, so it reads as a blue beaker and the
   // warning triangle is left to mean a real problem.
   it("renders orphan rows with the blue beaker icon", () => {
-    const p = provider(withOrphans("complete"));
+    const p = provider(withOrphans(["CALC"]));
     const rows = p.getChildren(p.getChildren()[2]);
     const icon = p.getTreeItem(rows[0]!).iconPath as vscode.ThemeIcon;
     expect(icon.id).toBe("beaker");
     expect((icon.color as vscode.ThemeColor).id).toBe("charts.blue");
   });
 
-  it("never renders orphans from a partial fetch, even when orphan data is present", () => {
-    const p = provider(withOrphans("partial"));
+  it("never renders orphans when no project's catalogue landed, even when orphan data is present", () => {
+    const p = provider(withOrphans([]));
     expect(p.getChildren().map((n) => (n.kind === "section" ? n.section : n.kind))).toEqual([
       "untraced",
       "covered",
     ]);
   });
 
-  it("never renders orphans from an unknown fetch", () => {
-    const p = provider(withOrphans("unknown"));
-    expect(p.getChildren().some((n) => n.kind === "section" && n.section === "orphan")).toBe(false);
-  });
-
-  it("shows an empty-state child when the catalogue is complete but has no orphans", () => {
-    const p = provider({ ...SNAPSHOT, completeness: "complete", orphans: [] });
+  it("shows an empty-state child naming the landed projects when they hold no orphans", () => {
+    const p = provider({ ...SNAPSHOT, completeProjects: ["CALC"], orphans: [] }, "Xray");
     const orphanSection = p.getChildren()[2]!;
-    expect(p.getTreeItem(orphanSection).description).toBe("0");
+    expect(p.getTreeItem(orphanSection).description).toBe("0 in CALC");
     const children = p.getChildren(orphanSection);
-    expect(children[0]!.kind).toBe("info");
+    const info = children[0]!;
+    expect(info.kind).toBe("info");
+    expect(info.kind === "info" && info.label).toBe("No available Xray tests in CALC.");
   });
 });
 
@@ -714,7 +712,7 @@ describe("TraceabilityTreeDataProvider by-file grouping", () => {
     ],
     orphans: [],
     stale: false,
-    completeness: "unknown",
+    completeProjects: [],
     errors: [],
   };
 
@@ -782,7 +780,7 @@ describe("TraceabilityTreeDataProvider by-file grouping", () => {
   it("retains the orphan section at the end in file mode on a complete catalogue", () => {
     const p = fileProvider({
       ...FILE_SNAPSHOT,
-      completeness: "complete",
+      completeProjects: ["CALC"],
       orphans: [{ testKey: "CALC-9999", meta: { key: "CALC-9999", summary: "Ghost" } }],
     });
     const roots = p.getChildren();

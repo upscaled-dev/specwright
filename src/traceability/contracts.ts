@@ -75,26 +75,25 @@ export interface SyncProgressEvent {
 // simply stops being called.
 export type SyncProgress = (event: SyncProgressEvent) => void;
 
-// The offline-first metadata snapshot. `completeness` describes catalogue integrity only (project
-// scope present, every project's pages complete, no catalogue errors; a supplemental key batch,
-// present or failed, never affects it) and gates orphan derivation: orphans are only authoritative
-// on a `"complete"` catalogue fetch; a `"partial"` or `"unknown"` snapshot must never yield orphan
-// counts.
+// The offline-first metadata snapshot. Catalogue integrity is tracked per project, never once for the
+// whole sync, so one project's failed fetch cannot suppress another's orphans or absence verdicts.
 export interface RemoteMetadataSnapshot {
   readonly tests: ReadonlyMap<string, TestCaseMetadata>;
   readonly fetchedScopes: readonly string[];
-  // The project keys whose full catalogue this snapshot attempted; authoritative for key-absence
-  // verdicts only when `completeness === "complete"` (which already implies every catalogue page
-  // complete with no catalogue errors; `errors` may still carry key-batch failures).
+  // The project keys whose full catalogue this snapshot attempted, whether or not each landed.
   readonly catalogueProjects: readonly string[];
+  // The subset of `catalogueProjects` whose catalogue landed whole: every page fetched, no catalogue
+  // errors. This is the gate on orphan derivation and key-absence verdicts, both of which hold only
+  // within these projects. A supplemental key batch, present or failed, never affects it (`errors`
+  // may still carry batch failures).
+  readonly completeProjects: readonly string[];
   // Canonical keys a *successful* key-batch fetch explicitly queried and the remote did not return,
-  // authoritative absence evidence regardless of `completeness` (§5 key-batch leniency: getTests
+  // authoritative absence evidence regardless of catalogue scope (§5 key-batch leniency: getTests
   // silently omits nonexistent keys and still returns 200). A failed or partial batch contributes
   // nothing.
   readonly verifiedAbsentKeys: readonly string[];
   readonly syncedAt?: number | undefined;
   readonly stale: boolean;
-  readonly completeness: "complete" | "partial" | "unknown";
   readonly errors: readonly string[];
 }
 
@@ -366,7 +365,7 @@ export interface RemoteSearchResult {
 export interface RemoteSearchCapability {
   search(text: string, signal?: AbortSignal): Promise<RemoteSearchResult>;
   // Additive, non-destructive merge of specific keys' metadata into the local snapshot (fires the
-  // metadata change event). Never demotes catalogue completeness; it supplements, like a key batch.
+  // metadata change event). Never touches the catalogue scope; it supplements, like a key batch.
   mergeKeys(keys: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 

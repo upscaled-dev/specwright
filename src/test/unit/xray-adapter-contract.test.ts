@@ -12,34 +12,35 @@ import { TestCaseMetadata } from "../../traceability/contracts";
 const SITE = "acme.atlassian.net";
 
 // A mocked transport standing in for XrayClient: `seed`/`seedError` decide what the next sync's
-// fetch returns, so the contract suite drives complete/partial/error catalogues without a network.
+// fetch returns, so the contract suite drives whole/short/error catalogues without a network. A
+// project outside `landed` pages short, which is how a per-project partial reaches the capability.
 class ControllableClient {
   private tests: XrayTestRecord[] = [];
-  private complete = true;
+  private landed: string[] = [];
   private errors: string[] = [];
 
-  public seed(tests: readonly TestCaseMetadata[], completeness: "complete" | "partial"): void {
+  public seed(tests: readonly TestCaseMetadata[], landedProjects: readonly string[]): void {
     this.tests = tests.map((test) => ({ ...test }));
-    this.complete = completeness === "complete";
+    this.landed = [...landedProjects];
     this.errors = [];
   }
 
   public seedError(message: string): void {
     this.tests = [];
-    this.complete = false;
+    this.landed = [];
     this.errors = [message];
   }
 
-  private outcome(): XrayFetchOutcome {
-    return { tests: [...this.tests], pages: [], complete: this.complete, errors: [...this.errors] };
+  private outcome(complete: boolean): XrayFetchOutcome {
+    return { tests: [...this.tests], pages: [], complete, errors: [...this.errors] };
   }
 
-  public fetchProjectCatalogue(): Promise<XrayFetchOutcome> {
-    return Promise.resolve(this.outcome());
+  public fetchProjectCatalogue(projectKey: string): Promise<XrayFetchOutcome> {
+    return Promise.resolve(this.outcome(this.landed.includes(projectKey)));
   }
 
   public fetchTestsByKeys(): Promise<XrayFetchOutcome> {
-    return Promise.resolve(this.outcome());
+    return Promise.resolve(this.outcome(this.errors.length === 0));
   }
 
   public invalidateAuth(): void {
@@ -107,10 +108,11 @@ function xrayHarness(): AdapterContractHarness {
     adapter,
     connect: () => credentialStore.setCredentials(SITE, "id", "secret"),
     disconnect: () => credentialStore.clearCredentials(SITE),
-    seedCatalogue: (tests, completeness) => client.seed(tests, completeness),
+    seedCatalogue: (tests, landedProjects) => client.seed(tests, landedProjects),
     seedSyncError: (message) => client.seedError(message),
-    // A project scope makes a full-catalogue fetch authoritative enough to derive orphans.
-    syncScope: { projectKeys: ["CALC"] },
+    // A project scope makes a full-catalogue fetch authoritative enough to derive orphans; the second
+    // project is the sibling the suite lets fall short. The seeded keys belong to CALC.
+    syncScope: { projectKeys: ["CALC", "MATH"] },
     grammarSample: { tags: ["@TEST_calc-1", "@TEST_CALC-2", "@REQ_calc-9"], testKeys: ["CALC-1", "CALC-2"], reqKeys: ["CALC-9"] },
     mappedKey: "CALC-1",
     orphanKey: "CALC-9",

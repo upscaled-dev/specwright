@@ -22,8 +22,12 @@ export interface AdapterContractHarness {
   readonly adapter: TraceabilityAdapter;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
-  seedCatalogue(tests: readonly TestCaseMetadata[], completeness: "complete" | "partial"): void;
+  // Seed the catalogue the next sync reads, naming the projects whose catalogue lands whole. A project
+  // in `syncScope` that is not named pages short, which is how the suite drives a per-project partial.
+  seedCatalogue(tests: readonly TestCaseMetadata[], landedProjects: readonly string[]): void;
   seedSyncError(message: string): void;
+  // The projects one sync fetches catalogues for. At least two, so a sibling can fall short; the seeded
+  // catalogue's keys belong to the first.
   readonly syncScope: SyncScope;
   // A tag set exercising the adapter's grammar, with the canonical keys it must extract.
   readonly grammarSample: {
@@ -49,6 +53,10 @@ function mappedFeature(harness: AdapterContractHarness): ParsedFeatureInput {
 function join(harness: AdapterContractHarness): TraceabilitySnapshot {
   const remote = harness.adapter.metadata?.snapshot();
   return buildTraceabilitySnapshot([mappedFeature(harness)], {}, harness.adapter.keyGrammar, remote);
+}
+
+function scopeProjects(harness: AdapterContractHarness): readonly string[] {
+  return harness.syncScope.projectKeys ?? [];
 }
 
 export function runAdapterContractTests(makeHarness: () => AdapterContractHarness): void {
@@ -89,12 +97,12 @@ export function runAdapterContractTests(makeHarness: () => AdapterContractHarnes
           { key: harness.mappedKey, summary: "mapped test" },
           { key: harness.orphanKey, summary: "orphan test" },
         ],
-        "complete"
+        scopeProjects(harness)
       );
       await harness.adapter.metadata!.sync(harness.syncScope);
 
       const remote = harness.adapter.metadata!.snapshot();
-      expect(remote.completeness).toBe("complete");
+      expect(remote.completeProjects.length).toBeGreaterThan(0);
       expect(remote.syncedAt).toBeTypeOf("number");
 
       const snap = join(harness);
@@ -106,27 +114,75 @@ export function runAdapterContractTests(makeHarness: () => AdapterContractHarnes
     it("never derives orphans from a partial catalogue fetch", async () => {
       const harness = makeHarness();
       await harness.connect();
-      harness.seedCatalogue(
-        [{ key: harness.mappedKey }, { key: harness.orphanKey }],
-        "partial"
-      );
+      harness.seedCatalogue([{ key: harness.mappedKey }, { key: harness.orphanKey }], []);
       await harness.adapter.metadata!.sync(harness.syncScope);
 
       const remote = harness.adapter.metadata!.snapshot();
-      expect(remote.completeness).toBe("partial");
+      expect(remote.completeProjects).toEqual([]);
       expect(join(harness).orphans).toEqual([]);
+    });
+
+    // Completeness is per project: the project that landed keeps its orphans while the one that fell
+    // short is simply left out, so one bad key in the scope can never blank the rest of the board.
+    it("keeps the landed project's orphans when a sibling project falls short", async () => {
+      const harness = makeHarness();
+      const [landed, ...short] = scopeProjects(harness);
+      expect(short.length).toBeGreaterThan(0);
+      await harness.connect();
+      harness.seedCatalogue([{ key: harness.mappedKey }, { key: harness.orphanKey }], [landed!]);
+      await harness.adapter.metadata!.sync(harness.syncScope);
+
+      const remote = harness.adapter.metadata!.snapshot();
+      expect(remote.catalogueProjects).toEqual(expect.arrayContaining([...scopeProjects(harness)]));
+      expect(remote.completeProjects).toEqual([landed]);
+      expect(join(harness).orphans.map((o) => o.testKey)).toEqual([harness.orphanKey]);
     });
 
     it("records a sync error on the snapshot and suppresses orphans", async () => {
       const harness = makeHarness();
       await harness.connect();
-      harness.seedCatalogue([{ key: harness.orphanKey }], "complete");
+      harness.seedCatalogue([{ key: harness.orphanKey }], scopeProjects(harness));
       harness.seedSyncError("transport failure");
       await harness.adapter.metadata!.sync(harness.syncScope);
 
       const remote = harness.adapter.metadata!.snapshot();
       expect(remote.errors).toContain("transport failure");
       expect(join(harness).orphans).toEqual([]);
+    });
+
+    // A later sync that learned nothing withdraws nothing: the catalogue on screen stays whole and the
+    // stamp is what goes stale, so a transient outage never blanks a board that was already correct.
+    it("keeps the prior catalogue whole when a later sync only errors", async () => {
+      const harness = makeHarness();
+      await harness.connect();
+      harness.seedCatalogue(
+        [{ key: harness.mappedKey }, { key: harness.orphanKey }],
+        scopeProjects(harness)
+      );
+      await harness.adapter.metadata!.sync(harness.syncScope);
+      const before = harness.adapter.metadata!.snapshot();
+
+      harness.seedSyncError("transport failure");
+      await harness.adapter.metadata!.sync(harness.syncScope);
+
+      const after = harness.adapter.metadata!.snapshot();
+      expect(after.completeProjects).toEqual(before.completeProjects);
+      expect(after.catalogueProjects).toEqual(before.catalogueProjects);
+      expect(after.fetchedScopes).toEqual(before.fetchedScopes);
+      expect(after.syncedAt).toBe(before.syncedAt);
+      expect(after.errors).toContain("transport failure");
+      expect(join(harness).orphans.map((o) => o.testKey)).toEqual([harness.orphanKey]);
+    });
+
+    // A first sync that fetched nothing has no catalogue to present, so no surface may claim one:
+    // "synced just now" over an unknown catalogue is the lie this rules out.
+    it("leaves a wholly failed first sync unsynced", async () => {
+      const harness = makeHarness();
+      await harness.connect();
+      harness.seedSyncError("transport failure");
+      await harness.adapter.metadata!.sync(harness.syncScope);
+
+      expect(harness.adapter.metadata!.snapshot().syncedAt).toBeUndefined();
     });
 
     it("resolves a browse link that carries the key", () => {

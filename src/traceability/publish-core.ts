@@ -1,4 +1,4 @@
-import { RunArtifact, RunArtifactOutcome, RunArtifactResult } from "./contracts";
+import { PublishOutcome, PublishRequest, RunArtifact, RunArtifactOutcome, RunArtifactResult } from "./contracts";
 import { plural } from "../utils/text";
 import { sameScenario } from "./scenario-ref";
 
@@ -132,6 +132,33 @@ export function publishDialogSubtitle(summary: PublishableSummary, changedSinceR
 export function defaultPublishSummary(createdAt: number, publishableCount: number): string {
   const date = new Date(createdAt).toISOString().slice(0, 10);
   return `Specwright run ${date} (${publishableCount} ${plural(publishableCount, "scenario")})`;
+}
+
+// An import response that carried neither a key nor an id leaves "" behind, and nothing invents one, so
+// this is what every surface asks before it prints a reference, hangs a link on it, or uploads to it.
+export function hasExecutionRef(ref: string): boolean {
+  return ref !== "";
+}
+
+// The one phrase for a reference the provider never named. It reads as a target ("published to …") so
+// the toast, the board row, and the dialog's banners can all say the same thing.
+export const UNKNOWN_EXECUTION = "an execution with no key";
+
+// What a surface prints in place of the reference: the key when there is one, the phrase when there is not.
+export function executionLabel(ref: string): string {
+  return hasExecutionRef(ref) ? ref : UNKNOWN_EXECUTION;
+}
+
+// The lead of every post-publish toast: what the import did and how much it carried.
+export function publishOutcomeLead(outcome: PublishOutcome, request: PublishRequest): string {
+  const carried = `${outcome.imported} ${plural(outcome.imported, "result")}`;
+  if (request.mode === "append") {
+    return `appended to ${outcome.ref.key}: ${carried}`;
+  }
+  if (!hasExecutionRef(outcome.ref.key)) {
+    return `created ${UNKNOWN_EXECUTION}: ${carried} imported`;
+  }
+  return `${outcome.ref.key} created: ${carried} imported`;
 }
 
 // One run's label in the dialog's newest-first dropdown: its local time and batch scope.

@@ -36,9 +36,9 @@ function inMemoryHarness(): AdapterContractHarness {
     adapter,
     connect: () => { adapter.setConnected(true); return Promise.resolve(); },
     disconnect: () => { adapter.setConnected(false); return Promise.resolve(); },
-    seedCatalogue: (tests, completeness) => adapter.seedCatalogue(tests, completeness),
+    seedCatalogue: (tests, landedProjects) => adapter.seedCatalogue(tests, landedProjects),
     seedSyncError: (message) => adapter.seedSyncError(message),
-    syncScope: { projectKeys: ["fixture"] },
+    syncScope: { projectKeys: ["FIXTURE", "OTHER"] },
     grammarSample: { tags: ["@TC-042", "@TC-7", "@RQ-3"], testKeys: ["42", "7"], reqKeys: ["3"] },
     mappedKey: "42",
     orphanKey: "77",
@@ -101,16 +101,17 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
     expect(targets.map((t) => t.ref.key)).toContain("EXEC-9");
   });
 
-  it("keeps last-known metadata but demotes completeness to unknown on a sync error", async () => {
+  it("keeps the last-known snapshot whole on a sync error, down to its catalogue scope", async () => {
     const adapter = new InMemoryTraceabilityAdapter();
-    adapter.seedCatalogue([{ key: "42", summary: "kept" }], "complete");
-    await adapter.metadata.sync({ testKeys: ["42"] });
-    expect(adapter.metadata.snapshot().completeness).toBe("complete");
+    adapter.seedCatalogue([{ key: "42", summary: "kept" }], ["fixture"]);
+    await adapter.metadata.sync({ projectKeys: ["fixture"], testKeys: ["42"] });
+    expect(adapter.metadata.snapshot().completeProjects).toEqual(["FIXTURE"]);
 
     adapter.seedSyncError("boom");
-    await adapter.metadata.sync({ testKeys: ["42"] });
+    await adapter.metadata.sync({ projectKeys: ["fixture"], testKeys: ["42"] });
     const snap = adapter.metadata.snapshot();
-    expect(snap.completeness).toBe("unknown");
+    expect(snap.completeProjects).toEqual(["FIXTURE"]);
+    expect(snap.catalogueProjects).toEqual(["FIXTURE"]);
     expect(snap.tests.get("42")?.summary).toBe("kept");
     expect(snap.errors).toEqual(["boom"]);
   });
@@ -129,7 +130,7 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
 
   it("records queried keys absent from the seeded catalogue as verified-absent", async () => {
     const adapter = new InMemoryTraceabilityAdapter();
-    adapter.seedCatalogue([{ key: "42", summary: "kept" }], "complete");
+    adapter.seedCatalogue([{ key: "42", summary: "kept" }], ["fixture"]);
     await adapter.metadata.sync({ testKeys: ["42", "99"] });
     const snap = adapter.metadata.snapshot();
     expect(snap.verifiedAbsentKeys).toEqual(["99"]);
@@ -141,14 +142,14 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
     // The catalogue returns a leading-zero variant of key 7; the numeric grammar must treat "007" and
     // "7" as one key, so only the genuinely-absent 8 lands in the absent set. A plain uppercase
     // compare (the old behavior) would wrongly mark both queried keys absent.
-    adapter.seedCatalogue([{ key: "007", summary: "kept" }], "complete");
+    adapter.seedCatalogue([{ key: "007", summary: "kept" }], ["fixture"]);
     await adapter.metadata.sync({ testKeys: ["7", "008"] });
     expect(adapter.metadata.snapshot().verifiedAbsentKeys).toEqual(["8"]);
   });
 
   it("keeps model absence verdicts correct under a non-uppercasing grammar", async () => {
     const adapter = new InMemoryTraceabilityAdapter();
-    adapter.seedCatalogue([{ key: "7", summary: "present" }], "complete");
+    adapter.seedCatalogue([{ key: "7", summary: "present" }], ["fixture"]);
     // The sync queries the non-canonical tag bodies the model later canonicalizes to 7 (present) and
     // 8 (verified absent).
     await adapter.metadata.sync({ testKeys: ["007", "008"] });
@@ -284,7 +285,7 @@ function controllableAdapter(id: string): Controllable {
     },
     metadata: {
       onDidChange: metaEmitter.event,
-      snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], verifiedAbsentKeys: [], stale: false, completeness: "unknown", errors: [] }),
+      snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], completeProjects: [], verifiedAbsentKeys: [], stale: false, errors: [] }),
       sync: () => Promise.resolve(),
     },
     dispose,
@@ -330,7 +331,7 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     await settle();
     expect(created).toHaveLength(1);
     // Seed catalogue state on the first adapter so a bleed would be observable after swap-back.
-    created[0]!.seedCatalogue([{ key: "42", summary: "mem-only" }], "complete");
+    created[0]!.seedCatalogue([{ key: "42", summary: "mem-only" }], ["fixture"]);
     await created[0]!.metadata.sync({ projectKeys: ["fixture"] });
 
     setProvider("xray");
@@ -348,7 +349,7 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     expect(created[1]).not.toBe(created[0]);
     const snap = created[1]!.metadata.snapshot();
     expect(snap.tests.size).toBe(0);
-    expect(snap.completeness).toBe("unknown");
+    expect(snap.completeProjects).toEqual([]);
 
     subsystem.dispose();
     expect(created[1]!.dispose).toHaveBeenCalledTimes(1);

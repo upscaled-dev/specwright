@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import type { KeyGrammar, SyncProgressEvent } from "./contracts";
 import type { LedgerEntry } from "./publish-ledger";
+import { executionLabel, hasExecutionRef } from "./publish-core";
 import type { ScenarioRef } from "./scenario-ref";
 import type {
   TraceabilitySnapshot,
@@ -79,21 +80,24 @@ export interface BoardViewModel {
   // offering a sync over (see `availableEmptyState`).
   readonly availableEmptyText: string;
   readonly offerSync: boolean;
+  // The projects whose catalogue the last sync fetched whole, carried so scoping to one project can
+  // re-decide the empty state for that project alone (see `scopeBoardViewModel`).
+  readonly completeProjects: readonly string[];
 }
 
 // The available group's empty state, by what the user can do about it. With nothing in the resolved
-// sync scope no sync helps, since completeness never reaches "complete" without project keys, and the
-// header's project selector is the fastest way to put one there. With a scope but no complete
-// catalogue, a sync is the fix. A complete catalogue that yields nothing has nothing to offer, and
-// saying every test is mapped would be a lie when the sync catalogued no tests at all.
+// sync scope no sync helps, since no project's catalogue can be fetched without project keys, and the
+// header's project selector is the fastest way to put one there. With a scope but no catalogue landed,
+// a sync is the fix. A landed catalogue that yields nothing has nothing to offer, and saying every test
+// is mapped would be a lie when the sync catalogued no tests at all.
 function availableEmptyState(
   syncScopeResolved: boolean,
-  completeness: TraceabilitySnapshot["completeness"] | undefined
+  landed: boolean
 ): { availableEmptyText: string; offerSync: boolean } {
   if (!syncScopeResolved) {
     return { availableEmptyText: "Pick a project in the header to load its tests.", offerSync: false };
   }
-  if (completeness !== "complete") {
+  if (!landed) {
     return { availableEmptyText: "No synced tests yet.", offerSync: true };
   }
   return { availableEmptyText: "No unmapped tests in the last sync.", offerSync: false };
@@ -335,9 +339,10 @@ export function buildBoardViewModel(
   syncScopeResolved: boolean,
   projectOf?: KeyGrammar["projectOf"]
 ): BoardViewModel {
-  const emptyState = availableEmptyState(syncScopeResolved, snapshot?.completeness);
+  const completeProjects = snapshot?.completeProjects ?? [];
+  const emptyState = availableEmptyState(syncScopeResolved, completeProjects.length > 0);
   if (!snapshot) {
-    return { scenarios: [], available: [], mapped: [], matrix: [], ...emptyState };
+    return { scenarios: [], available: [], mapped: [], matrix: [], completeProjects, ...emptyState };
   }
   const scenarios = snapshot.untraced
     .map((item) => scenarioCard(item, workspaceRoots))
@@ -359,6 +364,7 @@ export function buildBoardViewModel(
     available,
     mapped: mappedTestCards(snapshot.links, workspaceRoots, projectOf),
     matrix: matrixRows(snapshot, workspaceRoots, testTagPrefix, projectOf),
+    completeProjects,
     ...emptyState,
   };
 }
@@ -424,10 +430,14 @@ export function resolveBoardUnlink(
 }
 
 // One row of the Executions tab. Every cell is render-ready text (dates as ISO days, a plain dash
-// where an older ledger entry recorded no counts), except `timesFromHere` — the per-key publish count
-// the panel renders as its own column. `action` is the create/append the publish took.
+// where an older ledger entry recorded no counts), except `timesFromHere`, the publish count for this
+// row's execution, which the panel renders as its own column. `action` is the create/append the publish
+// took. `key` is the raw reference the panel opens (empty when the import response named none), and
+// `keyLabel` is what it prints, so the phrase for a missing reference is decided here rather than in the
+// webview.
 export interface ExecutionRow {
   readonly key: string;
+  readonly keyLabel: string;
   readonly summary: string;
   readonly action: string;
   readonly resultsImported: string;
@@ -476,17 +486,22 @@ function executionPassRate(entry: LedgerEntry): string {
  * execution key, its summary, what the entry did to it (created, appended, or created empty), the
  * imported result count (the recorded total) and pass rate (rendered only when the recorded pass/fail/skip
  * counts add up to that total, else a dash), the ISO date, and how many ledger entries name that same key,
- * standalone creations included, so every row for one key reports the same number.
+ * standalone creations included, so every row for one KEY reports the same number. An entry the import
+ * response never named has no key to group by, so each such row stands alone and reports 1.
  */
 export function buildExecutionRows(entries: readonly LedgerEntry[]): ExecutionRow[] {
   const timesByKey = new Map<string, number>();
   for (const entry of entries) {
-    timesByKey.set(entry.executionRef, (timesByKey.get(entry.executionRef) ?? 0) + 1);
+    // Tallying the blanks together would report unrelated publishes as repeats of one execution.
+    if (hasExecutionRef(entry.executionRef)) {
+      timesByKey.set(entry.executionRef, (timesByKey.get(entry.executionRef) ?? 0) + 1);
+    }
   }
   return [...entries]
     .sort((a, b) => b.publishedAt - a.publishedAt)
     .map((entry) => ({
       key: entry.executionRef,
+      keyLabel: executionLabel(entry.executionRef),
       summary: entry.summary ?? "",
       action: executionAction(entry.mode),
       resultsImported: executionImported(entry),
@@ -496,14 +511,15 @@ export function buildExecutionRows(entries: readonly LedgerEntry[]): ExecutionRo
     }));
 }
 
-// The Executions header search: case-insensitive substring over the execution key and its summary. An
-// empty query returns the rows untouched.
+// The Executions header search: case-insensitive substring over the reference AS PRINTED and the summary,
+// so a row whose reference is missing is findable by the words the user can see. An empty query returns
+// the rows untouched.
 export function filterExecutionRows(rows: readonly ExecutionRow[], query: string): readonly ExecutionRow[] {
   const needle = query.trim().toLowerCase();
   if (needle === "") {
     return rows;
   }
-  return rows.filter((row) => row.key.toLowerCase().includes(needle) || row.summary.toLowerCase().includes(needle));
+  return rows.filter((row) => row.keyLabel.toLowerCase().includes(needle) || row.summary.toLowerCase().includes(needle));
 }
 
 /**
@@ -512,18 +528,26 @@ export function filterExecutionRows(rows: readonly ExecutionRow[], query: string
  * matrix row when it evidences that project, whether through its test key or through any of its
  * requirement keys. A row that evidences no project at all stays visible under every scope, so an
  * untraced scenario's coverage hole never hides behind a filter. Scenario cards are local, not remote,
- * so they are never scoped away, and the available group's empty state stays whatever the build decided.
+ * so they are never scoped away. The available group's empty state is re-decided for the scoped project
+ * alone: a project whose own catalogue never landed must not inherit a sibling's authoritative "no
+ * unmapped tests". A project can only be scoped to once it is in the sync scope (the selection is a rung
+ * of that scope), so the pick-a-project hint is unreachable from here.
  */
 export function scopeBoardViewModel(model: BoardViewModel, project: string | undefined): BoardViewModel {
   if (project === undefined) {
     return model;
   }
   const inScope = (card: BoardTestCard): boolean => card.project === project;
+  // Card and row projects are uppercased at build time, but `completeProjects` comes through from the
+  // adapter as it reported it, so this compare matches the model's case-insensitive one rather than
+  // stranding a landed lowercase project on "No synced tests yet."
+  const landed = model.completeProjects.some((key) => key.toLowerCase() === project.toLowerCase());
   return {
     ...model,
     available: model.available.filter(inScope),
     mapped: model.mapped.filter(inScope),
     matrix: model.matrix.filter((row) => row.projects.length === 0 || row.projects.includes(project)),
+    ...availableEmptyState(true, landed),
   };
 }
 
@@ -555,5 +579,6 @@ export function filterBoardViewModel(model: BoardViewModel, query: string): Boar
     ),
     availableEmptyText: model.availableEmptyText,
     offerSync: model.offerSync,
+    completeProjects: model.completeProjects,
   };
 }

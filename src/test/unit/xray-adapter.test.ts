@@ -120,6 +120,13 @@ describe("XrayAdapter", () => {
     const adapter = new XrayAdapter(configWith({}));
     expect(adapter.browseUrl({ key: "CALC-1" })).toBeUndefined();
   });
+
+  // An import response that named no execution leaves an empty ref, and /browse/ with nothing after it
+  // is a dead link.
+  it("returns undefined for a ref with no key rather than a link to /browse/", () => {
+    const adapter = new XrayAdapter(configWith({ "xray.siteUrl": "acme.atlassian.net" }));
+    expect(adapter.browseUrl({ key: "" })).toBeUndefined();
+  });
 });
 
 describe("XrayAdapter connection capability", () => {

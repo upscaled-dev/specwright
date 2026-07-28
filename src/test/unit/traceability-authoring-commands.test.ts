@@ -62,7 +62,7 @@ function snapshot(refs: ScenarioRef[] = [LOGIN, CHECKOUT]): TraceabilitySnapshot
     untraced: refs.map((scenario) => ({ scenario, reqKeys: [] })),
     orphans: [],
     stale: false,
-    completeness: "complete",
+    completeProjects: ["CALC"],
     errors: [],
   };
 }
@@ -171,7 +171,7 @@ function linkSnapshot(over: Partial<TraceLink> = {}): TraceabilitySnapshot {
     untraced: [],
     orphans: [],
     stale: false,
-    completeness: "complete",
+    completeProjects: ["CALC"],
     errors: [],
   };
 }
@@ -277,7 +277,7 @@ const CONTAINER_SNAPSHOT: TraceabilitySnapshot = {
     { testKey: "CALC-3", meta: { key: "CALC-3" } },
   ],
   stale: false,
-  completeness: "complete",
+  completeProjects: ["CALC"],
   errors: [],
 };
 

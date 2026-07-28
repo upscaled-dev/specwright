@@ -19,7 +19,7 @@ export interface TraceabilitySyncDeps {
 /**
  * Drives one metadata sync and reduces it to a toast-ready result. The capability records fetch
  * failures on its snapshot rather than throwing (offline-first), so a non-empty `errors` array is
- * surfaced as a failure without the snapshot's previous completeness being lost. A cancelled run is
+ * surfaced as a failure without the snapshot's last-known catalogue being lost. A cancelled run is
  * not an error; the caller reports it as information rather than a failure.
  */
 export async function runTraceabilitySync(deps: TraceabilitySyncDeps): Promise<TraceabilitySyncResult> {
