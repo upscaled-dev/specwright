@@ -292,6 +292,32 @@ describe("RunArtifactStore", () => {
     expect(store.sealBatch(batch, false)?.results).toHaveLength(1);
     expect(store.list()).toHaveLength(1);
   });
+
+  // What an open Publish dialog listens to so a run recorded while it sits there reaches its dropdown.
+  it("announces every change to the buffer, with the new list already readable", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    const seen: number[] = [];
+    store.onDidChange(() => seen.push(store.list().length));
+
+    store.append(artifact({ id: "a" }));
+    const batch = store.beginBatch(FEATURE_SEL);
+    store.contributeShard(batch, shard({ details: [scenario()] }));
+    store.sealBatch(batch, false);
+    store.clear();
+
+    expect(seen).toEqual([1, 2, 0]);
+  });
+
+  it("says nothing while a batch is merely open, since the buffer has not changed", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    let fired = 0;
+    store.onDidChange(() => (fired += 1));
+
+    const batch = store.beginBatch(FEATURE_SEL);
+    store.contributeShard(batch, shard({ details: [scenario()] }));
+
+    expect(fired).toBe(0);
+  });
 });
 
 describe("testKey threading and preflight decisions", () => {

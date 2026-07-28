@@ -89,14 +89,14 @@ export interface PublishDialogResult {
   readonly attachments: readonly string[];
 }
 
-export interface PublishFlowDeps {
-  publishing: ResultPublishingCapability;
-  // Candidate runs, newest-first (the run-artifact store's `list()`). The flow keeps only the publishable
-  // ones with something left after reconciliation; that filtered set is the dropdown.
-  runs: readonly RunArtifact[];
-  // The run to open on: Run Locally and Publish passes the run it just sealed; Publish Last Run omits it
-  // and the newest publishable run wins.
-  preselectId?: string | undefined;
+// Everything one row of the dialog's run dropdown is derived from. Split out because the dropdown outlives
+// the moment the flow builds it: the Publish surface re-derives the list in place whenever the local run
+// history changes under an open dialog, and it has no business holding the rest of the flow's seams.
+export interface PublishRunSources {
+  // Candidate runs, newest-first (the run-artifact store's `list()`). Only the publishable ones with
+  // something left after reconciliation become the dropdown. Read fresh on every call, never snapshotted:
+  // the dialog outlives the moment it opened, and a run recorded while it sat there is publishable too.
+  runs(): readonly RunArtifact[];
   // The grammar's project-of-key (Xray: `projectFromKey`); absent when the provider can't derive one.
   projectOf?: ((key: string) => string) | undefined;
   // Publishable results whose source can no longer be resolved (create mode drops them). The command
@@ -106,6 +106,16 @@ export interface PublishFlowDeps {
   // The board's persisted project scope, when one is picked. It outranks the run-derived key for the
   // dialog's project prefill; All Projects is the absence of a selection and leaves derivation alone.
   selectedProjectKey?: string | undefined;
+  // A prior publish of the given artifact on the current site (or undefined); the ledger idempotency
+  // read, per run, feeding the republish and pending-attachments banners.
+  priorEntryFor(artifactId: string): LedgerEntry | undefined;
+}
+
+export interface PublishFlowDeps extends PublishRunSources {
+  publishing: ResultPublishingCapability;
+  // The run to open on: Run Locally and Publish passes the run it just sealed; Publish Last Run omits it
+  // and the newest publishable run wins.
+  preselectId?: string | undefined;
   jiraSearchAvailable: boolean;
   // The resolved project universe seeding the dialog's project dropdown. The flow normalizes it through
   // the same `normalizeProjectKeys` the board's scope selector reads.
@@ -113,9 +123,6 @@ export interface PublishFlowDeps {
   // Built lazily, only when the dialog is actually about to open (after the no-runs gate), so an
   // empty run list never fires the one allowed pre-confirm call (the `attachment/meta` probe).
   attachments(): Promise<PublishAttachmentsModel>;
-  // A prior publish of the given artifact on the current site (or undefined); the ledger idempotency
-  // read, per run, feeding the republish and pending-attachments banners.
-  priorEntryFor(artifactId: string): LedgerEntry | undefined;
   // Renders the dialog and returns the user's selected run + request + attachments, or undefined on
   // cancel/close (→ zero transport).
   presentDialog(model: PublishDialogModel): Promise<PublishDialogResult | undefined>;
@@ -153,7 +160,11 @@ interface BuiltRunOption {
   readonly derivedProject: string;
 }
 
-function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps, scopedProject: string | undefined): BuiltRunOption {
+function buildRunOption(
+  artifact: RunArtifact,
+  deps: PublishRunSources,
+  scopedProject: string | undefined
+): BuiltRunOption {
   const reconciled = publishableResults(artifact);
   const summary = summarizePublishable(reconciled);
   const planKey = artifact.selection.kind === "test-plan-derived" ? artifact.selection.planKey : undefined;
@@ -188,6 +199,28 @@ function buildRunOption(artifact: RunArtifact, deps: PublishFlowDeps, scopedProj
   };
 }
 
+// The runs the dialog can offer: publishable, and with something left after reconciliation. Exported so
+// the command layer's pre-open gate asks exactly what the dropdown will answer.
+export function runnableRuns(runs: readonly RunArtifact[]): readonly RunArtifact[] {
+  return runs.filter((artifact) => isPublishable(artifact) && publishableResults(artifact).publishable.length > 0);
+}
+
+// Folded through the same normalizer as the dropdown, so a blank or lowercase scope cannot reach the
+// prefill: whatever normalizes to nothing is no selection at all.
+function scopedProjectOf(deps: PublishRunSources): string | undefined {
+  return normalizeProjectKeys([deps.selectedProjectKey ?? ""])[0];
+}
+
+/**
+ * The dialog's run dropdown, newest-first. The flow builds it once when it presents; the Publish surface
+ * calls this again whenever the local run history changes under an open dialog, so a run recorded while
+ * the user was away lands in the list without a reopen.
+ */
+export function publishRunOptions(deps: PublishRunSources): readonly PublishRunOption[] {
+  const scopedProject = scopedProjectOf(deps);
+  return runnableRuns(deps.runs()).map((artifact) => buildRunOption(artifact, deps, scopedProject).option);
+}
+
 // The run the user confirmed, together with what publishing it returned.
 interface ConfirmedPublish {
   readonly artifact: RunArtifact;
@@ -197,18 +230,22 @@ interface ConfirmedPublish {
 
 // Present, publish, and on a failure come back to the same dialog instead of dropping the user on an idle
 // tab: the retry keeps the run they picked and the form they filled in, so a bad key or a transient 500 is
-// one more click rather than a re-pick. Undefined once they cancel, or when the run behind the pick is
-// gone.
+// one more click rather than a re-pick. Undefined once they cancel, or once the run they picked is gone.
+//
+// The confirmed id is resolved against the runs AS THEY STAND, not against the list the dialog opened on:
+// the dropdown refreshes itself while it sits there, so the newest run is exactly the one the opening
+// snapshot would refuse. A pick that is in neither is a run the history lost meanwhile, and it is reported
+// rather than dropped, since the user pressed Publish and is owed an answer.
 async function confirmAndPublish(
   deps: PublishFlowDeps,
-  model: PublishDialogModel,
-  runnable: readonly RunArtifact[]
+  model: PublishDialogModel
 ): Promise<ConfirmedPublish | undefined> {
   let answer = await deps.presentDialog(model);
   while (answer !== undefined) {
     const dialog = answer;
-    const artifact = runnable.find((candidate) => candidate.id === dialog.runId);
+    const artifact = runnableRuns(deps.runs()).find((candidate) => candidate.id === dialog.runId);
     if (artifact === undefined) {
+      deps.reportFailure(new Error("That run is no longer in this workspace's run history, so it cannot be published."));
       return undefined;
     }
     try {
@@ -233,9 +270,7 @@ async function confirmAndPublish(
  * No publishable run, or cancel/close, makes ZERO transport calls.
  */
 export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
-  const runnable = deps.runs.filter(
-    (artifact) => isPublishable(artifact) && publishableResults(artifact).publishable.length > 0
-  );
+  const runnable = runnableRuns(deps.runs());
   const newest = runnable[0];
   if (newest === undefined) {
     deps.reportNoRuns();
@@ -245,9 +280,7 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
   // The runs gate passed → the dialog will open, so this is the moment (and only moment) the attachments
   // model + its `attachment/meta` probe are built.
   const attachments = await deps.attachments();
-  // Folded through the same normalizer as the dropdown, so a blank or lowercase scope cannot reach the
-  // prefill: whatever normalizes to nothing is no selection at all.
-  const scopedProject = normalizeProjectKeys([deps.selectedProjectKey ?? ""])[0];
+  const scopedProject = scopedProjectOf(deps);
   const built = runnable.map((artifact) => buildRunOption(artifact, deps, scopedProject));
   const selectedRunId =
     deps.preselectId !== undefined && runnable.some((artifact) => artifact.id === deps.preselectId)
@@ -268,8 +301,7 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
         ...(scopedProject === undefined ? [] : built.map((run) => run.derivedProject)),
       ]),
       attachments,
-    },
-    runnable
+    }
   );
   if (confirmed === undefined) {
     return;

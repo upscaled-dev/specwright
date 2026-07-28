@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
-import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
+import { affectsBoard, BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import { BoardViewModel, ExecutionRow } from "../../traceability/board-data";
 import { NO_PROJECT_SCOPE, ProjectScopeStore } from "../../traceability/project-scope";
 import { PublishDialogDelegate } from "../../traceability/publish-dialog-panel";
@@ -11,6 +11,8 @@ const noopDelegate: PublishDialogDelegate = {
   searchTargets: () => Promise.resolve([]),
   browseFiles: () => Promise.resolve([]),
   attachPending: () => Promise.resolve({ remaining: 0 }),
+  onDidChangeRuns: new vscode.EventEmitter<void>().event,
+  runOptions: () => [],
 };
 
 // The panel drives the real `vscode.window.createWebviewPanel` stub: `__receive` delivers an inbound
@@ -371,6 +373,47 @@ describe("BoardPanel", () => {
 
     expect(html).toContain("msg.type === 'retry'");
     expect(html).toContain("msg.type === 'settled'");
+  });
+
+  // Source-level only. A run recorded under an open dialog rebuilds the dropdown and nothing else, so the
+  // fields the user has been filling in survive it; only a pick that is no longer offered moves the form.
+  it("rebuilds only the run dropdown when the host posts a fresh run list", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("msg.type === 'runs'");
+    expect(html).toContain("if (selected && selectedRunId !== had) { applyRun(selected); }");
+    // One builder for the dropdown, shared by the whole-model paint and the in-place refresh.
+    expect(html.split("function renderRunOptions()").length - 1).toBe(1);
+    expect(html.split("renderRunOptions();").length - 1).toBe(2);
+  });
+
+  // Source-level only. A run history that empties under an open dialog takes the form with it: a Publish
+  // button over no runs has nothing behind it, and the prefill describes a run that is gone. Both routes
+  // to a painted list decide the same way, so a reload over a cleared model cannot restore the form.
+  it("takes the publish form away whenever the run list it paints is empty", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain('id="publish-empty"');
+    expect(html).toContain("No runs left to publish.");
+    // One decision, at all three places a run list reaches a pane: the whole-model paint (a reload, or a
+    // retry onto a rebuilt document), the retry's own reveal, and the pane-aware in-place refresh.
+    expect(html.split("show(runs.length === 0 ? 'empty' : 'form');").length - 1).toBe(3);
+    expect(html).toContain("if (visible === 'form' || visible === 'empty') { show(runs.length === 0 ? 'empty' : 'form'); }");
+  });
+
+  // The webview moves its own pane a whole postMessage hop before the host learns of it (a click shows
+  // busy, Cancel shows idle), so a run sealing inside that hop must not yank the user onto a live form.
+  it("lets a host-driven run list update the dropdown without taking back the visible pane", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("let visible = 'idle';");
+    expect(html).toContain("function show(which) {\n    visible = which;");
+    expect(html).toContain("function showForRuns()");
+    // The list itself always lands, whichever pane is up.
+    expect(html).toContain("applyRuns(msg);\n      showForRuns();");
   });
 
   it("fires startPublish when the Publish tab is activated with no publish underway", async () => {
@@ -1324,5 +1367,32 @@ describe("BoardPanel", () => {
     // A fresh open now creates a new panel rather than revealing the disposed one.
     BoardPanel.open(deps());
     expect(win.__webviewPanels).toHaveLength(2);
+  });
+});
+
+// The board is rebuilt from settings, so it has to know which ones it renders: a rebuild per keystroke in
+// an unrelated setting would thrash it.
+describe("affectsBoard", () => {
+  const event = (...changed: string[]): vscode.ConfigurationChangeEvent => ({
+    affectsConfiguration: (key: string) => changed.includes(key),
+  });
+
+  it("claims the settings a board build reads: its project universe and its site", () => {
+    expect(affectsBoard(event("playwrightBddRunner.xray.syncProjectKeys"))).toBe(true);
+    expect(affectsBoard(event("playwrightBddRunner.xray.defaultProjectKey"))).toBe(true);
+    expect(affectsBoard(event("playwrightBddRunner.xray.siteUrl"))).toBe(true);
+  });
+
+  // These are read when a publish runs, not when the board is built, so a rebuild would show nothing new.
+  it("leaves the publish-time settings alone", () => {
+    expect(affectsBoard(event("playwrightBddRunner.xray.executionIssueType"))).toBe(false);
+    expect(affectsBoard(event("playwrightBddRunner.xray.reportGlob"))).toBe(false);
+    expect(affectsBoard(event("playwrightBddRunner.xray.attachTo"))).toBe(false);
+  });
+
+  it("ignores config noise, including the rest of the extension's own namespace", () => {
+    expect(affectsBoard(event())).toBe(false);
+    expect(affectsBoard(event("editor.fontSize"))).toBe(false);
+    expect(affectsBoard(event("playwrightBddRunner.playwrightCommand"))).toBe(false);
   });
 });

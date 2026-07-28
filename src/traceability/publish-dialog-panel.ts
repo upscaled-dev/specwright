@@ -1,3 +1,4 @@
+import type { Disposable, Event } from "vscode";
 import { escapeHtml } from "../utils/webview";
 import { errMsg, scrubJwtLike } from "../utils/text";
 import { PublishRequest, PublishTarget } from "./contracts";
@@ -6,6 +7,9 @@ import { SurfaceFragment, SurfaceHost } from "./webview-host";
 
 const IMPORT_HINT = "Create → POST /import/execution/cucumber/multipart · Append → POST /import/execution";
 const IDLE_HINT = "Pick a run to publish and its details appear here.";
+// The dialog is open but its run history emptied underneath it (a clear, or every run aged out). A form
+// over no runs would offer a Publish button with nothing behind it.
+const NO_RUNS_HINT = "No runs left to publish. Run some tests and they appear here.";
 
 // The still-pending count after an in-dialog attach-pending action; 0 clears the banner.
 export interface PendingAttachmentsResult {
@@ -25,6 +29,11 @@ export interface PublishDialogDelegate {
   ): Promise<readonly PublishTarget[]>;
   browseFiles(): Promise<readonly AttachmentSuggestion[]>;
   attachPending(runId: string): Promise<PendingAttachmentsResult>;
+  // The local run history changed. The dialog outlives the moment its list was built (the user runs tests
+  // and comes back to it), so it re-derives the dropdown from `runOptions` rather than showing what the
+  // store held when it opened.
+  readonly onDidChangeRuns: Event<void>;
+  runOptions(): readonly PublishRunOption[];
 }
 
 interface SearchMessage {
@@ -50,6 +59,12 @@ interface CancelMessage {
   type: "cancel";
 }
 type PublishIncoming = SearchMessage | BrowseMessage | ConfirmMessage | AttachPendingMessage | CancelMessage;
+
+// The pick that still stands: the one asked for while its run is offered, else the newest run there is,
+// else nothing. Both the in-place refresh and the retry answer the same question about a moved list.
+function selectionAmong(runs: readonly PublishRunOption[], preferred: string): string {
+  return runs.some((run) => run.id === preferred) ? preferred : (runs[0]?.id ?? "");
+}
 
 // A run's pending-attachments banner after an in-dialog retry: the still-failing count, or no banner at
 // all once nothing is left. The same move the webview makes on a `pending-result`.
@@ -78,6 +93,7 @@ export class PublishSurface {
   // the retry's lightweight reveal would show an empty form with a live Publish button.
   private painted = false;
   private searchController: AbortController | undefined;
+  private readonly runsSubscription: Disposable;
 
   constructor(
     private readonly host: SurfaceHost,
@@ -86,6 +102,9 @@ export class PublishSurface {
   ) {
     host.onMessage((message) => this.handle(message as PublishIncoming));
     host.onDidDispose(() => this.dispose());
+    // Off the mutation path: the store announces a change as it seals a run, and re-deriving the options
+    // re-reads every publishable run's source. The hop keeps that off the caller that just sealed.
+    this.runsSubscription = delegate.onDidChangeRuns(() => queueMicrotask(() => this.refreshRuns()));
   }
 
   // Hydrate the tab with a run model and await the user's decision. A present while one is pending
@@ -104,14 +123,18 @@ export class PublishSurface {
   // the user picked, and the present goes live again so the retry's confirm has a resolver waiting. While
   // the document that painted the form is still standing that is a reveal, keeping every field they filled
   // in; once it has been rebuilt there is nothing left to reveal, so the model is painted in full instead.
+  //
+  // Either way the reveal carries the run list AS IT STANDS: the busy window is exactly when a run seals or
+  // ages out, and a dropdown that still showed the old one would send the retry at a run that is gone.
   // Resolves undefined at once when the board is gone or a newer present already owns the tab.
   public presentRetry(selectedRunId: string): Promise<PublishDialogResult | undefined> {
     if (this.pending || this.model === undefined || this.host.isDisposed()) {
       return Promise.resolve(undefined);
     }
-    this.model = { ...this.model, selectedRunId };
+    const runs = this.model.runs;
+    this.model = { ...this.model, selectedRunId: selectionAmong(runs, selectedRunId) };
     if (this.painted) {
-      this.host.post({ type: "retry" });
+      this.host.post({ type: "retry", runs, selectedRunId: this.model.selectedRunId });
     } else {
       this.paint();
     }
@@ -137,6 +160,33 @@ export class PublishSurface {
     this.painted = false;
     if (this.pending && this.model !== undefined) {
       this.paint();
+    }
+  }
+
+  // A run recorded while the dialog sits open belongs in the dropdown without a reopen. Nothing is built
+  // unless a dialog is actually live: re-deriving the options re-reads every publishable run's source, and
+  // the tab has nowhere to put them.
+  //
+  // A publish in flight (the confirm resolved, the busy pane up) owns both the screen and the pick it went
+  // out with, so the fresh list rides the model and nothing is posted: moving the selection there would
+  // stomp the very form the retry promises to restore. The retry's own reveal carries the list on.
+  //
+  // The `painted` check guards an invariant rather than a live case: every route that arms a pending paints
+  // first, so a pending present always has a painted document behind it.
+  private refreshRuns(): void {
+    const model = this.model;
+    if (model === undefined || this.host.isDisposed()) {
+      return;
+    }
+    const runs = this.delegate.runOptions();
+    if (this.pending === undefined) {
+      this.model = { ...model, runs };
+      return;
+    }
+    const selectedRunId = selectionAmong(runs, model.selectedRunId);
+    this.model = { ...model, runs, selectedRunId };
+    if (this.painted) {
+      this.host.post({ type: "runs", runs, selectedRunId });
     }
   }
 
@@ -169,6 +219,7 @@ export class PublishSurface {
   public dispose(): void {
     this.resolvePending(undefined);
     this.searchController?.abort();
+    this.runsSubscription.dispose();
   }
 
   private handle(message: PublishIncoming): void {
@@ -311,6 +362,7 @@ const PUBLISH_CSS = `
   #pane-publish .footer { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 1.25rem; }`;
 
 const PUBLISH_PANE = `<div id="publish-idle" class="idle">${escapeHtml(IDLE_HINT)}</div>
+      <div id="publish-empty" class="idle" hidden>${escapeHtml(NO_RUNS_HINT)}</div>
       <div id="publish-busy" class="busy" hidden>Publishing…</div>
       <div id="publish-form" hidden>
         <h1 id="publish-title"></h1>
@@ -374,6 +426,7 @@ const PUBLISH_PANE = `<div id="publish-idle" class="idle">${escapeHtml(IDLE_HINT
 
 const PUBLISH_SCRIPT = `
   const idleBox = document.getElementById('publish-idle');
+  const emptyBox = document.getElementById('publish-empty');
   const busyBox = document.getElementById('publish-busy');
   const formBox = document.getElementById('publish-form');
   const titleEl = document.getElementById('publish-title');
@@ -579,10 +632,48 @@ const PUBLISH_SCRIPT = `
     return merged;
   }
 
+  // The pane on screen, tracked here because the webview moves it on its own (a click shows busy, Cancel
+  // shows idle) a whole postMessage hop before the host learns of it. A host-driven update that arrives
+  // inside that hop must not overrule what the user is looking at.
+  let visible = 'idle';
+
   function show(which) {
+    visible = which;
     idleBox.hidden = which !== 'idle';
+    emptyBox.hidden = which !== 'empty';
     busyBox.hidden = which !== 'busy';
     formBox.hidden = which !== 'form';
+  }
+
+  // The pane a run list implies, but only where the user is already reading the run list. Busy belongs to
+  // a publish in flight and idle to a dialog that has finished; neither is the host's to take back.
+  function showForRuns() {
+    if (visible === 'form' || visible === 'empty') { show(runs.length === 0 ? 'empty' : 'form'); }
+  }
+
+  // The dropdown and the selection the host now holds. The fields follow only when the pick actually
+  // moved, which happens only when the run the user had chosen stopped being offered; everything else on
+  // the form is theirs. Shared by the in-place refresh and the retry, which carries the same list.
+  function applyRuns(msg) {
+    const had = selectedRunId;
+    runs = msg.runs || [];
+    selectedRunId = msg.selectedRunId;
+    renderRunOptions();
+    const selected = findRun(selectedRunId);
+    if (selected && selectedRunId !== had) { applyRun(selected); }
+  }
+
+  // The dropdown alone, off whatever runs and selection are in hand. A whole-model paint and an in-place
+  // run refresh build it the same way; only the refresh leaves the rest of the form standing.
+  function renderRunOptions() {
+    runSelect.textContent = '';
+    runs.forEach(function (run) {
+      const opt = document.createElement('option');
+      opt.value = run.id;
+      opt.textContent = run.label;
+      if (run.id === selectedRunId) { opt.selected = true; }
+      runSelect.appendChild(opt);
+    });
   }
 
   // Repaint the whole form from a fresh run model, clearing every mutable field first so a second
@@ -595,14 +686,7 @@ const PUBLISH_SCRIPT = `
     attachModel = model.attachments;
     seenPaths = new Set();
     titleEl.textContent = model.title;
-    runSelect.textContent = '';
-    runs.forEach(function (run) {
-      const opt = document.createElement('option');
-      opt.value = run.id;
-      opt.textContent = run.label;
-      if (run.id === selectedRunId) { opt.selected = true; }
-      runSelect.appendChild(opt);
-    });
+    renderRunOptions();
     const selected = findRun(selectedRunId) || runs[0];
     errProject.textContent = '';
     errSummary.textContent = '';
@@ -631,7 +715,9 @@ const PUBLISH_SCRIPT = `
       attachDisabled.textContent = attachModel.reason || 'Add Jira access in Xray setup to attach run-level files.';
     }
     if (selected) { selectedRunId = selected.id; applyRun(selected); }
-    show('form');
+    // A whole-model paint over an emptied list reaches here through a reload or a retry on a rebuilt
+    // document, and a form with nothing in its dropdown offers a Publish button with nothing behind it.
+    show(runs.length === 0 ? 'empty' : 'form');
   }
 
   runSelect.addEventListener('change', function () {
@@ -688,8 +774,15 @@ const PUBLISH_SCRIPT = `
   window.__spec.register('publish', function (msg) {
     if (msg.type === 'model') {
       applyModel(msg.model);
+    } else if (msg.type === 'runs') {
+      // The list always lands; the pane only follows where the run list is what the user is reading.
+      applyRuns(msg);
+      showForRuns();
     } else if (msg.type === 'retry') {
-      show('form');
+      // A failed publish comes back to the form, and it comes back to the list as it stands now: runs
+      // recorded while the publish was out are offered, and evicted ones are not.
+      applyRuns(msg);
+      show(runs.length === 0 ? 'empty' : 'form');
     } else if (msg.type === 'settled') {
       show('idle');
     } else if (msg.type === 'search-result') {

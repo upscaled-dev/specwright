@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import * as vscode from "vscode";
 import { PendingAttachmentsResult, PublishDialogDelegate, PublishSurface } from "../../traceability/publish-dialog-panel";
 import {
   AttachmentSuggestion,
@@ -95,10 +96,18 @@ function deferredDelegate(): {
   attachPending: ReturnType<typeof vi.fn>;
   browseResult: AttachmentSuggestion[];
   pendingResult: PendingAttachmentsResult;
+  // Drives the delegate's run-history event: replaces what `runOptions` answers, fires, and settles the
+  // hop the surface puts between the store's announcement and the rebuild.
+  recordRuns: (runs: readonly PublishRunOption[]) => Promise<void>;
 } {
   const calls: DeferredCall[] = [];
-  const state = { browseResult: [] as AttachmentSuggestion[], pendingResult: { remaining: 0 } as PendingAttachmentsResult };
+  const state = {
+    browseResult: [] as AttachmentSuggestion[],
+    pendingResult: { remaining: 0 } as PendingAttachmentsResult,
+    runs: [] as readonly PublishRunOption[],
+  };
   const attachPending = vi.fn((_runId: string) => Promise.resolve(state.pendingResult));
+  const runsChanged = new vscode.EventEmitter<void>();
   const delegate: PublishDialogDelegate = {
     searchTargets: (kind, query, signal) =>
       new Promise<readonly PublishTarget[]>((resolve, reject) => {
@@ -106,11 +115,18 @@ function deferredDelegate(): {
       }),
     browseFiles: () => Promise.resolve(state.browseResult),
     attachPending,
+    onDidChangeRuns: runsChanged.event,
+    runOptions: () => state.runs,
   };
   return {
     delegate,
     calls,
     attachPending,
+    recordRuns: (runs) => {
+      state.runs = runs;
+      runsChanged.fire();
+      return flush();
+    },
     get browseResult() {
       return state.browseResult;
     },
@@ -388,6 +404,140 @@ describe("PublishSurface: hydrate on present", () => {
     publish.rehydrate();
 
     expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(1);
+  });
+});
+
+// The dialog outlives the moment its list was built: the user runs tests and comes back to it.
+describe("PublishSurface: runs recorded under an open dialog", () => {
+  const twoRuns = [runOption(), runOption({ id: "run-2", label: "newer run" })];
+
+  it("amends the live model in place and posts only the dropdown, keeping the user's pick", async () => {
+    const rig0 = deferredDelegate();
+    const { rig, publish } = surface(rig0.delegate);
+    void publish.present(makeModel());
+
+    await rig0.recordRuns(twoRuns);
+
+    const update = rig.posted.filter((m) => m.type === "runs");
+    expect(update).toHaveLength(1);
+    expect((update[0] as unknown as { runs: PublishRunOption[] }).runs.map((r) => r.id)).toEqual(["run-1", "run-2"]);
+    expect((update[0] as unknown as { selectedRunId: string }).selectedRunId).toBe("run-1");
+    // The whole form is never repainted, so nothing the user typed is touched.
+    expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(1);
+  });
+
+  it("moves the selection to the newest offered run when the picked one is gone", async () => {
+    const rig0 = deferredDelegate();
+    const { rig, publish } = surface(rig0.delegate);
+    void publish.present(makeModel());
+
+    await rig0.recordRuns([runOption({ id: "run-9", label: "only survivor" })]);
+
+    expect(rig.posted.filter((m) => m.type === "runs").at(-1)).toMatchObject({ selectedRunId: "run-9" });
+  });
+
+  // A cleared history leaves a form describing a run that no longer exists, over a Publish button with
+  // nothing behind it.
+  it("degrades to an honest empty state when the run history empties underneath it", async () => {
+    const rig0 = deferredDelegate();
+    const { rig, publish } = surface(rig0.delegate);
+    void publish.present(makeModel());
+
+    await rig0.recordRuns([]);
+
+    expect(rig.posted.filter((m) => m.type === "runs").at(-1)).toMatchObject({ runs: [], selectedRunId: "" });
+  });
+
+  // The busy pane is the flow's screen and the pick it went out with is the one the retry restores, so a
+  // refresh must touch neither; the fresh list rides the model until the next reveal.
+  it("moves neither the screen nor the selection while a publish is in flight", async () => {
+    const rig0 = deferredDelegate();
+    const { rig, publish } = surface(rig0.delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+
+    await rig0.recordRuns([runOption({ id: "run-9", label: "everything else evicted" })]);
+
+    expect(rig.posted.filter((m) => m.type === "runs")).toEqual([]);
+    publish.rehydrate();
+    const replayed = rig.posted.filter((m) => m.type === "model").at(-1) as unknown as { model: PublishDialogModel };
+    expect(replayed.model.selectedRunId).toBe("run-1");
+  });
+
+  // The busy window is exactly when a run seals, so the reveal that ends it has to carry the list; a
+  // dropdown still showing the old one would send the retry at a run that is gone.
+  it("carries the list refreshed mid-publish on the retry's own reveal", async () => {
+    const rig0 = deferredDelegate();
+    const { rig, publish } = surface(rig0.delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+
+    await rig0.recordRuns(twoRuns);
+    void publish.presentRetry("run-1");
+
+    const retry = rig.posted.filter((m) => m.type === "retry");
+    expect(retry).toHaveLength(1);
+    expect((retry[0] as unknown as { runs: PublishRunOption[] }).runs.map((r) => r.id)).toEqual(["run-1", "run-2"]);
+    expect(retry[0]).toMatchObject({ selectedRunId: "run-1" });
+  });
+
+  // The run the retry was asked for aged out while the publish was in flight, so the reveal offers the
+  // newest run there is rather than a pick the dropdown cannot show.
+  it("moves the retry's pick to the newest run when the one it was asked for is gone", async () => {
+    const rig0 = deferredDelegate();
+    const { rig, publish } = surface(rig0.delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+
+    await rig0.recordRuns([runOption({ id: "run-9", label: "everything else evicted" })]);
+    void publish.presentRetry("run-1");
+
+    expect(rig.posted.filter((m) => m.type === "retry").at(-1)).toMatchObject({ selectedRunId: "run-9" });
+  });
+
+  it("carries the list refreshed mid-publish into a retry that has to repaint a rebuilt document", async () => {
+    const rig0 = deferredDelegate();
+    const { rig, publish } = surface(rig0.delegate);
+    const first = publish.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+
+    await rig0.recordRuns(twoRuns);
+    publish.rehydrate();
+    void publish.presentRetry("run-1");
+
+    expect(rig.posted.filter((m) => m.type === "retry")).toEqual([]);
+    const replayed = rig.posted.filter((m) => m.type === "model").at(-1) as unknown as { model: PublishDialogModel };
+    expect(replayed.model.runs.map((r) => r.id)).toEqual(["run-1", "run-2"]);
+  });
+
+  it("ignores a recorded run while the tab is idle, and stops listening once the board is gone", async () => {
+    const rig0 = deferredDelegate();
+    const { rig, publish } = surface(rig0.delegate);
+
+    await rig0.recordRuns(twoRuns);
+    expect(rig.posted.filter((m) => m.type === "runs")).toEqual([]);
+
+    void publish.present(makeModel());
+    rig.dispose();
+    await rig0.recordRuns([runOption({ id: "run-3" })]);
+
+    expect(rig.posted.filter((m) => m.type === "runs")).toEqual([]);
+  });
+
+  // Re-deriving the options re-reads every publishable run's source, so it must not happen for a tab with
+  // nowhere to put them.
+  it("builds no options at all when no dialog is live", async () => {
+    const rig0 = deferredDelegate();
+    const runOptionsSpy = vi.spyOn(rig0.delegate, "runOptions");
+    surface(rig0.delegate);
+
+    await rig0.recordRuns(twoRuns);
+
+    expect(runOptionsSpy).not.toHaveBeenCalled();
   });
 });
 

@@ -14,6 +14,20 @@ const VIEW_TYPE = "playwrightBddRunner.coverageBoard";
 // than trusted: the board is a blank page with scripts off.
 const WEBVIEW_OPTIONS: vscode.WebviewOptions = { enableScripts: true, localResourceRoots: [] };
 
+// The settings a board REBUILD reads: the sync scope and the default project decide the project universe
+// its scope selector coerces against, and the site scopes the ledger rows the Executions tab lists. The
+// publish settings (work type, report globs, attach mode) are deliberately absent: they are read when a
+// publish runs, not when the board is built, so a rebuild would show the user nothing new.
+const BOARD_SETTINGS = [
+  "playwrightBddRunner.xray.syncProjectKeys",
+  "playwrightBddRunner.xray.defaultProjectKey",
+  "playwrightBddRunner.xray.siteUrl",
+];
+
+export function affectsBoard(event: vscode.ConfigurationChangeEvent): boolean {
+  return BOARD_SETTINGS.some((setting) => event.affectsConfiguration(setting));
+}
+
 type BoardTab = "mapping" | "matrix" | "executions";
 type ShellTab = BoardTab | "publish" | "link";
 
@@ -130,6 +144,12 @@ export class BoardPanel {
   // layer reports a run's progress without holding a board, and a closed board drops it.
   public static reportSyncProgress(text: string): void {
     BoardPanel.current?.board.syncProgress(text);
+  }
+
+  // Whether a board is on screen. Machine-driven refreshes ask before doing the work: a board builds
+  // itself when it opens, so rebuilding for one that is not there buys the user nothing.
+  public static isOpen(): boolean {
+    return BoardPanel.current !== undefined;
   }
 
   // The Executions tab, where a published run's row lands. The publish flow holds the panel it opened,

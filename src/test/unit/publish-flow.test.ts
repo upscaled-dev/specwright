@@ -4,6 +4,7 @@ import {
   PublishDialogModel,
   PublishDialogResult,
   PublishFlowDeps,
+  publishRunOptions,
   runPublishFlow,
 } from "../../traceability/publish-flow";
 import { LedgerEntry } from "../../traceability/publish-ledger";
@@ -86,7 +87,7 @@ function deps(runs: readonly RunArtifact[], over: Partial<PublishFlowDeps> = {})
   const publishing = over.publishing ?? spyPublishing().capability;
   return {
     publishing,
-    runs,
+    runs: () => runs,
     projectOf: projectFromKey,
     changedSinceRun: () => 0,
     defaultProjectKey: "",
@@ -212,6 +213,44 @@ describe("runPublishFlow: dropdown ordering and preselection", () => {
     const runs = [artifact({ id: "good" }), artifact({ id: "bad", state: "cancelled" })];
     await runPublishFlow(deps(runs, cap.over));
     expect(cap.models[0]!.runs.map((r) => r.id)).toEqual(["good"]);
+  });
+});
+
+// The same derivation the flow presents with, exported because the dropdown outlives that moment: the
+// Publish surface re-derives it whenever the run history changes under an open dialog.
+describe("publishRunOptions", () => {
+  it("offers the publishable runs in the order given, with their prefills and banners", () => {
+    const prior: LedgerEntry = {
+      artifactId: "old",
+      executionRef: "XNP-9",
+      site: "acme.atlassian.net",
+      account: "client-1",
+      publishedAt: 1_699_000_000_000,
+      pendingAttachments: [],
+    };
+    const runs = [
+      artifact({ id: "new", createdAt: CREATED_AT + 1000 }),
+      artifact({ id: "old" }),
+      artifact({ id: "bad", state: "cancelled" }),
+    ];
+
+    const options = publishRunOptions({
+      ...deps(runs),
+      priorEntryFor: (id) => (id === "old" ? prior : undefined),
+    });
+
+    expect(options.map((option) => option.id)).toEqual(["new", "old"]);
+    expect(options[0]!.project).toEqual({ value: "CALC", fromDerivation: true });
+    expect(options[1]!.republish?.target).toBe("XNP-9");
+  });
+
+  it("hands back nothing when no run is publishable", () => {
+    expect(publishRunOptions(deps([artifact({ state: "cancelled" })]))).toEqual([]);
+  });
+
+  it("lets the board's scope outrank the run-derived prefill, exactly as the flow does", () => {
+    const options = publishRunOptions({ ...deps([artifact()]), selectedProjectKey: "shop" });
+    expect(options[0]!.project).toEqual({ value: "SHOP", fromDerivation: false, fromScope: true });
   });
 });
 
@@ -359,6 +398,57 @@ describe("runPublishFlow: cancelled/closed dialog", () => {
     expect(publishing.searchTargets).not.toHaveBeenCalled();
     expect(d.recordPublish).not.toHaveBeenCalled();
     expect(d.reportSuccess).not.toHaveBeenCalled();
+  });
+});
+
+// The dropdown refreshes itself while the dialog sits open, so the confirmed id is resolved against the
+// runs as they stand. Resolving against the list the dialog opened on would refuse exactly the run that
+// arrived while the user was away.
+describe("runPublishFlow: a confirm against a moved run list", () => {
+  it("publishes a run that arrived after the dialog opened", async () => {
+    const publishing = spyPublishing();
+    const opened = artifact({ id: "old" });
+    const arrived = artifact({ id: "new", createdAt: CREATED_AT + 1000 });
+    let current = [opened];
+    const d = deps([opened], {
+      publishing: publishing.capability,
+      runs: () => current,
+      presentDialog: vi.fn(() => {
+        current = [arrived, opened];
+        return Promise.resolve(dialogResult(CREATE_REQUEST, [], "new"));
+      }),
+    });
+
+    await runPublishFlow(d);
+
+    expect(publishing.publish).toHaveBeenCalledTimes(1);
+    expect((publishing.publish.mock.calls[0]![0] as RunArtifact).id).toBe("new");
+    expect(d.reportSuccess).toHaveBeenCalledTimes(1);
+    expect(d.reportFailure).not.toHaveBeenCalled();
+  });
+
+  // Pressing Publish is owed an answer, so a run the history lost meanwhile is reported rather than
+  // dropped on the floor with the tab flipping to idle.
+  it("reports when the confirmed run is in neither the opening list nor the current one", async () => {
+    const publishing = spyPublishing();
+    const run = artifact({ id: "run-1" });
+    let current = [run];
+    const d = deps([run], {
+      publishing: publishing.capability,
+      runs: () => current,
+      presentDialog: vi.fn(() => {
+        current = [];
+        return Promise.resolve(dialogResult(CREATE_REQUEST, [], "run-1"));
+      }),
+    });
+
+    await runPublishFlow(d);
+
+    expect(publishing.publish).not.toHaveBeenCalled();
+    expect(d.recordPublish).not.toHaveBeenCalled();
+    expect(d.reportSuccess).not.toHaveBeenCalled();
+    expect(d.reportFailure).toHaveBeenCalledTimes(1);
+    expect(String((d.reportFailure as ReturnType<typeof vi.fn>).mock.calls[0]![0])).toContain("no longer");
   });
 });
 

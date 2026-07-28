@@ -2021,6 +2021,127 @@ describe("traceability bulkCreateTests wiring", () => {
   });
 });
 
+// The board is rebuilt from settings, so a settings edit only reaches an open one through a rebuild.
+describe("board refresh on a settings change", () => {
+  const registered: Array<{ dispose: () => void }> = [];
+
+  afterEach(() => {
+    // The host allows one serializer per view type, so each wiring retires with its test.
+    for (const subscription of registered.splice(0)) {
+      subscription.dispose();
+    }
+    win.__resetWebviewPanels();
+    vi.restoreAllMocks();
+  });
+
+  // A config whose xray.syncProjectKeys the test can move under an open board, which is what a settings
+  // edit does.
+  function movingConfig(keys: () => string[]): ExtensionConfig {
+    return ExtensionConfig.create(
+      {
+        get: (key: string, fallback: unknown) => (key === "xray.syncProjectKeys" ? keys() : fallback),
+      } as unknown as vscode.WorkspaceConfiguration,
+      false
+    );
+  }
+
+  function boardSubsystem(scope: ProjectScopeStore, onRebuild: () => void): TraceabilitySubsystem {
+    return {
+      traceabilityPanelActive: true,
+      getActiveAdapter: () => ({
+        label: "Xray",
+        keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", projectOf: (k: string) => k.split("-")[0] },
+      }),
+      getSnapshot: () => undefined,
+      tagDerivedProjectKeys: () => [],
+      projectScope: () => scope,
+      onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
+      // Stands in for the debounced, serialized rebuild the real subsystem runs.
+      scheduleRebuild: onRebuild,
+    } as unknown as TraceabilitySubsystem;
+  }
+
+  // Wire the board the way activation does, with the config listener captured so a test can fire it.
+  function wireBoard(
+    subsystem: TraceabilitySubsystem,
+    config?: ExtensionConfig
+  ): { openBoard: () => void; fire: (...changed: string[]) => void } {
+    let listener: ((event: vscode.ConfigurationChangeEvent) => void) | undefined;
+    vi.spyOn(vscode.workspace, "onDidChangeConfiguration").mockImplementation((handler) => {
+      listener = handler as (event: vscode.ConfigurationChangeEvent) => void;
+      return { dispose: () => undefined };
+    });
+    const mgr = CommandManager.create(makeContext(config ? { config } : undefined));
+    mgr.setTraceabilitySubsystem(subsystem);
+    mgr.registerBoardSerializer({ subscriptions: registered } as unknown as vscode.ExtensionContext);
+    return {
+      openBoard: () => (mgr as unknown as { openBoard: () => void }).openBoard(),
+      fire: (...changed: string[]) => listener?.({ affectsConfiguration: (key: string) => changed.includes(key) }),
+    };
+  }
+
+  it("requests a rebuild when a setting the board renders changes", () => {
+    const rebuild = vi.fn();
+    const { openBoard, fire } = wireBoard(boardSubsystem(NO_PROJECT_SCOPE, rebuild));
+    openBoard();
+
+    fire("playwrightBddRunner.xray.syncProjectKeys");
+
+    expect(rebuild).toHaveBeenCalledOnce();
+  });
+
+  it("ignores config noise, so an unrelated edit cannot thrash the board", () => {
+    const rebuild = vi.fn();
+    const { openBoard, fire } = wireBoard(boardSubsystem(NO_PROJECT_SCOPE, rebuild));
+    openBoard();
+
+    fire("playwrightBddRunner.playwrightCommand");
+    fire("editor.fontSize");
+
+    expect(rebuild).not.toHaveBeenCalled();
+  });
+
+  // A board opened later builds itself from the settings as they stand, so rebuilding for one that is not
+  // on screen is work nobody would see.
+  it("asks for no rebuild while no board is open", () => {
+    const rebuild = vi.fn();
+    const { fire } = wireBoard(boardSubsystem(NO_PROJECT_SCOPE, rebuild));
+
+    fire("playwrightBddRunner.xray.syncProjectKeys");
+
+    expect(rebuild).not.toHaveBeenCalled();
+  });
+
+  // The whole seam end to end: a settings edit reaches the board only through the rebuild it asks for, and
+  // what the board then paints is the REAL scope store's coercion against the universe those settings
+  // build. The store coerces, it never erases, so putting the project back restores the selection.
+  it("coerces a scope whose project left the settings, and restores it when the setting comes back", async () => {
+    let keys = ["calc", "pay"];
+    const scope = projectScopeStore(memento(), () => undefined);
+    scope.set("PAY");
+    const snapshotChanged = new vscode.EventEmitter<void>();
+    const subsystem = {
+      ...boardSubsystem(scope, () => snapshotChanged.fire()),
+      onDidChangeSnapshot: snapshotChanged.event,
+    } as unknown as TraceabilitySubsystem;
+    const { openBoard, fire } = wireBoard(subsystem, movingConfig(() => keys));
+    openBoard();
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+    const rendered = (): unknown => [...panel.webview.__posted].reverse().find((m) => m.type === "render");
+    expect(rendered()).toMatchObject({ project: "PAY", scoped: true, projects: ["CALC", "PAY"] });
+
+    keys = ["calc"];
+    fire("playwrightBddRunner.xray.syncProjectKeys");
+    expect(rendered()).toMatchObject({ project: "", scoped: false, projects: ["CALC"] });
+
+    keys = ["calc", "pay"];
+    fire("playwrightBddRunner.xray.syncProjectKeys");
+
+    expect(rendered()).toMatchObject({ project: "PAY", scoped: true });
+  });
+});
+
 describe("traceability clearLocalRunHistory", () => {
   afterEach(() => vi.restoreAllMocks());
 

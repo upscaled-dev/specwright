@@ -34,7 +34,7 @@ import {
   resolveBoardUnlink,
   syncProgressText,
 } from "../traceability/board-data";
-import { BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
+import { affectsBoard, BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
 import {
   NO_PROJECT_SCOPE,
   ProjectUniverseSources,
@@ -65,7 +65,14 @@ import {
   publishOutcomeLead,
   UNKNOWN_EXECUTION,
 } from "../traceability/publish-core";
-import { AttachmentSuggestion, PublishAttachmentsModel, runPublishFlow } from "../traceability/publish-flow";
+import {
+  AttachmentSuggestion,
+  PublishAttachmentsModel,
+  PublishRunSources,
+  publishRunOptions,
+  runnableRuns,
+  runPublishFlow,
+} from "../traceability/publish-flow";
 import { PendingAttachmentsResult, PublishDialogDelegate } from "../traceability/publish-dialog-panel";
 import { PublishLedger, STANDALONE_ARTIFACT_PREFIX } from "../traceability/publish-ledger";
 import { makeFeatureStepResolver } from "../xray/feature-step-resolver";
@@ -322,6 +329,15 @@ export class CommandManager {
         } catch (error) {
           this.logger.error("Reviving the Coverage Board tab failed", { error: errMsg(error) });
           throw error;
+        }
+      }),
+      // A board reads its project universe and its site from settings when it is built, so an edit only
+      // shows once something rebuilds. Two gates keep that cheap: only the settings a rebuild actually
+      // reads, and only while a board is on screen (one opened later builds itself). The request is the
+      // subsystem's debounced, serialized one, since a free-text setting commits per keystroke.
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (affectsBoard(event) && BoardPanel.isOpen()) {
+          this.traceabilitySubsystem?.scheduleRebuild();
         }
       })
     );
@@ -932,10 +948,9 @@ export class CommandManager {
       vscode.window.showInformationMessage("Connect to your test tracker before publishing.");
       return;
     }
-    // Peek the same gate the flow applies before opening the board, so Publish Last Run with nothing to
-    // publish shows the toast instead of popping an empty board.
-    const runs = this.context.runArtifactStore?.list() ?? [];
-    if (!runs.some((artifact) => isPublishable(artifact) && publishableResults(artifact).publishable.length > 0)) {
+    // The same predicate the dropdown is built from, so this gate and the dialog can never disagree about
+    // what is publishable: with nothing to offer, Publish Last Run toasts instead of popping an empty board.
+    if (runnableRuns(this.context.runArtifactStore?.list() ?? []).length === 0) {
       vscode.window.showInformationMessage(NO_PUBLISHABLE_RUNS_MESSAGE);
       return;
     }
@@ -944,7 +959,6 @@ export class CommandManager {
     const site = normalizeSiteUrl(rawSite);
     const credentials = await this.credentialStore?.getCredentials(rawSite);
     const jiraSearchAvailable = (await this.credentialStore?.hasJiraCredentials(rawSite)) ?? false;
-    const resolveSteps = makeFeatureStepResolver(this.context.featureParser);
     const known = this.projectUniverse(adapter);
     // A ledger entry means the import landed (partial attachments included), so the board has a new row
     // to carry; a clean success is the narrower case that also earns the tab switch.
@@ -952,21 +966,14 @@ export class CommandManager {
     let succeeded = false;
     try {
       await runPublishFlow({
+        ...this.publishRunSources(),
         publishing,
-        runs,
         ...(preselectId !== undefined ? { preselectId } : {}),
-        projectOf: adapter.keyGrammar.projectOf,
-        changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
-        defaultProjectKey: this.context.config.xrayDefaultProjectKey,
-        // The board's scope, read through the same store and against the same known keys the board uses,
-        // so a project picked there prefills the dialog instead of the run's derived key.
-        selectedProjectKey: subsystem.projectScope().get(known),
         jiraSearchAvailable,
         knownProjectKeys: known,
         // Lazy — the flow calls this only after the no-runs gate, so an empty run list never fires the
         // one allowed pre-confirm call (the attachment/meta probe).
         attachments: () => this.buildPublishAttachments(rawSite),
-        priorEntryFor: (artifactId) => this.publishLedger?.find(artifactId, site),
         presentDialog: (model) => board.publish.present(model),
         presentRetry: (selectedRunId) => board.publish.presentRetry(selectedRunId),
         attachFiles: (executionKey, files) => this.attachFiles(executionKey, files),
@@ -1387,7 +1394,6 @@ export class CommandManager {
   private boardDeps(): BoardPanelDeps {
     const subsystem = this.traceabilitySubsystem;
     const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
-    const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
     return {
       providerLabel: subsystem?.getActiveAdapter()?.label ?? "Xray",
       logger: this.logger,
@@ -1402,7 +1408,12 @@ export class CommandManager {
         ),
       knownProjects: () => this.projectUniverse(subsystem?.getActiveAdapter()),
       projectScope: subsystem?.projectScope() ?? NO_PROJECT_SCOPE,
-      buildExecutions: () => buildExecutionRows(this.publishLedger?.entriesForSite(site) ?? []),
+      // The site is read per build, not captured: pointing the workspace at another Jira has to change
+      // which ledger rows the Executions tab lists, and a board open at the time rebuilds in place.
+      buildExecutions: () =>
+        buildExecutionRows(
+          this.publishLedger?.entriesForSite(normalizeSiteUrl(this.context.config.xraySiteUrl)) ?? []
+        ),
       onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,
       applyDrop: (scenario, key) => this.applyBoardDrop(scenario, key),
       applyUnlink: (scenario, key) => this.applyBoardUnlink(scenario, key),
@@ -1471,6 +1482,29 @@ export class CommandManager {
       },
       browseFiles: () => this.browsePublishFiles(),
       attachPending: (runId) => this.attachPendingForRun(runId, normalizeSiteUrl(this.context.config.xraySiteUrl)),
+      // No store means no runs will ever be recorded, so the board's own idle event stands in and the
+      // dialog simply never refreshes.
+      onDidChangeRuns: this.context.runArtifactStore?.onDidChange ?? this.boardChange.event,
+      runOptions: () => publishRunOptions(this.publishRunSources()),
+    };
+  }
+
+  // What the publish dialog's dropdown is derived from, read fresh on every call: the flow takes it once
+  // when it opens, and the Publish tab takes it again whenever the run history changes underneath it.
+  private publishRunSources(): PublishRunSources {
+    const subsystem = this.traceabilitySubsystem;
+    const adapter = subsystem?.getActiveAdapter();
+    const site = normalizeSiteUrl(this.context.config.xraySiteUrl);
+    const resolveSteps = makeFeatureStepResolver(this.context.featureParser);
+    return {
+      runs: () => this.context.runArtifactStore?.list() ?? [],
+      projectOf: adapter?.keyGrammar.projectOf,
+      changedSinceRun: (results) => results.filter((result) => resolveSteps(result.scenario) === undefined).length,
+      defaultProjectKey: this.context.config.xrayDefaultProjectKey,
+      // The board's scope, read through the same store and against the same known keys the board uses,
+      // so a project picked there prefills the dialog instead of the run's derived key.
+      selectedProjectKey: subsystem?.projectScope().get(this.projectUniverse(adapter)),
+      priorEntryFor: (artifactId) => this.publishLedger?.find(artifactId, site),
     };
   }
 

@@ -381,7 +381,9 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     ].join("|");
   }
 
-  private scheduleRebuild(): void {
+  // The debounced, serialized rebuild request, and the only one a machine-driven trigger should use: a
+  // settings edit commits per keystroke, and `rebuildNow` would launch a full discovery for each.
+  public scheduleRebuild(): void {
     if (this.rebuildTimer) {clearTimeout(this.rebuildTimer);}
     this.rebuildTimer = setTimeout(() => {
       this.rebuildTimer = undefined;
