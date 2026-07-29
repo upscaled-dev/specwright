@@ -2,7 +2,7 @@
 
 > **Experimental: Xray Cloud only.** Specwright can connect an existing `playwright-bdd` workspace to Xray Cloud from inside VS Code. It is suitable for trying the workflow with a Jira/Xray trial tenant, provided your account can access the project you use. Because some actions create or update remote records, use a disposable project for your first evaluation and review each confirmation carefully.
 
-Traceability starts with tags in your `.feature` files. Specwright uses them to show mapped and untraced scenarios, sync Xray metadata, run a local batch, and optionally publish its results. It does not run tests in Jira or Xray; tests always run through your local Playwright setup.
+Traceability starts with tags in your `.feature` files. Specwright uses them to show mapped and untraced scenarios, sync Xray metadata, run your tests locally, and optionally publish their results. It does not run tests in Jira or Xray; tests always run through your local Playwright setup.
 
 ## Choose the right action
 
@@ -79,7 +79,7 @@ Put one test tag directly on the `Scenario`, `Scenario Outline`, or `Examples` b
 
 Feature-level test tags are inherited by every scenario in the feature. Avoid them unless the feature contains exactly one executable unit. Tags on `Rule:` and `Background:` are not used for traceability; place the tag on the scenario or Examples block instead.
 
-For a Scenario Outline, an outline-level test tag maps the whole outline to one Xray test and its example rows become iterations. A test tag on a particular `Examples:` block maps that block separately. Specwright does not create one Xray test per example row.
+For a Scenario Outline, an outline-level test tag maps the whole outline to one Xray test. A test tag on a particular `Examples:` block maps that block separately. Specwright does not create one Xray test per example row. See [Scenario Outlines in Xray](#scenario-outlines-in-xray) for how an outline is created, pushed, and published.
 
 Changing a local tag updates the local mapping automatically. It does not require a remote sync and does not change Xray.
 
@@ -113,7 +113,7 @@ Run **Specwright: Open Coverage Board** from the Command Palette or the Traceabi
 | **Mapping** | Link untraced scenarios to synced Xray tests, create tests from selected scenarios, create a Test Set or Test Plan from selected tests, push scenario text, and remove a local link. |
 | **Matrix** | Review the requirement, test, scenario, tag, and latest local result relationships. Empty cells show coverage gaps. |
 | **Executions** | Shows executions created or published from this workspace. It is a local activity ledger, not a complete list of executions in Jira. |
-| **Publish** | Select a completed local batch and create a new Test Execution or append results to an existing one. |
+| **Publish** | Select a completed local run and create a new Test Execution or append results to an existing one. |
 
 Use the project selector at the top of the board to narrow the view and to choose the target project for creation actions.
 
@@ -136,9 +136,9 @@ Confirming an existing test inserts its `@TEST_…` tag into the local feature f
 
 These actions make remote changes and always ask for confirmation:
 
-- **Create tests** creates one Xray Cucumber test for each selected untraced scenario. The scenario name and its current Gherkin are sent to Xray, then Specwright adds the returned test tag locally.
+- **Create tests** creates one Xray Cucumber test for each selected untraced scenario. The scenario name and its current Gherkin are sent to Xray, then Specwright adds the returned test tag locally. See [Scenario Outlines in Xray](#scenario-outlines-in-xray) for what is left out of the text that is sent.
 - **Create Test Set** and **Create Test Plan** create a remote container for the selected tests. The selected tests must have a synced remote issue ID, so run Sync first if the action says a test cannot be resolved.
-- **Create Execution** creates an empty remote Test Execution in the selected project. It has no results until you publish a batch to it later.
+- **Create Execution** creates an empty remote Test Execution in the selected project. It has no results until you publish a run to it later.
 
 A cancelled or partially completed bulk create can leave tests that were already created in Xray. If Specwright cannot apply the matching local tag, the remote test still exists; link it manually from the feature file or the Coverage Board.
 
@@ -156,11 +156,21 @@ Use **Specwright: Run Locally and Publish…** from the Traceability panel, a ma
 
 Before running, Specwright checks for unmapped scenarios, invalid or duplicate mappings, and known incompatible Xray test types. You can repair a mapping, run all flagged scenarios locally, or exclude flagged scenarios from the batch. An explicitly excluded or unmapped result is not sent to Xray. If you choose **Run all locally** and later choose Publish, review the publishable-result summary carefully: a result that still has a usable test mapping can remain eligible for publishing. To guarantee a flagged result stays local, exclude it or cancel the batch.
 
-Only a **complete** batch from **Run Locally and Publish…** is publishable. Ordinary Test Explorer runs update local Traceability badges for the session, but they do not create a publishable batch. Use **Specwright: Publish Last Run…** to return to a completed batch later.
+Runs started from the Testing view are recorded too, not only the ones started from **Run Locally and Publish…**. Running at any level there records one run alongside the Traceability badges it updates: a single Examples row, a scenario, a feature node, a tag group, a multi-selection, or the whole view. Debug runs started from the Testing view are recorded on the same path. Specwright keeps the last 10 runs in the workspace and drops older ones.
+
+The plain run commands do not record. A run started with CodeLens in the feature editor, from the editor or Explorer context menus, or from a Command Palette run command such as **Run All Tests** leaves no run to publish afterwards. The Testing view and **Run Locally and Publish…** are the two paths that record one.
+
+Use **Specwright: Publish Last Run…** to return to a recorded run. Its dropdown offers the runs that can still be published, which means all of the following hold:
+
+- The Traceability panel is enabled. Test keys are resolved from its mapping when the run starts, so with the panel off no run is ever publishable, and a tag added after a run does not apply to it. Run the scenarios again after tagging them.
+- The run finished without being cancelled or cut short.
+- At least one of its results maps to an Xray test and was not excluded during preflight.
+
+What **Run Locally and Publish…** adds is the preflight above. It checks mappings before running and records your exclusions on the run, so its results reach the Publish tab already reconciled. A Testing view run carries no preflight decisions, so read its result summary in the Publish tab before you publish it.
 
 In the **Publish** tab:
 
-1. Select the local batch to publish.
+1. Select the run to publish in the **Run** dropdown.
 2. Choose **Create new execution** or **Add to existing execution**.
 3. For a new execution, provide a project key and summary; you can optionally add a Test Plan key and environments. For an existing execution, enter or search for its key.
 4. Review the result summary and attachments, then choose **Publish**.
@@ -173,7 +183,7 @@ To create a new Test Execution, the target Jira project must have an Xray-mapped
 
 ### Evidence and report attachments
 
-Specwright can capture Playwright evidence such as screenshots, traces, and videos from the local batch. `playwrightBddRunner.xray.attachTo` controls where per-test evidence goes:
+Specwright can capture Playwright evidence such as screenshots, traces, and videos from the local run. `playwrightBddRunner.xray.attachTo` controls where per-test evidence goes:
 
 - `evidence`: embed it in the Xray result payload.
 - `issue`: upload it to the execution's Jira issue.
@@ -184,6 +194,37 @@ Jira credentials are required for issue uploads. If `issue` or `both` is selecte
 `playwrightBddRunner.xray.reportGlob` suggests run-level report bundles, such as Playwright HTML reports and trace archives. Chosen run-level files always upload to the Jira execution issue after a successful result import, so they require Jira credentials. An attachment failure does not undo a successful import; use the retry action to upload only the pending files instead of importing results again.
 
 Only attach material you are permitted to send to Xray or Jira. Test artifacts can contain screenshots, URLs, user data, or other sensitive information.
+
+## Scenario Outlines in Xray
+
+Specwright treats a Scenario Outline as one Xray test from creation through publishing. An outline is never converted into an Xray dataset or a parameterized test; it stays Gherkin text.
+
+### Create a test from an outline
+
+Creating a test from an outline, one at a time or in bulk, creates a single Cucumber-type Xray test. Its Gherkin definition holds the outline as written, including every Examples table and any tagged Examples block.
+
+The text sent is the outline body: its keyword line through its last Examples row. Everything around that body stays behind, including the `Feature:` line, any `Rule:` header, Background steps, and the tag lines above the outline, so the `@TEST_…` tag is not part of the definition either. Trailing blank and comment-only lines are trimmed off the end.
+
+The test as read in Jira is therefore the outline on its own. Keep context that a Jira reader needs inside the outline rather than in a Background.
+
+### Push an outline
+
+**Push** replaces the whole Gherkin definition of the mapped test with the current outline text, Examples tables included. It is a replacement, not a merge, so a row you deleted locally disappears from the remote test.
+
+Push refuses to write when the remote test is not one it can safely rewrite. It refuses a test whose type Xray reports as Manual or Generic, so an existing Manual test's dataset is left alone. It refuses a link that points at an individual `Examples:` block instead of a whole outline, and a test with no synced baseline or no remote issue ID. It also refuses when the remote definition changed since the last sync; sync, review the difference, then decide whether to push.
+
+### Publish example rows
+
+The outline is published as one test in the execution, and the rows you ran appear inside its Xray test run. The shape depends on the publishing mode:
+
+- **Add to existing execution** sends each row as an iteration of the test, carrying the row's status and duration.
+- **Create new execution** sends each row as its own scenario entry in a Cucumber report, named `Outline name (row title)`, and Xray folds those entries into the same test run.
+
+Either way the test run's status aggregates the rows, so one failing row fails the test run in Xray. Rows carry the row title Playwright reports, normally `Example #1`, `Example #2`, and so on. That title is the only row-specific data Xray receives, so the row's parameter values are not visible in the execution.
+
+### Read the counts
+
+The Testing view counts each Examples row as an individual test. Xray counts the outline as one test case. Run all five rows of a five-row outline and you see five tests locally and one test with five rows inside its Xray test run. Because you can also run a single Examples row, only the rows that ran are reported: run two of the five and the Xray test run holds those two. The two tools count different units of the same run.
 
 ## Settings reference
 
@@ -229,13 +270,13 @@ Keep credentials out of this file. Enter them through **Connect to Xray** instea
 | A mapped test says it is not found remotely | The key may be mistyped, belong to a different project or site, or name an issue that is not an Xray test. Sync again after correcting the tag or connection. |
 | Preflight reports a duplicate or incompatible mapping | Use one test tag per scenario unit and one scenario unit per test. For publishing or Push, link a Gherkin-compatible Xray test. |
 | Push is blocked by drift | Another person may have changed the remote Gherkin since the last sync. Sync, review the intended overwrite, then try again. Examples-block mappings cannot be pushed. |
-| Publish has no local runs | Start a complete batch with **Run Locally and Publish…**. A normal Test Explorer run updates badges but is not a publishing batch. |
+| Publish has no local runs | Enable the Traceability panel first: with it off, no run is publishable. Then check that the scenarios carry a valid test tag, that you started the run from the Testing view or with **Run Locally and Publish…**, and that preflight did not exclude them, and run them again. Only the last 10 runs are kept, and **Clear Local Run History…** in the Command Palette empties them. |
 | A new execution cannot be created | Check project permissions and the Xray Test Execution work-type mapping. If your project uses another standard-level name, set `xray.executionIssueType` to that name. |
 | Attachments are unavailable or fail | Add Jira credentials for issue uploads, check the site's upload limit and file size, then use the pending-attachment retry. A successful result import is not repeated. |
 
 ## Trial cleanup
 
-For a clean trial, use **Specwright: Clear Local Run History…** to remove the workspace's local batch buffer and, if you choose, its local publish ledger. This does not delete remote records.
+For a clean trial, run **Specwright: Clear Local Run History…** from the Command Palette, which is its only entry point, to remove this workspace's recorded local runs and, if you choose, its local publish ledger. This does not delete remote records.
 
 Delete any trial Tests, Test Sets, Test Plans, Test Executions, and attachments through Jira/Xray using an account with permission to do so. When you are finished, use **Disconnect from Xray** to remove stored credentials from VS Code Secret Storage.
 
