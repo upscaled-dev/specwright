@@ -636,6 +636,125 @@ describe("TestExecutor debugScenario", () => {
     expect(resolved).toBe(true);
   });
 
+  // spawnCommand resolves this shape once the signal aborts, so a cancel reaches the caller as a
+  // non-zero exit rather than a rejection.
+  const cancelAwareShell: ShellRunner = async (_command, _workingDir, _extraEnv, signal) =>
+    signal?.aborted
+      ? { success: false, output: "", error: "Cancelled", returnCode: 130 }
+      : { success: true, output: "", error: "", returnCode: 0 };
+
+  it("stops the live session when the run signal aborts while waiting", async () => {
+    const fakeDebug = makeFakeDebug();
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const forceStop = vi.spyOn(mirror, "forceStop");
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      mirror,
+    });
+    const controller = new AbortController();
+
+    let resolved = false;
+    const pending = executor
+      .debugScenario({
+        filePath: FEATURE_PATH,
+        scenarioName: "Passing",
+        waitForSessionEnd: true,
+        signal: controller.signal,
+      })
+      .then(() => { resolved = true; });
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(resolved).toBe(false);
+    const id = fakeDebug.startCalls[0]!.config[BreakpointMirror.SESSION_KEY];
+    const root = { id: "root", configuration: { [BreakpointMirror.SESSION_KEY]: id } };
+    fakeDebug.fireStart(root);
+
+    controller.abort();
+    await pending;
+
+    expect(forceStop).toHaveBeenCalledWith(id);
+    expect(fakeDebug.stopCalls).toEqual([root]);
+    expect(resolved).toBe(true);
+  });
+
+  it("stops the live session when the run signal aborts while the session is launching", async () => {
+    const controller = new AbortController();
+    const fakeDebug: FakeDebug = makeFakeDebug(undefined, () => {
+      const cfg = fakeDebug.startCalls.at(-1)!.config;
+      fakeDebug.fireStart({ id: "root", configuration: cfg });
+      controller.abort();
+      return Promise.resolve(true);
+    });
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const { executor } = makeExecutor(makeConfig(), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      mirror,
+    });
+
+    await executor.debugScenario({
+      filePath: FEATURE_PATH,
+      scenarioName: "Passing",
+      waitForSessionEnd: true,
+      signal: controller.signal,
+    });
+
+    expect(fakeDebug.stopCalls).toHaveLength(1);
+  });
+
+  it("never starts a session when the run signal is already aborted", async () => {
+    const fakeDebug = makeFakeDebug();
+    pushFeatureBreakpoint(fakeDebug);
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const fakeWindow = makeFakeWindow();
+    const { executor } = makeExecutor(makeConfig(), cancelAwareShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      window: fakeWindow.window,
+      mirror,
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await executor.debugScenario({
+      filePath: FEATURE_PATH,
+      scenarioName: "Passing",
+      waitForSessionEnd: true,
+      signal: controller.signal,
+    });
+
+    expect(fakeDebug.startCalls).toHaveLength(0);
+    expect(fakeWindow.errorMessages).toHaveLength(0);
+  });
+
+  it("releases the mirrored breakpoints when the signal is already aborted and bddgen is disabled", async () => {
+    // With no bddgen step the cancel is only seen after the breakpoints were mirrored, so this is
+    // the one already-aborted path that can leak them into the generated spec.
+    const fakeDebug = makeFakeDebug();
+    pushFeatureBreakpoint(fakeDebug);
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);
+    const release = vi.spyOn(mirror, "release");
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), okShell, {
+      debug: fakeDebug.debug,
+      workspace: makeWorkWorkspace(),
+      mirror,
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await executor.debugScenario({
+      filePath: FEATURE_PATH,
+      scenarioName: "Passing",
+      waitForSessionEnd: true,
+      signal: controller.signal,
+    });
+
+    expect(fakeDebug.startCalls).toHaveLength(0);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(specBreakpointLines(fakeDebug)).toEqual([]);
+  });
+
   it("resolves a waitForSessionEnd debug when the last child session terminates", async () => {
     const fakeDebug = makeFakeDebug();
     const mirror = BreakpointMirror.create(fakeDebug.debug, () => mirrorSpecText);

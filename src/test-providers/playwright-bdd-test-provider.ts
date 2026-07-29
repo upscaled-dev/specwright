@@ -171,7 +171,7 @@ export class PlaywrightBddTestProvider {
     const debugProfile = this.testController.createRunProfile(
       "Debug",
       vscode.TestRunProfileKind.Debug,
-      async (request) => { await this.debugTests(request); }
+      async (request, token) => { await this.debugTests(request, token); }
     );
     debugProfile.configureHandler = () => { /* no-op */ };
     this.runProfiles.push(debugProfile);
@@ -484,7 +484,18 @@ export class PlaywrightBddTestProvider {
 
   // --- Execution --------------------------------------------------------------
 
-  private async runTests(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
+  // The run scope both profiles share: one TestRun, one artifact batch, one AbortController wired
+  // to the Test Explorer stop button, and the finally that seals and ends exactly once.
+  private async executeRequest(
+    request: vscode.TestRunRequest,
+    token: vscode.CancellationToken,
+    executeItem: (
+      test: vscode.TestItem,
+      run: vscode.TestRun,
+      signal: AbortSignal,
+      batch: number | undefined
+    ) => Promise<void>
+  ): Promise<void> {
     if (this.isTestRunning) {
       vscode.window.showWarningMessage("A test run is already in progress.");
       return;
@@ -495,9 +506,9 @@ export class PlaywrightBddTestProvider {
     // command-driven run firing at the shared seam mid-batch can't inject a foreign shard. The
     // finally seals exactly one immutable artifact for the whole Test Explorer run.
     const batch = this.context.runArtifactStore?.beginBatch(this.describeSelection(request));
-    // One AbortController per run: cancelling the Test Explorer aborts the spawned Playwright
-    // process (see spawnCommand). runSingleTopLevelItem also reads token to skip, rather than
-    // fail, a subtree whose process was killed mid-run.
+    // Cancelling the Test Explorer aborts the spawned Playwright process (see spawnCommand) on the
+    // run path and stops the live session (see debugScenario) on the debug path. Each item callback
+    // also reads the signal to skip, rather than fail, work whose process was killed mid-run.
     const abort = new AbortController();
     const cancelSub = token.onCancellationRequested(() => abort.abort());
 
@@ -511,8 +522,7 @@ export class PlaywrightBddTestProvider {
           this.markSubtreeSkipped(test, run);
           continue;
         }
-        run.started(test);
-        await this.runSingleTopLevelItem(test, run, abort.signal, batch);
+        await executeItem(test, run, abort.signal, batch);
       }
     } catch (error) {
       const msg = errMsg(error);
@@ -525,6 +535,13 @@ export class PlaywrightBddTestProvider {
       run.end();
       this.isTestRunning = false;
     }
+  }
+
+  private async runTests(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
+    await this.executeRequest(request, token, async (test, run, signal, batch) => {
+      run.started(test);
+      await this.runSingleTopLevelItem(test, run, signal, batch);
+    });
   }
 
   // The batch-scope descriptor for a Test Explorer run: the deduplicated scenario refs the request
@@ -1156,67 +1173,59 @@ export class PlaywrightBddTestProvider {
     return undefined;
   }
 
-  private async debugTests(request: vscode.TestRunRequest): Promise<void> {
-    if (this.isTestRunning) {
-      vscode.window.showWarningMessage("A test run is already in progress.");
-      return;
-    }
-    this.isTestRunning = true;
-    // The testing service considers a Debug-kind request done once the handler resolves and its
-    // TestRun ends; returning at session start made VS Code tear down the run before the
-    // debuggee attached, so feature-file breakpoints never bound from the Test Explorer.
-    const run = this.testController.createTestRun(request);
-    const batch = this.context.runArtifactStore?.beginBatch(this.describeSelection(request));
-    try {
-      for (const test of this.requestedItems(request)) {
-        try {
-          if (test.uri) {
-            const isFeatureFile = this.isFeatureFileTest(test.id);
-            const scenarioName = isFeatureFile ? undefined : test.label;
-            const line = this.lineFromId(test.id);
-            const scenario = this.scenarioByTestId.get(test.id);
-            const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
-            // The debugged command runs in a terminal (no stdout capture), so the only way to
-            // learn the outcome is Playwright's file-based JSON report.
-            debugReportSequence += 1;
-            const jsonReportPath = path.join(
-              os.tmpdir(),
-              `playwright-bdd-debug-report-${process.pid}-${Date.now()}-${debugReportSequence}.json`
-            );
-            run.started(test);
-            // Debugging a feature/outline runs every descendant with one command; mark them all
-            // started so the Explorer shows what is actually running (mirrors runSingleTopLevelItem).
-            if (test.children.size > 0) {
-              this.markDescendantsStarted(test, run);
-            }
-            try {
-              await this.context.testExecutor.debugScenario({
-                filePath: test.uri.fsPath,
-                ...(line ? { lineNumber: line } : {}),
-                ...(scenarioName ? { scenarioName } : {}),
-                ...(outlineName ? { outlineName } : {}),
-                debug: true,
-                waitForSessionEnd: true,
-                jsonReportPath,
-              });
-              this.applyDebugReportStatus(test, run, jsonReportPath, batch);
-            } finally {
-              try { fs.unlinkSync(jsonReportPath); } catch { /* best effort */ }
-            }
+  private async debugTests(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
+    await this.executeRequest(request, token, async (test, run, signal, batch) => {
+      try {
+        if (test.uri) {
+          const isFeatureFile = this.isFeatureFileTest(test.id);
+          const scenarioName = isFeatureFile ? undefined : test.label;
+          const line = this.lineFromId(test.id);
+          const scenario = this.scenarioByTestId.get(test.id);
+          const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
+          // The debugged command runs in a terminal (no stdout capture), so the only way to
+          // learn the outcome is Playwright's file-based JSON report.
+          debugReportSequence += 1;
+          const jsonReportPath = path.join(
+            os.tmpdir(),
+            `playwright-bdd-debug-report-${process.pid}-${Date.now()}-${debugReportSequence}.json`
+          );
+          run.started(test);
+          // Debugging a feature/outline runs every descendant with one command; mark them all
+          // started so the Explorer shows what is actually running (mirrors runSingleTopLevelItem).
+          if (test.children.size > 0) {
+            this.markDescendantsStarted(test, run);
           }
-        } catch (testError) {
-          const msg = errMsg(testError);
-          this.context.logger.error(`Failed to debug test ${test.label}: ${msg}`);
-          vscode.window.showErrorMessage(`Failed to debug test "${test.label}": ${msg}`);
+          try {
+            // The testing service considers a Debug-kind request done once the handler resolves and
+            // its TestRun ends; returning at session start made VS Code tear down the run before the
+            // debuggee attached, so feature-file breakpoints never bound from the Test Explorer.
+            await this.context.testExecutor.debugScenario({
+              filePath: test.uri.fsPath,
+              ...(line ? { lineNumber: line } : {}),
+              ...(scenarioName ? { scenarioName } : {}),
+              ...(outlineName ? { outlineName } : {}),
+              debug: true,
+              waitForSessionEnd: true,
+              jsonReportPath,
+              signal,
+            });
+            // A cancelled session writes at most a partial report; ingesting it would seal
+            // half-truths into a batch about to be marked cancelled.
+            if (signal.aborted) {
+              this.markSubtreeSkipped(test, run);
+            } else {
+              this.applyDebugReportStatus(test, run, jsonReportPath, batch);
+            }
+          } finally {
+            try { fs.unlinkSync(jsonReportPath); } catch { /* best effort */ }
+          }
         }
+      } catch (testError) {
+        const msg = errMsg(testError);
+        this.context.logger.error(`Failed to debug test ${test.label}: ${msg}`);
+        vscode.window.showErrorMessage(`Failed to debug test "${test.label}": ${msg}`);
       }
-    } finally {
-      if (batch !== undefined) {
-        this.context.runArtifactStore?.sealBatch(batch, false);
-      }
-      run.end();
-      this.isTestRunning = false;
-    }
+    });
   }
 
   // When the report is missing or unparseable the status is left unset; a stale icon is less

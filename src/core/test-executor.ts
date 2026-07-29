@@ -211,7 +211,9 @@ export class TestExecutor {
       const { bddgenCommand } = this.commandBuilder().buildDebugCommandParts(options);
 
       if (bddgenCommand !== undefined) {
-        const result = await this.shellRunner(bddgenCommand, workingDir);
+        const result = await this.shellRunner(bddgenCommand, workingDir, undefined, options.signal);
+        // A cancelled bddgen reports failure like any other non-zero exit; stopping is not an error.
+        if (options.signal?.aborted) { return; }
         if (!result.success) {
           const detail = result.error.trim() === "" ? result.output : result.error;
           throw new Error(`bddgen failed (exit code ${result.returnCode}): ${detail}`);
@@ -230,6 +232,12 @@ export class TestExecutor {
       const folder =
         this.workspace.workspaceFolders?.find((f) => isSameOrInsideDir(workingDir, f.uri.fsPath)) ??
         this.workspace.workspaceFolders?.[0];
+
+      // Cancelled before launch: nothing will ever terminate, so release the mirror here.
+      if (options.signal?.aborted) {
+        this.mirror.release(mirrorId);
+        return;
+      }
 
       const started = await this.debug.startDebugging(folder, {
         type: "node-terminal",
@@ -250,7 +258,21 @@ export class TestExecutor {
       if (options.waitForSessionEnd) {
         // The testing service treats a Debug-kind run as finished when its handler resolves;
         // resolving at session start tears the run down before the debuggee attaches.
-        await this.waitForDebugCompletion(mirrorId, options.jsonReportPath);
+        const id = mirrorId;
+        const onAbort = (): void => {
+          this.mirror.forceStop(id).catch(() => { /* the mirror releases either way */ });
+        };
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+        // An abort that landed while startDebugging was awaited never reaches a listener added
+        // after the fact, and the wait would hang forever.
+        if (options.signal?.aborted) { onAbort(); }
+        try {
+          await this.waitForDebugCompletion(mirrorId, options.jsonReportPath);
+        } finally {
+          // One signal covers every item of a Test Explorer run, so listeners pile up per item
+          // unless each one is taken back off.
+          options.signal?.removeEventListener("abort", onAbort);
+        }
       }
     } catch (error) {
       // No session will ever terminate for a failed launch, so the mirror must be released

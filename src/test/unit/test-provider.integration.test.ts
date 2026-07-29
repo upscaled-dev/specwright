@@ -352,7 +352,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const leaf = controller.find(`${fixture.featurePath}:4`);
     const debugProfile = controller.profile("Debug");
     const pending = Promise.resolve(
-      debugProfile!.runHandler(new vscode.TestRunRequest([leaf!]))
+      debugProfile!.runHandler(new vscode.TestRunRequest([leaf!]), new vscode.CancellationTokenSource().token)
     );
 
     await vi.waitFor(() => {
@@ -388,7 +388,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const leaf = controller.find(`${fixture.featurePath}:4`);
     const debugProfile = controller.profile("Debug");
     const pending = Promise.resolve(
-      debugProfile!.runHandler(new vscode.TestRunRequest([leaf!]))
+      debugProfile!.runHandler(new vscode.TestRunRequest([leaf!]), new vscode.CancellationTokenSource().token)
     );
 
     await vi.waitFor(() => {
@@ -418,7 +418,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(featureItem, "feature item should be discovered").toBeTruthy();
     const debugProfile = controller.profile("Debug");
     const pending = Promise.resolve(
-      debugProfile!.runHandler(new vscode.TestRunRequest([featureItem!]))
+      debugProfile!.runHandler(new vscode.TestRunRequest([featureItem!]), new vscode.CancellationTokenSource().token)
     );
 
     await vi.waitFor(() => {
@@ -460,7 +460,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
     let handlerDone = false;
     const pending = Promise.resolve(
-      debugProfile!.runHandler(new vscode.TestRunRequest([leaf!]))
+      debugProfile!.runHandler(new vscode.TestRunRequest([leaf!]), new vscode.CancellationTokenSource().token)
     ).then(() => { handlerDone = true; });
 
     await vi.waitFor(() => {
@@ -482,6 +482,40 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     await pending;
     expect(handlerDone).toBe(true);
     expect(run.outcome.ended).toBe(true);
+  });
+
+  it("cancelling a debug run ends it without waiting for the session, skips the items, and seals the batch cancelled", async () => {
+    // No terminate event is ever fired: the stop button alone has to bring the session down and
+    // settle the run, otherwise the handler waits forever and blocks every later run.
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller, artifactStore } = buildProvider(shell);
+    await provider.discoverTests();
+
+    const first = controller.find(`${fixture.featurePath}:4`)!;
+    const second = controller.find(`${fixture.featurePath}:12`)!;
+    const source = new vscode.CancellationTokenSource();
+    const debugProfile = controller.profile("Debug")!;
+    const pending = Promise.resolve(
+      debugProfile.runHandler(new vscode.TestRunRequest([first, second]), source.token)
+    );
+
+    await vi.waitFor(() => {
+      expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
+    });
+    const root = { id: "root", configuration: vscode.debug.__startDebuggingCalls[0]!.config };
+    vscode.debug.__fireStart(root);
+    source.cancel();
+    await pending;
+
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.ended).toBe(true);
+    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:12`);
+    expect(run.outcome.failed).toEqual([]);
+    // The second item never launches a session of its own.
+    expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
+    expect(vscode.debug.__stopDebuggingCalls).toEqual([root]);
+    expect(artifactStore.latest()?.state).toBe("cancelled");
   });
 
   it("scopes the run summary to the target when the report's featurePath differs only by Windows drive-letter case/separators", async () => {
@@ -584,7 +618,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(featureItem, "feature item should be discovered").toBeTruthy();
     const debugProfile = controller.profile("Debug");
     const pending = Promise.resolve(
-      debugProfile!.runHandler(new vscode.TestRunRequest([featureItem!]))
+      debugProfile!.runHandler(new vscode.TestRunRequest([featureItem!]), new vscode.CancellationTokenSource().token)
     );
 
     await vi.waitFor(() => {
