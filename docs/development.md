@@ -15,7 +15,7 @@ Unit tests use [Vitest](https://vitest.dev/) with a minimal stub of the `vscode`
 
 ## Releasing
 
-Use the release script — it bumps the version in `package.json` and `package-lock.json` in lockstep (so the lockfile can't drift and dirty the next `npm ci`/install), updates `CHANGELOG.md`, runs the full pipeline, packages the `.vsix`, and creates a git commit + tag. It stops before pushing so you can review.
+Use the release script: it bumps the version in `package.json` and `package-lock.json` in lockstep (so the lockfile can't drift and dirty the next `npm ci`/install), updates `CHANGELOG.md`, runs the full pipeline, packages the `.vsix`, and creates a git commit + tag. It stops before pushing so you can review.
 
 ```bash
 npm run release            # default: patch bump
@@ -51,7 +51,7 @@ Useful when:
 - You want CI-like isolation while iterating.
 - You're triaging a "works on my machine" report.
 
-The DevContainer is intentionally tool-agnostic — it ships only what the project needs (Node + git + ESLint extension). Bring your own AI assistant, debugger, or other tooling.
+The DevContainer is intentionally tool-agnostic: it ships only what the project needs (Node + git + ESLint extension). Bring your own AI assistant, debugger, or other tooling.
 
 ## Project layout
 
@@ -139,7 +139,7 @@ scripts/
 - **Providers register through `ProviderRegistry`** ([src/core/provider-registry.ts](../src/core/provider-registry.ts)), which is the single owner of provider lifecycle. It reconciles "current state → desired state" on config change and on extension change, so toggling any setting attaches/detaches the right providers without a window reload.
 - **Shared `StepResolver` and `StepUsageIndex`** are reference-counted across consumers (Find References + Usage CodeLens + Unused diagnostic share one index). Indexes dispose only when the last consumer's setting flips off, preventing watcher leaks.
 - **Pure helpers live in their own modules** (`pattern-humanizer.ts`, `tag-line-detector.ts`, `feature-table-formatter-helpers.ts`, `bddgen-error-parser.ts`, `step-literal-promotion-helpers.ts`) so vitest can exercise the logic without the `vscode` stub.
-- **`parseFeatureSteps`** in [step-resolver.ts](../src/providers/step-resolver.ts) is the canonical Gherkin step walker — boundary-aware (`Scenario:` / `Background:` / `Rule:` / `Feature:` / `Example:` / `Scenario Template:`), used by every provider that needs effective-keyword resolution.
+- **`parseFeatureSteps`** in [step-resolver.ts](../src/providers/step-resolver.ts) is the canonical Gherkin step walker, boundary-aware (`Scenario:` / `Background:` / `Rule:` / `Feature:` / `Example:` / `Scenario Template:`), used by every provider that needs effective-keyword resolution.
 - **`shouldRegisterCompletion(mode, isCucumberAutocompletePresent())`** is the single pure helper that gates every `auto`/`on`/`off` provider. New providers with the same coexistence pattern should reuse it.
 
 ## Adding a setting or command

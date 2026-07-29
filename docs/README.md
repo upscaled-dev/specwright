@@ -1,10 +1,22 @@
-# Documentation
+# Specwright documentation
 
-Topic guides for the Specwright extension.
+Use these guides to author Gherkin, run `playwright-bdd` tests, and configure Specwright in VS Code.
 
-- **[runs.md](runs.md)** — Running tests: discovery, CodeLens, Test Explorer, cancellation, debugging with breakpoints, status bar, parallel execution, pre-run hook, `bddgen` errors, commands, context menus.
-- **[features.md](features.md)** — Language features: navigation, hover, autocompletion, tag autocompletion, references, CodeLens, unused-step diagnostic, ambiguous & unmatched diagnostics, Scenario Outline validation, snippets, outline, data-table formatting, literal-to-parameter refactor, step-definition generation, the Steps panel, the Xray Traceability panel, Insert Step, and Markdown exports.
-- **[settings.md](settings.md)** — Full settings reference + cucumberautocomplete coexistence behavior.
-- **[development.md](development.md)** — Building, testing, releasing, project layout, DevContainer.
+## Start with your goal
 
-If you're new, start with the [README quick start](../README.md#quick-start), then read [runs.md](runs.md) for the test-execution workflow.
+| Goal | Guide |
+| --- | --- |
+| Set up an existing `playwright-bdd` workspace and run your first scenario | [Getting started](getting-started.md) |
+| Run, debug, filter, stop, or understand a test result | [Run and debug tests](runs.md) |
+| Write feature files, navigate steps, fix diagnostics, and manage a step library | [Language features and Steps panel](features.md) |
+| Connect scenarios to Xray Cloud and understand the effect of remote actions | [Xray traceability](traceability.md) |
+| Change commands, discovery, authoring, or Xray settings | [Settings reference](settings.md) |
+| Resolve common setup and execution problems | [Troubleshooting](troubleshooting.md) |
+
+## For contributors
+
+- [Development](development.md) covers building, testing, releasing, and project structure.
+- [Contributing](../CONTRIBUTING.md) describes the contribution workflow.
+- [Release notes](../CHANGELOG.md) list changes by version.
+
+If you are evaluating the extension, start with the [Marketplace overview](../README.md).

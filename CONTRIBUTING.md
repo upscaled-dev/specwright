@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest. This project is a VS Code extension that drives [playwright-bdd](https://vitalets.github.io/playwright-bdd/) — the runtime it shells out to is `npx bddgen && npx playwright test`.
+Thanks for your interest. This project is a VS Code extension that drives [playwright-bdd](https://vitalets.github.io/playwright-bdd/): the runtime it shells out to is `npx bddgen && npx playwright test`.
 
 ## Setup
 
@@ -45,7 +45,7 @@ Current suites cover `scenarioByTestId` map population across all 5 organization
 
 **Visible window on macOS / Windows.** The harness briefly pops a VS Code window while the tests run. That's normal.
 
-**Linux headless runs.** Use `xvfb-run npm run test:integration` — local Linux runs without a display need this. CI does the same: [.github/workflows/ci.yml](.github/workflows/ci.yml) runs `check-types`, `lint`, the vitest suite, and the integration suite (under `xvfb` on Linux) on Ubuntu, Windows, and macOS for every push to `main` and every pull request.
+**Linux headless runs.** Use `xvfb-run npm run test:integration`. Local Linux runs without a display need this. CI does the same: [.github/workflows/ci.yml](.github/workflows/ci.yml) runs `check-types`, `lint`, the vitest suite, and the integration suite (under `xvfb` on Linux) on Ubuntu, Windows, and macOS for every push to `main` and every pull request.
 
 **`ELECTRON_RUN_AS_NODE` gotcha.** [src/test/integration/runTest.ts](src/test/integration/runTest.ts) explicitly unsets `ELECTRON_RUN_AS_NODE` before launching, because some shells export it globally and it breaks Electron startup. Don't re-introduce it.
 
@@ -86,7 +86,7 @@ The bundle entry point is [src/extension.ts](src/extension.ts); esbuild emits a 
 2. Register the handler in [CommandManager.registerCommands()](src/commands/command-manager.ts).
 3. If the command should appear in a menu, add it under the matching `contributes.menus.*` entry.
 
-`CommandManager.registerCommands()` is the single source of truth for what's wired up. If you add a command in package.json but not here, it won't do anything. If you add a handler here without a matching package.json entry, it's unreachable (this is what was wrong with `debugFeature` before — drop the handler or add the package.json entry).
+`CommandManager.registerCommands()` is the single source of truth for what's wired up. If you add a command in package.json but not here, it won't do anything. If you add a handler here without a matching package.json entry, it's unreachable (this is what was wrong with `debugFeature` before: drop the handler or add the package.json entry).
 
 ## Style
 

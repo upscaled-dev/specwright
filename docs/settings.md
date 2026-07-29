@@ -1,87 +1,117 @@
 # Settings reference
 
-All settings live under `playwrightBddRunner.*` in your VS Code Settings (`Cmd/Ctrl+,`) or `.vscode/settings.json`.
+All settings use the `playwrightBddRunner.*` prefix. Open VS Code Settings with `Cmd+,` on macOS or `Ctrl+,` on Windows and Linux, then search for **Specwright**. You can also add settings to `.vscode/settings.json`.
 
-## Settings table
+<!-- Screenshot placeholder: ../images/specwright-settings.png
+Show VS Code Settings filtered to Specwright. Include execution and authoring settings, but no credentials. -->
 
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `playwrightCommand` | string | `npx playwright test` | Use `pnpm exec playwright test`, `yarn playwright test`, etc. as appropriate. |
-| `bddgenCommand` | string | `npx bddgen` | Set empty to skip codegen if your `playwright.config.ts` already runs `bddgen` via `defineBddProject`. |
-| `preRunCommand` | string | `` | Command to run before each test execution (e.g. `npm run build:fixtures`). Empty disables. A non-zero exit aborts the run and writes the error to the output channel. |
-| `featuresGenDir` | string | `.features-gen` | Directory where `bddgen` writes generated specs, relative to the working directory. Set it if you customized playwright-bdd's `outputDir`. Used to mirror `.feature`-file breakpoints into the generated specs when debugging — see [runs.md](runs.md#debugging-with-breakpoints). |
-| `workingDirectory` | string | `` (inferred) | Empty = inferred per run: the directory of the nearest `playwright.config.*` above the feature file, falling back to the file's workspace folder. In a monorepo this runs `bddgen`/`playwright` from the package that declares them — required with pnpm, which links binaries only into the declaring package's `node_modules/.bin`. Set explicitly to override. |
-| `testFilePattern` | string | `**/*.feature` | Glob for feature-file discovery. Also used by tag autocompletion. |
-| `tags` | string | `` | Default tag expression, e.g. `@smoke and not @wip`. |
-| `parallelExecution` | boolean | `false` | Adds `--workers=<maxParallelProcesses>` to Playwright. |
-| `maxParallelProcesses` | number (1–16) | `4` | Worker count when parallel is enabled. |
-| `reporter` | string | `list` | The Settings dropdown offers `list`/`line`/`dot`/`html`/`json`/`junit`, but the value also accepts a comma-separated list, the `github`/`blob`/`null` built-ins, and custom reporter module paths (edit `settings.json` directly for those). The JSON reporter is appended in addition, for result mapping. |
-| `useConfigReporters` | boolean | `false` | Run the reporters declared in your Playwright config instead of injecting `--reporter` flags, so a custom reporter can run alongside the extension's Test Results panel. Requires a bare `['json']` entry (no `outputFile`) in your config's `reporter` array — the extension steers it to its temp file via `PLAYWRIGHT_JSON_OUTPUT_NAME` and parses that. |
-| `dryRun` | boolean | `false` | Passes `--list` to Playwright. |
-| `enableCodeLens` | boolean | `true` | Run/debug CodeLens on feature files. Disable if conflicting with another extension. |
-| `enableStepDefinitionNavigation` | boolean | `true` | Go to Definition from a Gherkin step to its TypeScript step definition. |
-| `enableStepDiagnostics` | boolean | `true` | Master switch for the unmatched-step, ambiguous-step, and Scenario Outline diagnostics in `.feature` files. |
-| `enableStepsPanel` | boolean | `true` | Show the Specwright Steps panel in the Activity Bar. Disabling disposes the panel and releases its share of the step-usage index. See [features.md → Steps panel](features.md#steps-panel). |
-| `enableStepAutocomplete` | `auto` / `on` / `off` | `auto` | Suggest existing playwright-bdd step definitions when typing a step. |
-| `enableTagAutocomplete` | `auto` / `on` / `off` | `auto` | Suggest existing tags when typing `@`. |
-| `enableStepHover` | `auto` / `on` / `off` | `auto` | Show the matching step-definition pattern and source location when hovering a step. |
-| `enableStepReferences` | `auto` / `on` / `off` | `auto` | Find All References on a step definition lists every matching Gherkin step. |
-| `enableStepUsageCodeLens` | `auto` / `on` / `off` | `auto` | `Used N times` CodeLens above each `Given/When/Then` definition. |
-| `enableUnusedStepDiagnostics` | `auto` / `on` / `off` | `auto` | Information diagnostic on step definitions that no `.feature` step matches. |
-| `enableStepLiteralPromotion` | `auto` / `on` / `off` | `auto` | Refactor: promote a hard-coded literal in a step to a `{string}`/`{int}`/`{float}` parameter, updating both files. |
-| `enableTableFormatting` | `auto` / `on` / `off` | `auto` | Auto-align Gherkin data tables on Format Document. |
-| `collapseMarkdownExportSections` | boolean | `false` | Render the collapsible sections in exported feature/step Markdown catalogs collapsed by default. Recommended for large catalogs so the document opens as a scannable outline. |
-| `traceability.enablePanel` | boolean | `true` | **Experimental.** Show the in-development Traceability panel beneath Steps. Do not rely on it for production workflows. Disabling hides the view and tears down its tree, model, and file watchers. See [features.md → experimental Xray traceability](features.md#experimental-xray-traceability). |
-| `traceability.provider` | string (`xray`) | `xray` | **Experimental.** The in-development ALM backend. Only `xray` is currently recognised; integration behaviour may change. |
-| `traceability.testTagPrefix` | string | `TEST_` | **Experimental.** Tag prefix used by the in-development traceability view — `@TEST_CALC-1043` maps to `CALC-1043`. Matching is case-insensitive; an empty or whitespace value falls back to the default. |
-| `traceability.reqTagPrefix` | string | `REQ_` | **Experimental.** Tag prefix used by the in-development traceability view to identify requirement coverage. Same case-insensitivity and empty-value fallback as `traceability.testTagPrefix`. |
-| `xray.siteUrl` | string | `` | **Experimental.** Jira/Xray Cloud host used by the in-development open-issue action, e.g. `acme.atlassian.net`. A pasted full URL or trailing slash is tolerated; an empty value shows a warning instead of guessing. |
-| `stepDefinitionPaths` | string[] | `["features/steps/**/*.ts", "features/steps/**/*.js", "tests/steps/**/*.ts", "steps/**/*.ts"]` | Globs for step-definition lookup. Used by navigation, autocompletion, references, the CodeLens, the unused-step diagnostic, the literal-promotion refactor, and the generator. Resource-scoped — set per workspace folder so each package in a monorepo can point at its own step directories. |
-| `stepDefinitionExcludePaths` | string[] | `[]` | Extra globs excluded from step-definition discovery, merged with the built-in excludes (`node_modules`, the generated `featuresGenDir`, `playwright-report`, `test-results`). Exclude generated/report directories whose files contain `Given/When/Then` invocations that would otherwise be mistaken for definitions — e.g. `"**/reports/**"`. Resource-scoped. |
+Use the defaults first. Most projects only need a change when they use a different package manager, a monorepo, non-standard step directories, or a custom `playwright-bdd` output directory.
 
-Per-feature deep dives: [features.md](features.md).
+## Run and discovery settings
 
-## Example: scoping step discovery in a monorepo
+| Setting | Default | Use it when… |
+| --- | --- | --- |
+| `playwrightCommand` | `npx playwright test` | Your project runs Playwright through another command, such as `pnpm exec playwright test`. |
+| `bddgenCommand` | `npx bddgen` | You need a different code-generation command. Set it to an empty string when your Playwright configuration already runs `bddgen`. |
+| `preRunCommand` | empty | A command must finish before every test run, for example to build fixtures. A non-zero exit stops the run. |
+| `featuresGenDir` | `.features-gen` | Your `playwright-bdd` output directory differs from the default. This is needed for feature-file breakpoint mapping. |
+| `workingDirectory` | inferred | Commands must run from a specific folder. By default, Specwright uses the nearest parent `playwright.config.*`, then the workspace folder. |
+| `testFilePattern` | `**/*.feature` | Your feature files live outside the usual locations or use a narrower glob. This also controls the tag index. |
+| `tags` | empty | You want every run to use a default `bddgen` tag expression, such as `@smoke and not @wip`. |
+| `parallelExecution` | `false` | You want Playwright runs to use workers. |
+| `maxParallelProcesses` | `4` | You need a different worker count when parallel execution is enabled. Valid range: `1` to `16`. |
+| `reporter` | `list` | You want a different terminal reporter, several reporters, or a custom reporter module. Specwright still obtains JSON results for mapping. |
+| `useConfigReporters` | `false` | Your Playwright configuration already declares the reporters you want to run. It requires a bare `['json']` entry in that configuration. |
+| `dryRun` | `false` | You want Playwright to list the tests that would run without executing them. |
+| `enableCodeLens` | `true` | You need to hide Run and Debug links in feature files, for example because another extension supplies conflicting CodeLens items. |
 
-`stepDefinitionPaths` and `stepDefinitionExcludePaths` are **resource-scoped**, so each package can configure its own step directories in that package's `.vscode/settings.json`:
+## Step discovery and authoring settings
+
+| Setting | Default | Use it when… |
+| --- | --- | --- |
+| `stepDefinitionPaths` | `features/steps/**/*.ts`, `features/steps/**/*.js`, `tests/steps/**/*.ts`, `steps/**/*.ts` | Your step definitions use another directory or file type. This setting is resource-scoped, so each monorepo package can use its own paths. |
+| `stepDefinitionExcludePaths` | empty | Generated or report files look like step definitions. Built-in exclusions already cover `node_modules`, the generated features directory, `playwright-report`, and `test-results`. |
+| `enableStepDefinitionNavigation` | `true` | You need to turn off Go to Definition from a feature step to its matching step definition. |
+| `enableStepDiagnostics` | `true` | You need to turn off missing-step, ambiguous-step, and Scenario Outline diagnostics. |
+| `enableStepsPanel` | `true` | You need to hide the Steps panel and release its index and file watchers. |
+| `collapseMarkdownExportSections` | `false` | You export large step or scenario catalogs and want their collapsible sections closed initially. |
+
+### Compatibility-mode settings
+
+The following settings accept `auto`, `on`, or `off` and default to `auto`:
+
+| Setting | Feature |
+| --- | --- |
+| `enableStepAutocomplete` | Step suggestions in feature files. |
+| `enableTagAutocomplete` | Suggestions after `@`. |
+| `enableStepHover` | Matching step-definition details on hover. |
+| `enableStepReferences` | Find All References from a step definition. |
+| `enableStepUsageCodeLens` | `Used N times` annotations above definitions. |
+| `enableUnusedStepDiagnostics` | Information diagnostics for unused definitions. |
+| `enableStepLiteralPromotion` | Refactor a literal into a `{string}`, `{int}`, or `{float}` parameter. |
+| `enableTableFormatting` | Align Gherkin data tables with Format Document. |
+
+`auto` enables the feature unless [Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete) is installed. That avoids duplicate completions, hover cards, references, diagnostics, and formatting. Choose `on` to keep both extensions active, or `off` to disable the Specwright feature.
+
+## Xray Cloud traceability settings
+
+Xray support is experimental and available only for Xray Cloud. See [Xray traceability](traceability.md) before enabling remote workflows.
+
+| Setting | Default | Use it when… |
+| --- | --- | --- |
+| `traceability.enablePanel` | `true` | You need to show or hide the Traceability panel. Disabling it also releases its watchers. |
+| `traceability.provider` | `xray` | Selects the traceability backend. Xray is currently the only supported value. |
+| `traceability.testTagPrefix` | `TEST_` | Your scenario-to-test tags use another prefix. For example, `@TEST_CALC-1043` maps to `CALC-1043`. |
+| `traceability.reqTagPrefix` | `REQ_` | Your requirement-coverage tags use another prefix. |
+| `xray.siteUrl` | empty | Sets the Jira/Xray Cloud host, such as `acme.atlassian.net`, for connection and issue links. |
+| `xray.apiRegion` | `global` | Your Xray Cloud tenant is hosted in `us`, `eu`, or `au` rather than the global API region. It must match the tenant's region. |
+| `xray.syncProjectKeys` | empty list | You always want selected project keys included when syncing remote metadata. |
+| `xray.cacheTtlMinutes` | `15` | You need a longer or shorter freshness window for synced metadata. Stale data remains visible until you sync again. |
+| `xray.defaultProjectKey` | empty | You want a project preselected when creating an Xray Test Execution. |
+| `xray.executionIssueType` | `Test Execution` | Your Jira project maps Xray Test Executions to another standard-level work type. |
+| `xray.reportGlob` | `playwright-report/**`, `test-results/**/*.zip` | You want different run-level report bundles suggested in the Publish dialog. Selected bundles are attached to the Jira execution issue after a successful import. |
+| `xray.attachTo` | `evidence` | You want per-test evidence sent as Xray evidence, Jira issue attachments, or both. Valid values: `evidence`, `issue`, and `both`. |
+
+## Examples
+
+### Use pnpm in a monorepo
+
+Place settings in the package folder that owns the Playwright configuration. Resource-scoped step paths then apply only to that package.
 
 ```jsonc
 // packages/web/.vscode/settings.json
 {
-  // Look for step definitions only inside this package's step folder.
+  "playwrightBddRunner.playwrightCommand": "pnpm exec playwright test",
+  "playwrightBddRunner.bddgenCommand": "pnpm exec bddgen",
   "playwrightBddRunner.stepDefinitionPaths": ["tests/steps/**/*.ts"],
-
-  // Exclude a custom report/output directory whose generated files contain
-  // Given/When/Then invocations that would otherwise be read as definitions.
   "playwrightBddRunner.stepDefinitionExcludePaths": ["**/reports/**"]
 }
 ```
 
-Why the exclude matters: bddgen's generated specs (and some report formats) call `Given("…")`, `When("…")`, `Then("…")` as **invocations**, which look identical to step **definitions** to the matcher. If discovery reaches those files, a single step appears to match several definitions and gets flagged as ambiguous. The built-in excludes already cover `node_modules`, the generated `featuresGenDir` (default `.features-gen`), `playwright-report`, and `test-results`; use `stepDefinitionExcludePaths` for any additional directory specific to your setup.
+### Match a custom `playwright-bdd` output directory
 
-## `auto` / `on` / `off` semantics
+```jsonc
+{
+  "playwrightBddRunner.featuresGenDir": "generated/bdd-specs"
+}
+```
 
-Eight providers in this extension share a tri-state setting because they overlap with the [Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete) extension:
+This setting is especially important when debugging a breakpoint set in a `.feature` file.
 
-| Setting | Provider |
-|---|---|
-| `enableStepAutocomplete` | Step completions on Gherkin step lines |
-| `enableTagAutocomplete` | Tag completions on `@`-prefix |
-| `enableStepHover` | Hover tooltip on Gherkin steps |
-| `enableStepReferences` | Find All References on step definitions |
-| `enableStepUsageCodeLens` | "Used N times" CodeLens |
-| `enableUnusedStepDiagnostics` | Unused-step Information diagnostic |
-| `enableStepLiteralPromotion` | Promote literal to parameter refactor |
-| `enableTableFormatting` | Format Document for data tables |
+### Set a default tag expression
 
-Each setting accepts three values:
+```jsonc
+{
+  "playwrightBddRunner.tags": "@smoke and not @wip"
+}
+```
 
-- **`auto`** (default) — registers the provider only when `alexkrechik.cucumberautocomplete` is **not** installed. Auto-defers when it is, so the IntelliSense list, Problems panel, References panel, and formatter never produce duplicates.
-- **`on`** — always register. Keeps both providers active. Use this when you want both extensions to contribute (each entry from this extension has `detail` prefixed with `Playwright-BDD` so you can tell them apart).
-- **`off`** — never register. Use this to defer to cucumberautocomplete unconditionally, or to disable the feature entirely.
+The expression is passed to `bddgen`; only matching specs are generated for the run.
 
-## Cucumberautocomplete coexistence
+## Related guides
 
-The auto-defer detection uses VS Code's `vscode.extensions.getExtension("alexkrechik.cucumberautocomplete")` and re-evaluates on `vscode.extensions.onDidChange`, so installing or uninstalling cucumberautocomplete mid-session re-reconciles every `auto`-mode provider without a window reload.
-
-The `enableCodeLens`, `enableStepDefinitionNavigation`, and `enableStepDiagnostics` settings are plain booleans because they don't overlap with cucumberautocomplete's surface (run/debug CodeLens, navigation that targets playwright-bdd specifically, and our distinct diagnostic codes).
+- [Getting started](getting-started.md)
+- [Run and debug tests](runs.md)
+- [Language features and Steps panel](features.md)
+- [Xray traceability](traceability.md)
+- [Troubleshooting](troubleshooting.md)

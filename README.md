@@ -1,141 +1,111 @@
-# Specwright - BDD Authoring for Playwright in VS Code
+# Specwright
 
-**A first-class BDD authoring experience for [playwright-bdd](https://vitalets.github.io/playwright-bdd/) in VS Code.**
+**BDD authoring, test execution, and traceability for `playwright-bdd` in VS Code.**
+
+Write Gherkin scenarios, keep them connected to their step definitions, and run or debug the exact test you are editing. Specwright brings authoring and Playwright results together in VS Code.
 
 [![Install on VS Code Marketplace](https://img.shields.io/badge/Install-VS%20Code%20Marketplace-blue?logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=upscaled-dev.specwright)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Write, navigate, validate, and generate Gherkin step definitions without leaving VS Code. Specwright keeps authoring connected to execution: run or debug the scenario you are editing directly from the Test Explorer, CodeLens, or editor.
+![Run and Debug CodeLens in a feature file](images/running_feature_code_lens.gif)
 
-![Run / Debug from the Test Explorer and CodeLens](images/running_feature_code_lens.gif)
+<!-- GIF placeholder: images/authoring-to-execution.gif
+Show an unmatched Gherkin step being resolved or generated, then run the scenario. Keep the recording
+tight, use a current Specwright build, and do not show personal paths, account names, or external apps. -->
 
-## Why Specwright?
+## What you can do
 
-- **Run the exact test you mean.** Results return to the right feature, scenario, or Scenario Outline example row instead of getting lost in terminal output.
-- **Debug from the feature file.** Set breakpoints in Gherkin or TypeScript step definitions, then use VS Code's normal Debug action — no Playwright Inspector workflow required.
-- **Keep steps connected.** Autocomplete, hover, go to definition, references, usage counts, diagnostics, and generation all work from your real step definitions.
-- **Use your existing project.** Once playwright-bdd is configured, Specwright discovers features, runs `bddgen`, starts Playwright, and maps the results back for you.
+### Write better feature files
+
+Use built-in Gherkin highlighting, snippets, document outline, tag suggestions, and table formatting. Specwright can identify missing or ambiguous steps, validate Scenario Outline tables, and help create a matching step definition.
+
+### Keep steps connected
+
+Go from a Gherkin step to its TypeScript or JavaScript definition, inspect the matching pattern on hover, find every scenario that uses a definition, and spot unused definitions. Suggestions come from the step definitions in your workspace.
+
+### Run and debug the right scenario
+
+Discover features in the Testing view and run a feature, scenario, Scenario Outline, or individual Examples row. Use CodeLens or the Testing view to target an individual scenario or row; editor and Explorer context menus provide file-level actions. Results map back to the feature file so failures are easier to act on.
+
+Set breakpoints in `.feature` files or step definitions, then use VS Code's normal Debug action. Specwright generates the necessary specs, mirrors supported feature-file breakpoints, and removes the generated breakpoints when the session ends.
+
+![Debug a feature with breakpoints](images/debugging_feature.gif)
+
+![Run one Scenario Outline Examples row](images/running_example.gif)
+
+![Switch between feature, tag, file, scenario-type, and flat test views](images/views.gif)
+
+### Manage a growing step library
+
+The Steps panel groups definitions by keyword, highlights unmatched and unused steps, and provides one-click generation. It can also export shareable Markdown catalogs of steps or scenarios.
+
+![Browse step definitions and their usage in the Steps panel](images/bdd-steps.png)
+
+### Connect scenarios to Xray Cloud
+
+**Experimental.** The Traceability panel maps tagged scenarios to Xray Cloud tests, shows coverage in VS Code, and supports local-run publishing workflows. It can be evaluated with an existing Jira/Xray project, including a trial tenant when the account has the required permissions. No standalone sample project is required.
+
+The Xray guide clearly identifies actions that only change your workspace, actions that read remote data, and actions that can create, update, attach, or publish remote Jira/Xray records.
+
+![Traceability panel showing mapped and untraced scenarios](images/traceability.png)
 
 ## Quick start
 
-1. Open a workspace that has [playwright-bdd configured](docs/runs.md#prerequisites) and at least one `.feature` file.
-2. Open the Testing view (beaker icon). Specwright discovers your scenarios automatically.
-3. Select **Run** or **Debug** on a scenario, outline, or individual Examples row.
+1. Install Specwright from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=upscaled-dev.specwright).
+2. Open a workspace already configured for [`playwright-bdd`](https://vitalets.github.io/playwright-bdd/) with one or more `.feature` files.
+3. Open the **Testing** view. Specwright discovers scenarios automatically.
+4. Choose **Run** or **Debug** for the feature, scenario, outline, or Examples row you need.
 
-Only your playwright-bdd configuration is required. If your project layout differs from the defaults (step paths, package-manager commands, working directory), see [docs/settings.md](docs/settings.md).
+Specwright uses your existing `playwright-bdd` and Playwright configuration. If you use a monorepo, another package manager, or custom step paths, follow the [getting started guide](docs/getting-started.md).
 
-## Features
+## Common tasks
 
-### Run and debug tests
+| If you want to… | Start here |
+| --- | --- |
+| Run, debug, filter, stop, or interpret a test | [Run and debug tests](docs/runs.md) |
+| Fix a missing or ambiguous step | [Author feature files](docs/features.md) |
+| Find, insert, generate, or export steps | [Use the Steps panel](docs/features.md#steps-panel) |
+| Configure a monorepo, package-manager command, or custom output directory | [Settings](docs/settings.md) |
+| Connect tagged scenarios to Xray Cloud | [Xray traceability](docs/traceability.md) |
+| Diagnose discovery, code generation, or result-mapping problems | [Troubleshooting](docs/troubleshooting.md) |
 
-- **Automatic discovery** of every `.feature` file, kept live by a file watcher — create, edit, or delete a feature and the tree updates without a reload.
-- **Three run profiles**: Run, Debug (including breakpoints in `.feature` files and step-definition `.ts` files), and Run in Parallel (prompts once for a worker count, then remembers it).
-- **Five organization strategies**, switchable on the fly: hierarchical by feature, by tag, by file, by scenario type, or flat.
-- **Scenario Outline rows as first-class items** — every `Examples:` row is individually runnable and individually reported.
-- **Exact result mapping** back to the right `.feature` line — including individual outline example rows. Flaky tests that pass on retry show as passed; multi-project runs show the worst outcome.
-- **Per-scenario durations** shown after a run, and a stop button that actually cancels — it kills the Playwright process tree and marks the rest skipped.
+## Highlights
 
-![Switching between tag, file, scenario-type, hierarchical, and flat views](images/views.gif)
+- Run, debug, cancel, and inspect results from the Testing view, CodeLens, file-level editor menus, or the Command Palette.
+- Treat Scenario Outline rows as first-class tests.
+- Navigate between Gherkin steps and real `Given`, `When`, and `Then` definitions.
+- Get autocomplete, hover, references, usage counts, diagnostics, quick fixes, and typed stub generation.
+- Format Gherkin data tables and promote literal values to reusable step parameters.
+- Organize discovered tests by feature, tag, file, scenario type, or as a flat list.
+- Export step and scenario catalogs as Markdown.
+- Use experimental Xray Cloud traceability from within VS Code.
 
-→ [docs/runs.md](docs/runs.md)
+## Compatibility and prerequisites
 
-### Run from the editor, explorer, or Test Explorer
+- VS Code `1.99` or later.
+- A project configured for `playwright-bdd` and Playwright.
+- TypeScript or JavaScript step-definition files.
+- Single-folder, multi-root, and monorepo workspaces are supported when their step paths and working directories are configured correctly.
 
-Wherever you're looking at a scenario, there's a way to run it:
+Specwright can coexist with [Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete). Overlapping authoring features default to an automatic compatibility mode to avoid duplicate suggestions and diagnostics. You can change that behavior in Settings.
 
-- **CodeLens at four levels**: the `Feature:` line (Run Feature File, plus one "Run with @tag" link per tag in the file), each scenario, each scenario outline, and each individual `Examples:` row.
-- **Context menus** in the editor, the editor tab, the file explorer, and the Test Explorer.
-- **Tag filtering** pushed into `bddgen --tags`, so only matching specs are even generated.
-- **Pre-run hook** (`preRunCommand`) that runs before every invocation and aborts the run on failure.
-- **Status bar** showing idle / running / last-run pass-fail counts; click it to open the test output.
-- **Step-level Test Results panel** — each scenario's steps with durations, the failing step's error and clickable stack trace, surfaced missing-step suggestions, and a hint when a targeted feature is outside playwright-bdd's `features` glob.
-- **`bddgen` errors as diagnostics** — codegen failures become red squiggles on the offending `.feature` line.
+## Documentation
 
-![Running a single Scenario Outline example row](images/running_example.gif)
+- [Getting started](docs/getting-started.md)
+- [Run and debug tests](docs/runs.md)
+- [Author feature files and manage steps](docs/features.md)
+- [Xray traceability](docs/traceability.md)
+- [Settings and workspace configuration](docs/settings.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Development](docs/development.md)
+- [Release notes](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
 
-→ [docs/runs.md](docs/runs.md)
-
-### Debugging with breakpoints
-
-Set breakpoints directly in the `.feature` file — the breakpoint gutter is enabled for Gherkin — or in your step-definition `.ts` files, then start any Debug action. The extension runs `bddgen` first, mirrors your feature-file breakpoints onto the matching lines of the generated spec (steps, `Scenario:` lines, and `Examples:` rows), launches VS Code's JS debugger, and removes the mirrored breakpoints when the session ends. While paused, the editor shows the generated spec (or your step definition once you step in), not the `.feature` file. If you customized playwright-bdd's `outputDir`, point `playwrightBddRunner.featuresGenDir` at it.
-
-→ [docs/runs.md](docs/runs.md#debugging-with-breakpoints)
-
-<!-- Media placeholder: add images/debug-feature-breakpoint.gif here if the hero placement above is removed.
-Show: set a breakpoint in a Gherkin step → Debug Scenario → pause in the generated test or TypeScript step definition. -->
-
-### Step intelligence
-
-`.feature` files and step definitions are linked in both directions:
-
-- **Go to Definition** from a Gherkin step to its `Given/When/Then` — plain strings, template literals, regex (with flags), and Cucumber Expression placeholders (`{string}`, `{int}`, `{word}`, custom types) all resolve.
-- **Hover** shows the matching definition's pattern with a clickable source link; ambiguous steps list every match.
-- **Step autocomplete** sourced from your real step definitions, inserted as snippets with a tab stop per parameter; regex patterns are humanized (`(\d+)` → `{int}`) where possible.
-- **Find All References** on a step definition lists every matching Gherkin step across the workspace.
-- **"Used N times" CodeLens** above each step definition — unused steps stand out at a glance.
-- **Edit-time diagnostics**: unmatched step (with a *Create step definition* quick fix), ambiguous step (would throw at runtime — flagged at edit time, with a go-to quick fix per conflict), unused step definition, and Scenario Outline validation (undeclared `<placeholder>`, unused `Examples:` column).
-
-→ [docs/features.md](docs/features.md)
-
-### Steps panel
-
-A **Specwright** container in the Activity Bar hosts a **Steps** view:
-
-- **Step definitions** grouped by `Given`/`When`/`Then`, each with a usage count and an unused marker; click one to open its definition.
-- **Unmatched steps** grouped by feature file, with one-click scaffolding for a single step or a whole file.
-- **Insert Step…** picks a known step pattern and inserts it into the active `.feature` file as a snippet, with a tab stop per parameter.
-- **Export Steps** and **Export All Scenarios** write shareable Markdown catalogs — a branded masthead with headline counts, a summary, a linked table of contents, and collapsible sections. Scenario catalogs add a "Browse by tag" index; step catalogs surface an "Unused" callout. The scenario export can be scoped to all features, a tag, or a hand-picked set, and `collapseMarkdownExportSections` starts the sections collapsed for large catalogs.
-
-Toggle the panel with `playwrightBddRunner.enableStepsPanel`.
-
-→ [docs/features.md#steps-panel](docs/features.md#steps-panel)
-
-<!-- Media placeholder: add images/steps-panel-and-generation.gif here.
-Show: find an unmatched step in the Steps panel → create its definition → return to the feature with the diagnostic cleared. -->
-
-### Authoring `.feature` files
-
-- **Syntax highlighting** built in — no second extension required.
-- **Tag autocompletion** — type `@` and get every tag already in use across the workspace.
-- **Snippets**: `feat`, `scen`, `bg`, `outline`, `ex`, `rule`.
-- **Document outline & breadcrumbs** for `Feature`, `Rule`, `Background`, `Scenario`, `Scenario Outline`, and `Example`.
-- **Data-table formatting** — Format Document aligns every pipe table, right-aligning numeric columns.
-- **Literal-to-parameter refactor** — promote a hard-coded `"value"`, `42`, or `3.14` into `{string}`/`{int}`/`{float}`, atomically updating both the `.feature` file and the step definition.
-
-→ [docs/features.md](docs/features.md)
-
-### Step generation
-
-Write the scenario first, then generate the code to match:
-
-- **Generate Missing Step Definitions** scaffolds typed stubs for every unmatched step in a feature, with parameter inference (`"…"` → `{string}`, `5` → `{int}`, `3.14` → `{float}`), into an existing step file or a new one. Re-running appends only newly unmatched steps.
-- **Per-step quick fix** on any unmatched-step squiggle creates a stub for just that step.
-
-→ [docs/features.md](docs/features.md#step-definition-generation)
-
-<!-- Media placeholder: add images/markdown-catalog-export.png here.
-Show the rendered output of Export Steps or Export All Scenarios, including the summary and linked contents. -->
-
-## Compatibility
-
-Works alongside [Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete). Every overlapping provider (autocomplete, hover, references, CodeLens, unused-step, literal promotion, table formatting) has an `auto`/`on`/`off` setting that defaults to `auto` and steps aside when cucumberautocomplete is installed — so your IntelliSense list, Problems panel, and References panel never show duplicates. See [docs/settings.md#cucumberautocomplete-coexistence](docs/settings.md#cucumberautocomplete-coexistence).
-
-## Install
-
-[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=upscaled-dev.specwright) or:
+## Install from the command line
 
 ```bash
 code --install-extension upscaled-dev.specwright
 ```
-
-## Documentation
-
-- [docs/runs.md](docs/runs.md) — running tests, cancellation, status bar, CodeLens, parallel, pre-run hook
-- [docs/features.md](docs/features.md) — language features, step generation, the Steps panel, and Markdown exports
-- [docs/settings.md](docs/settings.md) — full settings reference + compatibility behavior
-- [docs/development.md](docs/development.md) — building, testing, releasing, project layout
-- [CHANGELOG.md](CHANGELOG.md) — release notes
-- [CONTRIBUTING.md](CONTRIBUTING.md) — contribution guidelines
 
 ## Support
 
@@ -145,11 +115,22 @@ If Specwright saves you time, consider buying me a coffee.
 
 ## Acknowledgments
 
-- [playwright-bdd](https://vitalets.github.io/playwright-bdd/) — the Gherkin runner on top of Playwright that this extension targets.
-- [Behave Test Runner](https://github.com/upscaled-dev/behave-vsc-extension) — the upstream VS Code extension this project was forked from; Test Explorer wiring, organization strategies, and CodeLens scaffolding originated there.
-- [Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete) — independent VS Code extension for Gherkin authoring. This extension is designed to coexist with it (see [docs/settings.md](docs/settings.md#cucumberautocomplete-coexistence)).
-- [Gherkin](https://cucumber.io/docs/gherkin/) and the [VS Code Extension API](https://code.visualstudio.com/api) — the BDD syntax and the platform this extension is built on.
+Specwright stands on the work of projects and communities that make BDD development in VS Code possible.
+
+### Test runner
+
+[playwright-bdd](https://vitalets.github.io/playwright-bdd/) provides the Gherkin runner on top of Playwright that Specwright targets.
+
+### Original extension foundation
+
+[Behave Test Runner](https://github.com/upscaled-dev/behave-vsc-extension) is the upstream VS Code extension that Specwright was forked from. Its Test Explorer wiring, organization strategies, and CodeLens scaffolding provided the starting point.
+
+### Gherkin ecosystem
+
+[Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete) is an independent VS Code extension for Gherkin authoring. Specwright is designed to coexist with it; see the [compatibility settings](docs/settings.md#compatibility-mode-settings).
+
+[Gherkin](https://cucumber.io/docs/gherkin/) and the [VS Code Extension API](https://code.visualstudio.com/api) provide the language and platform that make the extension possible.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)
