@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.36] - 2026-07-29
 ### Fixed
 
 - **The Test Explorer stop button now cancels a debug run.** Stop did nothing while a scenario was being debugged: the run kept spinning until the debug session was ended from the debug toolbar, and every later run was refused with "A test run is already in progress". Stop now ends the debug session, marks the tests that did not run as skipped, and closes the run, so the next run starts normally.
