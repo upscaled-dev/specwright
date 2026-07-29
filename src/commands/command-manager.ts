@@ -1205,7 +1205,7 @@ export class CommandManager {
   }
 
   // The server's own error text is the diagnostic that makes a 400 legible, so it rides both the
-  // toast (verbatim) and the log. The request body, headers, and token never do.
+  // toast (scrubbed and clipped upstream) and the log. The request body, headers, and token never do.
   private reportPublishFailure(error: unknown): void {
     if (error instanceof XrayImportError) {
       this.logger.error("Publish failed", { status: error.status, message: error.serverMessage ?? error.message });

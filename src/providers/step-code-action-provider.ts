@@ -5,6 +5,7 @@ import {
   UnmatchedStepInfo,
 } from "./step-diagnostics-provider";
 import { toWorkspaceRelative } from "../utils/workspace-path";
+import { truncate } from "../utils/text";
 
 const MAX_TITLE_LEN = 60;
 const GENERATE_COMMAND = "playwrightBddRunner.generateStepDefinitionForStep";
@@ -106,10 +107,5 @@ function buildAmbiguousActions(
     actions.push(action);
   }
   return actions;
-}
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) {return text;}
-  return `${text.slice(0, max - 1)}…`;
 }
 

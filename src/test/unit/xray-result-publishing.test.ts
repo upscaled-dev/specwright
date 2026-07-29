@@ -96,6 +96,8 @@ describe("createXrayResultPublishing: publish routing (pin: create vs append map
     const body = t.postJson.mock.calls[0]![1] as { testExecutionKey: string; tests: unknown[] };
     expect(body.testExecutionKey).toBe("XNP-77");
     expect(body.tests).toHaveLength(1);
+    // An info block would make Xray write the execution issue's date fields, which fails screen validation.
+    expect(body).not.toHaveProperty("info");
     expect(outcome.ref.key).toBe("XNP-100");
   });
 

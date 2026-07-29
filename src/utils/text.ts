@@ -31,3 +31,9 @@ function isJwtLike(run: string): boolean {
 export function scrubJwtLike(text: string): string {
   return text.replace(TOKEN_RUN, (run) => (isJwtLike(run) ? "[jwt-like-token]" : run));
 }
+
+// `max` bounds the returned string, ellipsis included, so a caller sizing a menu title or a toast
+// gets the width it asked for.
+export function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}

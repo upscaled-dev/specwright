@@ -274,7 +274,7 @@ async function publishAppend(
   jiraAvailable: boolean
 ): Promise<PublishOutcome> {
   const plan = planEvidence(artifact, results, deps, jiraAvailable);
-  const payload = xrayJsonImporter.buildPayload({ artifact, results, request, evidenceFor: plan.evidenceFor });
+  const payload = xrayJsonImporter.buildPayload({ results, request, evidenceFor: plan.evidenceFor });
   const response = await xrayJsonImporter.import(deps.transport, payload, signal);
   return {
     ref: { kind: "execution", key: executionKeyOf(response, request) },

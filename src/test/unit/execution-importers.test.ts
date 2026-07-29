@@ -64,10 +64,10 @@ describe("buildXrayJsonPayload", () => {
         ],
       }),
     ];
-    const payload = buildXrayJsonPayload({ artifact: refArtifact(), results, request: { mode: "append", executionKey: "XNP-100" } });
+    const payload = buildXrayJsonPayload({ results, request: { mode: "append", executionKey: "XNP-100" } });
 
     expect(JSON.stringify(payload)).toBe(
-      '{"testExecutionKey":"XNP-100","info":{"startDate":"2026-07-22T12:00:00.000Z","finishDate":"2026-07-22T12:00:10.000Z"},' +
+      '{"testExecutionKey":"XNP-100",' +
         '"tests":[{"testKey":"CALC-1","status":"PASSED"},' +
         '{"testKey":"CALC-2","status":"PASSED","comment":"passed on retry (3 attempts)"},' +
         '{"testKey":"CALC-3","status":"FAILED"},' +
@@ -86,7 +86,6 @@ describe("buildXrayJsonPayload", () => {
   ];
   it.each(STATUS_CASES)("maps run outcome %s to Xray status %s", (outcome, status) => {
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [pub(ref("f", 1, "a"), "C-1", { outcome })],
       request: { mode: "append", executionKey: "X-1" },
     });
@@ -95,7 +94,6 @@ describe("buildXrayJsonPayload", () => {
 
   it("adds the flaky retry comment only for flaky results", () => {
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [pub(ref("f", 1, "a"), "C-1", { flaky: true, attempts: 3 }), pub(ref("f", 2, "b"), "C-2")],
       request: { mode: "append", executionKey: "X-1" },
     });
@@ -105,7 +103,6 @@ describe("buildXrayJsonPayload", () => {
 
   it("emits iterations only for outline results and a plain status otherwise (mutually exclusive)", () => {
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [
         pub(ref("f", 1, "plain"), "C-1"),
         pub(ref("f", 2, "outline", "outline"), "C-2", {
@@ -124,25 +121,24 @@ describe("buildXrayJsonPayload", () => {
     ]);
   });
 
-  it("places testExecutionKey at the top level (not inside info or tests)", () => {
+  it("places testExecutionKey at the top level (not inside tests)", () => {
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [pub(ref("f", 1, "a"), "C-1")],
       request: { mode: "append", executionKey: "XNP-1" },
     });
-    expect(Object.keys(payload)).toEqual(["testExecutionKey", "info", "tests"]);
+    expect(Object.keys(payload)).toEqual(["testExecutionKey", "tests"]);
     expect(payload.testExecutionKey).toBe("XNP-1");
-    expect(JSON.stringify(payload.info)).not.toContain("XNP-1");
+    expect(JSON.stringify(payload.tests)).not.toContain("XNP-1");
   });
 
-  it("derives finishDate as startDate plus the summed publishable durations", () => {
+  // An `info` block makes Xray update the execution issue's date custom fields, which screen validation
+  // rejects for issue types that do not carry them.
+  it("sends no info block", () => {
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [pub(ref("f", 1, "a"), "C-1", { durationMs: 2500 }), pub(ref("f", 2, "b"), "C-2", { durationMs: 500 })],
       request: { mode: "append", executionKey: "X-1" },
     });
-    expect(payload.info.startDate).toBe("2026-07-22T12:00:00.000Z");
-    expect(payload.info.finishDate).toBe("2026-07-22T12:00:03.000Z");
+    expect(payload).not.toHaveProperty("info");
   });
 });
 
@@ -408,7 +404,6 @@ describe("evidence embedding", () => {
     const withEvidence = pub(ref("f", 1, "a"), "C-1");
     const bare = pub(ref("f", 2, "b"), "C-2");
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [withEvidence, bare],
       request: { mode: "append", executionKey: "X-1" },
       evidenceFor: (result) => (result === withEvidence ? [SHOT] : []),
@@ -509,7 +504,6 @@ describe("XrayJsonImporter.import", () => {
   it("posts the payload as JSON to /import/execution and returns id/key/self", async () => {
     const rec = recordingTransport();
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [pub(ref("f", 1, "a"), "C-1")],
       request: { mode: "append", executionKey: "XNP-24" },
     });
@@ -558,7 +552,7 @@ describe("reconcile → importer wiring", () => {
     expect(cucumberTags).toContain("@TEST_CALC-1");
     expect(cucumberTags).not.toContain("@TEST_CALC-2");
 
-    const xray = buildXrayJsonPayload({ artifact, results: reconciled.publishable, request: { mode: "append", executionKey: "X-1" } });
+    const xray = buildXrayJsonPayload({ results: reconciled.publishable, request: { mode: "append", executionKey: "X-1" } });
     expect(xray.tests.map((t) => t.testKey)).toEqual(["CALC-1"]);
   });
 });
@@ -569,7 +563,6 @@ describe("import() error seam", () => {
   it("throws XrayImportError with status + server message on a non-2xx JSON body (Xray JSON)", async () => {
     const rec = recordingTransport({ status: 400, ok: false, body: { error: "No execution results were provided." } });
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [pub(ref("f", 1, "a"), "C-1")],
       request: { mode: "append", executionKey: "X-1" },
     });
@@ -596,24 +589,72 @@ describe("import() error seam", () => {
     expect((error as XrayImportError).serverMessage).toBe("No execution results were provided.");
   });
 
-  it("throws XrayImportError with status and no server message when the error body is not JSON", async () => {
-    const rec = recordingTransport({ status: 500, ok: false, body: "Internal Server Error" });
+  async function failedImport(body: unknown, status = 400): Promise<XrayImportError> {
+    const rec = recordingTransport({ status, ok: false, body });
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [pub(ref("f", 1, "a"), "C-1")],
       request: { mode: "append", executionKey: "X-1" },
     });
+    return (await new XrayJsonImporter().import(rec.transport, payload).catch((e: unknown) => e)) as XrayImportError;
+  }
 
-    const error = await new XrayJsonImporter().import(rec.transport, payload).catch((e: unknown) => e);
+  const MESSAGE_CASES: ReadonlyArray<readonly [string, unknown, string | undefined]> = [
+    ["an Xray error string", { error: "No execution results were provided." }, "No execution results were provided."],
+    [
+      "a Jira errorMessages array",
+      { errorMessages: ["Issue does not exist.", "You do not have permission."], errors: {} },
+      "Issue does not exist.; You do not have permission.",
+    ],
+    [
+      "a Jira per-field errors object",
+      { errorMessages: [], errors: { customfield_10032: "cannot be set", summary: "is required" } },
+      "customfield_10032: cannot be set; summary: is required",
+    ],
+    ["a plain text body", "  Internal Server Error  ", "Internal Server Error"],
+    ["an empty error string, falling through", { error: "", errorMessages: ["Import rejected."] }, "Import rejected."],
+    ["an all-empty errorMessages array, falling through", { errorMessages: [""], errors: { summary: "is required" } }, "summary: is required"],
+    ["an errorMessages array with an empty entry", { errorMessages: ["", "Real message"] }, "Real message"],
+    ["an errorMessages array with a non-string entry", { errorMessages: [null, "x"] }, "x"],
+    ["an errors object with a non-string value", { errors: { a: 42 } }, undefined],
+    ["an errors object with an empty value", { errors: { summary: "" } }, undefined],
+    ["an errors array (indexes are not field names)", { errors: ["a", "b"] }, undefined],
+    ["an unrecognized object", { unexpected: 42 }, undefined],
+    ["a null body", null, undefined],
+    ["an array body", ["a", "b"], undefined],
+    ["a numeric body", 42, undefined],
+    ["an empty text body", "   ", undefined],
+  ];
+  it.each(MESSAGE_CASES)("reads the server message from %s", async (_label, body, expected) => {
+    const error = await failedImport(body);
     expect(error).toBeInstanceOf(XrayImportError);
-    expect((error as XrayImportError).status).toBe(500);
-    expect((error as XrayImportError).serverMessage).toBeUndefined();
+    expect(error.status).toBe(400);
+    expect(error.serverMessage).toBe(expected);
+  });
+
+  it("carries the server message of a 5xx too", async () => {
+    const error = await failedImport({ error: "Internal Server Error" }, 500);
+    expect(error.status).toBe(500);
+    expect(error.serverMessage).toBe("Internal Server Error");
+  });
+
+  it("leaves a message at the length cap alone and clips one past it", async () => {
+    const atCap = await failedImport({ error: "x".repeat(300) });
+    expect(atCap.serverMessage).toBe("x".repeat(300));
+
+    const overCap = await failedImport({ error: "x".repeat(301) });
+    expect(overCap.serverMessage).toBe(`${"x".repeat(299)}…`);
+    expect(overCap.serverMessage).toHaveLength(300);
+  });
+
+  it("scrubs a JWT-like token out of the server message before it reaches the toast", async () => {
+    const token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r0wW1gFWFOEjXk";
+    const error = await failedImport({ error: `Unauthorized for token ${token}` });
+    expect(error.serverMessage).toBe("Unauthorized for token [jwt-like-token]");
   });
 
   it("coerces a numeric import-response id to a string", async () => {
     const rec = recordingTransport({ status: 200, ok: true, body: { id: 10200, key: "XNP-24" } });
     const payload = buildXrayJsonPayload({
-      artifact: refArtifact(),
       results: [pub(ref("f", 1, "a"), "C-1")],
       request: { mode: "append", executionKey: "X-1" },
     });
@@ -646,7 +687,7 @@ describe("empty-payload guard", () => {
 
   it("throws EmptyImportError and posts nothing when the append payload has no tests", async () => {
     const rec = recordingTransport();
-    const payload = buildXrayJsonPayload({ artifact: refArtifact(), results: [], request: { mode: "append", executionKey: "X-1" } });
+    const payload = buildXrayJsonPayload({ results: [], request: { mode: "append", executionKey: "X-1" } });
     expect(payload.tests).toHaveLength(0);
 
     const error = await new XrayJsonImporter().import(rec.transport, payload).catch((e: unknown) => e);
