@@ -15,7 +15,7 @@ Unit tests use [Vitest](https://vitest.dev/) with a minimal stub of the `vscode`
 
 ## Releasing
 
-Use the release script: it bumps the version in `package.json` and `package-lock.json` in lockstep (so the lockfile can't drift and dirty the next `npm ci`/install), updates `CHANGELOG.md`, runs the full pipeline, packages the `.vsix`, and creates a git commit + tag. It stops before pushing so you can review.
+Use the release script: it bumps the version in `package.json` and `package-lock.json` in lockstep (so the lockfile can't drift and dirty the next `npm ci`/install), updates `CHANGELOG.md`, runs typecheck, lint, and the unit tests, packages the `.vsix`, and creates a git commit + tag. It stops before pushing so you can review. The integration suite and packaging checks are not part of the release gate yet, so run `npm run test:integration` yourself before cutting a release.
 
 ```bash
 npm run release            # default: patch bump
