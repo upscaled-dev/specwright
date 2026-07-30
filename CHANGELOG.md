@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.42] - 2026-07-30
 ### Added
 
 - **The Coverage Board's Mapping tab filters and pages each list on its own.** Untraced scenarios, available tests, and mapped tests each get a filter box and a paginator, so a workspace with hundreds of cards no longer paints all of them into one long scroll. A column filter narrows only its own list and combines with the board's header search: the scenario list matches on scenario name, both test lists match on key or summary. A **Rows** dropdown above the columns sets how many cards every list shows (25, 50, or 100, starting at 50) and is remembered per workspace. Each section header counts what it holds, its paginator reads "1-50 of 130" over what the filter left, and a list emptied by a query says "No matches." instead of its nothing-to-map line. The three sections are built from one layout, so headers, buttons, filter boxes, and paginators line up across both columns.
