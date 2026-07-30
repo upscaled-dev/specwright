@@ -25,13 +25,23 @@ const BOARD_CSS = `
   .board-pane .verb { padding: 0.25rem 0.7rem; font-family: inherit; font-size: 0.78rem; border: none; border-radius: 3px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; }
   .board-pane .verb:hover:enabled { background: var(--vscode-button-hoverBackground); }
   .board-pane .verb:disabled { opacity: 0.55; cursor: default; }
-  .board-pane .verbs { flex: none; display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.6rem; }
+  .board-pane .verbs { flex: none; display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.6rem; min-height: 1.5rem; }
   .board-pane .card .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
   .board-pane .card .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 0.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .board-pane .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
   .board-pane .pill { font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
-  .board-pane .group + .group { margin-top: 0.9rem; }
   .board-pane .empty { color: var(--vscode-descriptionForeground); font-style: italic; padding: 0.4rem 0; }
+  .board-pane .mapping-top { flex: none; display: flex; align-items: flex-start; gap: 0.75rem; margin: 0 0 0.6rem; }
+  .board-pane .mapping-top .mapping-hint { flex: 1; margin: 0; }
+  .board-pane .page-size { flex: none; display: flex; align-items: center; gap: 0.35rem; color: var(--vscode-descriptionForeground); font-size: 0.82em; }
+  .board-pane .page-size select { padding: 0.3rem 0.4rem; color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); background: var(--vscode-dropdown-background, var(--vscode-input-background)); border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, transparent)); border-radius: 3px; font-family: inherit; font-size: inherit; }
+  .board-pane .page-size select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .board-pane .section + .section { margin-top: 0.9rem; }
+  .board-pane .section-search { flex: none; margin: 0 0 0.6rem; }
+  .board-pane .section-search input { width: 100%; box-sizing: border-box; padding: 0.35rem 0.5rem; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); border-radius: 3px; font-family: inherit; font-size: inherit; }
+  .board-pane .section-search input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .board-pane .paginator { flex: none; display: flex; align-items: center; gap: 0.5rem; min-height: 1.6rem; margin-top: 0.5rem; color: var(--vscode-descriptionForeground); font-size: 0.82em; }
+  .board-pane .paginator .range { flex: 1; text-align: center; }
   .board-pane .pill-button { font-family: inherit; font-size: 0.72rem; padding: 0.05rem 0.45rem; border: none; border-radius: 999px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
   .board-pane .pill-button:hover:enabled { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
   .board-pane .pill-button:disabled { cursor: default; }
@@ -64,33 +74,71 @@ const BOARD_CSS = `
     .board-pane .column { overflow: visible; }
   }`;
 
+// One card-list section's fixed skeleton, top to bottom: header, verbs row, search row, cards region,
+// paginator. Every mapping section is emitted through this, so the first section of each column shares row
+// heights by construction and the columns line up. `verbs` is trusted button markup, empty for the mapped
+// section, which keeps its verbs row for that same alignment; every other field is a label, so it escapes.
+interface MappingSectionSpec {
+  readonly id: string;
+  readonly title: string;
+  readonly verbs: string;
+  readonly placeholder: string;
+  readonly searchLabel: string;
+}
+
+function mappingSection(spec: MappingSectionSpec): string {
+  return `          <section class="section">
+            <div class="section-head"><h2>${escapeHtml(spec.title)} <span id="${spec.id}-count" class="count"></span></h2></div>
+            <div class="verbs">${spec.verbs}</div>
+            <div class="section-search"><input id="${spec.id}-search" type="text" spellcheck="false" autocomplete="off" placeholder="${escapeHtml(spec.placeholder)}" aria-label="${escapeHtml(spec.searchLabel)}"></div>
+            <div id="${spec.id}-cards" class="cards"></div>
+            <div id="${spec.id}-paginator" class="paginator"></div>
+          </section>`;
+}
+
 function boardPanesHtml(providerLabel: string): string {
-  const availableHeading = escapeHtml(`Available ${providerLabel} tests`);
-  const mappedHeading = escapeHtml(`Mapped ${providerLabel} tests`);
   const testColumn = escapeHtml(`${providerLabel} test`);
+  const untraced = mappingSection({
+    id: "scenario",
+    title: "Untraced scenarios",
+    verbs: `<button id="create-tests" class="verb" type="button" disabled>Create tests</button>`,
+    placeholder: "Filter scenarios",
+    searchLabel: "Filter untraced scenarios",
+  });
+  const available = mappingSection({
+    id: "available",
+    title: `Available ${providerLabel} tests`,
+    verbs: `<button id="create-test-set" class="verb" type="button" disabled>Create Test Set</button>
+            <button id="create-test-plan" class="verb" type="button" disabled>Create Test Plan</button>`,
+    placeholder: "Filter by key or summary",
+    searchLabel: `Filter available ${providerLabel} tests`,
+  });
+  const mapped = mappingSection({
+    id: "mapped",
+    title: `Mapped ${providerLabel} tests`,
+    verbs: "",
+    placeholder: "Filter by key or summary",
+    searchLabel: `Filter mapped ${providerLabel} tests`,
+  });
   return `    <section id="pane-mapping" class="pane board-pane" data-tab="mapping" hidden>
-      <p class="mapping-hint">Drag a scenario from the left onto a test on the right to link them. An available test can also be dragged onto a scenario.</p>
+      <div class="mapping-top">
+        <p class="mapping-hint">Drag a scenario from the left onto a test on the right to link them. An available test can also be dragged onto a scenario.</p>
+        <div class="page-size">
+          <label for="page-size-select">Rows</label>
+          <select id="page-size-select" title="How many cards each list shows">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+        </div>
+      </div>
       <div class="columns">
         <div class="column">
-          <h2>Untraced scenarios <span id="scenario-count" class="count"></span></h2>
-          <div class="verbs">
-            <button id="create-tests" class="verb" type="button" disabled>Create tests</button>
-          </div>
-          <div id="scenario-cards" class="cards"></div>
+${untraced}
         </div>
         <div class="column">
-          <div class="verbs">
-            <button id="create-test-set" class="verb" type="button" disabled>Create Test Set</button>
-            <button id="create-test-plan" class="verb" type="button" disabled>Create Test Plan</button>
-          </div>
-          <div class="group">
-            <h2>${availableHeading} <span id="available-count" class="count"></span></h2>
-            <div id="available-cards" class="cards"></div>
-          </div>
-          <div class="group">
-            <h2>${mappedHeading} <span id="mapped-count" class="count"></span></h2>
-            <div id="mapped-cards" class="cards"></div>
-          </div>
+${available}
+${mapped}
         </div>
       </div>
     </section>
@@ -133,6 +181,13 @@ const BOARD_SCRIPT = `
   const scenarioCount = document.getElementById('scenario-count');
   const availableCount = document.getElementById('available-count');
   const mappedCount = document.getElementById('mapped-count');
+  const scenarioSearch = document.getElementById('scenario-search');
+  const availableSearch = document.getElementById('available-search');
+  const mappedSearch = document.getElementById('mapped-search');
+  const scenarioPaginator = document.getElementById('scenario-paginator');
+  const availablePaginator = document.getElementById('available-paginator');
+  const mappedPaginator = document.getElementById('mapped-paginator');
+  const pageSizeSelect = document.getElementById('page-size-select');
   const matrixRows = document.getElementById('matrix-rows');
   const executionsRows = document.getElementById('executions-rows');
   const executionsEmpty = document.getElementById('executions-empty');
@@ -241,12 +296,13 @@ const BOARD_SCRIPT = `
     scopeSelect.value = project;
   }
 
-  // A column or group's empty line. Under a query the group is empty because of the filter, not because
-  // there is nothing there, so say that instead of its own empty text.
-  function emptyEl(text) {
+  // A section's empty line. The host passes whether that section is being filtered (its own column search
+  // or the header one), so a section emptied by a query says that instead of its nothing-to-map text. The
+  // flag is host-supplied per section and never read off the input boxes, which would race the render.
+  function emptyEl(text, isFiltering) {
     const el = document.createElement('div');
     el.className = 'empty';
-    el.textContent = filtering ? 'No matches.' : text;
+    el.textContent = isFiltering ? 'No matches.' : text;
     return el;
   }
 
@@ -271,13 +327,7 @@ const BOARD_SCRIPT = `
     return check;
   }
 
-  function renderScenarios(cards) {
-    scenarioCards.textContent = '';
-    scenarioCount.textContent = '(' + cards.length + ')';
-    if (cards.length === 0) {
-      scenarioCards.appendChild(emptyEl('No untraced scenarios.'));
-      return;
-    }
+  function paintScenarioCards(container, cards) {
     for (const card of cards) {
       const el = document.createElement('div');
       el.className = 'card';
@@ -292,7 +342,7 @@ const BOARD_SCRIPT = `
       el.appendChild(metaEl(card.location));
       if (card.pills.length > 0) { el.appendChild(pillsEl(card.pills)); }
       wireCardDrag(el, 'scenario', card.dropId, true);
-      scenarioCards.appendChild(el);
+      container.appendChild(el);
     }
   }
 
@@ -347,15 +397,9 @@ const BOARD_SCRIPT = `
     return btn;
   }
 
-  // One group of the right column. Only the available group's cards drag onto a scenario; every card,
-  // available or mapped, still accepts a dropped scenario, since a test can carry several.
-  function renderTestGroup(container, count, cards, draggable, empty) {
-    container.textContent = '';
-    count.textContent = '(' + cards.length + ')';
-    if (cards.length === 0) {
-      container.appendChild(empty);
-      return;
-    }
+  // A right-column test card. Only the available group's cards drag onto a scenario; every card, available
+  // or mapped, still accepts a dropped scenario, since a test can carry several.
+  function paintTestCards(container, cards, draggable) {
     for (const card of cards) {
       const el = document.createElement('div');
       el.className = 'card';
@@ -375,11 +419,64 @@ const BOARD_SCRIPT = `
     }
   }
 
-  function renderTests(available, mapped, availableEmptyText, offerSync) {
-    const availableEmpty = emptyEl(availableEmptyText);
-    if (offerSync && !filtering) { availableEmpty.appendChild(syncButton()); }
-    renderTestGroup(availableCards, availableCount, available, true, availableEmpty);
-    renderTestGroup(mappedCards, mappedCount, mapped, false, emptyEl('No mapped tests yet.'));
+  // A section's paginator: a prev/next pair the host clamps (so a button only disables at its end) and a
+  // "12-24 of 130" range over the filtered set. An empty section carries no range, so the row never reads
+  // a window over nothing; the empty state under it says why.
+  function pageButton(label, section, step, disabled) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'pill-button';
+    btn.textContent = label;
+    btn.disabled = disabled;
+    btn.addEventListener('click', function () {
+      window.__spec.post('board', { type: 'page', section: section, step: step });
+    });
+    return btn;
+  }
+
+  function renderPaginator(container, section, meta) {
+    container.textContent = '';
+    if (meta.filtered === 0) { return; }
+    const first = meta.page * meta.pageSize + 1;
+    const last = Math.min(first + meta.pageSize - 1, meta.filtered);
+    const range = document.createElement('span');
+    range.className = 'range';
+    range.textContent = first + '-' + last + ' of ' + meta.filtered;
+    container.appendChild(pageButton('Prev', section, 'prev', meta.page <= 0));
+    container.appendChild(range);
+    container.appendChild(pageButton('Next', section, 'next', meta.page >= meta.pageCount - 1));
+  }
+
+  // One card-list section's shared chrome: its header count from the honest total, its search box echoed
+  // only when it is not focused so a repaint never jumps a mid-type cursor, its empty state read from the
+  // host's per-section filtering flag, and its paginator. The cards are the caller's to paint, since a
+  // scenario card and a test card share only this frame.
+  function paintSection(section, cards, meta, empty, paintCards) {
+    section.count.textContent = '(' + meta.total + ')';
+    if (document.activeElement !== section.search) { section.search.value = meta.query; }
+    section.cards.textContent = '';
+    if (meta.filtered === 0) {
+      section.cards.appendChild(empty);
+    } else {
+      paintCards(section.cards, cards);
+    }
+    renderPaginator(section.paginator, section.name, meta);
+  }
+
+  const mapping = {
+    untraced: { name: 'untraced', count: scenarioCount, cards: scenarioCards, search: scenarioSearch, paginator: scenarioPaginator },
+    available: { name: 'available', count: availableCount, cards: availableCards, search: availableSearch, paginator: availablePaginator },
+    mapped: { name: 'mapped', count: mappedCount, cards: mappedCards, search: mappedSearch, paginator: mappedPaginator },
+  };
+
+  function renderMapping(msg) {
+    const sections = msg.sections;
+    paintSection(mapping.untraced, msg.scenarios || [], sections.untraced, emptyEl('No untraced scenarios.', sections.untraced.filtering), paintScenarioCards);
+    const availableEmpty = emptyEl(msg.availableEmptyText || '', sections.available.filtering);
+    if (msg.offerSync === true && !sections.available.filtering) { availableEmpty.appendChild(syncButton()); }
+    paintSection(mapping.available, msg.available || [], sections.available, availableEmpty, function (container, cards) { paintTestCards(container, cards, true); });
+    paintSection(mapping.mapped, msg.mapped || [], sections.mapped, emptyEl('No mapped tests yet.', sections.mapped.filtering), function (container, cards) { paintTestCards(container, cards, false); });
+    pageSizeSelect.value = String(msg.pageSize);
   }
 
   // Cells are nowrap by default so keys, dates and counts stay on one line; only the prose columns ask
@@ -640,6 +737,10 @@ const BOARD_SCRIPT = `
 
   search.addEventListener('input', function () { window.__spec.post('board', { type: 'search', value: search.value }); });
   scopeSelect.addEventListener('change', function () { window.__spec.post('board', { type: 'scope', project: scopeSelect.value }); });
+  scenarioSearch.addEventListener('input', function () { window.__spec.post('board', { type: 'columnSearch', section: 'untraced', value: scenarioSearch.value }); });
+  availableSearch.addEventListener('input', function () { window.__spec.post('board', { type: 'columnSearch', section: 'available', value: availableSearch.value }); });
+  mappedSearch.addEventListener('input', function () { window.__spec.post('board', { type: 'columnSearch', section: 'mapped', value: mappedSearch.value }); });
+  pageSizeSelect.addEventListener('change', function () { window.__spec.post('board', { type: 'pageSize', size: Number(pageSizeSelect.value) }); });
   createTests.addEventListener('click', function () { window.__spec.post('board', { type: 'bulkCreate' }); });
   createTestSet.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestSet' }); });
   createTestPlan.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestPlan' }); });
@@ -653,8 +754,7 @@ const BOARD_SCRIPT = `
       renderVerb(createTestSet, msg.testSetVerb || {}, 'Create Test Set');
       renderVerb(createTestPlan, msg.testPlanVerb || {}, 'Create Test Plan');
       renderVerb(createExecution, msg.executionVerb || {}, 'Create Execution');
-      renderScenarios(msg.scenarios || []);
-      renderTests(msg.available || [], msg.mapped || [], msg.availableEmptyText || '', msg.offerSync === true);
+      renderMapping(msg);
       renderMatrix(msg.matrix || []);
       renderExecutions(msg.executions || []);
       renderSyncProgress('');

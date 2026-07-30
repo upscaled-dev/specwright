@@ -715,10 +715,10 @@ export interface BoardPageMeta {
 }
 
 // What a rendered section carries. `total` is the section's count after the header search but before its
-// column search, the only count the caller knows, so the caller stamps it: the section's header count and
-// its "no matches" versus "nothing to map" empty state read from `total`, while the paginator's range
-// label reads from `filtered`. `filtering` and `query` are the two things the webview must not work out
-// for itself (see `sectionFiltering`).
+// column search, the only count the caller knows, so the caller stamps it: the section's header count
+// reads from `total`, the empty condition and the paginator's range label read from `filtered`, and the
+// "no matches" versus "nothing to map" wording reads from `filtering`. `filtering` and `query` are the
+// two things the webview must not work out for itself (see `sectionFiltering`).
 export interface BoardSectionMeta extends BoardPageMeta {
   readonly total: number;
   readonly filtering: boolean;

@@ -326,13 +326,15 @@ describe("BoardPanel", () => {
     expect(html).not.toContain("drag to link");
   });
 
+  // Four verb buttons across two panes, but four verbs rows: the shared section builder gives the Mapped
+  // section its own verbs row too, empty but height-holding, so the first section of each column lines up.
   it("skins every board button with the one verb class, each inside a verbs row", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
 
     expect(html.split('class="verb"').length - 1).toBe(4);
     expect(html).not.toContain('class="create-tests"');
-    expect(html.split('<div class="verbs">').length - 1).toBe(3);
+    expect(html.split('<div class="verbs">').length - 1).toBe(4);
   });
 
   // Both card renderers skip the pills row when there is nothing to put in it, which is most scenario
@@ -342,6 +344,33 @@ describe("BoardPanel", () => {
     const html = win.__webviewPanels[0]!.webview.html;
 
     expect(html.split("if (card.pills.length > 0)").length - 1).toBe(2);
+  });
+
+  // Source-level only: the webview JS never runs here. The shared section builder gives every card list
+  // the same skeleton, so this pins the three per-column search boxes, the three paginators, the one
+  // page-size dropdown, and the two decisions the frame owns: a count from the honest total, and a search
+  // echo that only lands when the box is not focused so a repaint cannot jump a mid-type cursor.
+  it("builds every mapping section with its own search box, paginator, and one shared page-size control", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain('id="scenario-search"');
+    expect(html).toContain('id="available-search"');
+    expect(html).toContain('id="mapped-search"');
+    expect(html).toContain('id="scenario-paginator"');
+    expect(html).toContain('id="available-paginator"');
+    expect(html).toContain('id="mapped-paginator"');
+    expect(html).toContain('id="page-size-select"');
+    expect(html).toContain('<option value="25">25</option>');
+    expect(html).toContain('<option value="50">50</option>');
+    expect(html).toContain('<option value="100">100</option>');
+    // One posting site per control kind: three column searches, one page step handler, one page size.
+    expect(html.split("type: 'columnSearch'").length - 1).toBe(3);
+    expect(html).toContain("type: 'page'");
+    expect(html).toContain("type: 'pageSize'");
+    expect(html).toContain("'(' + meta.total + ')'");
+    expect(html).toContain("' of ' + meta.filtered");
+    expect(html).toContain("document.activeElement !== section.search");
   });
 
   it("acquires the vscode api exactly once (the router owns the single acquireVsCodeApi)", () => {
