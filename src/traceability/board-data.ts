@@ -645,6 +645,12 @@ export function scopeBoardViewModel(model: BoardViewModel, project: string | und
   };
 }
 
+// What every test-card search has in common: the two fields the card's own header prints. The header
+// search adds its linked rows on top; the Mapping column search is exactly this.
+function matchesKeyOrSummary(card: BoardTestCard, needle: string): boolean {
+  return card.key.toLowerCase().includes(needle) || (card.summary ?? "").toLowerCase().includes(needle);
+}
+
 // The header search: case-insensitive substring over a test's key/summary and any of its linked
 // scenario rows (name or location), over a scenario card's name, its workspace-relative location (the
 // file path), and its requirement tags, plus a match across all five matrix columns. Both test groups
@@ -656,8 +662,7 @@ export function filterBoardViewModel(model: BoardViewModel, query: string): Boar
     return model;
   }
   const matchesTest = (card: BoardTestCard): boolean =>
-    card.key.toLowerCase().includes(needle) ||
-    (card.summary ?? "").toLowerCase().includes(needle) ||
+    matchesKeyOrSummary(card, needle) ||
     card.links.some((row) => row.name.toLowerCase().includes(needle) || row.location.toLowerCase().includes(needle));
   return {
     scenarios: model.scenarios.filter(
@@ -675,4 +680,81 @@ export function filterBoardViewModel(model: BoardViewModel, query: string): Boar
     offerSync: model.offerSync,
     completeProjects: model.completeProjects,
   };
+}
+
+// The Mapping tab's per-column searches, one per section, filtering only what is already loaded (a test
+// that was never synced is not findable here; Sync now is). They run after `filterBoardViewModel`, so a
+// column query and the header query compose AND-wise. Both are deliberately narrower than the header
+// predicate, which is what lets one column be searched while the other stays put: the untraced column
+// matches a scenario's name, and both test groups match a key or a summary, since a user pastes
+// "APEX-123" as readily as a phrase. Case-insensitive substring, no query syntax; an empty query returns
+// the cards untouched. Generic in the card so one the host has already stamped for the render keeps its
+// own type through the filter.
+export function filterScenarioColumn<T extends BoardScenarioCard>(cards: readonly T[], query: string): readonly T[] {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") {
+    return cards;
+  }
+  return cards.filter((card) => card.name.toLowerCase().includes(needle));
+}
+
+export function filterTestColumn<T extends BoardTestCard>(cards: readonly T[], query: string): readonly T[] {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") {
+    return cards;
+  }
+  return cards.filter((card) => matchesKeyOrSummary(card, needle));
+}
+
+// One page of a section: `filtered` is how many cards the column search left, and `page` is 0-based.
+export interface BoardPageMeta {
+  readonly filtered: number;
+  readonly page: number;
+  readonly pageCount: number;
+  readonly pageSize: number;
+}
+
+// What a rendered section carries. `total` is the section's count after the header search but before its
+// column search, the only count the caller knows, so the caller stamps it: the section's header count and
+// its "no matches" versus "nothing to map" empty state read from `total`, while the paginator's range
+// label reads from `filtered`. `filtering` and `query` are the two things the webview must not work out
+// for itself (see `sectionFiltering`).
+export interface BoardSectionMeta extends BoardPageMeta {
+  readonly total: number;
+  readonly filtering: boolean;
+  readonly query: string;
+}
+
+export interface BoardPage<T> {
+  readonly items: readonly T[];
+  readonly meta: BoardPageMeta;
+}
+
+/**
+ * Slice one page out of a section's filtered cards. The page clamps into range, so an index left past the
+ * end by a narrowing search comes back as the last page rather than an empty slice with cards still to
+ * show. An empty section is one empty page, never zero, so a paginator never reads "of 0". The returned
+ * `page` is the honest index and the caller is expected to adopt it as its new stored page, since a
+ * clamped-on-render-only index resurfaces the moment the search clears. Both numbers are coerced here: the
+ * page size floors at one whole row, so no arithmetic can leave a card unreachable, and the page truncates
+ * to a whole index, so a fraction cannot echo back a window straddling two pages.
+ */
+export function paginate<T>(items: readonly T[], page: number, pageSize: number): BoardPage<T> {
+  const size = Math.max(1, Math.trunc(pageSize) || 1);
+  const pageCount = Math.max(1, Math.ceil(items.length / size));
+  const current = Math.min(Math.max(Math.trunc(page) || 0, 0), pageCount - 1);
+  const start = current * size;
+  return {
+    items: items.slice(start, start + size),
+    meta: { filtered: items.length, page: current, pageCount, pageSize: size },
+  };
+}
+
+/**
+ * Whether a section is being narrowed: by the header search, which runs over every section, or by its own
+ * column's. Decided here and carried in the section meta, since a webview that read its own input box
+ * would race the render it is painting.
+ */
+export function sectionFiltering(globalQuery: string, columnQuery: string): boolean {
+  return globalQuery.trim() !== "" || columnQuery.trim() !== "";
 }

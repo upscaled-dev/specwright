@@ -1,16 +1,21 @@
 import { describe, it, expect } from "vitest";
 import {
+  BoardSectionMeta,
   BoardViewModel,
   buildBoardViewModel,
   buildExecutionRows,
   filterBoardViewModel,
   filterExecutionRows,
+  filterScenarioColumn,
+  filterTestColumn,
   groupMatrixRows,
   MatrixRow,
+  paginate,
   resolveBoardDrop,
   resolveBoardUnlink,
   scenarioDropId,
   scopeBoardViewModel,
+  sectionFiltering,
   syncProgressText,
 } from "../../traceability/board-data";
 import { projectFromKey } from "../../xray/xray-adapter";
@@ -534,6 +539,187 @@ describe("filterBoardViewModel", () => {
     expect(out.availableEmptyText).toBe(model.availableEmptyText);
     expect(out.offerSync).toBe(false);
     expect(filterBoardViewModel({ ...model, offerSync: true }, "calc-1").offerSync).toBe(true);
+  });
+});
+
+// One model for the three mapping sections: two untraced scenarios in different files, two available
+// tests with summaries, and a mapped test whose linked row says something its own header does not.
+const columnModel = build(
+  snapshot({
+    untraced: [
+      untraced({ scenario: ref({ name: "Log in" }), reqKeys: ["REQ-7"] }),
+      untraced({ scenario: ref({ filePath: "/ws/features/cart.feature", line: 12, name: "Pay by card" }) }),
+    ],
+    orphans: [
+      orphan({ testKey: "CALC-9", meta: { key: "CALC-9", summary: "Add two numbers" } }),
+      orphan({ testKey: "PAY-9", meta: { key: "PAY-9", summary: "Pay with a card" } }),
+    ],
+    links: [
+      link({
+        testKey: "CALC-1",
+        scenario: ref({ line: 30, name: "Add small numbers" }),
+        meta: { key: "CALC-1", summary: "Adding" },
+      }),
+    ],
+  })
+);
+
+describe("filterScenarioColumn", () => {
+  const cards = columnModel.scenarios;
+
+  it("returns the cards untouched for an empty query", () => {
+    expect(filterScenarioColumn(cards, "   ")).toBe(cards);
+  });
+
+  it("matches a scenario by name, case-insensitively", () => {
+    expect(filterScenarioColumn(cards, "PAY BY").map((card) => card.name)).toEqual(["Pay by card"]);
+    expect(filterScenarioColumn(cards, "log").map((card) => card.name)).toEqual(["Log in"]);
+  });
+
+  // Narrower than the header search on purpose. This column search exists to bring one drag source into
+  // view, and matching a file path would pull in every card that file holds.
+  it("ignores the location and requirement tags the header search matches", () => {
+    expect(filterBoardViewModel(columnModel, "req-7").scenarios.map((card) => card.name)).toEqual(["Log in"]);
+    expect(filterScenarioColumn(cards, "cart.feature")).toEqual([]);
+    expect(filterScenarioColumn(cards, "req-7")).toEqual([]);
+  });
+
+  it("composes AND-wise with the header search", () => {
+    const header = filterBoardViewModel(columnModel, "cart.feature").scenarios;
+    expect(header.map((card) => card.name)).toEqual(["Pay by card"]);
+    expect(filterScenarioColumn(header, "pay").map((card) => card.name)).toEqual(["Pay by card"]);
+    expect(filterScenarioColumn(header, "log in")).toEqual([]);
+  });
+});
+
+describe("filterTestColumn", () => {
+  const available = columnModel.available;
+
+  it("returns the cards untouched for an empty query", () => {
+    expect(filterTestColumn(available, "  ")).toBe(available);
+  });
+
+  it("matches a pasted test key, case-insensitively", () => {
+    expect(filterTestColumn(available, "pay-9").map((card) => card.key)).toEqual(["PAY-9"]);
+  });
+
+  it("matches a summary, case-insensitively", () => {
+    expect(filterTestColumn(available, "TWO NUMBERS").map((card) => card.key)).toEqual(["CALC-9"]);
+  });
+
+  it("keeps a card with no summary findable by key", () => {
+    const noSummary = build(snapshot({ orphans: [orphan({ testKey: "PAY-1", meta: { key: "PAY-1" } })] })).available;
+    expect(filterTestColumn(noSummary, "pay").map((card) => card.key)).toEqual(["PAY-1"]);
+    expect(filterTestColumn(noSummary, "pay with")).toEqual([]);
+  });
+
+  // One predicate for both test groups, and narrower than the header's: a mapped card is found by what its
+  // own header prints, not by the scenario rows listed under it.
+  it("runs over the mapped group too, matching its key and summary but not its linked rows", () => {
+    const mapped = columnModel.mapped;
+    expect(filterTestColumn(mapped, "calc-1").map((card) => card.key)).toEqual(["CALC-1"]);
+    expect(filterTestColumn(mapped, "adding").map((card) => card.key)).toEqual(["CALC-1"]);
+    expect(filterTestColumn(mapped, "add small")).toEqual([]);
+  });
+
+  it("composes AND-wise with the header search", () => {
+    const header = filterBoardViewModel(columnModel, "calc").available;
+    expect(header.map((card) => card.key)).toEqual(["CALC-9"]);
+    expect(filterTestColumn(header, "pay-9")).toEqual([]);
+    expect(filterTestColumn(available, "pay-9").map((card) => card.key)).toEqual(["PAY-9"]);
+  });
+});
+
+describe("paginate", () => {
+  // The fold is generic in its element, so a numbered list is the honest fixture: the arithmetic and the
+  // slice boundaries are what is under test.
+  const numbers = (count: number): number[] => Array.from({ length: count }, (_, index) => index + 1);
+
+  it("slices the first page and counts what the search left", () => {
+    expect(paginate(numbers(5), 0, 2)).toEqual({
+      items: [1, 2],
+      meta: { filtered: 5, page: 0, pageCount: 3, pageSize: 2 },
+    });
+  });
+
+  it("gives the last page its remainder only", () => {
+    expect(paginate(numbers(5), 2, 2).items).toEqual([5]);
+  });
+
+  it("clamps a page beyond the end to the last one", () => {
+    expect(paginate(numbers(5), 9, 2)).toEqual({ items: [5], meta: { filtered: 5, page: 2, pageCount: 3, pageSize: 2 } });
+  });
+
+  it("clamps to the last page when a narrowing search shrinks the set under the current page", () => {
+    // Page 2 of 25 held cards a keystroke ago; a search leaving 3 must show those 3, not an empty page.
+    expect(paginate(numbers(3), 1, 25)).toEqual({
+      items: [1, 2, 3],
+      meta: { filtered: 3, page: 0, pageCount: 1, pageSize: 25 },
+    });
+  });
+
+  it("clamps a negative page to the first", () => {
+    expect(paginate(numbers(3), -1, 2).meta.page).toBe(0);
+  });
+
+  it("truncates a non-integer page instead of straddling two windows", () => {
+    expect(paginate(numbers(5), 1.9, 2).items).toEqual([3, 4]);
+    expect(paginate(numbers(5), Number.NaN, 2).meta.page).toBe(0);
+  });
+
+  // A page size that is not a whole row is the one input that could leave cards unreachable, so it floors
+  // at one and the reported size says what was actually used.
+  it("floors a zero, negative, or fractional page size at one whole row", () => {
+    expect(paginate(numbers(3), 0, 0)).toEqual({ items: [1], meta: { filtered: 3, page: 0, pageCount: 3, pageSize: 1 } });
+    expect(paginate(numbers(3), 2, -5)).toEqual({ items: [3], meta: { filtered: 3, page: 2, pageCount: 3, pageSize: 1 } });
+    expect(paginate(numbers(5), 0, 0.5).meta.pageSize).toBe(1);
+    expect(paginate(numbers(5), 1, 2.7)).toEqual({ items: [3, 4], meta: { filtered: 5, page: 1, pageCount: 3, pageSize: 2 } });
+  });
+
+  it("makes an empty list one empty page, so a paginator never reads 'of 0'", () => {
+    expect(paginate([], 3, 25)).toEqual({ items: [], meta: { filtered: 0, page: 0, pageCount: 1, pageSize: 25 } });
+  });
+
+  it("counts pages exactly at a multiple of the page size, and one over", () => {
+    expect(paginate(numbers(100), 0, 25).meta.pageCount).toBe(4);
+    expect(paginate(numbers(101), 0, 25).meta.pageCount).toBe(5);
+    expect(paginate(numbers(101), 4, 25).items).toEqual([101]);
+  });
+
+  // The pipeline's "no matches for the filters" shape: nothing to paint, but the section still knows how
+  // many cards it holds, which is what lets its empty state say "no matches" instead of "nothing to map".
+  it("leaves a section whose search matched nothing one empty page, with the section's own count on the stamped meta", () => {
+    const paged = paginate(filterTestColumn(columnModel.available, "nope"), 0, 25);
+    const meta: BoardSectionMeta = {
+      ...paged.meta,
+      total: columnModel.available.length,
+      filtering: sectionFiltering("", "nope"),
+      query: "nope",
+    };
+
+    expect(paged.items).toEqual([]);
+    expect(meta).toEqual({ total: 2, filtered: 0, page: 0, pageCount: 1, pageSize: 25, filtering: true, query: "nope" });
+  });
+});
+
+describe("sectionFiltering", () => {
+  it("is false when neither search is set", () => {
+    expect(sectionFiltering("", "")).toBe(false);
+    expect(sectionFiltering("  ", " ")).toBe(false);
+  });
+
+  // The header search narrows every section, so a column that filtered nothing itself still has to say
+  // "no matches" rather than "nothing to map".
+  it("is true when the header search alone is set", () => {
+    expect(sectionFiltering("pay", "")).toBe(true);
+  });
+
+  it("is true when the column search alone is set", () => {
+    expect(sectionFiltering("", "pay")).toBe(true);
+  });
+
+  it("is true when both are set", () => {
+    expect(sectionFiltering("pay", "calc")).toBe(true);
   });
 });
 
