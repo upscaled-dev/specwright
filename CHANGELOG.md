@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- **The Coverage Board's Mapping tab filters and pages each list on its own.** Untraced scenarios, available tests, and mapped tests each get a filter box and a paginator, so a workspace with hundreds of cards no longer paints all of them into one long scroll. A column filter narrows only its own list and combines with the board's header search: the scenario list matches on scenario name, both test lists match on key or summary. A **Rows** dropdown above the columns sets how many cards every list shows (25, 50, or 100, starting at 50) and is remembered per workspace. Each section header counts what it holds, its paginator reads "1-50 of 130" over what the filter left, and a list emptied by a query says "No matches." instead of its nothing-to-map line. The three sections are built from one layout, so headers, buttons, filter boxes, and paginators line up across both columns.
+
+### Changed
+
+- **The Executions tab groups its history under the execution it belongs to.** Every publish used to be a top-level row, so an execution published to more than once appeared several times over with nothing tying those rows together. Each execution is now one row carrying its summary, its most recent date, and how many entries it holds; expanding it lists each create or append beneath it, newest first. A group you collapse stays collapsed as the board repaints, a search opens the groups it matched and shows each one's whole history, and an entry whose import named no execution stays a row of its own.
+
+### Fixed
+
+- **Appending results to an existing execution no longer rewrites its dates.** An appended run carried an information block describing that run, which Xray turns into an update of the execution issue's start and finish date fields: adding a run overwrote the dates already recorded on the execution, and the whole import was rejected when the execution's work type has no such fields on its edit screen (a Sub-Test Execution, for instance, failed with "Field 'customfield_…' cannot be set"). An append now sends only the execution key and the results.
+- **Appended example rows carry their label and a correct duration.** Each row of a Scenario Outline is added as an iteration of its test, but the durations went out in milliseconds into a field Xray reads as nanoseconds, so every row showed a time close to zero, and the iterations went out with no parameters at all. Each row now sends a nanosecond duration and an `example` parameter holding the row title Playwright reported, so the iteration table in Xray names its rows and shows their real times.
+- A publish the server rejects reports its reason from Jira's error envelopes as well as Xray's own, with token-like text scrubbed out and a long message clipped to one readable line.
 
 ## [0.4.36] - 2026-07-29
 ### Fixed
