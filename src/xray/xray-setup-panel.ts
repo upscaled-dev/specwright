@@ -39,9 +39,9 @@ export interface XraySetupValidationErrors {
 
 type ConnState = "connected" | "disconnected" | "checking";
 
-// The dot means VERIFIED, not credentials-stored: only `conn-state` moves it, and only a live auth
-// handshake sets `connected`. `test-result` drives the status area separately, so a failed GraphQL
-// stage can show a failure message while the dot stays connected (auth passed).
+// The dot means VERIFIED, not credentials-stored: only `conn-state` moves it, and only a probe that
+// passed every stage sets `connected`. `test-result` drives the status area separately, so a failure
+// carries its own detail alongside the label.
 type OutgoingMessage =
   | { type: "validation"; errors: XraySetupValidationErrors }
   | { type: "saved"; site: string; jira: boolean }
@@ -117,6 +117,13 @@ export function validateXraySetupInput(
     errors.clientSecret = "Client secret is required";
   }
   return Object.keys(errors).length > 0 ? errors : undefined;
+}
+
+function connectionLabel(outcome: XrayConnectionOutcome): string {
+  if (outcome.ok) {
+    return `Connected to ${outcome.site}`;
+  }
+  return outcome.stage === "graphql" ? "Authenticated, but Xray data calls failed" : "Not connected";
 }
 
 function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): string {
@@ -657,13 +664,13 @@ export class XraySetupPanel {
     if (this.stale(epoch)) {
       return;
     }
-    // Connected == a live handshake succeeded. A GraphQL-stage failure still means we authenticated,
-    // so the dot stays green while test-result carries the failure message.
-    const connected = outcome.ok || outcome.stage === "graphql";
+    // Connected == the whole probe passed. A GraphQL-stage failure means the handshake worked but no
+    // data call does, which is not a working connection, so the dot goes red and the label says which
+    // half failed.
     await this.post({
       type: "conn-state",
-      state: connected ? "connected" : "disconnected",
-      label: connected ? `Connected to ${outcome.site}` : "Not connected",
+      state: outcome.ok ? "connected" : "disconnected",
+      label: connectionLabel(outcome),
     });
     if (!outcome.ok || options.statusOnSuccess) {
       await this.post({ type: "test-result", ok: outcome.ok, message: outcome.message });

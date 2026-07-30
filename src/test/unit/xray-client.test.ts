@@ -674,7 +674,9 @@ describe("XrayClient redaction", () => {
 
     const emitted = lines.join("\n");
     expect(emitted).not.toContain(SECRET);
-    expect(emitted).toContain(`string(${SECRET.length})`);
+    // The secret is masked out of the echo, but the server's own wording survives verbatim.
+    expect(emitted).toContain("[redacted]");
+    expect(emitted).toContain('"error":"bad"');
     expect(outcome.complete).toBe(false);
     expect(outcome.errors.some((e) => e.includes("Authentication failed"))).toBe(true);
   });

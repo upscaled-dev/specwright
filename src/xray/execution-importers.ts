@@ -3,7 +3,7 @@ import type { PublishRequest, RunArtifact, RunArtifactIteration, RunArtifactOutc
 import type { PublishableResult } from "../traceability/publish-core";
 import type { EmbeddedEvidence } from "../traceability/evidence-resolution";
 import { normalizePath, type ScenarioRef } from "../traceability/scenario-ref";
-import { scrubJwtLike, truncate } from "../utils/text";
+import { serverMessageOf } from "../utils/text";
 
 // Resolves a publishable result's evidence to base64-embeddable blobs (empty when none applies for the
 // active `xray.attachTo` mode). The Xray capability supplies it; `buildPayload` never touches disk.
@@ -18,7 +18,6 @@ const CUCUMBER_MULTIPART_PATH = "/import/execution/cucumber/multipart";
 // tag prefix, §3.4), so it is hardcoded here rather than read from the KeyGrammar.
 const XRAY_TEST_TAG_PREFIX = "@TEST_";
 const MS_TO_NS = 1_000_000;
-const MAX_SERVER_MESSAGE_LENGTH = 300;
 const GHERKIN_KEYWORDS = ["Given", "When", "Then", "And", "But", "*"] as const;
 
 // The HTTP result of an import POST. Carries status/ok so a non-2xx reaches the importer with its body
@@ -46,12 +45,12 @@ export interface ImportTransport {
 export class XrayImportError extends Error {
   public readonly status: number;
   public readonly serverMessage?: string | undefined;
-  constructor(status: number, serverMessage?: string) {
-    super(serverMessage !== undefined ? `Import failed (HTTP ${status}): ${serverMessage}` : `Import failed (HTTP ${status}).`);
+  constructor(status: number, detail?: string) {
+    super(detail !== undefined ? `Import failed (HTTP ${status}): ${detail}` : `Import failed (HTTP ${status}).`);
     this.name = "XrayImportError";
     this.status = status;
-    if (serverMessage !== undefined) {
-      this.serverMessage = serverMessage;
+    if (detail !== undefined) {
+      this.serverMessage = detail;
     }
   }
 }
@@ -91,45 +90,6 @@ function handleImportResponse(response: ImportResponse): ExecutionImportResponse
     throw message !== undefined ? new XrayImportError(response.status, message) : new XrayImportError(response.status);
   }
   return parseImportResponse(response.body);
-}
-
-// The only wire-confirmed envelope on this endpoint is Xray's `{error}` string, which carried even a
-// Jira screen-validation rejection (§5). `{errorMessages}`, per-field `{errors}`, and plain text are
-// Jira's and a gateway's shapes, unobserved here but read as defensive breadth, in that order;
-// anything else stays undefined so the caller reports the bare status.
-function serverMessageOf(body: unknown): string | undefined {
-  if (typeof body === "string") {
-    return presentable(body);
-  }
-  if (typeof body !== "object" || body === null) {
-    return undefined;
-  }
-  const record = body as Record<string, unknown>;
-  const error = record["error"];
-  const messages = record["errorMessages"];
-  const fields = record["errors"];
-  return (
-    presentable(typeof error === "string" ? error : "") ??
-    presentable(Array.isArray(messages) ? messages.flatMap(nonEmpty).join("; ") : "") ??
-    presentable(
-      typeof fields === "object" && fields !== null && !Array.isArray(fields)
-        ? Object.entries(fields)
-            .flatMap(([field, message]) => nonEmpty(message).map((text) => `${field}: ${text}`))
-            .join("; ")
-        : ""
-    )
-  );
-}
-
-function nonEmpty(value: unknown): string[] {
-  return typeof value === "string" && value.trim() !== "" ? [value.trim()] : [];
-}
-
-// Scrubbing happens before the clip so a truncation cannot split a token past the point the scrub
-// pattern recognizes it.
-function presentable(message: string): string | undefined {
-  const text = message.trim();
-  return text === "" ? undefined : truncate(scrubJwtLike(text), MAX_SERVER_MESSAGE_LENGTH);
 }
 
 function parseImportResponse(body: unknown): ExecutionImportResponse {

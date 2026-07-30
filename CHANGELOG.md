@@ -6,8 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- **The connection test confirms which Jira account you are using.** Test Connection now asks Jira who the stored email and API token authenticate as before it lists projects, and reports "Jira authenticated as \<name\>" in its result. A token that Jira refuses is named at that point, with the site's own reason, instead of surfacing later as an empty project list.
+
+### Changed
+
+- **A failed connection test says what actually happened.** Every failure past the login used to read "Xray GraphQL probe failed (non-OK status or GraphQL errors)". The result now distinguishes a data host that rejects an authenticated call (pointing at `playwrightBddRunner.xray.apiRegion` and the site's Xray license), a rate limit that asks you to wait a minute, a permission refusal quoting Xray's own error, and any other status quoting the server's reply.
+- **The Xray setup panel's connection dot no longer shows green when data calls fail.** A connection that authenticated but could not run a single query used to keep the green dot. It now shows red with "Authenticated, but Xray data calls failed", so the dot and the message agree.
+- **A rejected request writes the server's own reply to the output channel.** Xray and Jira refusals were logged as the shape of the response body, which meant diagnosing a failure outside the editor. The body is now logged as sent, after credentials, tokens, and the basic-auth header are masked out and any token-like text is scrubbed, clipped to one readable line.
+- The "nothing to publish" message now reads "No local runs to publish yet. Run mapped scenarios first.", matching the vocabulary the rest of the publish surface uses.
+
 ### Fixed
 
+- **The publish dialog reports a failed issue search instead of showing no matches.** A search that failed (missing Jira credentials, a network or permission problem) emptied the result list, which reads exactly like "no such issue". The list now carries the reason, and the project field still offers the keys already known locally.
+- A gateway error page no longer becomes the text of a publish failure toast. An HTML response falls back to the plain status, and the page itself is in the output channel.
+- Connection failures name their underlying cause (a refused connection, a certificate rejection, a proxy fault) rather than only "fetch failed".
 - **A project key that collides with a JQL reserved word no longer breaks sync, search, or the connection test.** A key such as IS went out as a bare word, and Jira refuses a reserved word that is not surrounded by quotation marks, so that project's tests could not be synced or searched, and its connection probe reported no counts. Project keys and issue keys now go out quoted, so any key a project uses is accepted.
 
 ## [0.4.42] - 2026-07-30

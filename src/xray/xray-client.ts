@@ -1,9 +1,9 @@
 import { Logger } from "../utils/logger";
-import { errMsg, scrubJwtLike } from "../utils/text";
+import { errMsg, maskValues, scrubJwtLike, serverText } from "../utils/text";
 import { NormalizedStatus } from "../traceability/contracts";
 import { XrayCredentials } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
-import { describeJwt, describeShape, graphqlErrorSummaries } from "./xray-diagnostics";
+import { describeJwt, graphqlErrorSummaries } from "./xray-diagnostics";
 import { buildKeysJql, jqlString } from "./xray-search";
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -123,10 +123,6 @@ function parseBody(bodyText: string): unknown {
   } catch {
     return bodyText;
   }
-}
-
-function stringifyShape(value: unknown): string {
-  return JSON.stringify(describeShape(value), null, 2);
 }
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -517,6 +513,7 @@ export class XrayClient {
           refreshed = true;
           continue;
         }
+        this.deps.logger.error(`${url} → 401 with a fresh token; response body:\n${serverText(response.bodyText)}`);
         throw new XrayAuthError("Authentication failed: check your client ID and secret.");
       }
       return response;
@@ -622,7 +619,7 @@ export class XrayClient {
       }),
       signal
     );
-    this.deps.logger.info(`POST ${path} → ${response.status}`);
+    this.logImport(path, response);
     return { status: response.status, ok: response.ok, body: parseBody(response.bodyText) };
   }
 
@@ -639,8 +636,18 @@ export class XrayClient {
       },
       signal
     );
-    this.deps.logger.info(`POST ${path} → ${response.status}`);
+    this.logImport(path, response);
     return { status: response.status, ok: response.ok, body: parseBody(response.bodyText) };
+  }
+
+  // A rejected import is the one place the server explains itself, so its body goes to the output
+  // channel verbatim (scrubbed and clipped) instead of only the status the toast already carries.
+  private logImport(path: string, response: TimedResponse): void {
+    if (response.ok) {
+      this.deps.logger.info(`POST ${path} → ${response.status}`);
+      return;
+    }
+    this.deps.logger.error(`POST ${path} → ${response.status}; response body:\n${serverText(response.bodyText)}`);
   }
 
   // Concurrent callers that all miss the cached JWT (or all force-refresh after a shared 401) ride
@@ -687,9 +694,10 @@ export class XrayClient {
       signal
     );
     if (!response.ok) {
-      // The bad-credential body may echo the request, so only its shape is logged, never values.
+      // The bad-credential body may echo the request, so the credentials just sent are masked out of
+      // it; what is left is the server's own wording, which is the only account of why it refused.
       this.deps.logger.error(
-        `Authentication failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
+        `Authentication failed (HTTP ${response.status}); response body:\n${serverText(maskValues(response.bodyText, [credentials.clientSecret, credentials.clientId]))}`
       );
       throw new XrayAuthError(
         response.status === 401

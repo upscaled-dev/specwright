@@ -4,6 +4,7 @@ import { FeatureParser } from "../parsers/feature-parser";
 import { TestDiscoveryManager } from "../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../utils/playwright-json-parser";
 import { Logger } from "../utils/logger";
+import { errMsg } from "../utils/text";
 import {
   REPORT_CANDIDATES,
   TraceabilityModel,
@@ -335,7 +336,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     try {
       result = await connection.verify();
     } catch (error) {
-      result = { status: "unreachable", message: String(error) };
+      result = { status: "unreachable", message: errMsg(error) };
     }
     if (this.disposed || epoch !== this.connectionEpoch) {
       return;

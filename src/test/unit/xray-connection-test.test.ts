@@ -4,6 +4,7 @@ import { Logger, LogLevel } from "../../utils/logger";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import {
   extractTotal,
+  graphqlFailureMessage,
   probeXrayConnection,
   rateLimitHeaders,
   runXrayConnectionTest,
@@ -39,6 +40,41 @@ describe("rateLimitHeaders", () => {
     expect(picked["retry-after"]).toBe("30");
     expect(picked["content-type"]).toBeUndefined();
     expect(picked["authorization"]).toBeUndefined();
+  });
+});
+
+describe("graphqlFailureMessage", () => {
+  it("blames the data host and points at the region setting on a 401", () => {
+    const message = graphqlFailureMessage({ status: 401, bodyText: "", errors: [] });
+    expect(message).toContain("data host rejected the call");
+    expect(message).toContain("xray.apiRegion");
+  });
+
+  it("says rate-limited and asks for a pause on a 429", () => {
+    expect(graphqlFailureMessage({ status: 429, bodyText: "", errors: [] })).toContain("rate-limited");
+  });
+
+  it("quotes the first GraphQL error of a 200 as a likely permission problem", () => {
+    const message = graphqlFailureMessage({
+      status: 200,
+      bodyText: '{"errors":[{"message":"denied"}]}',
+      errors: ["errors[0] [FORBIDDEN]: denied", "errors[1]: also denied"],
+    });
+    expect(message).toBe(
+      "Xray accepted the login but refused the query, usually a permission problem: errors[0] [FORBIDDEN]: denied"
+    );
+  });
+
+  it("states the status and quotes the body for any other non-OK", () => {
+    expect(graphqlFailureMessage({ status: 502, bodyText: "upstream exploded", errors: [] })).toBe(
+      "Xray GraphQL probe failed (HTTP 502): upstream exploded"
+    );
+  });
+
+  it("falls back to the output channel when the body is an HTML page", () => {
+    expect(
+      graphqlFailureMessage({ status: 502, bodyText: "<html><body>Bad Gateway</body></html>", errors: [] })
+    ).toBe("Xray GraphQL probe failed (HTTP 502): see output for details.");
   });
 });
 
@@ -166,8 +202,9 @@ describe("runXrayConnectionTest: secret/JWT redaction invariant", () => {
     const emitted = lines.join("\n");
     expect(emitted).not.toContain(FAKE_SECRET);
     expect(emitted).not.toContain(FAKE_SECRET.slice(0, 12));
-    expect(emitted).toContain("response body shape");
-    expect(emitted).toContain(`string(${FAKE_SECRET.length})`);
+    // The credentials are masked out of the echo, but the server's own wording survives verbatim.
+    expect(emitted).toContain("[redacted]");
+    expect(emitted).toContain('"error":"bad request"');
     // Nothing runs after a failed handshake: only the /authenticate call was made.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(errorToast).toHaveBeenCalledWith(
@@ -195,7 +232,7 @@ describe("runXrayConnectionTest: secret/JWT redaction invariant", () => {
     expect(emitted).toContain("[jwt-like-token]");
     expect(emitted).toContain("FORBIDDEN");
     expect(errorToast).toHaveBeenCalledWith(
-      expect.stringContaining("GraphQL probe failed"),
+      expect.stringContaining("Xray accepted the login but refused the query"),
       "Show Output"
     );
   });
@@ -442,15 +479,22 @@ describe("probeXrayConnection: structured outcome", () => {
   });
 });
 
-// Auth returns the JWT, the Jira project-search URL returns `jiraPage`, and every other /graphql POST
-// is answered by `graphql`. Keeps the three transports of a full probe in one deterministic mock.
+const JIRA_NAME = "Jane Tester";
+
+// Auth returns the JWT, /myself names the account (`identity` overrides it), the Jira project-search
+// URL returns `jiraPage`, and every other /graphql POST is answered by `graphql`. Keeps the four
+// transports of a full probe in one deterministic mock.
 function jwtGraphqlAndJira(
   graphql: (query: string) => unknown,
-  jira: { status: number; body: unknown }
+  jira: { status: number; body: unknown },
+  identity: { status: number; body: unknown } = { status: 200, body: { displayName: JIRA_NAME } }
 ): ReturnType<typeof vi.fn> {
   return vi.fn((url: string, init?: RequestInit) => {
     if (url.endsWith("/authenticate")) {
       return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));
+    }
+    if (url.includes("/rest/api/3/myself")) {
+      return Promise.resolve(makeResponse(identity.status, JSON.stringify(identity.body)));
     }
     if (url.includes("/rest/api/3/project/search")) {
       const body = typeof jira.body === "string" ? jira.body : JSON.stringify(jira.body);
@@ -514,6 +558,39 @@ describe("probeXrayConnection: Jira project view", () => {
     expect(outcome.jiraProjects).toBeUndefined();
   });
 
+  it("names the authenticated Jira account in the verdict and the output", async () => {
+    const deps = await jiraSeededDeps(() => ["CALC-1"]);
+    const fetchMock = jwtGraphqlAndJira(
+      () => ({ data: { getTests: { total: 1, results: [] } } }),
+      { status: 200, body: { isLast: true, values: [{ key: "CALC", name: "Calculator" }] } }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.message).toContain(`Jira authenticated as ${JIRA_NAME}`);
+    expect(deps.lines.join("\n")).toContain(`GET /rest/api/3/myself → 200; authenticated as ${JIRA_NAME}`);
+  });
+
+  it("reports the identity failure and never lists projects when /myself is refused", async () => {
+    const deps = await jiraSeededDeps(() => ["CALC-1"]);
+    const fetchMock = jwtGraphqlAndJira(
+      () => ({ data: { getTests: { total: 1, results: [] } } }),
+      { status: 200, body: { isLast: true, values: [{ key: "CALC", name: "Calculator" }] } },
+      { status: 403, body: { errorMessages: ["Browse permission required"] } }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await probeXrayConnection(deps);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.jiraError).toBe("Jira identity check failed (HTTP 403): Browse permission required");
+    expect(outcome.jiraProjects).toBeUndefined();
+    expect(fetchMock.mock.calls.some((call: unknown[]) => String(call[0]).includes("project/search"))).toBe(false);
+    expect(deps.lines.join("\n")).toContain("Browse permission required");
+  });
+
   it("keeps ok true and records jiraError when the Jira project list fails", async () => {
     const deps = await jiraSeededDeps(() => ["CALC-1"]);
     const fetchMock = jwtGraphqlAndJira(
@@ -558,6 +635,9 @@ describe("probeXrayConnection: Jira project view", () => {
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/authenticate")) {
         return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));
+      }
+      if (url.includes("/rest/api/3/myself")) {
+        return Promise.resolve(makeResponse(200, JSON.stringify({ displayName: JIRA_NAME })));
       }
       if (url.includes("/rest/api/3/project/search")) {
         return Promise.resolve(makeResponse(200, jiraPage));

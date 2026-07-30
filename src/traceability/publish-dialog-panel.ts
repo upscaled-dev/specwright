@@ -1,6 +1,6 @@
 import type { Disposable, Event } from "vscode";
 import { escapeHtml } from "../utils/webview";
-import { errMsg, scrubJwtLike } from "../utils/text";
+import { errMsg, serverText } from "../utils/text";
 import { PublishRequest, PublishTarget } from "./contracts";
 import { AttachmentSuggestion, PublishDialogModel, PublishDialogResult, PublishRunOption } from "./publish-flow";
 import { SurfaceFragment, SurfaceHost } from "./webview-host";
@@ -297,7 +297,7 @@ export class PublishSurface {
       if (controller.signal.aborted || this.settled()) {
         return;
       }
-      const reason = scrubJwtLike(errMsg(error));
+      const reason = serverText(errMsg(error));
       this.host.post({ type: "search-result", token: message.token, kind: message.kind, items: [], error: reason });
     }
   }
@@ -347,6 +347,8 @@ const PUBLISH_CSS = `
   #pane-publish .results:empty { display: none; border: none; }
   #pane-publish .results li { padding: 0.35rem 0.5rem; cursor: pointer; }
   #pane-publish .results li:hover { background: var(--vscode-list-hoverBackground); }
+  #pane-publish .results li.search-error { color: var(--vscode-errorForeground); cursor: default; }
+  #pane-publish .results li.search-error:hover { background: none; }
   #pane-publish .attach-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
   #pane-publish .attach-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; }
   #pane-publish .attach-row .name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -595,6 +597,15 @@ const PUBLISH_SCRIPT = `
     listEl.__token = -1;
   }
 
+  // A failed search prints why, above whatever local matches still stand: an empty list alone reads
+  // as "no such issue", which is the one thing a failure does not tell us.
+  function renderSearchError(listEl, message) {
+    const li = document.createElement('li');
+    li.className = 'search-error';
+    li.textContent = message;
+    listEl.insertBefore(li, listEl.firstChild);
+  }
+
   function renderResults(listEl, items) {
     listEl.textContent = '';
     for (const item of items) {
@@ -790,6 +801,7 @@ const PUBLISH_SCRIPT = `
       if (listEl.__token !== msg.token) { return; }
       const items = msg.error ? [] : msg.items;
       renderResults(listEl, msg.kind === 'project' ? mergedProjectItems(items) : items);
+      if (msg.error) { renderSearchError(listEl, 'Search failed: ' + msg.error); }
     } else if (msg.type === 'browse-result') {
       for (const file of msg.items) { addAttachmentRow(file); }
     } else if (msg.type === 'pending-result') {

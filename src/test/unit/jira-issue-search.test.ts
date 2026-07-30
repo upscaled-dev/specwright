@@ -182,11 +182,18 @@ describe("searchJiraIssues", () => {
     expect(truncated).toBe(true);
   });
 
-  it("throws a value-free JiraAccessError on a 400 and never logs the token", async () => {
+  it("throws a value-free JiraAccessError on a 400 and masks the credentials out of the logged body", async () => {
     const { logger, lines } = capturingLogger();
-    const fetchImpl: FetchLike = () => Promise.resolve(response(400, { errorMessages: ["bad JQL"] }));
+    const basic = Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64");
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(400, { errorMessages: [`bad JQL for ${EMAIL} (token ${TOKEN}, Basic ${basic})`] }));
     await expect(run(fetchImpl, logger)).rejects.toBeInstanceOf(JiraAccessError);
-    expect(lines.join("\n")).not.toContain(TOKEN);
+
+    const emitted = lines.join("\n");
+    expect(emitted).toContain("bad JQL for [redacted] (token [redacted], Basic [redacted])");
+    expect(emitted).not.toContain(TOKEN);
+    expect(emitted).not.toContain(basic);
+    expect(emitted).not.toContain(EMAIL);
   });
 });
 

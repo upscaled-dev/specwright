@@ -264,15 +264,19 @@ describe("resolveExecutionIssueType", () => {
     expect(requestedUrl).toBe(`https://${SITE}/rest/api/3/issue/createmeta/a%2Fb%20c/issuetypes?maxResults=200`);
   });
 
-  it("returns unknown on a 403 and logs the status/shape without the token", async () => {
+  it("returns unknown on a 403 and logs the refusal verbatim with the credentials masked", async () => {
     const { logger, lines } = capturingLogger();
-    const fetchImpl: FetchLike = () => Promise.resolve(response(403, { errorMessages: ["forbidden"], token: TOKEN }));
+    const basic = Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64");
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(403, { errorMessages: [`forbidden for ${EMAIL} (Basic ${basic})`], token: TOKEN }));
     const result = await resolve(fetchImpl, logger);
     expect(result).toEqual({ kind: "unknown" });
     const log = lines.join("\n");
     expect(log).toContain("HTTP 403");
+    expect(log).toContain("forbidden for [redacted] (Basic [redacted])");
     expect(log).not.toContain(TOKEN);
-    expect(log).not.toContain("forbidden");
+    expect(log).not.toContain(basic);
+    expect(log).not.toContain(EMAIL);
   });
 
   it("returns unknown on a 404", async () => {

@@ -1,10 +1,10 @@
 import * as fs from "node:fs";
 import { Logger } from "../utils/logger";
-import { errMsg, scrubJwtLike } from "../utils/text";
+import { errMsg, maskValues, scrubJwtLike, serverText } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
 import { contentTypeForFile, EVIDENCE_MAX_FILE_BYTES } from "../traceability/evidence-resolution";
 import { describeShape } from "./xray-diagnostics";
-import { FetchLike, JiraAccessError } from "./jira-project-search";
+import { FetchLike, JiraAccessError, jiraSecrets } from "./jira-project-search";
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_ATTEMPTS = 4;
@@ -76,7 +76,8 @@ function parseMeta(body: unknown): JiraAttachmentMeta {
 /**
  * Reads the site's attachment settings. On any failure the dialog degrades to the evidence constants,
  * so this never throws; a failed probe returns `{ enabled: true }` (no `uploadLimit`, fall back to
- * {@link EVIDENCE_MAX_FILE_BYTES}). Diagnostics stay allowlisted shape/status only.
+ * {@link EVIDENCE_MAX_FILE_BYTES}). A refused response is logged with its body verbatim, masked by
+ * {@link jiraSecrets}, JWT-scrubbed and clipped at 300; a successful one is logged as shape/status only.
  */
 export async function fetchJiraAttachmentMeta(deps: JiraAttachmentMetaDeps): Promise<JiraAttachmentMeta> {
   const fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
@@ -89,7 +90,9 @@ export async function fetchJiraAttachmentMeta(deps: JiraAttachmentMetaDeps): Pro
     });
     const bodyText = await response.text();
     if (!response.ok) {
-      deps.logger.warn(`GET /rest/api/3/attachment/meta → ${response.status}; using evidence-limit fallback`);
+      deps.logger.warn(
+        `GET /rest/api/3/attachment/meta → ${response.status}; using evidence-limit fallback; response body:\n${serverText(maskValues(bodyText, jiraSecrets(deps.credentials)))}`
+      );
       return { enabled: true };
     }
     const body = parseBody(bodyText);

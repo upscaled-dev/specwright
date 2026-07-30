@@ -156,7 +156,7 @@ const STRATEGY_TYPE_BY_VALUE: Record<string, string> = {
 };
 
 const CATEGORY = "Specwright";
-const NO_PUBLISHABLE_RUNS_MESSAGE = "No local runs to publish yet. Run a batch first.";
+const NO_PUBLISHABLE_RUNS_MESSAGE = "No local runs to publish yet. Run mapped scenarios first.";
 
 // The clear-run-history toast, naming only what was actually removed.
 function clearedHistoryMessage(runs: number, entries: number): string {

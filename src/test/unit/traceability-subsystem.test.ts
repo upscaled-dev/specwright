@@ -673,10 +673,11 @@ describe("TraceabilitySubsystem connection indicator", () => {
     subsystem.dispose();
   });
 
-  it("maps a thrown verify to an unreachable indicator carrying the error text", async () => {
+  it("maps a thrown verify to an unreachable indicator carrying the error text and its cause", async () => {
     const setIndicator = spyIndicator();
     const { config } = makeConfig();
-    const conn = makeConnection(true, () => Promise.reject(new Error("boom")));
+    const cause = Object.assign(new Error("connect ECONNREFUSED 10.0.0.1:443"), { code: "ECONNREFUSED" });
+    const conn = makeConnection(true, () => Promise.reject(new Error("boom", { cause })));
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
@@ -686,7 +687,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
     expect(indicatorCalls(setIndicator).at(-1)).toEqual({
       state: "unreachable",
       label: "acme.atlassian.net",
-      message: "Error: boom",
+      message: "boom (cause: ECONNREFUSED: connect ECONNREFUSED 10.0.0.1:443)",
     });
     subsystem.dispose();
   });

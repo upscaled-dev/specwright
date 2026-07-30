@@ -1,5 +1,5 @@
 import { Logger } from "../utils/logger";
-import { errMsg, scrubJwtLike } from "../utils/text";
+import { errMsg, maskValues, scrubJwtLike, serverMessageOf, serverText } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
 import { describeShape } from "./xray-diagnostics";
 
@@ -41,8 +41,9 @@ export interface JiraProjectSearchDeps {
   signal?: AbortSignal | undefined;
 }
 
-// Non-retryable Jira access failure (bad credentials, forbidden, not found). Carries a value-free,
-// user-facing message so the probe can degrade the project view without leaking response contents.
+// Non-retryable Jira access failure (bad credentials, forbidden, not found). The message is
+// user-facing: status-only from the search paths, and from the identity check the envelope's own text
+// after credential masking and JWT scrubbing, clipped at 300.
 export class JiraAccessError extends Error {
   constructor(message: string) {
     super(message);
@@ -80,11 +81,23 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Basic auth per Jira REST v3. The base64 of `email:token` is the credential in transit and must
-// never be logged; every diagnostic in this module is shape/status/count only.
+// Basic auth per Jira REST v3. The base64 of `email:token` is the credential in transit and is never
+// logged: a response body reaches the output channel only after {@link jiraSecrets} has masked it out.
+function basicAuthValue(credentials: XrayJiraCredentials): string {
+  return Buffer.from(`${credentials.email}:${credentials.token}`).toString("base64");
+}
+
 function basicAuthHeader(credentials: XrayJiraCredentials): string {
-  const encoded = Buffer.from(`${credentials.email}:${credentials.token}`).toString("base64");
-  return `Basic ${encoded}`;
+  return `Basic ${basicAuthValue(credentials)}`;
+}
+
+/**
+ * Everything a Jira response body must not echo back into the log: the API token, the base64 the
+ * Authorization header carries (so an echoed header reads `Basic [redacted]`), and the account email.
+ * Pass it to `maskValues` before any verbatim body is logged or quoted.
+ */
+export function jiraSecrets(credentials: XrayJiraCredentials): string[] {
+  return [credentials.token, basicAuthValue(credentials), credentials.email];
 }
 
 interface JiraPage {
@@ -172,14 +185,12 @@ class JiraProjectSearch {
 
   private async requestPage(url: string): Promise<JiraPage> {
     const response = await this.withBackoff(() => this.timedFetch(url));
-    if (response.status === 401 || response.status === 403 || response.status === 404) {
-      // The 4xx body may echo request/account details, so only its shape is logged, never values.
-      this.deps.logger.error(
-        `Jira project search failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
-      );
-      throw accessErrorFor(response.status);
-    }
     if (!response.ok) {
+      // The user-facing message stays value-free, so the server's own account of the refusal only
+      // exists here: verbatim, with the token masked out in case the body echoes it back.
+      this.deps.logger.error(
+        `Jira project search failed (HTTP ${response.status}); response body:\n${serverText(maskValues(response.bodyText, jiraSecrets(this.deps.credentials)))}`
+      );
       throw accessErrorFor(response.status);
     }
     const body = parseBody(response.bodyText);
@@ -249,9 +260,59 @@ class JiraProjectSearch {
  * narrowed server-side by the optional `query` (Jira matches key and name, case-insensitively).
  * Returns `{ projects, truncated }`: `truncated` is true when the cap cut the list short, so callers
  * never treat absence from a partial list as proof a project is missing. Throws {@link JiraAccessError}
- * with a value-free message on a terminal failure. Diagnostics are allowlisted shape/status/count only
- * (the token and the basic-auth header never reach the logger).
+ * with a value-free message on a terminal failure. A refused response is logged with its body verbatim,
+ * masked by {@link jiraSecrets}, JWT-scrubbed and clipped at 300; a page that succeeds is logged as
+ * shape/status/count only.
  */
 export function searchJiraProjects(deps: JiraProjectSearchDeps): Promise<JiraProjectSearchResult> {
   return new JiraProjectSearch(deps).run();
+}
+
+/**
+ * Confirms who the stored Jira credentials authenticate as via `GET /rest/api/3/myself`, returning the
+ * display name the site knows them by. Throws {@link JiraAccessError} carrying the status and the
+ * server's own words when the site refuses, which is where a missing permission shows up first.
+ */
+export async function fetchJiraIdentity(
+  deps: Pick<JiraProjectSearchDeps, "site" | "credentials" | "logger" | "fetchImpl" | "signal">
+): Promise<string> {
+  const fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const onAbort = (): void => controller.abort();
+  deps.signal?.addEventListener("abort", onAbort);
+  let status: number;
+  let ok: boolean;
+  let bodyText: string;
+  try {
+    const response = await fetchImpl(`https://${deps.site}/rest/api/3/myself`, {
+      method: "GET",
+      headers: { Accept: "application/json", Authorization: basicAuthHeader(deps.credentials) },
+      signal: controller.signal,
+    });
+    status = response.status;
+    ok = response.ok;
+    bodyText = await response.text();
+  } catch (error) {
+    deps.logger.error(`Jira identity check request error: ${scrubJwtLike(errMsg(error))}`);
+    throw new JiraAccessError("Could not reach Jira: check your network connection.");
+  } finally {
+    clearTimeout(timer);
+    deps.signal?.removeEventListener("abort", onAbort);
+  }
+  const body = maskValues(bodyText, jiraSecrets(deps.credentials));
+  if (!ok) {
+    deps.logger.error(`GET /rest/api/3/myself → ${status}; response body:\n${serverText(body)}`);
+    const message = serverMessageOf(parseBody(body));
+    throw new JiraAccessError(
+      message === undefined
+        ? `Jira identity check failed (HTTP ${status}).`
+        : `Jira identity check failed (HTTP ${status}): ${message}`
+    );
+  }
+  const parsed = parseBody(bodyText);
+  const record = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  const name = readString(record["displayName"]) ?? readString(record["emailAddress"]) ?? "an unnamed account";
+  deps.logger.info(`GET /rest/api/3/myself → ${status}; authenticated as ${name}`);
+  return name;
 }

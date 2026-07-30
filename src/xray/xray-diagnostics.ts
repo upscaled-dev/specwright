@@ -3,10 +3,10 @@ import { scrubJwtLike } from "../utils/text";
 const DEPTH_CAP = 6;
 const ERROR_MESSAGE_CLIP = 160;
 
-// Connection diagnostics log allowlisted information only: status, field names, value types,
-// lengths/counts, and rate-limit headers (docs/requirements/traceability-integration-recommendations.md;
-// truncating arbitrary values is not redaction). The type skeleton is exactly what the §5 wire-shape
-// review needs; response values never reach the output channel.
+// The allowlisted view of a response: status, field names, value types, lengths/counts
+// (docs/requirements/traceability-integration-recommendations.md). The type skeleton is exactly what
+// the §5 wire-shape review needs, and it is what a SUCCESSFUL call logs; a refusal logs its body
+// verbatim instead, masked and scrubbed by the caller.
 export function describeShape(value: unknown, depth = 0): unknown {
   if (depth >= DEPTH_CAP) {
     return "…";

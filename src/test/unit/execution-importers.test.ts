@@ -639,12 +639,20 @@ describe("import() error seam", () => {
     ["an array body", ["a", "b"], undefined],
     ["a numeric body", 42, undefined],
     ["an empty text body", "   ", undefined],
+    ["a gateway HTML page", "  <html><head><title>502 Bad Gateway</title></head></html>", undefined],
+    ["an HTML page inside the error string", { error: "<!DOCTYPE html><html><body>Gateway Timeout</body></html>" }, undefined],
   ];
   it.each(MESSAGE_CASES)("reads the server message from %s", async (_label, body, expected) => {
     const error = await failedImport(body);
     expect(error).toBeInstanceOf(XrayImportError);
     expect(error.status).toBe(400);
     expect(error.serverMessage).toBe(expected);
+  });
+
+  it("falls back to the bare status when a gateway answers with an HTML page", async () => {
+    const error = await failedImport("<html><body>502 Bad Gateway</body></html>", 502);
+    expect(error.serverMessage).toBeUndefined();
+    expect(error.message).toBe("Import failed (HTTP 502).");
   });
 
   it("carries the server message of a 5xx too", async () => {

@@ -1,8 +1,8 @@
 import { Logger } from "../utils/logger";
-import { errMsg, scrubJwtLike } from "../utils/text";
+import { errMsg, maskValues, scrubJwtLike, serverText } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
 import { describeShape } from "./xray-diagnostics";
-import { FetchLike, JiraAccessError } from "./jira-project-search";
+import { FetchLike, JiraAccessError, jiraSecrets } from "./jira-project-search";
 import { jqlString } from "./xray-search";
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -189,14 +189,12 @@ class JiraIssueSearch {
 
   private async requestPage(url: string, nextPageToken: string | undefined): Promise<IssuePage> {
     const response = await this.withBackoff(() => this.timedFetch(url, nextPageToken));
-    if (response.status === 400 || response.status === 401 || response.status === 403 || response.status === 404) {
-      // The 4xx body may echo request/account details, so only its shape is logged, never values.
-      this.deps.logger.error(
-        `Jira issue search failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
-      );
-      throw accessErrorFor(response.status);
-    }
     if (!response.ok) {
+      // The user-facing message stays value-free, so the server's own account of the refusal only
+      // exists here: verbatim, with the token masked out in case the body echoes it back.
+      this.deps.logger.error(
+        `Jira issue search failed (HTTP ${response.status}); response body:\n${serverText(maskValues(response.bodyText, jiraSecrets(this.deps.credentials)))}`
+      );
       throw accessErrorFor(response.status);
     }
     const body = parseBody(response.bodyText);
@@ -274,8 +272,9 @@ class JiraIssueSearch {
  * JQL `project = "<key>" AND issuetype = "<type>" ORDER BY created DESC` with each clause dropped when
  * it does not apply, `nextPageToken` pagination, capped at {@link MAX_ISSUES}). Returns `{ issues,
  * truncated }`. Throws {@link JiraAccessError} with a value-free message on a terminal failure. An
- * unscoped requirement search is refused here, before any request leaves. Diagnostics are allowlisted
- * shape/status/count only; the token and basic-auth header never log.
+ * unscoped requirement search is refused here, before any request leaves. A refused response is logged
+ * with its body verbatim, masked by {@link jiraSecrets}, JWT-scrubbed and clipped at 300; a page that
+ * succeeds is logged as shape/status/count only.
  */
 export function searchJiraIssues(deps: JiraIssueSearchDeps): Promise<JiraIssueSearchResult> {
   if (deps.kind === "requirement" && deps.query.trim() === "") {

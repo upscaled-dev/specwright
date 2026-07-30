@@ -421,14 +421,14 @@ describe("Xray setup panel save flow", () => {
     });
   });
 
-  it("keeps the dot connected when Save & Test fails only at the GraphQL stage", async () => {
+  it("drops the dot and names the failed half when Save & Test fails at the GraphQL stage", async () => {
     stubWorkspaceConfig();
     const { commands } = makeCommands("acme.atlassian.net");
     vi.spyOn(commands, "probeConnection").mockResolvedValue({
       ok: false,
       stage: "graphql",
       site: "acme.atlassian.net",
-      message: "Xray GraphQL probe failed (non-OK status or GraphQL errors): see output for details.",
+      message: "Xray GraphQL probe failed (HTTP 403): no permission.",
     });
     const panel = await openPanel(commands);
 
@@ -436,13 +436,13 @@ describe("Xray setup panel save flow", () => {
 
     expect(panel.webview.__posted).toContainEqual({
       type: "conn-state",
-      state: "connected",
-      label: "Connected to acme.atlassian.net",
+      state: "disconnected",
+      label: "Authenticated, but Xray data calls failed",
     });
     expect(panel.webview.__posted.at(-1)).toEqual({
       type: "test-result",
       ok: false,
-      message: "Xray GraphQL probe failed (non-OK status or GraphQL errors): see output for details.",
+      message: "Xray GraphQL probe failed (HTTP 403): no permission.",
     });
   });
 

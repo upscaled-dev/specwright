@@ -161,6 +161,21 @@ describe("fetchJiraAttachmentMeta", () => {
     const meta = await fetchJiraAttachmentMeta(deps(() => Promise.reject(new Error("offline"))));
     expect(meta).toEqual({ enabled: true });
   });
+
+  it("logs a refused probe's body with the credentials masked out", async () => {
+    const { logger, lines } = capturingLogger();
+    const basic = Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64");
+    const body = `Basic ${basic} for ${EMAIL} (token ${TOKEN}) cannot read attachment settings`;
+    const fetchImpl: FetchLike = () => Promise.resolve(response(403, body));
+
+    await fetchJiraAttachmentMeta({ ...deps(fetchImpl), logger });
+
+    const emitted = lines.join("\n");
+    expect(emitted).toContain("Basic [redacted] for [redacted] (token [redacted]) cannot read attachment settings");
+    expect(emitted).not.toContain(TOKEN);
+    expect(emitted).not.toContain(basic);
+    expect(emitted).not.toContain(EMAIL);
+  });
 });
 
 describe("attachmentUploadLimit", () => {

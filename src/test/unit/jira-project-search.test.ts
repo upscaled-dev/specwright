@@ -5,6 +5,7 @@ import {
   FetchLike,
   JiraAccessError,
   JiraProjectSearchResult,
+  fetchJiraIdentity,
   searchJiraProjects,
 } from "../../xray/jira-project-search";
 
@@ -169,7 +170,7 @@ describe("searchJiraProjects", () => {
     expect(projects).toEqual([{ key: "SOLO", name: "SOLO" }]);
   });
 
-  it("throws a value-free JiraAccessError on 401 and logs only the body shape", async () => {
+  it("throws a value-free JiraAccessError on 401 and logs the body with the token masked", async () => {
     const { logger, lines } = capturingLogger();
     const fetchImpl: FetchLike = () =>
       Promise.resolve(response(401, { errorMessages: [`token ${TOKEN} rejected`] }));
@@ -178,8 +179,23 @@ describe("searchJiraProjects", () => {
     await expect(run(fetchImpl, logger)).rejects.toThrow("Jira authentication failed");
 
     const emitted = lines.join("\n");
-    expect(emitted).toContain("response body shape");
+    expect(emitted).toContain("response body:");
+    expect(emitted).toContain("[redacted] rejected");
     expect(emitted).not.toContain(TOKEN);
+  });
+
+  it("masks the basic-auth header and the email out of a refused body", async () => {
+    const { logger, lines } = capturingLogger();
+    const basic = Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64");
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(response(403, { errorMessages: [`Basic ${basic} for ${EMAIL} is not permitted`] }));
+
+    await expect(run(fetchImpl, logger)).rejects.toThrow("Jira denied access");
+
+    const emitted = lines.join("\n");
+    expect(emitted).toContain("Basic [redacted] for [redacted] is not permitted");
+    expect(emitted).not.toContain(basic);
+    expect(emitted).not.toContain(EMAIL);
   });
 
   it("maps 403 and 404 to distinct value-free messages", async () => {
@@ -229,5 +245,57 @@ describe("searchJiraProjects", () => {
     expect(emitted).not.toContain(basic);
     expect(emitted).not.toContain("Authorization");
     expect(emitted).toContain("GET /rest/api/3/project/search");
+  });
+});
+
+describe("fetchJiraIdentity", () => {
+  function identity(fetchImpl: FetchLike, logger: Logger): Promise<string> {
+    return fetchJiraIdentity({ site: SITE, credentials: { email: EMAIL, token: TOKEN }, logger, fetchImpl });
+  }
+
+  it("returns the display name and sends basic auth to /myself", async () => {
+    const { logger, lines } = capturingLogger();
+    let requestedUrl = "";
+    const fetchImpl: FetchLike = (url, init) => {
+      requestedUrl = url;
+      expect((init.headers as Record<string, string>)["Authorization"]).toContain("Basic ");
+      return Promise.resolve(response(200, { displayName: "Jane Tester", accountId: "5b1" }));
+    };
+
+    await expect(identity(fetchImpl, logger)).resolves.toBe("Jane Tester");
+    expect(requestedUrl).toBe(`https://${SITE}/rest/api/3/myself`);
+    expect(lines.join("\n")).toContain("authenticated as Jane Tester");
+  });
+
+  it("falls back to the account email when the site names no display name", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl: FetchLike = () => Promise.resolve(response(200, { emailAddress: EMAIL }));
+
+    await expect(identity(fetchImpl, logger)).resolves.toBe(EMAIL);
+  });
+
+  it("carries the status and the envelope's text on a refusal, with the credentials masked", async () => {
+    const { logger, lines } = capturingLogger();
+    const basic = Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64");
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(
+        response(403, { errorMessages: [`${EMAIL} with token ${TOKEN} (Basic ${basic}) lacks Browse`] })
+      );
+
+    await expect(identity(fetchImpl, logger)).rejects.toThrow(
+      "Jira identity check failed (HTTP 403): [redacted] with token [redacted] (Basic [redacted]) lacks Browse"
+    );
+    const emitted = lines.join("\n");
+    expect(emitted).toContain("GET /rest/api/3/myself → 403");
+    expect(emitted).not.toContain(TOKEN);
+    expect(emitted).not.toContain(basic);
+    expect(emitted).not.toContain(EMAIL);
+  });
+
+  it("reports an unreachable site rather than a status", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl: FetchLike = () => Promise.reject(new Error("fetch failed", { cause: new Error("ECONNREFUSED") }));
+
+    await expect(identity(fetchImpl, logger)).rejects.toThrow("Could not reach Jira");
   });
 });

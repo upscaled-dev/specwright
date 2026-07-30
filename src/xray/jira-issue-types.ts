@@ -1,8 +1,8 @@
 import { Logger } from "../utils/logger";
-import { errMsg, scrubJwtLike } from "../utils/text";
+import { errMsg, maskValues, scrubJwtLike, serverText } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
 import { describeShape } from "./xray-diagnostics";
-import { FetchLike } from "./jira-project-search";
+import { FetchLike, jiraSecrets } from "./jira-project-search";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESULTS = 200;
@@ -163,10 +163,11 @@ class IssueTypeResolver {
     }
     const parsed = tryParse(response.bodyText);
     if (!response.ok) {
-      // The 4xx/5xx body may echo request/account details, so only its shape is logged, never values.
+      // The refusal's own wording is the only account of why createmeta failed, so it is logged
+      // verbatim, with the credentials masked out in case the body echoes them back.
       this.deps.logger.warn(
-        `Issue-type resolution failed (HTTP ${response.status}); response body shape:\n${stringifyShape(
-          parsed.ok ? parsed.value : response.bodyText
+        `Issue-type resolution failed (HTTP ${response.status}); response body:\n${serverText(
+          maskValues(response.bodyText, jiraSecrets(this.deps.credentials))
         )}`
       );
       return { kind: "unknown" };
@@ -237,8 +238,9 @@ class IssueTypeResolver {
  * `unavailable` with the project's non-subtask type names, the excluded subtask names plus the one
  * that matched the target (`subtaskMatch`), and a `teamManaged` flag (true when any listed type
  * carries a `PROJECT`-scoped entry) when the listing succeeds but lacks it, and `unknown` on any HTTP
- * error, network fault, timeout, or unparseable body. Never throws. Diagnostics are allowlisted
- * status/shape only: the token and the basic-auth header never reach the logger.
+ * error, network fault, timeout, or unparseable body. Never throws. A refused response is logged with
+ * its body verbatim, masked by {@link jiraSecrets}, JWT-scrubbed and clipped at 300; a successful one
+ * is logged as status/shape only.
  */
 export function resolveExecutionIssueType(deps: IssueTypeResolverDeps): Promise<IssueTypeResolution> {
   return new IssueTypeResolver(deps).run();

@@ -1,10 +1,10 @@
 import * as vscode from "vscode";
 import { Logger } from "../utils/logger";
-import { errMsg, scrubJwtLike } from "../utils/text";
+import { errMsg, maskValues, scrubJwtLike, serverMessage, serverText } from "../utils/text";
 import { normalizeSiteUrl, projectFromKey } from "./xray-adapter";
-import { XrayCredentialStore } from "./xray-credential-store";
+import { XrayCredentialStore, XrayJiraCredentials } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
-import { JiraAccessError, JiraProject, searchJiraProjects } from "./jira-project-search";
+import { JiraAccessError, JiraProject, fetchJiraIdentity, searchJiraProjects } from "./jira-project-search";
 import { describeJwt, describeShape, graphqlErrorSummaries } from "./xray-diagnostics";
 import { buildKeysJql, jqlString } from "./xray-search";
 
@@ -135,7 +135,10 @@ function errorShapeQuery(): string {
 
 interface GraphqlResult {
   ok: boolean;
+  status: number;
+  bodyText: string;
   body: unknown;
+  errors: string[];
 }
 
 async function graphqlRequest(base: string, logger: Logger, jwt: string, label: string, query: string): Promise<GraphqlResult> {
@@ -149,6 +152,11 @@ async function graphqlRequest(base: string, logger: Logger, jwt: string, label: 
   });
   const body = parseBody(response.bodyText);
   logger.info(`POST /graphql (${label}) → ${response.status}; response shape:\n${stringifyShape(body)}`);
+  if (!response.ok) {
+    // A rejected data call is where the region/license/permission truth lives, and the shape alone
+    // never carried it, so the server's own words go to the output channel verbatim.
+    logger.error(`POST /graphql (${label}) → ${response.status}; response body:\n${serverText(response.bodyText)}`);
+  }
   const headers = rateLimitHeaders(response.headers);
   if (Object.keys(headers).length > 0) {
     logger.info(`Rate/limit headers (${label}):\n${JSON.stringify(headers, null, 2)}`);
@@ -160,7 +168,34 @@ async function graphqlRequest(base: string, logger: Logger, jwt: string, label: 
   const data =
     body !== null && typeof body === "object" ? (body as { data?: unknown }).data : undefined;
   const hasData = data !== null && data !== undefined;
-  return { ok: response.ok && errorSummaries.length === 0 && hasData, body };
+  return {
+    ok: response.ok && errorSummaries.length === 0 && hasData,
+    status: response.status,
+    bodyText: response.bodyText,
+    body,
+    errors: errorSummaries,
+  };
+}
+
+/**
+ * One sentence per distinct way a GraphQL probe can fail, so the toast and the setup panel say what
+ * the data host actually did instead of folding every case into "non-OK status or GraphQL errors".
+ */
+export function graphqlFailureMessage(probe: Pick<GraphqlResult, "status" | "bodyText" | "errors">): string {
+  if (probe.status === 401) {
+    return "Xray authenticated the client, but the data host rejected the call (HTTP 401): check the playwrightBddRunner.xray.apiRegion setting and that this site has an Xray license.";
+  }
+  if (probe.status === 429) {
+    return "Xray rate-limited the connection test (HTTP 429): wait a minute before testing again.";
+  }
+  const first = probe.errors[0];
+  if (first !== undefined) {
+    return `Xray accepted the login but refused the query, usually a permission problem: ${first}`;
+  }
+  const body = serverMessage(probe.bodyText);
+  return body === undefined
+    ? `Xray GraphQL probe failed (HTTP ${probe.status}): see output for details.`
+    : `Xray GraphQL probe failed (HTTP ${probe.status}): ${body}`;
 }
 
 export function extractTotal(body: unknown): number | undefined {
@@ -246,10 +281,10 @@ async function authenticate(
   });
   logger.info(`POST /authenticate → ${response.status}`);
   if (!response.ok) {
-    // §5 leaves the bad-credential body undocumented; it may echo the request, so only its field
-    // names and value types are logged, never values.
+    // §5 leaves the bad-credential body undocumented and it may echo the request, so the credentials
+    // just sent are masked out of it; what is left is the server's own account of the refusal.
     logger.error(
-      `Authentication failed (HTTP ${response.status}); response body shape:\n${stringifyShape(parseBody(response.bodyText))}`
+      `Authentication failed (HTTP ${response.status}); response body:\n${serverText(maskValues(response.bodyText, [credentials.clientSecret, credentials.clientId]))}`
     );
     return { ok: false, status: response.status };
   }
@@ -288,13 +323,21 @@ function projectPhrase(p: XrayProjectSummary): string {
   return `project ${p.project}: ${p.totalTests} Xray tests`;
 }
 
+// What the optional Jira leg of a probe found: who the credentials authenticate as, the accessible
+// project list, and the one failure that ends the leg. None of it flips the Xray outcome (§5, Jira
+// credentials are optional).
+interface JiraOutcome {
+  identity?: string | undefined;
+  projects?: JiraProject[] | undefined;
+  truncated: boolean;
+  error?: string | undefined;
+}
+
 function successMessage(
   site: string,
   projects: readonly XrayProjectSummary[],
   failed: number,
-  jiraProjects?: readonly JiraProject[] | undefined,
-  jiraError?: string | undefined,
-  jiraTruncated = false
+  jira: JiraOutcome
 ): string {
   const parts = projects.map(projectPhrase).join(", ");
   let base = projects.length === 0
@@ -303,14 +346,37 @@ function successMessage(
   if (failed > 0) {
     base = `${base}; ${failed} project probe(s) failed, see output`;
   }
-  if (jiraError !== undefined) {
-    base = `${base}; ${jiraError}`;
-  } else if (jiraProjects !== undefined) {
-    base = jiraTruncated
-      ? `${base}; ${jiraProjects.length}+ Jira projects accessible (list truncated)`
-      : `${base}; ${jiraProjects.length} Jira project(s) accessible`;
+  if (jira.identity !== undefined) {
+    base = `${base}; Jira authenticated as ${jira.identity}`;
+  }
+  if (jira.error !== undefined) {
+    base = `${base}; ${jira.error}`;
+  } else if (jira.projects !== undefined) {
+    base = jira.truncated
+      ? `${base}; ${jira.projects.length}+ Jira projects accessible (list truncated)`
+      : `${base}; ${jira.projects.length} Jira project(s) accessible`;
   }
   return base;
+}
+
+// Identity first: a wrong token or a missing Browse permission answers /myself before the project
+// list ever runs, and the display name is the confirmation a user can act on. The first failure ends
+// the leg, since the project list would only repeat it.
+async function probeJira(site: string, credentials: XrayJiraCredentials, logger: Logger): Promise<JiraOutcome> {
+  const jira: JiraOutcome = { truncated: false };
+  try {
+    jira.identity = await fetchJiraIdentity({ site, credentials, logger });
+    const result = await searchJiraProjects({ site, credentials, logger });
+    jira.projects = result.projects;
+    jira.truncated = result.truncated;
+    logger.info(
+      `Jira project search returned ${result.projects.length} accessible project(s)${result.truncated ? " (list truncated at the cap)" : ""}`
+    );
+  } catch (error) {
+    jira.error = error instanceof JiraAccessError ? error.message : "Jira access unavailable.";
+    logger.error(`Jira access error: ${scrubJwtLike(errMsg(error))}`);
+  }
+  return jira;
 }
 
 // Indicative, value-free auth messages shared by the toast and the panel status area (§5: no
@@ -362,32 +428,19 @@ export async function probeXrayConnection(
     return { ok: true, stage: "ok", site, message: `Connected to ${site}` };
   }
 
-  // Optional Jira project list (§5 project-view bullet). This never flips ok/stage; a Jira failure
-  // is captured in jiraError and degrades the project view only. Fetched before the GraphQL probes
-  // so the cross-check can run and so the view still populates even on a later GraphQL-stage failure.
-  let jiraProjects: JiraProject[] | undefined;
-  let jiraTruncated = false;
-  let jiraError: string | undefined;
+  // Optional Jira leg (§5 project-view bullet). This never flips ok/stage; a Jira failure degrades
+  // the project view only. Run before the GraphQL probes so the cross-check can run and so the view
+  // still populates even on a later GraphQL-stage failure.
   const jiraCredentials = await credentialStore.getJiraCredentials(deps.site);
-  if (jiraCredentials) {
-    try {
-      const result = await searchJiraProjects({ site, credentials: jiraCredentials, logger });
-      jiraProjects = result.projects;
-      jiraTruncated = result.truncated;
-      logger.info(
-        `Jira project search returned ${jiraProjects.length} accessible project(s)${jiraTruncated ? " (list truncated at the cap)" : ""}`
-      );
-    } catch (error) {
-      jiraError = error instanceof JiraAccessError ? error.message : "Jira project list unavailable.";
-      logger.error(`Jira project search error: ${scrubJwtLike(errMsg(error))}`);
-    }
-  }
-  const jiraKeys = jiraProjects ? new Set(jiraProjects.map((p) => p.key.toUpperCase())) : undefined;
+  const jira: JiraOutcome = jiraCredentials
+    ? await probeJira(site, jiraCredentials, logger)
+    : { truncated: false };
+  const jiraKeys = jira.projects ? new Set(jira.projects.map((p) => p.key.toUpperCase())) : undefined;
   const finish = (partial: XrayConnectionOutcome): XrayConnectionOutcome => ({
     ...partial,
-    ...(jiraProjects !== undefined ? { jiraProjects } : {}),
-    ...(jiraTruncated ? { jiraTruncated: true } : {}),
-    ...(jiraError !== undefined ? { jiraError } : {}),
+    ...(jira.projects !== undefined ? { jiraProjects: jira.projects } : {}),
+    ...(jira.truncated ? { jiraTruncated: true } : {}),
+    ...(jira.error !== undefined ? { jiraError: jira.error } : {}),
   });
 
   const keys = uniqueKeys(knownTestKeys()).slice(0, MAX_PROBE_KEYS);
@@ -397,7 +450,7 @@ export async function probeXrayConnection(
       ok: true,
       stage: "ok",
       site,
-      message: successMessage(site, [], 0, jiraProjects, jiraError, jiraTruncated),
+      message: successMessage(site, [], 0, jira),
     });
   }
 
@@ -412,11 +465,11 @@ export async function probeXrayConnection(
         ok: false,
         stage: "graphql",
         site,
-        message: "Xray GraphQL probe failed (non-OK status or GraphQL errors): see output for details.",
+        message: graphqlFailureMessage(probeA.ok ? probeB : probeA),
       });
     }
     await probeErrorShape(base, logger, jwt);
-    const probed = await probeProjects(base, logger, jwt, keys, jiraKeys, jiraTruncated);
+    const probed = await probeProjects(base, logger, jwt, keys, jiraKeys, jira.truncated);
     projects = probed.summaries;
     projectFailures = probed.failed;
   } catch (error) {
@@ -433,7 +486,7 @@ export async function probeXrayConnection(
     ok: true,
     stage: "ok",
     site,
-    message: successMessage(site, projects, projectFailures, jiraProjects, jiraError, jiraTruncated),
+    message: successMessage(site, projects, projectFailures, jira),
     projects,
   });
 }
