@@ -101,6 +101,58 @@ describe("createXrayResultPublishing: publish routing (pin: create vs append map
     expect(outcome.ref.key).toBe("XNP-100");
   });
 
+  it("append sends schema-complete outline iterations with nanosecond durations", async () => {
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport }));
+    const scenario: ScenarioRef = {
+      filePath: "/ws/a.feature",
+      line: 3,
+      name: "Outline",
+      kind: "outline",
+      outlineName: "Outline",
+    };
+
+    await publishing.publish(
+      artifact([
+        mapped("Outline", "CALC-4", {
+          scenario,
+          outcome: "failed",
+          durationMs: 4000,
+          iterations: [
+            { name: "Example #1", outcome: "passed", durationMs: 1500, attempts: 1 },
+            { name: "Example #2", outcome: "failed", durationMs: 2500, attempts: 1 },
+          ],
+        }),
+      ]),
+      { mode: "append", executionKey: "XNP-77" }
+    );
+
+    expect(t.postJson.mock.calls[0]![1]).toEqual({
+      testExecutionKey: "XNP-77",
+      tests: [
+        {
+          testKey: "CALC-4",
+          status: "FAILED",
+          iterations: [
+            {
+              name: "Example #1",
+              status: "PASSED",
+              parameters: [{ name: "example", value: "Example #1" }],
+              duration: "1500000000",
+            },
+            {
+              name: "Example #2",
+              status: "FAILED",
+              parameters: [{ name: "example", value: "Example #2" }],
+              duration: "2500000000",
+            },
+          ],
+        },
+      ],
+    });
+    expect(t.postMultipart).not.toHaveBeenCalled();
+  });
+
   // Whether a real Xray response can carry neither field is an open wire question, so the guard is the
   // honest one: the results landed somewhere this session cannot name, and no key is invented for them.
   it("leaves the ref empty and logs when a create response carries neither key nor id", async () => {

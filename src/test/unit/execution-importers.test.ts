@@ -72,8 +72,8 @@ describe("buildXrayJsonPayload", () => {
         '{"testKey":"CALC-2","status":"PASSED","comment":"passed on retry (3 attempts)"},' +
         '{"testKey":"CALC-3","status":"FAILED"},' +
         '{"testKey":"CALC-4","status":"PASSED","iterations":[' +
-        '{"name":"Example #1","status":"PASSED","duration":"1500"},' +
-        '{"name":"Example #2","status":"FAILED","duration":"2500"}]}]}'
+        '{"name":"Example #1","status":"PASSED","parameters":[{"name":"example","value":"Example #1"}],"duration":"1500000000"},' +
+        '{"name":"Example #2","status":"FAILED","parameters":[{"name":"example","value":"Example #2"}],"duration":"2500000000"}]}]}'
     );
   });
 
@@ -109,6 +109,7 @@ describe("buildXrayJsonPayload", () => {
           iterations: [
             { name: "row1", outcome: "passed", durationMs: 100, attempts: 1 },
             { name: "row2", outcome: "failed", durationMs: 200, attempts: 1 },
+            { name: "row3", outcome: "skipped", durationMs: 0, attempts: 1 },
           ],
         }),
       ],
@@ -116,9 +117,24 @@ describe("buildXrayJsonPayload", () => {
     });
     expect(payload.tests[0]!.iterations).toBeUndefined();
     expect(payload.tests[1]!.iterations).toEqual([
-      { name: "row1", status: "PASSED", duration: "100" },
-      { name: "row2", status: "FAILED", duration: "200" },
+      { name: "row1", status: "PASSED", parameters: [{ name: "example", value: "row1" }], duration: "100000000" },
+      { name: "row2", status: "FAILED", parameters: [{ name: "example", value: "row2" }], duration: "200000000" },
+      { name: "row3", status: "TODO", parameters: [{ name: "example", value: "row3" }], duration: "0" },
     ]);
+  });
+
+  // The enforced validator requires a non-empty parameters array per iteration, and a positional value
+  // would mislabel the row whenever only part of an outline ran.
+  it("labels a partially run outline's iteration with its own row title", () => {
+    const payload = buildXrayJsonPayload({
+      results: [
+        pub(ref("f", 1, "outline", "outline"), "C-1", {
+          iterations: [{ name: "Example #4", outcome: "failed", durationMs: 250, attempts: 1 }],
+        }),
+      ],
+      request: { mode: "append", executionKey: "X-1" },
+    });
+    expect(payload.tests[0]!.iterations![0]!.parameters).toEqual([{ name: "example", value: "Example #4" }]);
   });
 
   it("places testExecutionKey at the top level (not inside tests)", () => {

@@ -220,7 +220,7 @@ The outline is published as one test in the execution, and the rows you ran appe
 - **Add to existing execution** sends each row as an iteration of the test, carrying the row's status and duration.
 - **Create new execution** sends each row as its own scenario entry in a Cucumber report, named `Outline name (row title)`, and Xray folds those entries into the same test run.
 
-Either way the test run's status aggregates the rows, so one failing row fails the test run in Xray. Rows carry the row title Playwright reports, normally `Example #1`, `Example #2`, and so on. That title is the only row-specific data Xray receives, so the row's parameter values are not visible in the execution.
+Either way the test run's status aggregates the rows, so one failing row fails the test run in Xray. Rows carry the row title Playwright reports, normally `Example #1`, `Example #2`, and so on. When adding to an existing execution, each row also carries a synthetic `example` parameter holding that same title, so the title appears among the iteration's parameters in Xray. The column values from the Examples table are not sent.
 
 ### Read the counts
 

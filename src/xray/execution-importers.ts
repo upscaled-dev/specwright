@@ -169,6 +169,7 @@ export interface XrayJsonEvidence {
 export interface XrayJsonIteration {
   readonly name: string;
   readonly status: string;
+  readonly parameters: readonly { readonly name: string; readonly value: string }[];
   readonly duration: string;
 }
 
@@ -222,7 +223,7 @@ function toXrayJsonTest(result: PublishableResult, evidence: readonly EmbeddedEv
   // steps/examples/results/iterations are mutually exclusive per test (schema dependency): iterations
   // ONLY for outline results, a plain top-level status otherwise.
   if (result.iterations && result.iterations.length > 0) {
-    test.iterations = result.iterations.map(toXrayJsonIteration);
+    test.iterations = result.iterations.map((iteration) => toXrayJsonIteration(iteration));
   }
   if (evidence.length > 0) {
     test.evidence = evidence.map((item) => ({ data: item.data, filename: item.filename, contentType: item.contentType }));
@@ -231,9 +232,16 @@ function toXrayJsonTest(result: PublishableResult, evidence: readonly EmbeddedEv
 }
 
 function toXrayJsonIteration(iteration: RunArtifactIteration): XrayJsonIteration {
-  // IterationResult.duration is a string in the schema; the artifact carries milliseconds. `parameters`
-  // is omitted; the artifact records iteration names only (accepted).
-  return { name: iteration.name, status: XRAY_STATUS[iteration.outcome], duration: String(iteration.durationMs) };
+  // playwright-xray, the reference reporter for this endpoint, always sends a non-empty `parameters` array
+  // per iteration, so a synthetic `example` parameter rides along, carrying the row title: the artifact
+  // records no column values, and a positional label would lie whenever only some rows ran.
+  // IterationResult.duration is a string of nanoseconds; the artifact carries milliseconds.
+  return {
+    name: iteration.name,
+    status: XRAY_STATUS[iteration.outcome],
+    parameters: [{ name: "example", value: iteration.name }],
+    duration: String(iteration.durationMs * MS_TO_NS),
+  };
 }
 
 export class XrayJsonImporter implements ExecutionImporter<XrayJsonInput, XrayJsonPayload> {
