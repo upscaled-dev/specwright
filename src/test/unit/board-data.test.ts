@@ -777,7 +777,7 @@ describe("buildExecutionRows", () => {
     expect(buildExecutionRows([])).toEqual([]);
   });
 
-  it("orders rows newest first by published time", () => {
+  it("orders execution parents by their newest activity", () => {
     const rows = buildExecutionRows([
       ledgerEntry({ executionRef: "OLD-1", publishedAt: 1000 }),
       ledgerEntry({ executionRef: "NEW-1", publishedAt: 3000 }),
@@ -786,30 +786,59 @@ describe("buildExecutionRows", () => {
     expect(rows.map((r) => r.key)).toEqual(["NEW-1", "MID-1", "OLD-1"]);
   });
 
-  it("renders the pass rate and results imported from the recorded counts and total", () => {
+  it("groups activities for the same execution, newest first", () => {
+    const rows = buildExecutionRows([
+      ledgerEntry({ executionRef: "XNP-1", mode: "create-new", publishedAt: 1000 }),
+      ledgerEntry({ executionRef: "PAY-9", mode: "create-new", publishedAt: 2000 }),
+      ledgerEntry({ executionRef: "XNP-1", mode: "append", publishedAt: 3000 }),
+    ]);
+
+    expect(rows.map((row) => row.key)).toEqual(["XNP-1", "PAY-9"]);
+    const [first] = rows;
+    expect(first).toMatchObject({ kind: "group", activityCount: 2 });
+    expect(first?.kind === "group" ? first.activities.map((activity) => activity.action) : []).toEqual([
+      "Appended",
+      "Created",
+    ]);
+  });
+
+  it("renders the pass rate and results imported on the recorded activity", () => {
     const [row] = buildExecutionRows([ledgerEntry({ passed: 3, failed: 1, skipped: 2, total: 6 })]);
-    expect(row).toMatchObject({ passRate: "3/6 passed", resultsImported: "6" });
+    expect(row?.kind === "group" ? row.activities[0] : undefined).toMatchObject({
+      passRate: "3/6 passed",
+      resultsImported: "6",
+    });
   });
 
   it("renders a plain dash for the rate and imported count when an entry recorded no counts", () => {
     const [row] = buildExecutionRows([ledgerEntry()]);
-    expect(row).toMatchObject({ passRate: "-", resultsImported: "-" });
+    expect(row?.kind === "group" ? row.activities[0] : undefined).toMatchObject({
+      passRate: "-",
+      resultsImported: "-",
+    });
   });
 
   it("shows the imported total but dashes the pass rate when pass/fail/skip fall short of it (timed out or interrupted)", () => {
     // 3 passed + 1 timed-out: passed+failed+skipped is 3, but 4 results were imported; the pass rate
     // cannot be honestly stated, so it dashes while Imported still reports the whole total.
     const [row] = buildExecutionRows([ledgerEntry({ passed: 3, failed: 0, skipped: 0, total: 4 })]);
-    expect(row).toMatchObject({ resultsImported: "4", passRate: "-" });
+    expect(row?.kind === "group" ? row.activities[0] : undefined).toMatchObject({
+      resultsImported: "4",
+      passRate: "-",
+    });
   });
 
-  it("maps the publish mode to a Created or Appended action, dashing an entry with none", () => {
+  it("maps the activity mode to Created or Appended, dashing an entry with none", () => {
     const rows = buildExecutionRows([
       ledgerEntry({ executionRef: "A-1", publishedAt: 3000, mode: "create-new" }),
       ledgerEntry({ executionRef: "B-1", publishedAt: 2000, mode: "append" }),
       ledgerEntry({ executionRef: "C-1", publishedAt: 1000 }),
     ]);
-    expect(rows.map((r) => r.action)).toEqual(["Created", "Appended", "-"]);
+    expect(rows.map((row) => (row.kind === "group" ? row.activities[0]!.action : row.action))).toEqual([
+      "Created",
+      "Appended",
+      "-",
+    ]);
   });
 
   it("renders a standalone create as Created (empty), dashing the cells it has no counts for", () => {
@@ -817,31 +846,54 @@ describe("buildExecutionRows", () => {
       ledgerEntry({ executionRef: "XNP-7", summary: "CALC Test Execution (2026-07-26)", mode: "created-empty" }),
     ]);
     expect(row).toMatchObject({
+      kind: "group",
       key: "XNP-7",
       summary: "CALC Test Execution (2026-07-26)",
-      action: "Created (empty)",
-      resultsImported: "-",
-      passRate: "-",
+      activityCount: 1,
+      activities: [{ action: "Created (empty)", resultsImported: "-", passRate: "-" }],
     });
   });
 
-  it("carries the summary and renders the published date as an ISO day", () => {
+  it("carries the summary and latest date on the parent and the date on its child", () => {
     const [row] = buildExecutionRows([ledgerEntry({ summary: "Nightly", publishedAt: Date.UTC(2026, 6, 22) })]);
-    expect(row).toMatchObject({ summary: "Nightly", publishedAt: "2026-07-22" });
+    expect(row).toMatchObject({
+      summary: "Nightly",
+      latestPublishedAt: "2026-07-22",
+      activities: [{ publishedAt: "2026-07-22" }],
+    });
+  });
+
+  it("reuses a known execution summary for a newer append parent", () => {
+    const rows = buildExecutionRows([
+      ledgerEntry({ executionRef: "XNP-7", mode: "append", publishedAt: 3000 }),
+      ledgerEntry({ executionRef: "XNP-7", summary: "Nightly regression", mode: "create-new", publishedAt: 2000 }),
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ summary: "Nightly regression", activityCount: 2 });
+  });
+
+  it("uses the newest nonblank summary when the ledger contains more than one", () => {
+    const [row] = buildExecutionRows([
+      ledgerEntry({ executionRef: "XNP-7", summary: "Current", publishedAt: 3000 }),
+      ledgerEntry({ executionRef: "XNP-7", summary: "Older", publishedAt: 2000 }),
+    ]);
+
+    expect(row?.summary).toBe("Current");
   });
 
   it("defaults an absent summary to an empty string", () => {
     expect(buildExecutionRows([ledgerEntry()])[0]!.summary).toBe("");
   });
 
-  it("counts how many entries published to the same execution key", () => {
+  it("counts all activities under the execution parent", () => {
     const rows = buildExecutionRows([
       ledgerEntry({ executionRef: "XNP-1", publishedAt: 3000 }),
       ledgerEntry({ executionRef: "XNP-1", publishedAt: 2000 }),
       ledgerEntry({ executionRef: "XNP-9", publishedAt: 1000 }),
     ]);
-    expect(rows.map((r) => [r.key, r.timesFromHere])).toEqual([
-      ["XNP-1", 2],
+
+    expect(rows.map((row) => [row.key, row.activityCount])).toEqual([
       ["XNP-1", 2],
       ["XNP-9", 1],
     ]);
@@ -849,14 +901,29 @@ describe("buildExecutionRows", () => {
 
   // An entry whose ref is unknown names no execution, so two of them are two unrelated publishes rather
   // than one execution published to twice.
-  it("counts an entry with no execution ref as its own row, printing the phrase for it", () => {
+  it("keeps entries with no execution ref as independent leaves, printing the phrase for each", () => {
     const rows = buildExecutionRows([
-      ledgerEntry({ executionRef: "", publishedAt: 2000 }),
-      ledgerEntry({ executionRef: "", publishedAt: 1000 }),
+      ledgerEntry({ executionRef: "", summary: "First unknown", publishedAt: 2000 }),
+      ledgerEntry({ executionRef: "", summary: "Second unknown", publishedAt: 1000 }),
     ]);
-    expect(rows.map((r) => r.timesFromHere)).toEqual([1, 1]);
+
+    expect(rows.map((row) => row.kind)).toEqual(["unknown", "unknown"]);
+    expect(rows.map((row) => row.activityCount)).toEqual([1, 1]);
     expect(rows.map((r) => r.keyLabel)).toEqual([UNKNOWN_EXECUTION, UNKNOWN_EXECUTION]);
     expect(rows.map((r) => r.key)).toEqual(["", ""]);
+    expect(rows.map((r) => r.summary)).toEqual(["First unknown", "Second unknown"]);
+  });
+
+  it("preserves input order when activities have equal timestamps", () => {
+    const [row] = buildExecutionRows([
+      ledgerEntry({ executionRef: "XNP-1", mode: "create-new", publishedAt: 1000 }),
+      ledgerEntry({ executionRef: "XNP-1", mode: "append", publishedAt: 1000 }),
+    ]);
+
+    expect(row?.kind === "group" ? row.activities.map((activity) => activity.action) : []).toEqual([
+      "Created",
+      "Appended",
+    ]);
   });
 
   it("labels a row that has a reference with the reference itself", () => {
@@ -880,6 +947,18 @@ describe("filterExecutionRows", () => {
 
   it("matches on the summary, case-insensitively", () => {
     expect(filterExecutionRows(rows, "CHECKOUT").map((r) => r.key)).toEqual(["XNP-1"]);
+  });
+
+  it("matches child activity text and retains the parent's complete history", () => {
+    const grouped = buildExecutionRows([
+      ledgerEntry({ executionRef: "XNP-1", mode: "append", publishedAt: 3000 }),
+      ledgerEntry({ executionRef: "XNP-1", mode: "create-new", publishedAt: 2000 }),
+      ledgerEntry({ executionRef: "PAY-9", mode: "create-new", publishedAt: 1000 }),
+    ]);
+    const matches = filterExecutionRows(grouped, "appended");
+
+    expect(matches.map((row) => row.key)).toEqual(["XNP-1"]);
+    expect(matches[0]).toMatchObject({ kind: "group", activityCount: 2 });
   });
 
   // The reference is matched AS PRINTED, so the one row the user cannot search by key is still findable

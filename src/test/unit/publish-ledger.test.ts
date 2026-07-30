@@ -154,34 +154,36 @@ describe("standalone execution entries", () => {
     expect(updated[1]!.pendingAttachments).toEqual(["/b"]);
   });
 
-  // From here counts the entries naming a key, creations included, so a key that was created empty and
-  // then published to reads the same number on every one of its rows.
-  it("counts itself alongside the publishes that later landed on the same key", () => {
+  // The parent history includes the empty creation and every publish that later named the same key.
+  it("groups itself alongside the publishes that later landed on the same key", () => {
     const rows = buildExecutionRows([
       standalone("XNP-7"),
       entry({ artifactId: "run-1", executionRef: "XNP-7", mode: "create-new", publishedAt: 3000 }),
       entry({ artifactId: "run-2", executionRef: "XNP-7", mode: "append", publishedAt: 4000 }),
     ]);
 
-    expect(rows.map((row) => [row.action, row.timesFromHere])).toEqual([
-      ["Appended", 3],
-      ["Created", 3],
-      ["Created (empty)", 3],
-    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: "group",
+      key: "XNP-7",
+      activityCount: 3,
+      activities: [{ action: "Appended" }, { action: "Created" }, { action: "Created (empty)" }],
+    });
   });
 
-  it("leaves another key's From here count alone", () => {
+  it("keeps another key's activity history separate", () => {
     const rows = buildExecutionRows([
       standalone("XNP-7"),
       entry({ artifactId: "run-1", executionRef: "XNP-1", mode: "create-new", publishedAt: 1500 }),
       entry({ artifactId: "run-2", executionRef: "XNP-1", mode: "append", publishedAt: 1000 }),
     ]);
 
-    expect(rows.map((row) => [row.key, row.action, row.timesFromHere])).toEqual([
-      ["XNP-7", "Created (empty)", 1],
-      ["XNP-1", "Created", 2],
-      ["XNP-1", "Appended", 2],
+    expect(rows.map((row) => [row.key, row.activityCount])).toEqual([
+      ["XNP-7", 1],
+      ["XNP-1", 2],
     ]);
+    expect(rows[0]).toMatchObject({ activities: [{ action: "Created (empty)" }] });
+    expect(rows[1]).toMatchObject({ activities: [{ action: "Created" }, { action: "Appended" }] });
   });
 });
 

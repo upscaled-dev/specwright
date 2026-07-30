@@ -115,8 +115,29 @@ function fakeScope(initial?: string): ProjectScopeStore {
 }
 
 const EXECUTIONS: ExecutionRow[] = [
-  { key: "XNP-1", keyLabel: "XNP-1", summary: "Checkout suite", action: "Created", resultsImported: "6", passRate: "5/6 passed", publishedAt: "2026-07-22", timesFromHere: 1 },
-  { key: "PAY-9", keyLabel: "PAY-9", summary: "Payments", action: "Appended", resultsImported: "-", passRate: "-", publishedAt: "2026-07-20", timesFromHere: 2 },
+  {
+    kind: "group",
+    key: "XNP-1",
+    keyLabel: "XNP-1",
+    summary: "Checkout suite",
+    latestPublishedAt: "2026-07-22",
+    activityCount: 1,
+    activities: [
+      { action: "Created", resultsImported: "6", passRate: "5/6 passed", publishedAt: "2026-07-22" },
+    ],
+  },
+  {
+    kind: "group",
+    key: "PAY-9",
+    keyLabel: "PAY-9",
+    summary: "Payments",
+    latestPublishedAt: "2026-07-20",
+    activityCount: 2,
+    activities: [
+      { action: "Appended", resultsImported: "-", passRate: "-", publishedAt: "2026-07-20" },
+      { action: "Created", resultsImported: "4", passRate: "4/4 passed", publishedAt: "2026-07-19" },
+    ],
+  },
 ];
 
 function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
@@ -198,7 +219,8 @@ describe("BoardPanel", () => {
     expect(panel.webview.html).toContain("Tag in file");
     expect(panel.webview.html).toContain("Last result");
     expect(panel.webview.html).toContain("Pass rate");
-    expect(panel.webview.html).toContain("Publishes from this workspace appear here.");
+    expect(panel.webview.html).toContain("<th>Activity</th>");
+    expect(panel.webview.html).toContain("Execution activity from this workspace appears here.");
   });
 
   it("splits the mapping pane's test column into an available group and a mapped group", () => {
@@ -328,12 +350,15 @@ describe("BoardPanel", () => {
     const html = win.__webviewPanels[0]!.webview.html;
 
     expect(html).toContain("Array.isArray(boardState.matrixOpen) ? boardState.matrixOpen : []");
+    expect(html).toContain(
+      "Array.isArray(boardState.executionsCollapsed) ? boardState.executionsCollapsed : []"
+    );
     expect(html).toContain("Number(boardState.executionsShown) || EXECUTIONS_PAGE");
   });
 
-  // The ledger arrives whole and the cap is a render cap: the newest page is painted, and Show older
-  // appends the next one in place rather than repainting the table.
-  it("windows the executions rows behind a Show older control that says how many remain", () => {
+  // The grouped history arrives whole and the cap applies to parents, so children are never split across
+  // pages. Show older appends the next complete parents in place.
+  it("windows execution parents behind a Show older control that says how many remain", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
 
@@ -341,6 +366,20 @@ describe("BoardPanel", () => {
     expect(html).toContain("'Show older (' + remaining + ' more)'");
     expect(html).toContain("executionsShown = from + EXECUTIONS_PAGE;");
     expect(html).toContain("saveState({ executionsShown: executionsShown })");
+    expect(html).toContain("renderExecutionItem(executionItems[i])");
+  });
+
+  // Groups start open so the result detail the flat table used to show remains visible. A saved collapse
+  // folds only that execution, while a search opens matching history without rewriting the saved view.
+  it("renders keyed executions as collapsible parents with activity children", () => {
+    BoardPanel.open(deps());
+    const html = win.__webviewPanels[0]!.webview.html;
+
+    expect(html).toContain("function renderExecutionGroup(group)");
+    expect(html).toContain("let open = filtering || !executionsCollapsed.has(group.key);");
+    expect(html).toContain("rows = group.activities.map(executionActivityRowEl);");
+    expect(html).toContain("toggle.setAttribute('aria-expanded', open ? 'true' : 'false');");
+    expect(html).toContain("saveState({ executionsCollapsed: Array.from(executionsCollapsed) })");
   });
 
   // Source-level only: the webview JS never runs here. The phrase for a missing reference is decided
@@ -350,8 +389,10 @@ describe("BoardPanel", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
 
-    expect(html).toContain("if (!row.key) { return executionCell(row.keyLabel); }");
+    expect(html).toContain("if (!row.key) {");
+    expect(html).toContain("cell.appendChild(document.createTextNode(row.keyLabel));");
     expect(html).toContain("link.textContent = row.keyLabel;");
+    expect(html).toContain("executionsRows.appendChild(unknownExecutionRowEl(item));");
     expect(html).toContain("'Already published to ' + n.target");
     expect(html).toContain("' from the last publish to ' + n.target");
     expect(html).not.toContain(UNKNOWN_EXECUTION);

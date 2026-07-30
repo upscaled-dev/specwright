@@ -429,24 +429,67 @@ export function resolveBoardUnlink(
   return link ? { ref: link.scenario, key } : undefined;
 }
 
-// One row of the Executions tab. Every cell is render-ready text (dates as ISO days, a plain dash
-// where an older ledger entry recorded no counts), except `timesFromHere`, the publish count for this
-// row's execution, which the panel renders as its own column. `action` is the create/append the publish
-// took. `key` is the raw reference the panel opens (empty when the import response named none), and
-// `keyLabel` is what it prints, so the phrase for a missing reference is decided here rather than in the
-// webview.
-export interface ExecutionRow {
-  readonly key: string;
-  readonly keyLabel: string;
-  readonly summary: string;
+// One child in a keyed execution's activity history. Every cell is render-ready text: dates are ISO
+// days, and an older ledger entry that recorded no counts carries a plain dash.
+export interface ExecutionActivityRow {
   readonly action: string;
   readonly resultsImported: string;
   readonly passRate: string;
   readonly publishedAt: string;
-  readonly timesFromHere: number;
 }
 
+// One parent in the Executions tab. The key and summary appear once; its ordered children retain every
+// create/append activity this workspace recorded. `key` is the raw reference the panel opens, while
+// `keyLabel` is what it prints.
+export interface ExecutionGroup {
+  readonly kind: "group";
+  readonly key: string;
+  readonly keyLabel: string;
+  readonly summary: string;
+  readonly latestPublishedAt: string;
+  readonly activityCount: number;
+  readonly activities: readonly ExecutionActivityRow[];
+}
+
+// An import response that named no execution cannot be safely grouped with another blank reference. It
+// remains a standalone activity row, with the printable missing-reference phrase decided here rather
+// than in the webview.
+export interface UnknownExecutionRow extends ExecutionActivityRow {
+  readonly kind: "unknown";
+  readonly key: "";
+  readonly keyLabel: string;
+  readonly summary: string;
+  readonly activityCount: 1;
+}
+
+export type ExecutionRow = ExecutionGroup | UnknownExecutionRow;
+
+interface ExecutionGroupAccumulator {
+  readonly key: string;
+  readonly keyLabel: string;
+  summary: string;
+  readonly latestPublishedAt: string;
+  readonly activities: ExecutionActivityRow[];
+}
+
+type ExecutionItem =
+  | { readonly kind: "group"; readonly group: ExecutionGroupAccumulator }
+  | { readonly kind: "unknown"; readonly row: UnknownExecutionRow };
+
 const DASH = "-";
+
+function executionSummary(entry: LedgerEntry): string {
+  return entry.summary !== undefined && entry.summary.trim() !== "" ? entry.summary : "";
+}
+
+function executionActivity(entry: LedgerEntry): ExecutionActivityRow {
+  return {
+    action: executionAction(entry.mode),
+    resultsImported: executionImported(entry),
+    passRate: executionPassRate(entry),
+    publishedAt: new Date(entry.publishedAt).toISOString().slice(0, 10),
+  };
+}
 
 function executionAction(mode: LedgerEntry["mode"]): string {
   if (mode === "create-new") {
@@ -481,45 +524,96 @@ function executionPassRate(entry: LedgerEntry): string {
 }
 
 /**
- * The Executions tab rows (vscode-free), newest first, over the site-scoped publish ledger. No live
- * remote execution query exists, so this reflects only what this workspace recorded: each row carries the
- * execution key, its summary, what the entry did to it (created, appended, or created empty), the
- * imported result count (the recorded total) and pass rate (rendered only when the recorded pass/fail/skip
- * counts add up to that total, else a dash), the ISO date, and how many ledger entries name that same key,
- * standalone creations included, so every row for one KEY reports the same number. An entry the import
- * response never named has no key to group by, so each such row stands alone and reports 1.
+ * The Executions tab (vscode-free), newest first, over the site-scoped publish ledger. No live remote
+ * query exists, so this reflects only what this workspace recorded. Entries naming the same execution
+ * become one parent whose children preserve each create/append activity, newest first. Its summary is
+ * the newest nonblank summary known anywhere in that history, which also fills in a newer append written
+ * before summaries were recorded. An entry whose import response named no execution remains an
+ * independent leaf: blank references cannot prove that two activities belong together.
  */
 export function buildExecutionRows(entries: readonly LedgerEntry[]): ExecutionRow[] {
-  const timesByKey = new Map<string, number>();
-  for (const entry of entries) {
-    // Tallying the blanks together would report unrelated publishes as repeats of one execution.
-    if (hasExecutionRef(entry.executionRef)) {
-      timesByKey.set(entry.executionRef, (timesByKey.get(entry.executionRef) ?? 0) + 1);
+  const ordered = entries
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => b.entry.publishedAt - a.entry.publishedAt || a.index - b.index)
+    .map(({ entry }) => entry);
+  const groups = new Map<string, ExecutionGroupAccumulator>();
+  const items: ExecutionItem[] = [];
+
+  for (const entry of ordered) {
+    const activity = executionActivity(entry);
+    const summary = executionSummary(entry);
+    if (!hasExecutionRef(entry.executionRef)) {
+      items.push({
+        kind: "unknown",
+        row: {
+          kind: "unknown",
+          key: "",
+          keyLabel: executionLabel(entry.executionRef),
+          summary,
+          activityCount: 1,
+          ...activity,
+        },
+      });
+      continue;
     }
-  }
-  return [...entries]
-    .sort((a, b) => b.publishedAt - a.publishedAt)
-    .map((entry) => ({
+
+    const existing = groups.get(entry.executionRef);
+    if (existing !== undefined) {
+      existing.activities.push(activity);
+      if (existing.summary === "" && summary !== "") {
+        existing.summary = summary;
+      }
+      continue;
+    }
+
+    const group: ExecutionGroupAccumulator = {
       key: entry.executionRef,
       keyLabel: executionLabel(entry.executionRef),
-      summary: entry.summary ?? "",
-      action: executionAction(entry.mode),
-      resultsImported: executionImported(entry),
-      passRate: executionPassRate(entry),
-      publishedAt: new Date(entry.publishedAt).toISOString().slice(0, 10),
-      timesFromHere: timesByKey.get(entry.executionRef) ?? 1,
-    }));
+      summary,
+      latestPublishedAt: activity.publishedAt,
+      activities: [activity],
+    };
+    groups.set(entry.executionRef, group);
+    items.push({ kind: "group", group });
+  }
+
+  return items.map((item) => {
+    if (item.kind === "unknown") {
+      return item.row;
+    }
+    const { group } = item;
+    return {
+      kind: "group",
+      key: group.key,
+      keyLabel: group.keyLabel,
+      summary: group.summary,
+      latestPublishedAt: group.latestPublishedAt,
+      activityCount: group.activities.length,
+      activities: group.activities,
+    };
+  });
 }
 
-// The Executions header search: case-insensitive substring over the reference AS PRINTED and the summary,
-// so a row whose reference is missing is findable by the words the user can see. An empty query returns
-// the rows untouched.
+// The Executions header search is a case-insensitive substring over what the table prints. A parent
+// match retains its whole history; a child match reveals that same whole history rather than presenting
+// a filtered activity list as if it were complete. An empty query returns the rows untouched.
 export function filterExecutionRows(rows: readonly ExecutionRow[], query: string): readonly ExecutionRow[] {
   const needle = query.trim().toLowerCase();
   if (needle === "") {
     return rows;
   }
-  return rows.filter((row) => row.keyLabel.toLowerCase().includes(needle) || row.summary.toLowerCase().includes(needle));
+  const matches = (value: string): boolean => value.toLowerCase().includes(needle);
+  const matchesActivity = (activity: ExecutionActivityRow): boolean =>
+    matches(activity.action) ||
+    matches(activity.resultsImported) ||
+    matches(activity.passRate) ||
+    matches(activity.publishedAt);
+  return rows.filter(
+    (row) =>
+      matches(row.keyLabel) ||
+      matches(row.summary) ||
+      (row.kind === "group" ? row.activities.some(matchesActivity) : matchesActivity(row))
+  );
 }
 
 /**

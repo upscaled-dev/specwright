@@ -112,7 +112,7 @@ Run **Specwright: Open Coverage Board** from the Command Palette or the Traceabi
 | --- | --- |
 | **Mapping** | Link untraced scenarios to synced Xray tests, create tests from selected scenarios, create a Test Set or Test Plan from selected tests, push scenario text, and remove a local link. |
 | **Matrix** | Review the requirement, test, scenario, tag, and latest local result relationships. Empty cells show coverage gaps. |
-| **Executions** | Shows executions created or published from this workspace. It is a local activity ledger, not a complete list of executions in Jira. |
+| **Executions** | Groups this workspace's local create and publish activity under each Test Execution. Expand or collapse a parent to inspect its history. This is not a complete list of executions in Jira. |
 | **Publish** | Select a completed local run and create a new Test Execution or append results to an existing one. |
 
 Use the project selector at the top of the board to narrow the view and to choose the target project for creation actions.

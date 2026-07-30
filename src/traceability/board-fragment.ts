@@ -54,6 +54,10 @@ const BOARD_CSS = `
   .board-pane table.matrix td.older-cell { text-align: center; }
   .board-pane .group-toggle { display: flex; width: 100%; align-items: baseline; gap: 0.4rem; padding: 0.4rem 0.6rem; border: none; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); color: var(--vscode-foreground); font-family: inherit; font-size: inherit; font-weight: 600; text-align: left; cursor: pointer; }
   .board-pane .group-toggle:hover { background: var(--vscode-list-hoverBackground, var(--vscode-editorWidget-background)); }
+  .board-pane table.matrix tr.execution-parent th, .board-pane table.matrix tr.execution-parent td { background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); font-weight: 600; }
+  .board-pane .execution-toggle { width: 1.4rem; margin: 0 0.3rem 0 0; padding: 0; border: none; background: transparent; color: var(--vscode-foreground); font-family: inherit; cursor: pointer; }
+  .board-pane .execution-toggle:hover { color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); }
+  .board-pane tr.execution-child td:first-child { padding-left: 1.4rem; color: var(--vscode-descriptionForeground); }
   #executions-empty { flex: none; }
   @media (max-width: 540px) {
     .board-pane .columns { flex: none; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
@@ -104,11 +108,11 @@ function boardPanesHtml(providerLabel: string): string {
       <div class="verbs">
         <button id="create-execution" class="verb" type="button" disabled>Create Execution</button>
       </div>
-      <div id="executions-empty" class="empty" hidden>Publishes from this workspace appear here.</div>
+      <div id="executions-empty" class="empty" hidden>Execution activity from this workspace appears here.</div>
       <div id="executions-scroll" class="matrix-scroll">
         <table class="matrix">
           <thead>
-            <tr><th>Execution</th><th>Summary</th><th>Action</th><th>Imported</th><th>Pass rate</th><th>Published</th><th>From here</th></tr>
+            <tr><th>Execution</th><th>Summary</th><th>Action</th><th>Imported</th><th>Pass rate</th><th>Date</th><th>Activity</th></tr>
           </thead>
           <tbody id="executions-rows"></tbody>
         </table>
@@ -136,17 +140,21 @@ const BOARD_SCRIPT = `
   const syncStrip = document.getElementById('sync-strip');
   const syncStripText = document.getElementById('sync-strip-text');
 
-  // What the board looks like rather than what it holds: which matrix files are unfolded and how far the
-  // executions window has been pulled down. Both ride the webview's own state, so a window reload gets
-  // the board back the way it was left, and both are the webview's alone: neither reaches the host.
+  // What the board looks like rather than what it holds: which matrix files are unfolded, which
+  // execution histories are folded, and how far the executions window has been pulled down. All ride
+  // the webview's own state, so a window reload gets the board back the way it was left, and none reaches
+  // the host.
   // State outlives the script that wrote it, so a key left by another version is read as data, never
   // trusted: a throw on this line would take the fragment's message handler with it, and the bad value
   // persists, so the pane would come back blank on every reload.
   const boardState = window.__spec.state();
   const matrixOpen = new Set(Array.isArray(boardState.matrixOpen) ? boardState.matrixOpen : []);
+  const executionsCollapsed = new Set(
+    Array.isArray(boardState.executionsCollapsed) ? boardState.executionsCollapsed : []
+  );
   const EXECUTIONS_PAGE = 50;
   let executionsShown = Number(boardState.executionsShown) || EXECUTIONS_PAGE;
-  let ledgerRows = [];
+  let executionItems = [];
   let olderRow = null;
 
   // A scenario card carries kind 'scenario' + its drop id; a test card kind 'test' + its key. A drop is
@@ -470,9 +478,14 @@ const BOARD_SCRIPT = `
   }
 
   // The host decides what this cell says; the only call left here is whether there is a reference to open.
-  function executionKeyCell(row) {
-    if (!row.key) { return executionCell(row.keyLabel); }
-    const td = document.createElement('td');
+  function executionKeyCell(row, toggle) {
+    const cell = document.createElement('th');
+    cell.scope = 'row';
+    if (toggle) { cell.appendChild(toggle); }
+    if (!row.key) {
+      cell.appendChild(document.createTextNode(row.keyLabel));
+      return cell;
+    }
     const link = document.createElement('a');
     link.className = 'link';
     link.href = '#';
@@ -481,11 +494,33 @@ const BOARD_SCRIPT = `
       e.preventDefault();
       window.__spec.post('board', { type: 'open', key: row.key });
     });
-    td.appendChild(link);
-    return td;
+    cell.appendChild(link);
+    return cell;
   }
 
-  function executionRowEl(row) {
+  function activityCountText(count) {
+    return String(count) + (count === 1 ? ' entry' : ' entries');
+  }
+
+  function executionActivityRowEl(activity) {
+    const tr = document.createElement('tr');
+    tr.className = 'execution-child';
+    const branch = executionCell('');
+    const arrow = document.createElement('span');
+    arrow.textContent = '↳';
+    arrow.setAttribute('aria-hidden', 'true');
+    branch.appendChild(arrow);
+    tr.appendChild(branch);
+    tr.appendChild(executionCell(''));
+    tr.appendChild(executionCell(activity.action));
+    tr.appendChild(executionCell(activity.resultsImported));
+    tr.appendChild(executionCell(activity.passRate));
+    tr.appendChild(executionCell(activity.publishedAt));
+    tr.appendChild(executionCell(''));
+    return tr;
+  }
+
+  function unknownExecutionRowEl(row) {
     const tr = document.createElement('tr');
     tr.appendChild(executionKeyCell(row));
     tr.appendChild(executionCell(row.summary, 'wrap'));
@@ -493,8 +528,61 @@ const BOARD_SCRIPT = `
     tr.appendChild(executionCell(row.resultsImported));
     tr.appendChild(executionCell(row.passRate));
     tr.appendChild(executionCell(row.publishedAt));
-    tr.appendChild(executionCell(String(row.timesFromHere)));
+    tr.appendChild(executionCell(activityCountText(row.activityCount)));
     return tr;
+  }
+
+  function renderExecutionGroup(group) {
+    const head = document.createElement('tr');
+    head.className = 'execution-parent';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'execution-toggle';
+    head.appendChild(executionKeyCell(group, toggle));
+    head.appendChild(executionCell(group.summary, 'wrap'));
+    head.appendChild(executionCell(''));
+    head.appendChild(executionCell(''));
+    head.appendChild(executionCell(''));
+    head.appendChild(executionCell(group.latestPublishedAt));
+    head.appendChild(executionCell(activityCountText(group.activityCount)));
+    executionsRows.appendChild(head);
+
+    let rows = [];
+    let open = filtering || !executionsCollapsed.has(group.key);
+    function paint() {
+      toggle.textContent = open ? '▾' : '▸';
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      toggle.setAttribute(
+        'aria-label',
+        (open ? 'Hide activity for ' : 'Show activity for ') + group.keyLabel
+      );
+      for (const row of rows) { row.remove(); }
+      rows = [];
+      if (!open) { return; }
+      rows = group.activities.map(executionActivityRowEl);
+      const frag = document.createDocumentFragment();
+      for (const row of rows) { frag.appendChild(row); }
+      executionsRows.insertBefore(frag, head.nextSibling);
+    }
+    // A query opens the groups it matched. Folding one while filtering is temporary, so clearing the
+    // query restores the user's saved view.
+    toggle.addEventListener('click', function () {
+      open = !open;
+      if (!filtering) {
+        if (open) { executionsCollapsed.delete(group.key); } else { executionsCollapsed.add(group.key); }
+        window.__spec.saveState({ executionsCollapsed: Array.from(executionsCollapsed) });
+      }
+      paint();
+    });
+    paint();
+  }
+
+  function renderExecutionItem(item) {
+    if (item.kind === 'group') {
+      renderExecutionGroup(item);
+    } else {
+      executionsRows.appendChild(unknownExecutionRowEl(item));
+    }
   }
 
   function olderRowEl(remaining) {
@@ -507,7 +595,7 @@ const BOARD_SCRIPT = `
     btn.className = 'pill-button';
     btn.textContent = 'Show older (' + remaining + ' more)';
     btn.addEventListener('click', function () {
-      const from = Math.min(executionsShown, ledgerRows.length);
+      const from = Math.min(executionsShown, executionItems.length);
       executionsShown = from + EXECUTIONS_PAGE;
       window.__spec.saveState({ executionsShown: executionsShown });
       paintExecutions(from);
@@ -517,15 +605,14 @@ const BOARD_SCRIPT = `
     return tr;
   }
 
-  // Paint the rows from the given index up to the revealed count, then re-hang the control that reveals
-  // the next page. The whole ledger arrives on every render, but only the window is built, and a reveal
-  // appends its page rather than repainting the table.
+  // Paint whole top-level items from the given index up to the revealed count, then re-hang the control
+  // that reveals the next page. A group and its children are never split across pages.
   function paintExecutions(from) {
     if (olderRow) { olderRow.remove(); olderRow = null; }
-    const shown = Math.min(executionsShown, ledgerRows.length);
-    for (let i = from; i < shown; i++) { executionsRows.appendChild(executionRowEl(ledgerRows[i])); }
-    if (shown < ledgerRows.length) {
-      olderRow = olderRowEl(ledgerRows.length - shown);
+    const shown = Math.min(executionsShown, executionItems.length);
+    for (let i = from; i < shown; i++) { renderExecutionItem(executionItems[i]); }
+    if (shown < executionItems.length) {
+      olderRow = olderRowEl(executionItems.length - shown);
       executionsRows.appendChild(olderRow);
     }
   }
@@ -533,8 +620,11 @@ const BOARD_SCRIPT = `
   function renderExecutions(rows) {
     executionsRows.textContent = '';
     olderRow = null;
-    ledgerRows = rows;
+    executionItems = rows;
     const empty = rows.length === 0;
+    executionsEmpty.textContent = filtering
+      ? 'No executions match this filter.'
+      : 'Execution activity from this workspace appears here.';
     executionsEmpty.hidden = !empty;
     executionsScroll.hidden = empty;
     if (empty) { return; }
