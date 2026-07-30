@@ -1730,6 +1730,31 @@ describe("traceability publishLastRun: Publish tab", () => {
     expect(tabs).not.toContain("executions");
   });
 
+  // Closing the board is the publish's cancellation: the controller it opened with aborts, the import
+  // that was in flight comes back rejected, and the flow says cancelled rather than raising a failure.
+  it("cancels an in-flight publish when the board closes, reporting cancellation not a failure", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(
+      connectedSubsystem([], NO_PROJECT_SCOPE, () => {
+        win.__webviewPanels[0]!.dispose();
+        return Promise.reject(new Error("The operation was aborted"));
+      })
+    );
+
+    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    await flush();
+    const panel = win.__webviewPanels[0]!;
+    await panel.__receive({ type: "ready" });
+    await panel.__receive({ surface: "publish", ...CONFIRM });
+    await promise;
+
+    expect(info.mock.calls.map((call) => String(call[0]))).toContain("Publish cancelled.");
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it("guides the user and opens no board when no publishing capability is connected", async () => {
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     const mgr = CommandManager.create(makeContext());

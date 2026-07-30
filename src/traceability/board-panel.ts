@@ -158,6 +158,19 @@ export class BoardPanel {
     this.activateTab("executions");
   }
 
+  // Closing the board takes down the surface a publish is driven from (its busy pane, its retry dialog,
+  // its banners), so the flow that opened this panel treats the close as its cancellation. The panel
+  // outlives any one flow, so the returned subscription is how a finished flow stops holding it.
+  public onDidDispose(handler: () => void): vscode.Disposable {
+    this.disposeHandlers.push(handler);
+    return {
+      dispose: () => {
+        const at = this.disposeHandlers.indexOf(handler);
+        if (at > -1) {this.disposeHandlers.splice(at, 1);}
+      },
+    };
+  }
+
   private hostFor(surface: SurfaceName): SurfaceHost {
     return {
       post: (message) => this.postRaw({ ...message, surface }),

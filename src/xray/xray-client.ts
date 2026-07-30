@@ -103,8 +103,9 @@ export class XrayMutationError extends Error {
   }
 }
 
-// A transient transport fault (429, 5xx, timeout, network) that backoff should retry.
-class RetryableError extends Error {
+// A transient transport fault (429, 5xx, timeout, network) that backoff should retry. Exported because
+// {@link withBackoff} retries this class and nothing else, so every transport it wraps raises it.
+export class RetryableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "RetryableError";
@@ -125,7 +126,8 @@ function parseBody(bodyText: string): unknown {
   }
 }
 
-function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+/** A delay that ends on the signal instead of running to term, rejecting with {@link XrayAbortError}. */
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new XrayAbortError());
@@ -141,6 +143,41 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+export interface BackoffDeps {
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  random: () => number;
+  signal?: AbortSignal | undefined;
+}
+
+function backoffDelay(attempt: number, random: () => number): number {
+  const base = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (attempt - 1));
+  return base + Math.floor(random() * BACKOFF_BASE_MS);
+}
+
+/**
+ * Retries `run` up to {@link MAX_ATTEMPTS} with exponential backoff and jitter. A {@link RetryableError}
+ * is the only error retried; every other one (an auth refusal, a cancel) comes straight back out. The
+ * signal is read before each attempt and ends the delay itself, so an aborted caller starts no further
+ * request.
+ */
+export async function withBackoff<T>(run: () => Promise<T>, deps: BackoffDeps): Promise<T> {
+  let attempt = 0;
+  for (;;) {
+    if (deps.signal?.aborted) {
+      throw new XrayAbortError();
+    }
+    try {
+      return await run();
+    } catch (error) {
+      attempt += 1;
+      if (!(error instanceof RetryableError) || attempt >= MAX_ATTEMPTS || deps.signal?.aborted) {
+        throw error;
+      }
+      await deps.sleep(backoffDelay(attempt, deps.random), deps.signal);
+    }
+  }
 }
 
 function dedupe(keys: readonly string[]): string[] {
@@ -384,7 +421,7 @@ export class XrayClient {
     this.base = xrayBaseUrl(deps.region);
     this.fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
     this.now = deps.now ?? ((): number => Date.now());
-    this.sleep = deps.sleep ?? defaultSleep;
+    this.sleep = deps.sleep ?? abortableSleep;
     this.random = deps.random ?? Math.random;
   }
 
@@ -718,41 +755,18 @@ export class XrayClient {
   }
 
   private sendWithRetry(url: string, init: RequestInit, signal?: AbortSignal): Promise<TimedResponse> {
-    return this.withBackoff(async () => {
-      const response = await this.timedFetch(url, init, signal);
-      // A rate-limit or server fault is retryable; every other status (incl. 401/400) is handled by
-      // the caller. Backoff never depends on rate-limit headers; none appear on the wire (§5).
-      if (response.status === 429 || response.status >= 500) {
-        throw new RetryableError(`HTTP ${response.status}`);
-      }
-      return response;
-    }, signal);
-  }
-
-  private async withBackoff<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    let attempt = 0;
-    for (;;) {
-      if (signal?.aborted) {
-        throw new XrayAbortError();
-      }
-      try {
-        return await run();
-      } catch (error) {
-        if (error instanceof XrayAbortError || error instanceof XrayAuthError) {
-          throw error;
+    return withBackoff(
+      async () => {
+        const response = await this.timedFetch(url, init, signal);
+        // A rate-limit or server fault is retryable; every other status (incl. 401/400) is handled by
+        // the caller. Backoff never depends on rate-limit headers; none appear on the wire (§5).
+        if (response.status === 429 || response.status >= 500) {
+          throw new RetryableError(`HTTP ${response.status}`);
         }
-        attempt += 1;
-        if (!(error instanceof RetryableError) || attempt >= MAX_ATTEMPTS || signal?.aborted) {
-          throw error;
-        }
-        await this.sleep(this.backoffDelay(attempt), signal);
-      }
-    }
-  }
-
-  private backoffDelay(attempt: number): number {
-    const base = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (attempt - 1));
-    return base + Math.floor(this.random() * BACKOFF_BASE_MS);
+        return response;
+      },
+      { sleep: this.sleep, random: this.random, signal }
+    );
   }
 
   // The body read stays inside the timed window (matches the probe): a server that returns headers

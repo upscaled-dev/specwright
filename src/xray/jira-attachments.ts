@@ -5,11 +5,9 @@ import { XrayJiraCredentials } from "./xray-credential-store";
 import { contentTypeForFile, EVIDENCE_MAX_FILE_BYTES } from "../traceability/evidence-resolution";
 import { describeShape } from "./xray-diagnostics";
 import { FetchLike, JiraAccessError, jiraSecrets } from "./jira-project-search";
+import { abortableSleep, RetryableError, withBackoff, XrayAbortError } from "./xray-client";
 
 const REQUEST_TIMEOUT_MS = 60_000;
-const MAX_ATTEMPTS = 4;
-const BACKOFF_BASE_MS = 300;
-const BACKOFF_CAP_MS = 8_000;
 
 function basicAuthHeader(credentials: XrayJiraCredentials): string {
   const encoded = Buffer.from(`${credentials.email}:${credentials.token}`).toString("base64");
@@ -28,20 +26,9 @@ function stringifyShape(value: unknown): string {
   return JSON.stringify(describeShape(value), null, 2);
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function baseName(filePath: string): string {
   const parts = filePath.split(/[\\/]/);
   return parts[parts.length - 1] ?? filePath;
-}
-
-class RetryableError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RetryableError";
-  }
 }
 
 // ---- Attachment upload limits (`GET /rest/api/3/attachment/meta`) ----
@@ -116,7 +103,7 @@ export interface JiraAttachmentUploadDeps {
   logger: Logger;
   fetchImpl?: FetchLike | undefined;
   readFile?: ((path: string) => Buffer) | undefined;
-  sleep?: ((ms: number) => Promise<void>) | undefined;
+  sleep?: ((ms: number, signal?: AbortSignal) => Promise<void>) | undefined;
   random?: (() => number) | undefined;
   signal?: AbortSignal | undefined;
 }
@@ -124,15 +111,20 @@ export interface JiraAttachmentUploadDeps {
 // Per-file routing so a partial failure is recoverable; the failed paths become the ledger's
 // `pendingAttachments`, replayed by the shared retry/resume routine. One file's failure never rolls
 // back or re-imports; it also never taints the files that did upload.
+//
+// The three lists partition `files`. `cancelled` is what the caller's signal stopped: the file the abort
+// landed on and every one after it. They are pending like a failure, but they are not a fault, so the
+// caller can say cancelled instead of reporting an error nobody hit.
 export interface JiraAttachmentUploadResult {
   readonly uploaded: readonly string[];
   readonly failed: readonly string[];
+  readonly cancelled: readonly string[];
 }
 
 class JiraAttachmentUpload {
   private readonly fetchImpl: FetchLike;
   private readonly readFile: (path: string) => Buffer;
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly random: () => number;
   private readonly authHeader: string;
   private readonly url: string;
@@ -140,7 +132,7 @@ class JiraAttachmentUpload {
   constructor(private readonly deps: JiraAttachmentUploadDeps) {
     this.fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
     this.readFile = deps.readFile ?? ((path) => fs.readFileSync(path));
-    this.sleep = deps.sleep ?? defaultSleep;
+    this.sleep = deps.sleep ?? abortableSleep;
     this.random = deps.random ?? Math.random;
     this.authHeader = basicAuthHeader(deps.credentials);
     this.url = `https://${deps.site}/rest/api/3/issue/${encodeURIComponent(deps.issueKey)}/attachments`;
@@ -149,11 +141,23 @@ class JiraAttachmentUpload {
   public async run(): Promise<JiraAttachmentUploadResult> {
     const uploaded: string[] = [];
     const failed: string[] = [];
-    for (const file of this.deps.files) {
+    const files = this.deps.files;
+    for (const [index, file] of files.entries()) {
+      // The file the abort landed on, and every file after it, is cancelled rather than failed.
+      if (this.aborted()) {
+        return { uploaded, failed, cancelled: files.slice(index) };
+      }
       const ok = await this.uploadOne(file);
+      if (!ok && this.aborted()) {
+        return { uploaded, failed, cancelled: files.slice(index) };
+      }
       (ok ? uploaded : failed).push(file);
     }
-    return { uploaded, failed };
+    return { uploaded, failed, cancelled: [] };
+  }
+
+  private aborted(): boolean {
+    return this.deps.signal?.aborted ?? false;
   }
 
   private async uploadOne(file: string): Promise<boolean> {
@@ -165,7 +169,11 @@ class JiraAttachmentUpload {
       return false;
     }
     try {
-      const status = await this.withBackoff(() => this.postFile(file, content));
+      const status = await withBackoff(() => this.postFile(file, content), {
+        sleep: this.sleep,
+        random: this.random,
+        signal: this.deps.signal,
+      });
       this.deps.logger.info(`POST /rest/api/3/issue/${this.deps.issueKey}/attachments → ${status}`);
       return true;
     } catch {
@@ -174,10 +182,15 @@ class JiraAttachmentUpload {
   }
 
   private async postFile(file: string, content: Buffer): Promise<number> {
+    // A listener on an already-aborted signal never fires, so the state is read before it is subscribed
+    // to; without this the fetch would go out after cancellation.
+    if (this.aborted()) {
+      throw new XrayAbortError();
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     const onAbort = (): void => controller.abort();
-    this.deps.signal?.addEventListener("abort", onAbort);
+    this.deps.signal?.addEventListener("abort", onAbort, { once: true });
     const form = new FormData();
     form.append("file", new Blob([content], { type: contentTypeForFile(file) }), baseName(file));
     try {
@@ -196,6 +209,11 @@ class JiraAttachmentUpload {
       }
       return response.status;
     } catch (error) {
+      // An abort that lands mid-request reports as a cancel even when the fetch failed for a reason of
+      // its own: the two are indistinguishable from here.
+      if (this.aborted()) {
+        throw new XrayAbortError();
+      }
       if (error instanceof RetryableError || error instanceof JiraAccessError) {
         throw error;
       }
@@ -206,36 +224,15 @@ class JiraAttachmentUpload {
     }
   }
 
-  private async withBackoff(run: () => Promise<number>): Promise<number> {
-    let attempt = 0;
-    for (;;) {
-      try {
-        return await run();
-      } catch (error) {
-        if (error instanceof JiraAccessError) {
-          throw error;
-        }
-        attempt += 1;
-        if (!(error instanceof RetryableError) || attempt >= MAX_ATTEMPTS) {
-          throw error;
-        }
-        await this.sleep(this.backoffDelay(attempt));
-      }
-    }
-  }
-
-  private backoffDelay(attempt: number): number {
-    const base = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (attempt - 1));
-    return base + Math.floor(this.random() * BACKOFF_BASE_MS);
-  }
 }
 
 /**
  * Uploads each file to the execution issue via `POST /rest/api/3/issue/{key}/attachments`
  * (`X-Atlassian-Token: no-check`, Jira basic auth, multipart `file`, original filenames), retrying
- * transient faults with backoff. Returns `{ uploaded, failed }` split per file; a single failure is
- * isolated so the caller can ledger the pending files and retry without re-importing. The token and
- * file bytes never reach the logger.
+ * transient faults with backoff. Returns `{ uploaded, failed, cancelled }` split per file; a single
+ * failure is isolated so the caller can ledger the pending files and retry without re-importing. The
+ * caller's `signal` is honoured before every request and during every backoff delay, so an abort starts
+ * no further POST. The token and file bytes never reach the logger.
  */
 export function uploadJiraAttachments(deps: JiraAttachmentUploadDeps): Promise<JiraAttachmentUploadResult> {
   return new JiraAttachmentUpload(deps).run();

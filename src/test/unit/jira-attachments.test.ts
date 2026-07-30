@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
 import { FetchLike } from "../../xray/jira-project-search";
+import { abortableSleep } from "../../xray/xray-client";
 import {
   attachmentUploadLimit,
   fetchJiraAttachmentMeta,
@@ -63,7 +64,7 @@ describe("uploadJiraAttachments", () => {
 
     const result = await upload({ fetchImpl });
 
-    expect(result).toEqual({ uploaded: ["/ws/report.zip"], failed: [] });
+    expect(result).toEqual({ uploaded: ["/ws/report.zip"], failed: [], cancelled: [] });
     expect(url).toBe(`https://${SITE}/rest/api/3/issue/XNP-9/attachments`);
     expect(headers["X-Atlassian-Token"]).toBe("no-check");
     expect(headers["Authorization"]).toBe(`Basic ${Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64")}`);
@@ -126,6 +127,113 @@ describe("uploadJiraAttachments", () => {
     const fetchImpl: FetchLike = () => Promise.resolve(response(200, []));
     await upload({ fetchImpl, logger });
     expect(lines.join("\n")).not.toContain(TOKEN);
+  });
+});
+
+describe("uploadJiraAttachments: cancellation", () => {
+  const FILES = ["/ws/a.zip", "/ws/b.zip"];
+
+  it("makes no request at all when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const fetchImpl: FetchLike = () => {
+      calls += 1;
+      return Promise.resolve(response(200, [{ id: "1" }]));
+    };
+
+    const result = await upload({ files: FILES, fetchImpl, signal: controller.signal });
+
+    expect(calls).toBe(0);
+    expect(result).toEqual({ uploaded: [], failed: [], cancelled: FILES });
+  });
+
+  it("stops on the file the abort landed on: no retry, no next upload", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const fetchImpl: FetchLike = () => {
+      calls += 1;
+      controller.abort();
+      return Promise.reject(new Error("The operation was aborted"));
+    };
+
+    const result = await upload({ files: FILES, fetchImpl, signal: controller.signal });
+
+    expect(calls).toBe(1);
+    expect(result).toEqual({ uploaded: [], failed: [], cancelled: FILES });
+  });
+
+  it("stops mid-list: the uploaded file stands, the file the abort landed on and the rest are cancelled", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const fetchImpl: FetchLike = () => {
+      calls += 1;
+      if (calls === 2) {
+        controller.abort();
+        return Promise.reject(new Error("The operation was aborted"));
+      }
+      return Promise.resolve(response(200, [{ id: "1" }]));
+    };
+
+    const result = await upload({
+      files: ["/ws/a.zip", "/ws/b.zip", "/ws/c.zip"],
+      fetchImpl,
+      signal: controller.signal,
+    });
+
+    expect(calls).toBe(2);
+    expect(result).toEqual({ uploaded: ["/ws/a.zip"], failed: [], cancelled: ["/ws/b.zip", "/ws/c.zip"] });
+  });
+
+  it("aborts during the backoff delay and never attempts again", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const fetchImpl: FetchLike = () => {
+      calls += 1;
+      return Promise.resolve(response(429, "rate limited"));
+    };
+    const sleepSignals: (AbortSignal | undefined)[] = [];
+    const sleep = (_ms: number, signal?: AbortSignal): Promise<void> => {
+      sleepSignals.push(signal);
+      controller.abort();
+      return Promise.resolve();
+    };
+
+    const result = await upload({ files: FILES, fetchImpl, sleep, signal: controller.signal });
+
+    expect(calls).toBe(1);
+    expect(sleepSignals).toEqual([controller.signal]);
+    expect(result).toEqual({ uploaded: [], failed: [], cancelled: FILES });
+  });
+
+  // Fake timers are never advanced past the point the delay begins, so the upload can only settle by the
+  // abort ending that delay; a sleep that ran to term would hang here instead.
+  it("ends the real backoff delay on the abort rather than running it out", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      let calls = 0;
+      const fetchImpl: FetchLike = () => {
+        calls += 1;
+        return Promise.resolve(response(429, "rate limited"));
+      };
+      const delays: Array<[number, AbortSignal | undefined]> = [];
+      const sleep = (ms: number, signal?: AbortSignal): Promise<void> => {
+        delays.push([ms, signal]);
+        return abortableSleep(ms, signal);
+      };
+
+      const promise = upload({ files: FILES, fetchImpl, sleep, signal: controller.signal });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(delays).toEqual([[300, controller.signal]]);
+
+      controller.abort();
+
+      expect(await promise).toEqual({ uploaded: [], failed: [], cancelled: FILES });
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

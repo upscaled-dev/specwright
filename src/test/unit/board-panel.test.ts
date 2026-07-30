@@ -1670,6 +1670,23 @@ describe("BoardPanel", () => {
     BoardPanel.open(deps());
     expect(win.__webviewPanels).toHaveLength(2);
   });
+
+  // The publish flow's cancellation seam: a close means stop, and a flow that finished first must stop
+  // holding the panel, since the panel outlives every one of them.
+  it("fires a dispose handler on close, drops it once its subscription is disposed, and carries none to a reopen", async () => {
+    const fired: string[] = [];
+    const { instance, panel } = await openReady();
+
+    instance.onDidDispose(() => fired.push("kept"));
+    instance.onDidDispose(() => fired.push("released")).dispose();
+    panel.dispose();
+
+    expect(fired).toEqual(["kept"]);
+
+    BoardPanel.open(deps()).dispose();
+
+    expect(fired).toEqual(["kept"]);
+  });
 });
 
 // The board is rebuilt from settings, so it has to know which ones it renders: a rebuild per keystroke in

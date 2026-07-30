@@ -131,8 +131,13 @@ export interface PublishFlowDeps extends PublishRunSources {
   // picked. Undefined on cancel/close/supersede/closed board, exactly like `presentDialog`.
   presentRetry(selectedRunId: string): Promise<PublishDialogResult | undefined>;
   // Uploads run-level picks + issue-routed evidence to the execution issue AFTER a successful import,
-  // returning which failed. The same routine backs toast-retry and the pending-attachments banner.
-  attachFiles(executionKey: string, files: readonly string[]): Promise<{ readonly failed: readonly string[] }>;
+  // returning which failed and which the signal stopped. The same routine backs toast-retry and the
+  // pending-attachments banner.
+  attachFiles(
+    executionKey: string,
+    files: readonly string[],
+    signal?: AbortSignal
+  ): Promise<{ readonly failed: readonly string[]; readonly cancelled: readonly string[] }>;
   recordPublish(entry: LedgerEntry): void;
   // No publishable run exists; the message/toast the caller shows instead of an empty dialog.
   reportNoRuns(): void;
@@ -148,9 +153,15 @@ export interface PublishFlowDeps extends PublishRunSources {
     artifactId: string
   ): void;
   reportFailure(error: unknown): void;
+  // `landed` is present once the import has succeeded: the execution exists on the server whatever the
+  // cancel did next, and `pending` is what the upload never got to (on the ledger, replayable from the
+  // banner).
+  reportCancelled(landed?: { outcome: PublishOutcome; request: PublishRequest; pending: readonly string[] }): void;
   site: string;
   account: string;
   now(): number;
+  // Cancels the transport: the import POST and the attachment uploads. The dialog wait is not driven by it.
+  signal?: AbortSignal | undefined;
 }
 
 // A run's dialog option plus the project its own test keys derived to. The derived key outlives a
@@ -243,14 +254,23 @@ async function confirmAndPublish(
   let answer = await deps.presentDialog(model);
   while (answer !== undefined) {
     const dialog = answer;
+    if (deps.signal?.aborted) {
+      deps.reportCancelled();
+      return undefined;
+    }
     const artifact = runnableRuns(deps.runs()).find((candidate) => candidate.id === dialog.runId);
     if (artifact === undefined) {
       deps.reportFailure(new Error("That run is no longer in this workspace's run history, so it cannot be published."));
       return undefined;
     }
     try {
-      return { artifact, dialog, outcome: await deps.publishing.publish(artifact, dialog.request) };
+      return { artifact, dialog, outcome: await deps.publishing.publish(artifact, dialog.request, deps.signal) };
     } catch (error) {
+      // A cancelled import rejects like any other failure; only the signal separates the two.
+      if (deps.signal?.aborted) {
+        deps.reportCancelled();
+        return undefined;
+      }
       deps.reportFailure(error);
       answer = await deps.presentRetry(dialog.runId);
     }
@@ -268,6 +288,8 @@ async function confirmAndPublish(
  * A run already on the ledger shows an inline republish banner (no modal); submit proceeds directly.
  * A failed import keeps the dialog on the picked run for a retry rather than settling the tab.
  * No publishable run, or cancel/close, makes ZERO transport calls.
+ * An aborted `signal` stops the transport at the next boundary; that is reported as cancelled, and never
+ * re-offers the dialog.
  */
 export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
   const runnable = runnableRuns(deps.runs());
@@ -316,15 +338,24 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
   // be replayed, so the upload is skipped whole rather than attempted and ledgered as unrecoverable work.
   const uploadable = hasExecutionRef(outcome.ref.key);
   let failed: readonly string[] = [];
+  let cancelled: readonly string[] = [];
   if (uploadable && files.length > 0) {
     try {
-      failed = (await deps.attachFiles(outcome.ref.key, files)).failed;
+      const upload = await deps.attachFiles(outcome.ref.key, files, deps.signal);
+      failed = upload.failed;
+      cancelled = upload.cancelled;
     } catch {
       // The import already landed; an upload fault is recoverable, never a rollback. Treat every file
-      // as pending so Retry/resume can replay them.
-      failed = files;
+      // as pending so Retry/resume can replay them. A cancelled upload can surface as a throw too, and
+      // only the signal separates the two.
+      if (deps.signal?.aborted) {
+        cancelled = files;
+      } else {
+        failed = files;
+      }
     }
   }
+  const pending = [...failed, ...cancelled];
 
   deps.recordPublish({
     artifactId: artifact.id,
@@ -332,7 +363,8 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
     site: deps.site,
     account: deps.account,
     publishedAt: deps.now(),
-    pendingAttachments: [...failed],
+    // A cancelled file is pending exactly like a failed one; the banner replays both.
+    pendingAttachments: pending,
     ...(dialog.request.mode === "create-new" ? { summary: dialog.request.summary } : {}),
     mode: dialog.request.mode,
     passed: summary.passed,
@@ -341,7 +373,13 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
     total: summary.total,
   });
 
-  const attachedCount = uploadable ? files.length - failed.length : 0;
+  const attachedCount = uploadable ? files.length - pending.length : 0;
+  // A cancel that also left a failure behind is still one interrupted upload, so it reports once, over
+  // the whole pending set the ledger took.
+  if (cancelled.length > 0) {
+    deps.reportCancelled({ outcome, request: dialog.request, pending });
+    return;
+  }
   if (failed.length > 0) {
     deps.reportPartialAttachments(outcome, dialog.request, attachedCount, failed, artifact.id);
     return;

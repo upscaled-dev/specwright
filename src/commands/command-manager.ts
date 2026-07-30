@@ -956,6 +956,10 @@ export class CommandManager {
       return;
     }
     const board = BoardPanel.open(this.boardDeps());
+    // The publish has no progress notification of its own (the board's busy pane is its UI), so closing
+    // the board is the gesture that cancels it: the import and the uploads stop at the next boundary.
+    const controller = new AbortController();
+    const cancelOnClose = board.onDidDispose(() => controller.abort());
     const rawSite = this.context.config.xraySiteUrl;
     const site = normalizeSiteUrl(rawSite);
     const credentials = await this.credentialStore?.getCredentials(rawSite);
@@ -977,7 +981,7 @@ export class CommandManager {
         attachments: () => this.buildPublishAttachments(rawSite),
         presentDialog: (model) => board.publish.present(model),
         presentRetry: (selectedRunId) => board.publish.presentRetry(selectedRunId),
-        attachFiles: (executionKey, files) => this.attachFiles(executionKey, files),
+        attachFiles: (executionKey, files, signal) => this.attachFiles(executionKey, files, signal),
         recordPublish: (entry) => {
           published = true;
           this.publishLedger?.record(entry);
@@ -992,11 +996,23 @@ export class CommandManager {
         reportPartialAttachments: (outcome, request, attachedCount, failed, artifactId) =>
           this.reportPartialAttachments(artifactId, site, outcome, request, attachedCount, failed),
         reportFailure: (error) => this.reportPublishFailure(error),
+        reportCancelled: (landed) => {
+          if (landed === undefined) {
+            vscode.window.showInformationMessage("Publish cancelled.");
+            return;
+          }
+          // The execution is on the server whether or not the user stopped what came after it, so the
+          // toast leads with it exactly like a success or a partial does.
+          const note = `Publish cancelled · ${landed.pending.length} ${plural(landed.pending.length, "attachment")} pending`;
+          this.showBrowseToast(`${publishOutcomeLead(landed.outcome, landed.request)} · ${note}`, landed.outcome, "info");
+        },
         site,
         account: credentials?.clientId ?? "",
         now: () => Date.now(),
+        signal: controller.signal,
       });
     } finally {
+      cancelOnClose.dispose();
       const settled = board.publish.markSettled();
       const refreshed = published && (await this.refreshBoard("publishing"));
       // The switch is earned, not automatic: a clean publish, a settle this flow still owned (a false one
@@ -1045,15 +1061,16 @@ export class CommandManager {
     if (!this.canReplayAttachments(entry.executionRef)) {
       return { remaining: entry.pendingAttachments.length };
     }
-    const { failed } = await this.attachFiles(entry.executionRef, entry.pendingAttachments);
-    this.publishLedger?.setPendingAttachments(artifactId, site, failed);
-    const attached = entry.pendingAttachments.length - failed.length;
-    if (failed.length === 0) {
+    const { failed, cancelled } = await this.attachFiles(entry.executionRef, entry.pendingAttachments);
+    const pending = [...failed, ...cancelled];
+    this.publishLedger?.setPendingAttachments(artifactId, site, pending);
+    const attached = entry.pendingAttachments.length - pending.length;
+    if (pending.length === 0) {
       vscode.window.showInformationMessage(`${entry.executionRef}: ${attached} pending attachment(s) uploaded.`);
     } else {
-      vscode.window.showWarningMessage(`${entry.executionRef}: ${failed.length} attachment(s) still failed.`);
+      vscode.window.showWarningMessage(`${entry.executionRef}: ${pending.length} attachment(s) still failed.`);
     }
-    return { remaining: failed.length };
+    return { remaining: pending.length };
   }
 
   // The Publish dialog's run-level attachments section — the vscode-free build + probe logic lives in
@@ -1100,11 +1117,15 @@ export class CommandManager {
   // The shared upload routine behind the flow, the partial-toast Retry, and publishLastRun resume —
   // uploads to the execution's Jira issue and reports which files still failed. No Jira creds ⇒ every
   // file is pending (the section is disabled, so this only guards a race).
-  private async attachFiles(executionKey: string, files: readonly string[]): Promise<{ readonly failed: readonly string[] }> {
+  private async attachFiles(
+    executionKey: string,
+    files: readonly string[],
+    signal?: AbortSignal
+  ): Promise<{ readonly failed: readonly string[]; readonly cancelled: readonly string[] }> {
     const rawSite = this.context.config.xraySiteUrl;
     const credentials = await this.credentialStore?.getJiraCredentials(rawSite);
     if (credentials === undefined) {
-      return { failed: files };
+      return { failed: files, cancelled: [] };
     }
     const result = await uploadJiraAttachments({
       site: normalizeSiteUrl(rawSite),
@@ -1112,8 +1133,9 @@ export class CommandManager {
       issueKey: executionKey,
       files,
       logger: this.logger,
+      ...(signal !== undefined ? { signal } : {}),
     });
-    return { failed: result.failed };
+    return { failed: result.failed, cancelled: result.cancelled };
   }
 
   // A ledgered upload can only be replayed against an execution the import response actually named; an
@@ -1139,17 +1161,18 @@ export class CommandManager {
     if (!this.canReplayAttachments(executionKey)) {
       return;
     }
-    const { failed } = await this.attachFiles(executionKey, files);
-    this.publishLedger?.setPendingAttachments(artifactId, site, failed);
-    const attached = files.length - failed.length;
-    if (failed.length === 0) {
+    const { failed, cancelled } = await this.attachFiles(executionKey, files);
+    const pending = [...failed, ...cancelled];
+    this.publishLedger?.setPendingAttachments(artifactId, site, pending);
+    const attached = files.length - pending.length;
+    if (pending.length === 0) {
       vscode.window.showInformationMessage(`${executionKey}: ${attached} pending attachment(s) uploaded.`);
       return;
     }
     Promise.resolve(
-      vscode.window.showWarningMessage(`${executionKey}: ${failed.length} attachment(s) still failed.`, "Retry")
+      vscode.window.showWarningMessage(`${executionKey}: ${pending.length} attachment(s) still failed.`, "Retry")
     )
-      .then((choice) => (choice === "Retry" ? this.retryAttachments(artifactId, site, executionKey, failed) : undefined))
+      .then((choice) => (choice === "Retry" ? this.retryAttachments(artifactId, site, executionKey, pending) : undefined))
       .catch(() => undefined);
   }
 
