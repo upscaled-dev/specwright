@@ -4,6 +4,7 @@ import { NormalizedStatus } from "../traceability/contracts";
 import { XrayCredentials } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
 import { describeJwt, describeShape, graphqlErrorSummaries } from "./xray-diagnostics";
+import { buildKeysJql, jqlString } from "./xray-search";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 // Proactively reuse the JWT well inside its ~24h life so an in-flight batch never trips the true
@@ -404,8 +405,7 @@ export class XrayClient {
   public async fetchTestsByKeys(keys: readonly string[], signal?: AbortSignal): Promise<XrayFetchOutcome> {
     const outcome: XrayFetchOutcome = { tests: [], pages: [], complete: true, errors: [] };
     for (const batch of chunk(dedupe([...keys]), PAGE_LIMIT)) {
-      const jql = `key in (${batch.join(", ")})`;
-      const page = await this.fetchScope(jql, signal);
+      const page = await this.fetchScope(buildKeysJql(batch), signal);
       outcome.tests.push(...page.tests);
       outcome.pages.push(...page.pages);
       outcome.errors.push(...page.errors);
@@ -421,7 +421,7 @@ export class XrayClient {
     signal?: AbortSignal,
     onPage?: XrayPageProgress
   ): Promise<XrayFetchOutcome> {
-    return this.fetchScope(`project = ${projectKey}`, signal, onPage);
+    return this.fetchScope(`project = ${jqlString(projectKey)}`, signal, onPage);
   }
 
   // Forward a caller-built JQL through the shared scope engine (pagination/auth/backoff/normalization

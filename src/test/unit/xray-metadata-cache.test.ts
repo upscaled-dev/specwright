@@ -43,7 +43,7 @@ function sample(): CachedMetadata {
     verifiedAbsentKeys: ["CALC-404"],
     errors: [],
     tests: [{ key: "CALC-1", summary: "one" }],
-    pages: [{ fetchedAt: 1, query: "project = CALC", start: 0, total: 1 }],
+    pages: [{ fetchedAt: 1, query: 'project = "CALC"', start: 0, total: 1 }],
   };
 }
 

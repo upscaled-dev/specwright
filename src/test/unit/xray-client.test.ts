@@ -127,11 +127,25 @@ describe("XrayClient.fetchTestsByKeys", () => {
     expect(queries).toHaveLength(2);
     expect(queries[0]).toContain("limit: 100");
     expect(queries[0]).toContain("coverableIssues(limit: 20)");
-    expect(queries[0]).toContain("CALC-1,");
-    expect(queries[0]).toContain("CALC-100)");
+    expect(queries[0]).toContain(String.raw`\"CALC-1\",`);
+    expect(queries[0]).toContain(String.raw`\"CALC-100\")`);
     expect(queries[0]).not.toContain("CALC-101");
-    expect(queries[1]).toContain("CALC-101,");
-    expect(queries[1]).toContain("CALC-150)");
+    expect(queries[1]).toContain(String.raw`\"CALC-101\",`);
+    expect(queries[1]).toContain(String.raw`\"CALC-150\")`);
+  });
+
+  it("quotes each key so a reserved-word project part (IS) survives JQL parsing", async () => {
+    const queries: string[] = [];
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        queries.push(query);
+        return testsPage([]);
+      }),
+    });
+
+    await client.fetchTestsByKeys(["IS-123"]);
+
+    expect(queries[0]).toContain(String.raw`key in (\"IS-123\")`);
   });
 });
 
@@ -283,7 +297,7 @@ describe("XrayClient pagination", () => {
     expect(outcome.tests).toHaveLength(150);
     expect(outcome.complete).toBe(true);
     expect(outcome.pages).toHaveLength(2);
-    expect(outcome.pages[0]).toMatchObject({ query: "project = CALC", start: 0, total: 150 });
+    expect(outcome.pages[0]).toMatchObject({ query: 'project = "CALC"', start: 0, total: 150 });
   });
 
   it("reports each landed page with the records in hand and the total the remote gave", async () => {
@@ -454,7 +468,7 @@ describe("XrayClient backoff", () => {
     expect(graphqlCalls).toBe(4);
     expect(outcome.complete).toBe(false);
     expect(outcome.tests).toEqual([]);
-    expect(outcome.errors[0]).toContain("project = CALC");
+    expect(outcome.errors[0]).toContain('project = "CALC"');
   });
 
   it("retries a rate-limited 429 without depending on any rate-limit header", async () => {

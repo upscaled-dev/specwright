@@ -278,10 +278,10 @@ describe("probeXrayConnection: structured outcome", () => {
   it("groups keys by project and reports each project's total from a `project = X` probe", async () => {
     const deps = await seededDeps(() => ["CALC-1043", "CALC-1051", "MATH-2"]);
     const fetchMock = jwtThenGraphql((query) => {
-      if (query.includes("project = CALC")) {
+      if (query.includes(String.raw`project = \"CALC\"`)) {
         return { data: { getTests: { total: 42 } } };
       }
-      if (query.includes("project = MATH")) {
+      if (query.includes(String.raw`project = \"MATH\"`)) {
         return { data: { getTests: { total: 7 } } };
       }
       return { data: { getTests: { total: 3, results: [] } } };
@@ -301,6 +301,21 @@ describe("probeXrayConnection: structured outcome", () => {
     );
     // authenticate + two shape probes + invalid-field probe + one probe per project.
     expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("quotes the key list and the project so a reserved word like IS is not a bare JQL token", async () => {
+    const deps = await seededDeps(() => ["IS-1"]);
+    const queries: string[] = [];
+    const fetchMock = jwtThenGraphql((query) => {
+      queries.push(query);
+      return { data: { getTests: { total: 1, results: [] } } };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await probeXrayConnection(deps);
+
+    expect(queries.some((query) => query.includes(String.raw`key in (\"IS-1\")`))).toBe(true);
+    expect(queries.some((query) => query.includes(String.raw`project = \"IS\"`))).toBe(true);
   });
 
   it("probes at most three projects", async () => {
@@ -357,10 +372,10 @@ describe("probeXrayConnection: structured outcome", () => {
   it("excludes a project whose probe returns 200-with-errors and notes the failure in the message", async () => {
     const deps = await seededDeps(() => ["CALC-1", "MATH-1"]);
     const fetchMock = jwtThenGraphql((query) => {
-      if (query.includes("project = CALC")) {
+      if (query.includes(String.raw`project = \"CALC\"`)) {
         return { errors: [{ message: "boom" }], data: null };
       }
-      if (query.includes("project = MATH")) {
+      if (query.includes(String.raw`project = \"MATH\"`)) {
         return { data: { getTests: { total: 5 } } };
       }
       return { data: { getTests: { total: 2, results: [] } } };
@@ -393,8 +408,8 @@ describe("probeXrayConnection: structured outcome", () => {
 
     const listed = (/key in \(([^)]*)\)/.exec(capturedJql)?.[1] ?? "").split(", ");
     expect(listed).toHaveLength(20);
-    expect(listed[0]).toBe("CALC-1");
-    expect(listed[19]).toBe("CALC-20");
+    expect(listed[0]).toBe(String.raw`\"CALC-1\"`);
+    expect(listed[19]).toBe(String.raw`\"CALC-20\"`);
     expect(capturedJql).not.toContain("CALC-21");
   });
 
@@ -460,8 +475,14 @@ describe("probeXrayConnection: Jira project view", () => {
 
   it("cross-checks probed projects against the Jira list and reports absent ones as not-found", async () => {
     const deps = await jiraSeededDeps(() => ["CALC-1", "MATH-1"]);
+    const queries: string[] = [];
     const fetchMock = jwtGraphqlAndJira(
-      (query) => (query.includes("project = CALC") ? { data: { getTests: { total: 5 } } } : { data: { getTests: { total: 0, results: [] } } }),
+      (query) => {
+        queries.push(query);
+        return query.includes(String.raw`project = \"CALC\"`)
+          ? { data: { getTests: { total: 5 } } }
+          : { data: { getTests: { total: 0, results: [] } } };
+      },
       { status: 200, body: { isLast: true, values: [{ key: "CALC", name: "Calculator" }] } }
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -478,10 +499,7 @@ describe("probeXrayConnection: Jira project view", () => {
     expect(outcome.message).toContain("project MATH: not found on this site");
     expect(outcome.message).toContain("1 Jira project(s) accessible");
     // No Xray probe is spent on the absent MATH project.
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ body: expect.stringContaining("project = MATH") })
-    );
+    expect(queries.some((query) => query.includes(String.raw`project = \"MATH\"`))).toBe(false);
   });
 
   it("uses honest can't-verify wording for a 0-total project when no Jira credentials are stored", async () => {

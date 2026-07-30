@@ -6,6 +6,7 @@ import { XrayCredentialStore } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
 import { JiraAccessError, JiraProject, searchJiraProjects } from "./jira-project-search";
 import { describeJwt, describeShape, graphqlErrorSummaries } from "./xray-diagnostics";
+import { buildKeysJql, jqlString } from "./xray-search";
 
 const FETCH_TIMEOUT_MS = 30_000;
 const CONNECT_COMMAND = "playwrightBddRunner.traceability.connect";
@@ -121,7 +122,7 @@ function coverageQuery(jql: string): string {
 // `limit: Int!` is required on getTests (schema max 100); a per-project count only needs `total`, so
 // a single-item page is the cheapest legal request.
 function projectCountQuery(project: string): string {
-  const jql = `project = ${project}`;
+  const jql = `project = ${jqlString(project)}`;
   return `{ getTests(jql: ${JSON.stringify(jql)}, limit: 1) { total } }`;
 }
 
@@ -400,7 +401,7 @@ export async function probeXrayConnection(
     });
   }
 
-  const jql = `key in (${keys.join(", ")})`;
+  const jql = buildKeysJql(keys);
   let projects: XrayProjectSummary[];
   let projectFailures: number;
   try {

@@ -8,6 +8,16 @@ export function escapeJql(text: string): string {
   return text.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
+// The one way a value enters JQL. A bare token that collides with a reserved word (`IS`, `AND`, ...)
+// is hard-rejected by Jira's parser, so values are always quoted, never interpolated raw.
+export function jqlString(value: string): string {
+  return `"${escapeJql(value)}"`;
+}
+
+export function buildKeysJql(keys: readonly string[]): string {
+  return `key in (${keys.map(jqlString).join(", ")})`;
+}
+
 // True when the input already looks like a Jira issue key (a trailing `-<number>`), so a direct key
 // lookup is the right search rather than a summary contains-match.
 export function isKeyShaped(text: string): boolean {
@@ -27,13 +37,14 @@ export function buildSearchJql(projectKeys: readonly string[], text: string): st
     return undefined;
   }
   if (isKeyShaped(trimmed)) {
-    return `key in (${trimmed.toUpperCase()})`;
+    return buildKeysJql([trimmed.toUpperCase()]);
   }
   const projects = projectKeys.map((key) => key.trim()).filter((key) => key !== "");
   if (projects.length === 0) {
     return undefined;
   }
-  const projectClause = projects.length === 1 ? `project = ${projects[0]}` : `project in (${projects.join(", ")})`;
+  const quoted = projects.map(jqlString);
+  const projectClause = quoted.length === 1 ? `project = ${quoted[0]}` : `project in (${quoted.join(", ")})`;
   return `${projectClause} AND summary ~ "${escapeJql(trimmed)}*"`;
 }
 
@@ -42,5 +53,5 @@ export function buildSearchJql(projectKeys: readonly string[], text: string): st
 // with Xray's `testPlanTests` JQL function, a flat query that honors the limit ≤ 100 / paginate
 // budget for free.
 export function buildTestPlanJql(planKey: string): string {
-  return `issue in testPlanTests("${escapeJql(planKey)}")`;
+  return `issue in testPlanTests(${jqlString(planKey)})`;
 }

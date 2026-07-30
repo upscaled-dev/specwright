@@ -792,7 +792,7 @@ describe("XrayMetadataCapability.search", () => {
 
     const result = await capability.search("login");
 
-    expect(seen).toEqual(['project = CALC AND summary ~ "login*"']);
+    expect(seen).toEqual(['project = "CALC" AND summary ~ "login*"']);
     expect(result.complete).toBe(true);
     expect(result.tests.map((t) => t.key)).toEqual(["CALC-9"]);
   });
@@ -840,7 +840,7 @@ describe("XrayMetadataCapability.search", () => {
 
     await capability.search("login");
 
-    expect(seen).toEqual(['project in (CALC, SHOP) AND summary ~ "login*"']);
+    expect(seen).toEqual(['project in ("CALC", "SHOP") AND summary ~ "login*"']);
   });
 });
 

@@ -3,6 +3,7 @@ import { errMsg, scrubJwtLike } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
 import { describeShape } from "./xray-diagnostics";
 import { FetchLike, JiraAccessError } from "./jira-project-search";
+import { jqlString } from "./xray-search";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const PAGE_SIZE = 50;
@@ -134,21 +135,15 @@ function accessErrorFor(status: number): JiraAccessError {
   return new JiraAccessError(`Jira issue search failed (HTTP ${status}).`);
 }
 
-// JQL metacharacters that would break out of the quoted clause; only `"` and `\` need escaping inside
-// a double-quoted JQL string value.
-function escapeJql(value: string): string {
-  return value.replaceAll("\\", String.raw`\\`).replaceAll('"', String.raw`\"`);
-}
-
 function buildJql(kind: JiraIssueKind, query: string, executionIssueType: string): string {
   const project = query.trim();
   const clauses: string[] = [];
   if (project !== "") {
-    clauses.push(`project = "${escapeJql(project)}"`);
+    clauses.push(`project = ${jqlString(project)}`);
   }
   if (kind !== "requirement") {
     const issueType = kind === "execution" ? executionIssueType : ISSUE_TYPE_NAME[kind];
-    clauses.push(`issuetype = "${escapeJql(issueType)}"`);
+    clauses.push(`issuetype = ${jqlString(issueType)}`);
   }
   const where = clauses.length === 0 ? "" : `${clauses.join(" AND ")} `;
   return `${where}ORDER BY created DESC`;
@@ -276,7 +271,7 @@ class JiraIssueSearch {
 
 /**
  * Searches the Jira issues of one {@link JiraIssueKind} via `POST /rest/api/3/search/jql` (basic auth,
- * JQL `project = <key> AND issuetype = "<type>" ORDER BY created DESC` with each clause dropped when
+ * JQL `project = "<key>" AND issuetype = "<type>" ORDER BY created DESC` with each clause dropped when
  * it does not apply, `nextPageToken` pagination, capped at {@link MAX_ISSUES}). Returns `{ issues,
  * truncated }`. Throws {@link JiraAccessError} with a value-free message on a terminal failure. An
  * unscoped requirement search is refused here, before any request leaves. Diagnostics are allowlisted

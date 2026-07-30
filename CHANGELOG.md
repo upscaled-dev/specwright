@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+
+- **A project key that collides with a JQL reserved word no longer breaks sync, search, or the connection test.** A key such as IS went out as a bare word, and Jira refuses a reserved word that is not surrounded by quotation marks, so that project's tests could not be synced or searched, and its connection probe reported no counts. Project keys and issue keys now go out quoted, so any key a project uses is accepted.
 
 ## [0.4.42] - 2026-07-30
 ### Added
