@@ -23,6 +23,7 @@ import {
 import { TagDiagnosticsProvider } from "./tag-diagnostics";
 import { TagDecorationProvider } from "./tag-decoration";
 import { RunResultStore } from "./run-result-store";
+import { MappingPageSizeStore, mappingPageSizeStore } from "./mapping-page-size";
 import { ProjectScopeStore, projectScopeStore } from "./project-scope";
 
 const FALLBACK_PROVIDER_ID = "xray";
@@ -137,6 +138,14 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   public projectScope(): ProjectScopeStore {
     return projectScopeStore(this.workspaceState, (error) => {
       this.logger.warn("Persisting the board project scope failed", { error: String(error) });
+    });
+  }
+
+  // The Mapping tab's page size, persisted per workspace alongside the project scope. The coercion of a
+  // size the dropdown no longer offers lives in the store.
+  public mappingPageSize(): MappingPageSizeStore {
+    return mappingPageSizeStore(this.workspaceState, (error) => {
+      this.logger.warn("Persisting the board mapping page size failed", { error: String(error) });
     });
   }
 

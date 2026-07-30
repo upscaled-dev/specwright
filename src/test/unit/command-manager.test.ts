@@ -19,6 +19,7 @@ import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
+import { NO_MAPPING_PAGE_SIZE } from "../../traceability/mapping-page-size";
 import { NO_PROJECT_SCOPE, ProjectScopeStore, projectScopeStore } from "../../traceability/project-scope";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
 import { PublishLedger } from "../../traceability/publish-ledger";
@@ -874,6 +875,7 @@ describe("traceability sync command handler", () => {
       knownTestKeys: () => over.testKeys ?? [],
       tagDerivedProjectKeys: () => over.tagDerived ?? [],
       projectScope: () => over.scope ?? NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
   }
@@ -1349,6 +1351,7 @@ describe("traceability openBoard command handler", () => {
       }),
       tagDerivedProjectKeys: () => ladder.tagDerived ?? [],
       projectScope: () => NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
   }
@@ -1518,6 +1521,7 @@ describe("traceability publishLastRun: Publish tab", () => {
       getSnapshot: () => undefined,
       tagDerivedProjectKeys: () => [],
       projectScope: () => scope,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
   }
@@ -1988,6 +1992,7 @@ describe("traceability bulkCreateTests wiring", () => {
       }),
       tagDerivedProjectKeys: () => [],
       projectScope: () => NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
     } as unknown as TraceabilitySubsystem;
   }
@@ -2055,6 +2060,7 @@ describe("board refresh on a settings change", () => {
       getSnapshot: () => undefined,
       tagDerivedProjectKeys: () => [],
       projectScope: () => scope,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
       onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
       // Stands in for the debounced, serialized rebuild the real subsystem runs.
       scheduleRebuild: onRebuild,

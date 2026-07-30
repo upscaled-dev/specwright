@@ -35,6 +35,7 @@ import {
   syncProgressText,
 } from "../traceability/board-data";
 import { affectsBoard, BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
+import { NO_MAPPING_PAGE_SIZE } from "../traceability/mapping-page-size";
 import {
   NO_PROJECT_SCOPE,
   ProjectUniverseSources,
@@ -1408,6 +1409,7 @@ export class CommandManager {
         ),
       knownProjects: () => this.projectUniverse(subsystem?.getActiveAdapter()),
       projectScope: subsystem?.projectScope() ?? NO_PROJECT_SCOPE,
+      mappingPageSize: subsystem?.mappingPageSize() ?? NO_MAPPING_PAGE_SIZE,
       // The site is read per build, not captured: pointing the workspace at another Jira has to change
       // which ledger rows the Executions tab lists, and a board open at the time rebuilds in place.
       buildExecutions: () =>

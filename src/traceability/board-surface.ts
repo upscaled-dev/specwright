@@ -1,21 +1,46 @@
 import * as vscode from "vscode";
 import {
+  BoardPageMeta,
   BoardScenarioCard,
+  BoardSectionMeta,
   BoardTestCard,
   BoardViewModel,
   ExecutionRow,
   MatrixGroup,
   filterBoardViewModel,
   filterExecutionRows,
+  filterScenarioColumn,
+  filterTestColumn,
   groupMatrixRows,
+  paginate,
   scopeBoardViewModel,
+  sectionFiltering,
 } from "./board-data";
+import { MappingPageSizeStore } from "./mapping-page-size";
 import { ProjectScopeStore } from "./project-scope";
 import { SurfaceHost } from "./webview-host";
 
 interface SearchMessage {
   type: "search";
   value: string;
+}
+// The three card lists of the Mapping tab, each with its own search box and paginator.
+type MappingSection = "untraced" | "available" | "mapped";
+interface ColumnSearchMessage {
+  type: "columnSearch";
+  section: MappingSection;
+  value: string;
+}
+// A paginator step, never a page number: the webview posts the direction and the host moves its own
+// index, so a stale render can never send the board to a page nobody clicked for.
+interface PageMessage {
+  type: "page";
+  section: MappingSection;
+  step: "prev" | "next";
+}
+interface PageSizeMessage {
+  type: "pageSize";
+  size: number;
 }
 interface DropMessage {
   type: "drop";
@@ -65,6 +90,9 @@ interface CreateTestExecutionMessage {
 }
 type BoardIncoming =
   | SearchMessage
+  | ColumnSearchMessage
+  | PageMessage
+  | PageSizeMessage
   | DropMessage
   | UnlinkMessage
   | PushTextMessage
@@ -102,9 +130,15 @@ interface CreateVerb {
 
 interface RenderMessage {
   type: "render";
+  // One page of each Mapping section, already sliced. `sections` is what the webview paints its header
+  // counts, empty states, and paginators from; deriving any of it from the cards it was handed would go
+  // wrong the moment a page is not the whole set.
   scenarios: readonly SelectableScenarioCard[];
   available: readonly SelectableTestCard[];
   mapped: readonly SelectableTestCard[];
+  sections: Record<MappingSection, BoardSectionMeta>;
+  // The one page size every section runs on, for the pane's dropdown to show as selected.
+  pageSize: number;
   matrix: readonly MatrixGroup[];
   executions: readonly ExecutionRow[];
   availableEmptyText: string;
@@ -177,7 +211,20 @@ export interface BoardSurfaceDeps {
   // Where the selection lives between sessions; it also owns coercing a key that has left `knownProjects`
   // back to All Projects.
   readonly projectScope: ProjectScopeStore;
+  // How many cards a Mapping section shows at a time. Persisted, unlike the searches and the paginator
+  // positions, which are per panel.
+  readonly mappingPageSize: MappingPageSizeStore;
 }
+
+// The Mapping tab's per-section search boxes and paginator positions, all ephemeral per panel. Both
+// records are replaced from these constants rather than edited in place, so a reset cannot alias them.
+interface MappingViewState {
+  query: Record<MappingSection, string>;
+  page: Record<MappingSection, number>;
+}
+
+const NO_COLUMN_QUERIES: Record<MappingSection, string> = { untraced: "", available: "", mapped: "" };
+const FIRST_PAGES: Record<MappingSection, number> = { untraced: 0, available: 0, mapped: 0 };
 
 function prune(selection: Set<string>, live: readonly string[]): void {
   const known = new Set(live);
@@ -196,6 +243,7 @@ function prune(selection: Set<string>, live: readonly string[]): void {
 // how far the executions window is pulled down).
 export class BoardSurface {
   private query = "";
+  private mapping: MappingViewState = { query: { ...NO_COLUMN_QUERIES }, page: { ...FIRST_PAGES } };
   private model: BoardViewModel;
   private executions: readonly ExecutionRow[];
   private projects: readonly string[];
@@ -227,6 +275,23 @@ export class BoardSurface {
   private readonly routes: BoardRoutes = {
     search: (message) => {
       this.query = message.value;
+      this.mapping.page = { ...FIRST_PAGES };
+      this.render();
+    },
+    columnSearch: (message) => {
+      this.mapping.query[message.section] = message.value;
+      this.mapping.page[message.section] = 0;
+      this.render();
+    },
+    // The step lands on the host's own index, and `paginate` clamps it, so both ends hold without the
+    // webview knowing how many pages there are.
+    page: (message) => {
+      this.mapping.page[message.section] += message.step === "next" ? 1 : -1;
+      this.render();
+    },
+    pageSize: (message) => {
+      this.deps.mappingPageSize.set(message.size);
+      this.mapping.page = { ...FIRST_PAGES };
       this.render();
     },
     // The write, its snapshot rebuild, and the follow-up re-render are the host's job. Nothing is posted
@@ -287,6 +352,7 @@ export class BoardSurface {
 
   private scopeTo(project: string): void {
     this.deps.projectScope.set(project === "" ? undefined : project);
+    this.mapping.page = { ...FIRST_PAGES };
     this.render();
     // Picking a project is also a load instruction. The key rides the request, so the run covers what was
     // just picked whether or not the store's write has settled; All projects asks for nothing.
@@ -330,10 +396,12 @@ export class BoardSurface {
     this.render();
   }
 
-  // A rebuilt webview comes back with an empty search box, so the query it was filtering behind goes
-  // with it; keeping it would leave the board narrowed by a filter nothing on screen still shows.
+  // A rebuilt webview comes back with empty search boxes and every paginator on page 1, so the state
+  // they were filtering behind goes with them; keeping it would leave the board narrowed and scrolled by
+  // controls that no longer show any of it.
   public rehydrate(): void {
     this.query = "";
+    this.mapping = { query: { ...NO_COLUMN_QUERIES }, page: { ...FIRST_PAGES } };
     this.refresh();
   }
 
@@ -401,6 +469,18 @@ export class BoardSurface {
     };
   }
 
+  // What a section's meta says beyond its page arithmetic: `total` is the count the header shows, before
+  // the column search but after the header one, and the two flags are the ones the webview must not work
+  // out from its own inputs.
+  private sectionMeta(section: MappingSection, page: BoardPageMeta, total: number): BoardSectionMeta {
+    return {
+      ...page,
+      total,
+      filtering: sectionFiltering(this.query, this.mapping.query[section]),
+      query: this.mapping.query[section],
+    };
+  }
+
   private render(): void {
     const project = this.deps.projectScope.get(this.projects);
     const scoped = scopeBoardViewModel(this.model, project);
@@ -410,16 +490,51 @@ export class BoardSurface {
       ...card,
       selected: this.selectedTestKeys.has(card.key),
     });
+    // Header search, then the section's own search, then one page of what is left. Selection is stamped
+    // before the column filter so a checked card off the page keeps its flag for the verb counts.
+    const pageSize = this.deps.mappingPageSize.get();
+    const scenarios = filtered.scenarios.map((card) => ({
+      ...card,
+      selected: this.selectedScenarioIds.has(card.dropId),
+    }));
+    const untraced = paginate(
+      filterScenarioColumn(scenarios, this.mapping.query.untraced),
+      this.mapping.page.untraced,
+      pageSize
+    );
+    const available = paginate(
+      filterTestColumn(filtered.available.map(checkedTest), this.mapping.query.available),
+      this.mapping.page.available,
+      pageSize
+    );
+    const mapped = paginate(
+      filterTestColumn(filtered.mapped.map(checkedTest), this.mapping.query.mapped),
+      this.mapping.page.mapped,
+      pageSize
+    );
+    // Adopt the clamped indexes. A clamp that lived only in the render would resurface the stale index the
+    // moment a search cleared and the section grew back.
+    this.mapping.page = {
+      untraced: untraced.meta.page,
+      available: available.meta.page,
+      mapped: mapped.meta.page,
+    };
     const message: RenderMessage = {
       type: "render",
-      scenarios: filtered.scenarios.map((card) => ({ ...card, selected: this.selectedScenarioIds.has(card.dropId) })),
-      available: filtered.available.map(checkedTest),
-      mapped: filtered.mapped.map(checkedTest),
+      scenarios: untraced.items,
+      available: available.items,
+      mapped: mapped.items,
+      sections: {
+        untraced: this.sectionMeta("untraced", untraced.meta, filtered.scenarios.length),
+        available: this.sectionMeta("available", available.meta, filtered.available.length),
+        mapped: this.sectionMeta("mapped", mapped.meta, filtered.mapped.length),
+      },
+      pageSize,
       matrix: groupMatrixRows(filtered.matrix),
       executions: filterExecutionRows(this.executions, this.query),
       availableEmptyText: filtered.availableEmptyText,
       offerSync: filtered.offerSync,
-      filtering: this.query.trim() !== "",
+      filtering: sectionFiltering(this.query, ""),
       projects: this.projects,
       project: project ?? "",
       scoped: project !== undefined,

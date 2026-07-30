@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
+import type { Memento } from "vscode";
 import { affectsBoard, BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
-import { BoardViewModel, ExecutionRow } from "../../traceability/board-data";
+import { BoardSectionMeta, BoardViewModel, ExecutionRow } from "../../traceability/board-data";
+import { mappingPageSizeStore } from "../../traceability/mapping-page-size";
 import { NO_PROJECT_SCOPE, ProjectScopeStore } from "../../traceability/project-scope";
 import { PublishDialogDelegate } from "../../traceability/publish-dialog-panel";
 import { UNKNOWN_EXECUTION } from "../../traceability/publish-core";
@@ -35,6 +37,8 @@ interface RenderMessage {
   scenarios: Array<{ name: string; dropId: string; selected: boolean }>;
   available: Array<{ key: string; selected: boolean; links: Array<{ name: string; location: string; unlinkId: string }> }>;
   mapped: Array<{ key: string; selected: boolean; links: Array<{ name: string; location: string; unlinkId: string }> }>;
+  sections: { untraced: BoardSectionMeta; available: BoardSectionMeta; mapped: BoardSectionMeta };
+  pageSize: number;
   matrix: Array<{ file: string; count: number; rows: Array<{ requirement: string; test: string; scenario: string; tag: string; result: string }> }>;
   executions: Array<{ key: string; summary: string }>;
   availableEmptyText: string;
@@ -114,6 +118,37 @@ function fakeScope(initial?: string): ProjectScopeStore {
   return store;
 }
 
+// workspaceState in memory, so the board runs the real page-size store instead of a second copy of its
+// coercion, and a test can read back what a pageSize message persisted.
+function memento(): Memento & { values: Record<string, unknown> } {
+  const store = {
+    values: {} as Record<string, unknown>,
+    get: <T>(key: string): T | undefined => store.values[key] as T | undefined,
+    update: (key: string, value: unknown): Promise<void> => {
+      store.values[key] = value;
+      return Promise.resolve();
+    },
+    keys: () => Object.keys(store.values),
+  };
+  return store as unknown as Memento & { values: Record<string, unknown> };
+}
+
+const PAGE_SIZE_KEY = "playwrightBddRunner.board.mappingPageSize";
+
+// More untraced scenarios than one page holds, so a paginator has somewhere to go.
+function manyScenarios(count: number): BoardViewModel {
+  return {
+    ...MODEL,
+    scenarios: Array.from({ length: count }, (_, index) => ({
+      name: `Scenario ${index + 1}`,
+      location: `features/many.feature:${index + 1}`,
+      dropId: `id-${index + 1}`,
+      pills: [],
+      reqKeys: [],
+    })),
+  };
+}
+
 const EXECUTIONS: ExecutionRow[] = [
   {
     kind: "group",
@@ -159,6 +194,7 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     createTestExecution: () => undefined,
     knownProjects: () => PROJECTS,
     projectScope: fakeScope(),
+    mappingPageSize: mappingPageSizeStore(memento(), () => undefined),
     publishDelegate: noopDelegate,
     startPublish: () => undefined,
     ...over,
@@ -1394,6 +1430,202 @@ describe("BoardPanel", () => {
     instance.dispose();
 
     expect(BoardPanel.selectedScenarios()).toEqual([]);
+  });
+
+  it("opens every mapping section on its first page at the stored size, with no column query", async () => {
+    const { panel } = await openReady();
+
+    const render = lastRender(panel)!;
+    expect(render.pageSize).toBe(50);
+    expect(render.sections).toEqual({
+      untraced: { total: 2, filtered: 2, page: 0, pageCount: 1, pageSize: 50, filtering: false, query: "" },
+      available: { total: 1, filtered: 1, page: 0, pageCount: 1, pageSize: 50, filtering: false, query: "" },
+      mapped: { total: 1, filtered: 1, page: 0, pageCount: 1, pageSize: 50, filtering: false, query: "" },
+    });
+  });
+
+  // The bug the per-column searches exist for: the header search hid the scenario the user was dragging
+  // from while they hunted for its target.
+  it("filters only the section a column search names, leaving the other two put", async () => {
+    const { panel } = await openReady();
+
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "untraced", value: "Log in" });
+
+    const render = lastRender(panel)!;
+    expect(render.scenarios.map((s) => s.name)).toEqual(["Log in"]);
+    expect(render.available.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(render.mapped.map((t) => t.key)).toEqual(["CALC-1"]);
+    expect(render.filtering).toBe(false);
+    expect(render.sections.untraced).toMatchObject({ total: 2, filtered: 1, filtering: true, query: "Log in" });
+    expect(render.sections.available).toMatchObject({ total: 1, filtered: 1, filtering: false, query: "" });
+    expect(render.sections.mapped).toMatchObject({ total: 1, filtered: 1, filtering: false, query: "" });
+  });
+
+  it("matches a test column on key or summary, each test group on its own query", async () => {
+    const { panel } = await openReady();
+
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "available", value: "pay-9" });
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "mapped", value: "add two" });
+    expect(lastRender(panel)!.available.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(lastRender(panel)!.mapped.map((t) => t.key)).toEqual(["CALC-1"]);
+
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "mapped", value: "PAY" });
+
+    const render = lastRender(panel)!;
+    expect(render.mapped).toEqual([]);
+    expect(render.available.map((t) => t.key)).toEqual(["PAY-9"]);
+    expect(render.sections.mapped).toMatchObject({ total: 1, filtered: 0, filtering: true, query: "PAY" });
+  });
+
+  it("composes the header search with a column search, counting a section before its own query", async () => {
+    const { panel } = await openReady();
+
+    await panel.__receive({ surface: "board", type: "search", value: "Checkout" });
+
+    const header = lastRender(panel)!;
+    expect(header.sections.untraced).toMatchObject({ total: 1, filtered: 1, filtering: true, query: "" });
+    expect(header.sections.available).toMatchObject({ total: 0, filtered: 0, filtering: true, query: "" });
+
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "untraced", value: "Log in" });
+
+    const both = lastRender(panel)!;
+    expect(both.scenarios).toEqual([]);
+    expect(both.sections.untraced).toMatchObject({ total: 1, filtered: 0, filtering: true, query: "Log in" });
+  });
+
+  it("steps a paginator from the host's own index and clamps it at both ends", async () => {
+    const { panel } = await openReady({ buildModel: () => manyScenarios(60) });
+    await panel.__receive({ surface: "board", type: "pageSize", size: 25 });
+    const untraced = (): BoardSectionMeta => lastRender(panel)!.sections.untraced;
+    expect(untraced()).toMatchObject({ total: 60, filtered: 60, page: 0, pageCount: 3, pageSize: 25 });
+    expect(lastRender(panel)!.scenarios).toHaveLength(25);
+
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "prev" });
+    expect(untraced().page).toBe(0);
+
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+    expect(untraced().page).toBe(1);
+    expect(lastRender(panel)!.scenarios[0]!.name).toBe("Scenario 26");
+
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+    expect(untraced().page).toBe(2);
+    expect(lastRender(panel)!.scenarios).toHaveLength(10);
+
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "prev" });
+    expect(untraced().page).toBe(1);
+  });
+
+  it("re-renders on every mapping control and moves only the section the message names", async () => {
+    const { panel } = await openReady({ buildModel: () => manyScenarios(60) });
+    await panel.__receive({ surface: "board", type: "pageSize", size: 25 });
+    const renders = (): number => panel.webview.__posted.filter(isRender).length;
+    const before = renders();
+
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "available", value: "PAY" });
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+
+    expect(renders()).toBe(before + 2);
+    const render = lastRender(panel)!;
+    expect(render.sections.untraced).toMatchObject({ page: 1, query: "" });
+    expect(render.sections.available).toMatchObject({ page: 0, query: "PAY" });
+    expect(render.sections.mapped).toMatchObject({ page: 0, query: "" });
+  });
+
+  it("persists a page-size change and sends every section back to its first page", async () => {
+    const state = memento();
+    const { panel } = await openReady({
+      buildModel: () => manyScenarios(60),
+      mappingPageSize: mappingPageSizeStore(state, () => undefined),
+    });
+    await panel.__receive({ surface: "board", type: "pageSize", size: 25 });
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+    expect(lastRender(panel)!.sections.untraced.page).toBe(1);
+
+    await panel.__receive({ surface: "board", type: "pageSize", size: 100 });
+
+    expect(state.values[PAGE_SIZE_KEY]).toBe(100);
+    const render = lastRender(panel)!;
+    expect(render.pageSize).toBe(100);
+    expect(render.sections.untraced).toMatchObject({ page: 0, pageCount: 1, pageSize: 100 });
+  });
+
+  it("sends every paginator back to the first page on a global search or a scope change, but a column search resets only its own section", async () => {
+    const { panel } = await openReady({ buildModel: () => manyScenarios(60) });
+    await panel.__receive({ surface: "board", type: "pageSize", size: 25 });
+    const toSecondPage = async (): Promise<void> => {
+      await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+      expect(lastRender(panel)!.sections.untraced.page).toBe(1);
+    };
+
+    await toSecondPage();
+    await panel.__receive({ surface: "board", type: "search", value: "many.feature" });
+    expect(lastRender(panel)!.sections.untraced.page).toBe(0);
+
+    await toSecondPage();
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "mapped", value: "CALC" });
+    expect(lastRender(panel)!.sections.untraced.page).toBe(1);
+
+    await panel.__receive({ surface: "board", type: "scope", project: "PAY" });
+    expect(lastRender(panel)!.sections.untraced.page).toBe(0);
+  });
+
+  // A clamp that lived only in the render would put the board back on the page it could not reach as soon
+  // as the section grew again.
+  it("adopts the clamped page, so a section that shrinks and grows again stays where the clamp left it", async () => {
+    let current = manyScenarios(60);
+    const changes = new vscode.EventEmitter<void>();
+    const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
+    await panel.__receive({ surface: "board", type: "pageSize", size: 25 });
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+    expect(lastRender(panel)!.sections.untraced.page).toBe(2);
+
+    current = manyScenarios(30);
+    changes.fire();
+    expect(lastRender(panel)!.sections.untraced).toMatchObject({ page: 1, pageCount: 2 });
+
+    current = manyScenarios(60);
+    changes.fire();
+
+    expect(lastRender(panel)!.sections.untraced).toMatchObject({ page: 1, pageCount: 3 });
+  });
+
+  // The rebuilt document brings back empty search boxes and every paginator on page 1; the page size is
+  // the one piece of this state that persists.
+  it("drops the column queries and the paginator positions when the webview comes back", async () => {
+    const { panel } = await openReady({ buildModel: () => manyScenarios(60) });
+    await panel.__receive({ surface: "board", type: "pageSize", size: 25 });
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "untraced", value: "Scenario" });
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "mapped", value: "CALC" });
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+    expect(lastRender(panel)!.sections.untraced).toMatchObject({ page: 1, query: "Scenario" });
+
+    await panel.__receive({ type: "ready" });
+
+    const render = lastRender(panel)!;
+    expect(render.sections.untraced).toMatchObject({ page: 0, query: "", filtering: false });
+    expect(render.sections.mapped).toMatchObject({ page: 0, query: "", filtering: false });
+    expect(render.pageSize).toBe(25);
+  });
+
+  it("keeps a checked card checked off the page and behind a column search, counting it in the verb", async () => {
+    const { panel } = await openReady({ buildModel: () => manyScenarios(60), projectScope: fakeScope("CALC") });
+    await panel.__receive({ surface: "board", type: "pageSize", size: 25 });
+    await panel.__receive({ surface: "board", type: "select", target: "scenario", id: "id-1", on: true });
+    expect(lastRender(panel)!.scenarios.filter((s) => s.selected).map((s) => s.name)).toEqual(["Scenario 1"]);
+
+    await panel.__receive({ surface: "board", type: "page", section: "untraced", step: "next" });
+
+    const offPage = lastRender(panel)!;
+    expect(offPage.scenarios.every((s) => !s.selected)).toBe(true);
+    expect(offPage.createVerb).toMatchObject({ enabled: true, label: "Create 1 test in CALC" });
+
+    await panel.__receive({ surface: "board", type: "columnSearch", section: "untraced", value: "Scenario 60" });
+
+    expect(lastRender(panel)!.scenarios.map((s) => s.name)).toEqual(["Scenario 60"]);
+    expect(lastRender(panel)!.createVerb.label).toBe("Create 1 test in CALC");
+    expect(BoardPanel.selectedScenarios()).toEqual(["id-1"]);
   });
 
   it("clears the singleton on dispose and stops posting; dispose is idempotent", async () => {
