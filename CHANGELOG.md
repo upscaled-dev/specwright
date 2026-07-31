@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.43] - 2026-07-31
 ### Added
 
 - **The connection test confirms which Jira account you are using.** Test Connection now asks Jira who the stored email and API token authenticate as before it lists projects, and reports "Jira authenticated as \<name\>" in its result. A token that Jira refuses is named at that point, with the site's own reason, instead of surfacing later as an empty project list.
