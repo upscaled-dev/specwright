@@ -27,7 +27,7 @@ If the Testing view is empty, start with [Troubleshooting: features do not appea
 2. Expand a feature until you reach the scope you want to run.
 3. Select the **Run** icon, or use the action in the feature editor.
 
-Specwright creates the required specs, starts Playwright, and maps the result to the item you selected. The status bar shows whether a run is in progress and the last pass/fail summary. Select it to open the Specwright output channel.
+Specwright creates the required specs, starts Playwright, and maps each scenario result to the item you selected as soon as it finishes. During a long run, the Test Results output and status bar show the live completed count. Editor-triggered feature and scenario runs show the same count in a progress notification. The final JSON report reconciles the complete result and supplies the detailed summary after Playwright exits. Select the status bar item to open the Specwright output channel.
 
 ![Run a scenario directly from its editor action](../images/running_scenario_side.gif)
 
@@ -43,7 +43,9 @@ Use **Run with @tag** above a feature, or configure a default tag expression wit
 
 ### Run in parallel
 
-Choose **Run All Tests in Parallel** from the Testing view, or from the Command Palette with a `.feature` file open. The first run asks for a worker count and remembers it. You can also enable parallel runs through `playwrightBddRunner.parallelExecution` and set `playwrightBddRunner.maxParallelProcesses`.
+Choose **Run All Tests in Parallel** from the Testing view, or from the Command Palette with a `.feature` file open. The first run asks for a worker count and remembers it. You can also enable workers through `playwrightBddRunner.parallelExecution` and set `playwrightBddRunner.maxParallelProcesses`.
+
+The worker count controls concurrency that Playwright permits across files and projects. A feature normally generates one spec file, so hundreds of scenarios in that one feature do not become parallel solely because Specwright passes `--workers`. Use Playwright's `fullyParallel` configuration when you deliberately want tests within one generated file to run in parallel.
 
 ### Run a pre-flight command
 
@@ -82,7 +84,7 @@ If your project writes generated specs outside `.features-gen`, set `playwrightB
 
 ## Read results
 
-After a run, the **Test Results** panel shows a scenario summary with Gherkin steps, durations, failures, and clickable stack traces.
+While a run is active, the **Test Results** panel marks each completed scenario and writes lines such as `[127 / 500]`. After the run, it shows the final scenario summary with Gherkin steps, durations, failures, and clickable stack traces.
 
 <!-- Screenshot placeholder: ../images/test-results.png
 Show VS Code Test Results for one failed scenario, including a failing Gherkin step and a clickable stack trace. Remove sensitive paths and data. -->
@@ -94,7 +96,7 @@ Show VS Code Test Results for one failed scenario, including a failing Gherkin s
 
 ## Stop a run
 
-Use VS Code's **Stop** action in the Testing view. Specwright ends the Playwright process tree and marks tests that did not run as skipped. A deliberately stopped run is shown as cancelled, not failed. A debug run stops the same way, and its debug session ends with it.
+Use VS Code's **Stop** action in the Testing view. For a feature or scenario run started from CodeLens or an editor menu, use **Cancel** in its progress notification. Specwright ends the Playwright process tree and marks tests that did not run as skipped. A deliberately stopped run is shown as cancelled, not failed. A debug run stops the same way, and its debug session ends with it.
 
 ## Commands
 

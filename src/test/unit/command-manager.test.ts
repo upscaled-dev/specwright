@@ -216,7 +216,50 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
     // VS Code invokes resource context-menu commands with a Uri (has .fsPath), not a string.
     const uri = { fsPath: "/abs/login.feature", scheme: "file" };
     await (mgr as unknown as Handlers).runFeatureFileWithContext(uri);
-    expect(exec.runFeatureFileWithOutput).toHaveBeenCalledWith({ filePath: "/abs/login.feature" });
+    expect(exec.runFeatureFileWithOutput).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: "/abs/login.feature",
+    }));
+  });
+
+  it("wires editor-run cancellation through the executor and its open TestRun session", async () => {
+    const cancelled = { success: false, output: "", error: "Cancelled", duration: 1 };
+    const runFeatureFileWithOutput = vi.fn(async (options: { signal?: AbortSignal }) => {
+      await new Promise<void>((resolve) => options.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return cancelled;
+    });
+    const exec = {
+      ...makeExecutorSpy(),
+      runFeatureFileWithOutput,
+    };
+    const complete = vi.fn();
+    const end = vi.fn();
+    const beginExternalRun = vi.fn(() => ({ progress: {}, complete, end }));
+    const mgr = CommandManager.create(makeContext({ testExecutor: exec as unknown as TestExecutor }));
+    mgr.setTestProvider({ beginExternalRun });
+    const progressSpy = vi.spyOn(vscode.window, "withProgress").mockImplementation((
+      _options,
+      task
+    ) => Promise.resolve(task(
+      { report: () => undefined },
+      {
+        isCancellationRequested: false,
+        onCancellationRequested: (listener) => {
+          queueMicrotask(() => listener(undefined));
+          return { dispose: () => undefined };
+        },
+      } as vscode.CancellationToken
+    )));
+
+    try {
+      await (mgr as unknown as Handlers).runFeature("/abs/x.feature");
+    } finally {
+      progressSpy.mockRestore();
+    }
+
+    expect(beginExternalRun).toHaveBeenCalledWith("/abs/x.feature", undefined);
+    expect(runFeatureFileWithOutput.mock.calls[0]?.[0].signal?.aborted).toBe(true);
+    expect(complete).toHaveBeenCalledWith(cancelled);
+    expect(end).not.toHaveBeenCalled();
   });
 });
 

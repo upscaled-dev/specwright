@@ -1,6 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Logger } from "./logger";
+import { parseBddSourceData } from "../parsers/bdd-file-data-parser";
+import { resolveTestStatus } from "../core/test-result-status";
 
 /**
  * Status as exposed to consumers. Playwright also reports `timedOut` and `interrupted`,
@@ -137,6 +139,7 @@ interface RawResult {
 
 interface RawTest {
   annotations?: Array<{ type?: string; description?: string }>;
+  expectedStatus?: string;
   results?: RawResult[];
 }
 
@@ -151,10 +154,6 @@ function detailedOutcome(rawStatus: string | undefined): ScenarioOutcome {
   if (status === "interrupted") {return "interrupted";}
   if (status === "skipped") {return "skipped";}
   return "passed";
-}
-
-function isFailureOutcome(outcome: ScenarioOutcome): boolean {
-  return outcome === "failed" || outcome === "timed-out" || outcome === "interrupted";
 }
 
 /** Collect on-disk evidence paths across every attempt, skipping inline (blob) attachments. */
@@ -343,15 +342,18 @@ export class PlaywrightJsonParser {
     const errorMessage = lastResult?.error?.message;
     const stack = lastResult?.error?.stack;
     const outcome = lastResult ? detailedOutcome(lastResult.status) : "skipped";
+    const status = this.aggregateStatus(test);
     const flaky =
-      outcome === "passed" &&
+      status === "passed" &&
       attempts.length > 1 &&
-      attempts.slice(0, -1).some((r) => isFailureOutcome(detailedOutcome(r.status)));
+      attempts.slice(0, -1).some((attempt) =>
+        resolveTestStatus(attempt.status, test.expectedStatus) === "failed"
+      );
     const attachmentPaths = collectAttachmentPaths(attempts);
 
     return {
       scenarioName,
-      status: this.aggregateStatus(test),
+      status,
       featurePath,
       ...(lineNumber !== undefined ? { lineNumber } : {}),
       ...(outlineName !== undefined ? { outlineName } : {}),
@@ -419,33 +421,22 @@ export class PlaywrightJsonParser {
     } catch {
       return null;
     }
-    const header = /Generated from:\s*(\S+\.feature)/.exec(content);
-    if (!header?.[1]) {return null;}
-
-    const featurePath = path.resolve(baseDir, header[1]);
-    const lineMap = new Map<number, number>();
-    const pairs = /"pwTestLine":(\d+),"pickleLine":(\d+)/g;
-    let match: RegExpExecArray | null;
-    while ((match = pairs.exec(content)) !== null) {
-      lineMap.set(Number(match[1]), Number(match[2]));
-    }
-    return { featurePath, lineMap };
+    const source = parseBddSourceData(content, baseDir);
+    return source ? { featurePath: source.featurePath, lineMap: source.lineNumbers } : null;
   }
 
   /**
    * Status of one test entry, decided from its LAST attempt only. Entries in `results[]` are
    * retries of the same test, so a [failed, passed] sequence is Playwright's "flaky" case: the
    * final attempt passed and the run exits 0, so we collapse it to passed (not failed). Empty
-   * results means nothing ran → skipped. Cross-entry worst-wins (multi-project / repeat-each
-   * emit separate entries) is applied later in toStatusMap.
+   * results means nothing ran → skipped. Expected failures count as passed, while an expected
+   * failure that unexpectedly passes counts as failed. Cross-entry worst-wins (multi-project /
+   * repeat-each emit separate entries) is applied later in toStatusMap.
    */
   private aggregateStatus(test: RawTest): ScenarioStatus {
     const last = (test.results ?? []).at(-1);
     if (!last) {return "skipped";}
-    const status = (last.status ?? "").toLowerCase();
-    if (status === "failed" || status === "timedout" || status === "interrupted") {return "failed";}
-    if (status === "skipped") {return "skipped";}
-    return "passed";
+    return resolveTestStatus(last.status, test.expectedStatus);
   }
 
   /**

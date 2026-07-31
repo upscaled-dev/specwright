@@ -88,6 +88,11 @@ describe("StatusBar", () => {
     expect(item.tooltip).toBe("No runs this session");
   });
 
+  it("shows completed and total counts while a run is active", () => {
+    executor.fire({ kind: "running", passed: 8, failed: 1, completed: 10, total: 25 });
+    expect(captured[0]!.text).toBe("$(loading~spin) Specwright: 10/25");
+  });
+
   it("updates to success state with passed count and updates tooltip with last run time", () => {
     executor.fire({ kind: "success", passed: 7, failed: 0 });
     const item = captured[0]!;

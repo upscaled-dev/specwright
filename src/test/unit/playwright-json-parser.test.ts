@@ -29,6 +29,21 @@ describe("PlaywrightJsonParser", () => {
     expect(results[0]?.status).toBe("passed");
   });
 
+  it("resolves expected failures and unexpected passes", () => {
+    const statusFor = (actual: string): ScenarioResult["status"] | undefined =>
+      parser.parse(JSON.stringify({
+        suites: [{
+          specs: [{
+            title: actual,
+            tests: [{ expectedStatus: "failed", results: [{ status: actual }] }],
+          }],
+        }],
+      }))[0]?.status;
+
+    expect(statusFor("failed")).toBe("passed");
+    expect(statusFor("passed")).toBe("failed");
+  });
+
   it("collapses timedOut into failed", () => {
     const report = JSON.stringify({
       suites: [{
@@ -74,6 +89,21 @@ describe("PlaywrightJsonParser", () => {
     const r = parser.parse(report)[0];
     expect(r?.attempts).toBe(2);
     expect(r?.flaky).toBe(true);
+  });
+
+  it("does not mark a skipped-then-passed serial rerun as flaky", () => {
+    const report = JSON.stringify({
+      suites: [{
+        specs: [{
+          title: "Serial peer",
+          tests: [{ results: [{ status: "skipped" }, { status: "passed" }] }],
+        }],
+      }],
+    });
+    const result = parser.parse(report)[0];
+    expect(result?.status).toBe("passed");
+    expect(result?.attempts).toBe(2);
+    expect(result?.flaky).toBeUndefined();
   });
 
   it("leaves attempts and flaky unset for a clean single-attempt run", () => {

@@ -60,6 +60,7 @@ src/
   extension.ts                            # activation, wiring
   commands/
     command-manager.ts                    # registers all playwrightBddRunner.* commands
+    captured-run-progress.ts              # cancellable editor-run notification + live counts
     generate-steps.ts                     # orchestrates "Generate Missing Step Definitions"
     insert-step.ts                        # "Insert Step…" snippet builder + QuickPick
     export-catalogs.ts                    # orchestrates Export Steps / Export All Scenarios
@@ -68,6 +69,9 @@ src/
     extension-config.ts                   # reads playwrightBddRunner.* settings
     command-builder.ts                    # composes `bddgen && playwright test …`
     test-executor.ts                      # runs in terminal + spawns for JSON parsing
+    live-run-session.ts                   # owns one reporter side-channel lifecycle
+    live-run-stream.ts                    # tails reporter JSONL and maps generated source lines
+    run-progress.ts                       # scoped live-result observer contract
     breakpoint-mirror.ts                  # mirrors .feature breakpoints onto generated specs for debug
     test-discovery-manager.ts             # globs + caches .feature files
     test-organization.ts                  # 5 tree-grouping strategies
@@ -111,6 +115,8 @@ src/
     status-bar.ts                         # left-side status item: idle / running / last result
   test-providers/
     playwright-bdd-test-provider.ts       # bridges Test Explorer to playwright-bdd
+    live-test-run-progress.ts             # applies terminal results to an open TestRun
+    specwright-live-reporter.ts           # bundled Playwright reporter for live result events
     group-scenarios.ts                    # pure scenario-grouping function (vitest-covered)
     constants.ts                          # shared OUTLINE_ID_SEPARATOR constant
   utils/

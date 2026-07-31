@@ -25,7 +25,7 @@ Go from a Gherkin step to its TypeScript or JavaScript definition, inspect the m
 
 ### Run and debug the right scenario
 
-Discover features in the Testing view and run a feature, scenario, Scenario Outline, or individual Examples row. Use CodeLens or the Testing view to target an individual scenario or row; editor and Explorer context menus provide file-level actions. Results map back to the feature file so failures are easier to act on.
+Discover features in the Testing view and run a feature, scenario, Scenario Outline, or individual Examples row. Use CodeLens or the Testing view to target an individual scenario or row; editor and Explorer context menus provide file-level actions. Results map back to the feature file as each scenario finishes, so a long run shows useful progress immediately.
 
 Set breakpoints in `.feature` files or step definitions, then use VS Code's normal Debug action. Specwright generates the necessary specs, mirrors supported feature-file breakpoints, and removes the generated breakpoints when the session ends.
 

@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { RunOutputResult } from "../core/test-executor";
+import type { RunProgressObserver, RunProgressSession } from "../core/run-progress";
 import { StepDefinitionProvider } from "../providers/step-definition-provider";
 import { StepResolver, UnmatchedStep } from "../providers/step-resolver";
 import { StepUsageIndex } from "../providers/step-usage-index";
@@ -22,6 +24,7 @@ import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
 import { GenerateStepsCommand } from "./generate-steps";
 import { runInsertStep } from "./insert-step";
 import { TraceabilityCommands } from "./traceability-commands";
+import { runCapturedWithProgress } from "./captured-run-progress";
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -46,6 +49,10 @@ interface TestProviderLike {
     result: RunOutputResult,
     target?: { lineNumber?: number }
   ) => void;
+  beginExternalRun?: (
+    filePath: string,
+    target?: { lineNumber?: number }
+  ) => RunProgressSession;
 }
 
 interface UsageIndexHost {
@@ -285,7 +292,9 @@ export class CommandManager {
     filePath: string,
     lineNumber: number | undefined,
     scenarioName: string | undefined,
-    tags?: string
+    tags?: string,
+    signal?: AbortSignal,
+    progress?: RunProgressObserver
   ): Promise<RunOutputResult> {
     if (lineNumber === undefined) {
       const featureName = this.getParsedFeature(filePath)?.feature;
@@ -293,6 +302,8 @@ export class CommandManager {
         filePath,
         ...(featureName ? { featureName } : {}),
         ...(tags ? { tags } : {}),
+        signal,
+        progress,
       });
     }
 
@@ -303,12 +314,17 @@ export class CommandManager {
       ...(scenarioName !== undefined ? { scenarioName } : {}),
       ...(outlineName ? { outlineName } : {}),
       ...(tags ? { tags } : {}),
+      signal,
+      progress,
     };
     return this.context.testExecutor.runScenarioWithOutput(opts);
   }
 
   private logResult(label: string, result: RunOutputResult): void {
-    if (result.success) {
+    if (result.error === "Cancelled") {
+      this.logger.info(`${label} cancelled`, { duration: result.duration });
+      return;
+    } else if (result.success) {
       this.logger.info(`${label} completed`, { duration: result.duration, outputLength: result.output.length });
     } else {
       this.logger.error(`${label} failed`, { error: result.error, duration: result.duration });
@@ -325,28 +341,51 @@ export class CommandManager {
     }
   }
 
+  private async runCapturedCommand(
+    label: string,
+    filePath: string,
+    lineNumber: number | undefined,
+    execute: (signal: AbortSignal, progress: RunProgressObserver) => Promise<RunOutputResult>
+  ): Promise<void> {
+    const provider = this.testProvider as TestProviderLike | undefined;
+    const target = lineNumber === undefined ? undefined : { lineNumber };
+    const session = provider?.beginExternalRun?.(filePath, target);
+    const result = await runCapturedWithProgress(
+      `Running ${label.toLowerCase()}: ${path.basename(filePath)}`,
+      session,
+      execute
+    );
+    if (!session && result.error !== "Cancelled") {
+      this.applyRunStatus(filePath, result, lineNumber);
+    }
+    this.logResult(label, result);
+    if (!result.success && result.error !== "Cancelled") {
+      throw new Error(`Test failed: ${result.error ?? "Unknown error"}`);
+    }
+  }
+
   private async runScenario(...args: CommandArguments): Promise<void> {
     const [filePath, lineNumber, scenarioName] = args as [string, number | undefined, string | undefined];
     if (!filePath) {throw new Error("File path is required");}
 
-    const result = await this.runScenarioCore(filePath, lineNumber, scenarioName);
-    this.applyRunStatus(filePath, result, lineNumber);
-    this.logResult("Scenario", result);
-    if (!result.success) {throw new Error(`Test failed: ${result.error ?? "Unknown error"}`);}
+    await this.runCapturedCommand("Scenario", filePath, lineNumber, (signal, progress) =>
+      this.runScenarioCore(filePath, lineNumber, scenarioName, undefined, signal, progress)
+    );
   }
 
   private async runFeature(...args: CommandArguments): Promise<void> {
     const [filePath] = args as [string];
     if (!filePath) {throw new Error("File path is required");}
 
-    const featureName = this.getParsedFeature(filePath)?.feature;
-    const result = await this.context.testExecutor.runFeatureFileWithOutput({
-      filePath,
-      ...(featureName ? { featureName } : {}),
+    await this.runCapturedCommand("Feature", filePath, undefined, (signal, progress) => {
+      const featureName = this.getParsedFeature(filePath)?.feature;
+      return this.context.testExecutor.runFeatureFileWithOutput({
+        filePath,
+        ...(featureName ? { featureName } : {}),
+        signal,
+        progress,
+      });
     });
-    this.applyRunStatus(filePath, result);
-    this.logResult("Feature", result);
-    if (!result.success) {throw new Error(`Test failed: ${result.error ?? "Unknown error"}`);}
   }
 
   private async runAllTests(): Promise<void> {
@@ -410,10 +449,9 @@ export class CommandManager {
     if (!filePath) {throw new Error("File path is required");}
     if (!tags) {throw new Error("Tags are required");}
 
-    const result = await this.context.testExecutor.runFeatureFileWithOutput({ filePath, tags });
-    this.applyRunStatus(filePath, result);
-    this.logResult("Feature with tags", result);
-    if (!result.success) {throw new Error(`Test failed: ${result.error ?? "Unknown error"}`);}
+    await this.runCapturedCommand("Feature with tags", filePath, undefined, (signal, progress) =>
+      this.context.testExecutor.runFeatureFileWithOutput({ filePath, tags, signal, progress })
+    );
   }
 
   private async runScenarioWithTags(...args: CommandArguments): Promise<void> {
@@ -421,10 +459,9 @@ export class CommandManager {
     if (!filePath) {throw new Error("File path is required");}
     if (!tags) {throw new Error("Tags are required");}
 
-    const result = await this.runScenarioCore(filePath, lineNumber, scenarioName, tags);
-    this.applyRunStatus(filePath, result, lineNumber);
-    this.logResult("Scenario with tags", result);
-    if (!result.success) {throw new Error(`Test failed: ${result.error ?? "Unknown error"}`);}
+    await this.runCapturedCommand("Scenario with tags", filePath, lineNumber, (signal, progress) =>
+      this.runScenarioCore(filePath, lineNumber, scenarioName, tags, signal, progress)
+    );
   }
 
   private async runAllTestsParallel(): Promise<void> {
@@ -449,17 +486,9 @@ export class CommandManager {
     const lineNumber = typeof args[1] === "number" ? args[1] : undefined;
     const scenarioName = typeof args[2] === "string" ? args[2] : undefined;
 
-    const outlineName = this.resolveOutlineName(filePath, lineNumber, scenarioName);
-    const opts: TestExecutionOptions = {
-      filePath,
-      ...(lineNumber !== undefined ? { lineNumber } : {}),
-      ...(scenarioName ? { scenarioName } : {}),
-      ...(outlineName ? { outlineName } : {}),
-    };
-    const result = await this.context.testExecutor.runScenarioWithOutput(opts);
-    this.applyRunStatus(filePath, result, lineNumber);
-    this.logResult("Scenario with context", result);
-    if (!result.success) {throw new Error(`Test failed: ${result.error ?? "Unknown error"}`);}
+    await this.runCapturedCommand("Scenario with context", filePath, lineNumber, (signal, progress) =>
+      this.runScenarioCore(filePath, lineNumber, scenarioName, undefined, signal, progress)
+    );
   }
 
   private async debugScenarioWithContext(...args: CommandArguments): Promise<void> {
@@ -482,14 +511,15 @@ export class CommandManager {
     const filePath = this.firstArgToFsPath(args[0]);
     if (!filePath) {throw new Error("File path is required");}
 
-    const featureName = this.getParsedFeature(filePath)?.feature;
-    const result = await this.context.testExecutor.runFeatureFileWithOutput({
-      filePath,
-      ...(featureName ? { featureName } : {}),
+    await this.runCapturedCommand("Feature with context", filePath, undefined, (signal, progress) => {
+      const featureName = this.getParsedFeature(filePath)?.feature;
+      return this.context.testExecutor.runFeatureFileWithOutput({
+        filePath,
+        ...(featureName ? { featureName } : {}),
+        signal,
+        progress,
+      });
     });
-    this.applyRunStatus(filePath, result);
-    this.logResult("Feature with context", result);
-    if (!result.success) {throw new Error(`Test failed: ${result.error ?? "Unknown error"}`);}
   }
 
   private showErrorMessage(message: string): void {

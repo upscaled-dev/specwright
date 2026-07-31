@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
-import { TestExecutor, ShellRunner, TestRunEvent } from "../../core/test-executor";
+import { TestExecutor, ShellRunner, TestRunEvent, withJsonReporter } from "../../core/test-executor";
 import { ExtensionConfig } from "../../core/extension-config";
 import { Logger } from "../../utils/logger";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
@@ -200,6 +200,22 @@ function makeExecutor(
   return { executor, events, commandBuilder };
 }
 
+describe("withJsonReporter", () => {
+  it("adds json to the configured reporter list without replacing it", () => {
+    expect(withJsonReporter("npx playwright test --reporter=list"))
+      .toBe("npx playwright test --reporter=list,json");
+    expect(withJsonReporter("npx playwright test --reporter=line,html"))
+      .toBe("npx playwright test --reporter=line,html,json");
+  });
+
+  it("adds a reporter flag only when the command has none", () => {
+    expect(withJsonReporter("npx playwright test"))
+      .toBe("npx playwright test --reporter=json");
+    expect(withJsonReporter("npx playwright test --reporter=list,json"))
+      .toBe("npx playwright test --reporter=list,json");
+  });
+});
+
 describe("TestExecutor preRunCommand", () => {
   let calls: ShellCall[];
   let recordingShell: ShellRunner;
@@ -220,7 +236,7 @@ describe("TestExecutor preRunCommand", () => {
     await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 1 });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.command).toContain("--reporter=json");
+    expect(calls[0]!.command).toContain("--reporter=list,json");
     expect(events[0]?.kind).toBe("running");
   });
 
@@ -232,7 +248,7 @@ describe("TestExecutor preRunCommand", () => {
 
     expect(calls).toHaveLength(2);
     expect(calls[0]!.command).toBe("npm run build:fixtures");
-    expect(calls[1]!.command).toContain("--reporter=json");
+    expect(calls[1]!.command).toContain("--reporter=list,json");
   });
 
   it("aborts the test run and emits failure when the pre-run command exits non-zero", async () => {
@@ -305,7 +321,7 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
     expect(calls).toHaveLength(2);
     expect(calls[0]!.command).toBe("npx bddgen");
     expect(calls[1]!.command).not.toContain("bddgen");
-    expect(calls[1]!.command).toContain("--reporter=json");
+    expect(calls[1]!.command).toContain("--reporter=list,json");
   });
 
   it("aborts before playwright and reports failure when bddgen fails", async () => {
@@ -352,7 +368,7 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
     await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 5 });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.command).toContain("--reporter=json");
+    expect(calls[0]!.command).toContain("--reporter=list,json");
   });
 });
 

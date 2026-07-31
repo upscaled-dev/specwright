@@ -20,6 +20,13 @@ export interface BddFileData {
   stepLines: Map<number, number[]>;
   /** pickleLine (Scenario: line, 1-based) → pwTestLine (1-based) */
   testLines: Map<number, number>;
+  /** pwTestLine (generated test line, 1-based) → pickleLine (Scenario: line, 1-based) */
+  pickleLines: Map<number, number>;
+}
+
+export interface BddSourceData {
+  featurePath: string;
+  lineNumbers: Map<number, number>;
 }
 
 /**
@@ -57,8 +64,10 @@ export function parseBddFileData(specText: string): BddFileData | undefined {
   // Scenario Outline rows genuinely produce multiple distinct pwStepLines; those all survive.
   const stepLineSets = new Map<number, Set<number>>();
   const testLines = new Map<number, number>();
+  const pickleLines = new Map<number, number>();
   for (const entry of entries) {
     testLines.set(entry.pickleLine, entry.pwTestLine);
+    pickleLines.set(entry.pwTestLine, entry.pickleLine);
     for (const step of entry.steps ?? []) {
       let set = stepLineSets.get(step.gherkinStepLine);
       if (!set) {
@@ -73,7 +82,33 @@ export function parseBddFileData(specText: string): BddFileData | undefined {
   for (const [gherkinLine, pwLines] of stepLineSets) {
     stepLines.set(gherkinLine, [...pwLines].sort((a, b) => a - b));
   }
-  return { stepLines, testLines };
+  return { stepLines, testLines, pickleLines };
+}
+
+/** Parse the source feature and the complete generated-test line map once for reuse. */
+export function parseBddSourceData(
+  specText: string,
+  projectDir: string
+): BddSourceData | undefined {
+  const generatedFrom = /^\s*\/\/\s*Generated from:\s*(.+?\.feature)\s*$/m.exec(specText)?.[1];
+  if (!generatedFrom) {
+    return undefined;
+  }
+
+  const lineNumbers = parseBddFileData(specText)?.pickleLines ?? looseSourceLineMap(specText);
+  const featurePath = path.resolve(projectDir, generatedFrom);
+  return { featurePath, lineNumbers };
+}
+
+/** Older generated specs carry the same entries without the end marker used by the strict parser. */
+function looseSourceLineMap(specText: string): Map<number, number> {
+  const lineNumbers = new Map<number, number>();
+  const pairs = /"pwTestLine"\s*:\s*(\d+)\s*,\s*"pickleLine"\s*:\s*(\d+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pairs.exec(specText)) !== null) {
+    lineNumbers.set(Number(match[1]), Number(match[2]));
+  }
+  return lineNumbers;
 }
 
 interface SpecCandidate {

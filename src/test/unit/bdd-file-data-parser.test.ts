@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parseBddFileData, resolveGeneratedSpecPath } from "../../parsers/bdd-file-data-parser";
+import {
+  parseBddFileData,
+  parseBddSourceData,
+  resolveGeneratedSpecPath,
+} from "../../parsers/bdd-file-data-parser";
 
 // Verbatim bddFileData block from .features-gen/features/background.feature.spec.js: two
 // scenarios sharing Background steps (pwStepLine 7/8 repeated across entries).
@@ -38,6 +42,8 @@ describe("parseBddFileData", () => {
     const data = parseBddFileData(backgroundSpecText);
     expect(data!.testLines.get(8)).toBe(11);
     expect(data!.testLines.get(13)).toBe(19);
+    expect(data!.pickleLines.get(11)).toBe(8);
+    expect(data!.pickleLines.get(19)).toBe(13);
   });
 
   it("dedupes Background steps repeated across scenario entries", () => {
@@ -65,6 +71,26 @@ describe("parseBddFileData", () => {
   {"pwTestLine":11,"pickleLine":,
 ]; // bdd-data-end`;
     expect(parseBddFileData(malformed)).toBeUndefined();
+  });
+});
+
+describe("parseBddSourceData", () => {
+  it("maps a generated test line through the feature header and reverse bddFileData map", () => {
+    const spec = `// Generated from: features/calculator.feature\n${outlineSpecText}`;
+    const source = parseBddSourceData(spec, "/work");
+
+    expect(source?.featurePath).toBe(path.resolve("/work/features/calculator.feature"));
+    expect(source?.lineNumbers.get(11)).toBe(10);
+  });
+
+  it("returns undefined when the generated feature header is absent", () => {
+    expect(parseBddSourceData(outlineSpecText, "/work")).toBeUndefined();
+  });
+
+  it("preserves spaces in the generated feature path", () => {
+    const spec = `// Generated from: features/account settings.feature\n${outlineSpecText}`;
+    expect(parseBddSourceData(spec, "/work")?.featurePath)
+      .toBe(path.resolve("/work/features/account settings.feature"));
   });
 });
 

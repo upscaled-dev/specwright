@@ -275,10 +275,8 @@ export class CommandBuilder {
     if (this.config.useConfigReporters) {
       return;
     }
-    // Always emit the reporter explicitly (including the default `list`). When the executor
-    // later appends `--reporter=json` for result mapping, Playwright keeps both reporters;
-    // omitting `list` here would let `--reporter=json` clobber the implicit default and leave
-    // stdout (and therefore the Test Explorer output panel) empty.
+    // Always emit the reporter explicitly (including the default `list`). The executor adds json
+    // to this same comma-separated reporter list for result mapping, preserving visible output.
     const reporter = opts.reporter ?? this.config.reporter;
     if (reporter) {
       parts.push(`--reporter=${reporter}`);

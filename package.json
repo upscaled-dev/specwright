@@ -139,7 +139,7 @@
         "playwrightBddRunner.parallelExecution": {
           "type": "boolean",
           "default": false,
-          "description": "Pass --workers to Playwright to enable parallel execution"
+          "description": "Pass a worker count to Playwright. This controls available workers but does not enable Playwright's fullyParallel mode."
         },
         "playwrightBddRunner.maxParallelProcesses": {
           "type": "number",

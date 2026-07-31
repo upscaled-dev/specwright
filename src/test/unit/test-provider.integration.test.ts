@@ -23,6 +23,11 @@ import { PlaywrightBddExtensionContext } from "../../types";
 import { BreakpointMirror } from "../../core/breakpoint-mirror";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
 import { FakeTestController, FakeTestItem } from "./helpers/fake-test-controller";
+import {
+  LIVE_REPORT_FILE_ENV,
+  type LiveRunBeginRecord,
+  type LiveTestEndRecord,
+} from "../../core/live-reporter-protocol";
 
 function fakeMemento(): import("vscode").Memento {
   const store = new Map<string, unknown>();
@@ -98,6 +103,31 @@ function reportJson(
       })),
     }],
   });
+}
+
+function passingLiveRecords(fixture: Fixture, total = 3): string {
+  const begin: LiveRunBeginRecord = {
+    kind: "run-begin",
+    rootDir: path.dirname(fixture.genSpecPath),
+    configFile: path.join(fixture.root, "playwright.config.ts"),
+    total,
+  };
+  const result: LiveTestEndRecord = {
+    kind: "test-end",
+    file: fixture.genSpecPath,
+    line: 6,
+    title: "Passing scenario",
+    titlePath: ["chromium", "test.feature.spec.js", "Sample feature", "Passing scenario"],
+    status: "passed",
+    durationMs: 5,
+    retry: 0,
+    retries: 0,
+    expectedStatus: "passed",
+    projectName: "chromium",
+    completed: 1,
+    total,
+  };
+  return `${JSON.stringify(begin)}\n${JSON.stringify(result)}\n`;
 }
 
 describe("PlaywrightBddTestProvider: discover → run → status (integration)", () => {
@@ -188,6 +218,171 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const last = controller.runs.at(-1)!;
     expect(last.outcome.passed).toContain(`${fixture.featurePath}:4`);
     expect(last.outcome.skipped).not.toContain(`${fixture.featurePath}:4`);
+  });
+
+  it("publishes a scenario result before the Playwright process finishes", async () => {
+    let releaseShell: (() => void) | undefined;
+    let signalShellStarted: (() => void) | undefined;
+    const shellStarted = new Promise<void>((resolve) => { signalShellStarted = resolve; });
+    const shell: ShellRunner = (_cmd, _dir, env) => new Promise((resolve) => {
+      const livePath = env?.[LIVE_REPORT_FILE_ENV];
+      if (!livePath) {throw new Error("Live report path was not provided");}
+      fs.appendFileSync(livePath, passingLiveRecords(fixture));
+      releaseShell = () => {
+        const reportPath = env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"];
+        if (reportPath) {
+          fs.writeFileSync(
+            reportPath,
+            reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "passed" }])
+          );
+        }
+        resolve({ success: true, output: "", error: "", returnCode: 0 });
+      };
+      signalShellStarted?.();
+    });
+    const { provider, controller, executor } = buildProvider(shell);
+    const events: TestRunEvent[] = [];
+    executor.onTestRunEvent((event) => events.push(event));
+    await provider.discoverTests();
+
+    const feature = controller.find(fixture.featurePath)!;
+    const pending = runItem(controller, feature);
+    await shellStarted;
+    const run = controller.runs.at(-1)!;
+    await vi.waitFor(() =>
+      expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`)
+    );
+
+    expect(run.outcome.ended).toBe(false);
+    expect(run.outcome.passed).not.toContain(fixture.featurePath);
+    expect(run.outcome.output.join("")).toContain("[1 / 3] Passing scenario: passed");
+    expect(events).toContainEqual({
+      kind: "running",
+      passed: 1,
+      failed: 0,
+      completed: 1,
+      total: 3,
+    });
+
+    releaseShell?.();
+    await pending;
+    expect(run.outcome.ended).toBe(true);
+    expect(run.outcome.passed).toContain(fixture.featurePath);
+  });
+
+  it("keeps an editor-triggered TestRun open for live results and final reconciliation", async () => {
+    const shell: ShellRunner = async () => ({
+      success: true,
+      output: "",
+      error: "",
+      returnCode: 0,
+    });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    const session = provider.beginExternalRun(fixture.featurePath);
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.ended).toBe(false);
+    expect(run.outcome.started).toEqual([fixture.featurePath]);
+
+    const detail = {
+      featurePath: fixture.featurePath,
+      lineNumber: 4,
+      scenarioName: "Passing scenario",
+      status: "passed" as const,
+      durationMs: 5,
+    };
+    session.progress.onTestEnd?.(detail, 1, 3);
+    expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.ended).toBe(false);
+
+    session.complete({
+      success: true,
+      output: "",
+      duration: 10,
+      scenarioResults: { [`${fixture.featurePath}:4`]: "passed" },
+      scenarioDetails: [detail],
+    });
+    expect(run.outcome.passed.filter((id) => id === `${fixture.featurePath}:4`)).toHaveLength(1);
+    expect(run.outcome.passed).toContain(fixture.featurePath);
+    expect(run.outcome.ended).toBe(true);
+  });
+
+  it("keeps an all-skipped live feature skipped when the final report is empty", async () => {
+    const shell: ShellRunner = async () => ({
+      success: true,
+      output: "",
+      error: "",
+      returnCode: 0,
+    });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    const session = provider.beginExternalRun(fixture.featurePath);
+    const run = controller.runs.at(-1)!;
+
+    for (const [lineNumber, scenarioName, completed] of [
+      [4, "Passing scenario", 1],
+      [12, "Example #1", 2],
+      [13, "Example #2", 3],
+    ] as const) {
+      session.progress.onTestEnd?.({
+        featurePath: fixture.featurePath,
+        lineNumber,
+        scenarioName,
+        status: "skipped",
+      }, completed, 3);
+    }
+
+    session.complete({ success: true, output: "", duration: 10, scenarioResults: {} });
+
+    expect(run.outcome.skipped).toContain(fixture.featurePath);
+    expect(run.outcome.passed).not.toContain(fixture.featurePath);
+    expect(run.outcome.failed).toEqual([]);
+    expect(provider.getItemStatus(`${fixture.featurePath}:4`)).toBeUndefined();
+  });
+
+  it("uses an empty request instead of selecting the whole tree when an external target is undiscovered", () => {
+    const shell: ShellRunner = async () => ({
+      success: true,
+      output: "",
+      error: "",
+      returnCode: 0,
+    });
+    const { provider, controller } = buildProvider(shell);
+
+    const session = provider.beginExternalRun(fixture.featurePath);
+    const request = controller.runs.at(-1)!.request as vscode.TestRunRequest;
+    expect(request.include).toEqual([]);
+    session.end();
+  });
+
+  it("does not overwrite a completed live scenario when the rest of the run is cancelled", async () => {
+    const source = new vscode.CancellationTokenSource();
+    const shell: ShellRunner = (_cmd, _dir, env, signal) => new Promise((resolve) => {
+      const livePath = env?.[LIVE_REPORT_FILE_ENV];
+      if (!livePath) {throw new Error("Live report path was not provided");}
+      fs.appendFileSync(livePath, passingLiveRecords(fixture));
+      signal?.addEventListener("abort", () => {
+        resolve({ success: false, output: "", error: "Cancelled", returnCode: 130 });
+      }, { once: true });
+    });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    const feature = controller.find(fixture.featurePath)!;
+    const runProfile = controller.profile("Run")!;
+    const pending = runProfile.runHandler(new vscode.TestRunRequest([feature]), source.token);
+    const run = controller.runs.at(-1)!;
+    await vi.waitFor(() =>
+      expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`)
+    );
+
+    source.cancel();
+    await pending;
+    expect(run.outcome.skipped).not.toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:12`);
+    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:13`);
+    expect(run.outcome.ended).toBe(true);
   });
 
   it("passes the parsed scenario duration to run.passed", async () => {

@@ -18,8 +18,8 @@ Use the defaults first. Most projects only need a change when they use a differe
 | `workingDirectory` | inferred | Commands must run from a specific folder. By default, Specwright uses the nearest parent `playwright.config.*`, then the workspace folder. |
 | `testFilePattern` | `**/*.feature` | Your feature files live outside the usual locations or use a narrower glob. This also controls the tag index. |
 | `tags` | empty | You want every run to use a default `bddgen` tag expression, such as `@smoke and not @wip`. |
-| `parallelExecution` | `false` | You want Playwright runs to use workers. |
-| `maxParallelProcesses` | `4` | You need a different worker count when parallel execution is enabled. Valid range: `1` to `16`. |
+| `parallelExecution` | `false` | You want Specwright to pass a worker count to Playwright. This does not enable Playwright's `fullyParallel` mode. |
+| `maxParallelProcesses` | `4` | You need a different Playwright worker count. Valid range: `1` to `16`. |
 | `reporter` | `list` | You want a different terminal reporter, several reporters, or a custom reporter module. Specwright still obtains JSON results for mapping. |
 | `useConfigReporters` | `false` | Your Playwright configuration already declares the reporters you want to run. It requires a bare `['json']` entry in that configuration. |
 | `dryRun` | `false` | You want Playwright to list the tests that would run without executing them. |

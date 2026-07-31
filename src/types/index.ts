@@ -6,6 +6,7 @@ import { TestDiscoveryManager } from "../core/test-discovery-manager";
 import { TestOrganizationManager } from "../core/test-organization";
 import { FeatureParser } from "../parsers/feature-parser";
 import { PlaywrightJsonParser } from "../utils/playwright-json-parser";
+import type { RunProgressObserver } from "../core/run-progress";
 
 /**
  * Represents a parsed feature file with its scenarios
@@ -107,6 +108,8 @@ export interface TestExecutionOptions {
   dryRun?: boolean;
   /** Aborts the spawned run when the Test Explorer stop button is pressed. */
   signal?: AbortSignal | undefined;
+  /** Receives scenario result updates while Playwright is still running. */
+  progress?: RunProgressObserver | undefined;
   /** Open run-artifact batch this invocation's shard belongs to; unset → no artifact is captured. */
   artifactBatch?: number | undefined;
 }
@@ -137,6 +140,8 @@ export interface FeatureExecutionOptions {
   dryRun?: boolean;
   /** Aborts the spawned run when the Test Explorer stop button is pressed. */
   signal?: AbortSignal | undefined;
+  /** Receives scenario result updates while Playwright is still running. */
+  progress?: RunProgressObserver | undefined;
   /** Open run-artifact batch this invocation's shard belongs to; unset → no artifact is captured. */
   artifactBatch?: number | undefined;
 }

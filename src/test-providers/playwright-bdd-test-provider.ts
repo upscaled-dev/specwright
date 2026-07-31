@@ -34,6 +34,11 @@ import {
   resolveWorkerCountDetailed,
   WorkerCountResolution,
 } from "../commands/prompt-worker-count";
+import type { RunProgressObserver, RunProgressSession } from "../core/run-progress";
+import {
+  beginExternalTestRun,
+  LiveTestRunProgress,
+} from "./live-test-run-progress";
 
 /**
  * Pull bddgen's "Missing step definitions" block (count + suggested snippets) out of captured
@@ -573,9 +578,64 @@ export class PlaywrightBddTestProvider {
     return { kind: "multi-select", scenarios: refs };
   }
 
-  private markSubtreeSkipped(item: vscode.TestItem, run: vscode.TestRun): void {
-    run.skipped(item);
-    item.children.forEach((child) => this.markSubtreeSkipped(child, run));
+  private markSubtreeSkipped(
+    item: vscode.TestItem,
+    run: vscode.TestRun,
+    hasResult: (item: vscode.TestItem) => boolean = () => false
+  ): void {
+    if (!hasResult(item)) {run.skipped(item);}
+    item.children.forEach((child) => this.markSubtreeSkipped(child, run, hasResult));
+  }
+
+  private createLiveProgress(
+    run: vscode.TestRun,
+    roots: readonly vscode.TestItem[],
+    fallbackTarget?: vscode.TestItem
+  ): LiveTestRunProgress {
+    return LiveTestRunProgress.create({
+      run,
+      roots,
+      scenarioFor: (id) => {
+        const scenario = this.scenarioByTestId.get(id);
+        if (!scenario) {return undefined;}
+        return {
+          source: { filePath: scenario.filePath, lineNumber: scenario.lineNumber },
+          name: isOutlineExampleRow(scenario)
+            ? scenario.substitutedName ?? scenario.name
+            : scenario.name,
+        };
+      },
+      ...(fallbackTarget ? { fallbackTarget } : {}),
+      onStatus: (item, status) => {
+        if (status === "passed" || status === "failed") {
+          this.testStatusCache.set(item.id, status);
+        }
+      },
+    });
+  }
+
+  private settleCancelledRun(
+    signal: AbortSignal,
+    test: vscode.TestItem,
+    run: vscode.TestRun,
+    live: LiveTestRunProgress
+  ): boolean {
+    if (!signal.aborted) {return false;}
+    this.markSubtreeSkipped(test, run, (item) => live.hasResult(item));
+    return true;
+  }
+
+  private liveProgressObserver(
+    live: LiveTestRunProgress,
+    useReporterCounts = true
+  ): RunProgressObserver {
+    return {
+      onTestEnd: (result, completed, total) => live.apply(
+        result,
+        useReporterCounts ? completed : undefined,
+        useReporterCounts ? total : undefined
+      ),
+    };
   }
 
   /**
@@ -624,6 +684,8 @@ export class PlaywrightBddTestProvider {
   ): Promise<void> {
     try {
       if (test.uri) {
+        const live = this.createLiveProgress(run, [test]);
+        const progress = this.liveProgressObserver(live);
         const isFeatureFile = this.isFeatureFileTest(test.id);
         const isOutline = test.id.includes(OUTLINE_ID_SEPARATOR);
 
@@ -637,10 +699,11 @@ export class PlaywrightBddTestProvider {
             featureName: this.featureTitleByPath.get(test.uri.fsPath) ?? test.label,
             signal,
             artifactBatch: batch,
+            progress,
           });
-          if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
+          if (this.settleCancelledRun(signal, test, run, live)) {return;}
           this.appendRunOutput(run, result, test, test.uri.fsPath);
-          this.applyResultsToChildren(test, run, result, test.uri.fsPath);
+          this.applyResultsToChildren(test, run, result, test.uri.fsPath, live);
         } else if (isOutline) {
           this.markDescendantsStarted(test, run);
           const scenario = this.scenarioByTestId.get(test.id);
@@ -651,12 +714,13 @@ export class PlaywrightBddTestProvider {
             filePath: test.uri.fsPath,
             signal,
             artifactBatch: batch,
+            progress,
             ...(outlineName ? { outlineName } : {}),
           };
           const result = await this.context.testExecutor.runScenarioWithOutput(options);
-          if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
+          if (this.settleCancelledRun(signal, test, run, live)) {return;}
           this.appendRunOutput(run, result, test, test.uri.fsPath);
-          this.applyResultsToChildren(test, run, result, test.uri.fsPath);
+          this.applyResultsToChildren(test, run, result, test.uri.fsPath, live);
         } else {
           const lineNumber = this.lineFromId(test.id);
           const scenario = this.scenarioByTestId.get(test.id);
@@ -665,14 +729,15 @@ export class PlaywrightBddTestProvider {
             filePath: test.uri.fsPath,
             signal,
             artifactBatch: batch,
+            progress,
             ...(lineNumber ? { lineNumber } : {}),
             scenarioName: test.label,
             ...(outlineName ? { outlineName } : {}),
           };
           const result = await this.context.testExecutor.runScenarioWithOutput(options);
-          if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
+          if (this.settleCancelledRun(signal, test, run, live)) {return;}
           this.appendRunOutput(run, result, test, test.uri.fsPath);
-          this.applyStatusToItem(test, run, result, test.uri.fsPath);
+          this.applyStatusToItem(test, run, result, test.uri.fsPath, live);
         }
       } else if (test.id.startsWith("group:") || test.id.startsWith("tag:")) {
         await this.runGroupOrTag(test, run, signal, batch);
@@ -691,12 +756,14 @@ export class PlaywrightBddTestProvider {
     signal: AbortSignal,
     batch: number | undefined
   ): Promise<void> {
+    const live = this.createLiveProgress(run, [test]);
     if (test.id.startsWith("tag:")) {
+      const progress = this.liveProgressObserver(live);
       const tag = test.id.slice("tag:".length) || test.label;
-      const result = await this.context.testExecutor.runAllTestsWithTagsOutput(tag, signal, batch);
-      if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
+      const result = await this.context.testExecutor.runAllTestsWithTagsOutput(tag, signal, batch, progress);
+      if (this.settleCancelledRun(signal, test, run, live)) {return;}
       this.appendRunOutput(run, result, test);
-      this.applyResultsToChildren(test, run, result);
+      this.applyResultsToChildren(test, run, result, undefined, live);
       return;
     }
 
@@ -704,6 +771,7 @@ export class PlaywrightBddTestProvider {
     const featureFiles = this.collectFeatureFiles(test);
     const aggregated: Record<string, ScenarioStatus> = {};
     const aggregatedDetails: ScenarioResult[] = [];
+    const progress = this.liveProgressObserver(live, false);
     let success = true;
     for (const filePath of featureFiles) {
       const featureName = this.featureTitleByPath.get(filePath);
@@ -711,11 +779,12 @@ export class PlaywrightBddTestProvider {
         filePath,
         signal,
         artifactBatch: batch,
+        progress,
         ...(featureName ? { featureName } : {}),
       });
       // Killed mid-group: don't aggregate the killed file's red result, and skip the whole subtree
       // rather than leaving the earlier files' statuses half-applied.
-      if (signal.aborted) { this.markSubtreeSkipped(test, run); return; }
+      if (this.settleCancelledRun(signal, test, run, live)) {return;}
       this.appendRunOutput(run, result, test, filePath);
       if (!result.success) {success = false;}
       if (result.scenarioResults) {Object.assign(aggregated, result.scenarioResults);}
@@ -727,7 +796,7 @@ export class PlaywrightBddTestProvider {
       duration: 1,
       scenarioResults: aggregated,
       scenarioDetails: aggregatedDetails,
-    });
+    }, undefined, live);
   }
 
   private collectFeatureFiles(test: vscode.TestItem): Set<string> {
@@ -879,7 +948,8 @@ export class PlaywrightBddTestProvider {
     parent: vscode.TestItem,
     run: vscode.TestRun,
     result: RunOutputResult,
-    fallbackFeaturePath?: string
+    fallbackFeaturePath?: string,
+    live?: LiveTestRunProgress
   ): void {
     const results = result.scenarioResults ?? {};
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
@@ -889,18 +959,22 @@ export class PlaywrightBddTestProvider {
 
     const walk = (item: vscode.TestItem): void => {
       if (item.children.size === 0) {
-        const status = this.resolveStatusForItem(item, results, fallbackFeaturePath, workspaceRoot);
-        const durationMs = this.findDetailForItem(item, result.scenarioDetails)?.durationMs;
+        const status = this.resolveStatusForItem(item, results, fallbackFeaturePath, workspaceRoot) ??
+          live?.statusFor(item);
+        const detail = this.findDetailForItem(item, result.scenarioDetails, status);
+        const durationMs = detail?.durationMs;
         if (status === "passed") {
-          run.passed(item, durationMs);
+          if (!live || live.shouldApplyFinal(item, status, detail)) {run.passed(item, durationMs);}
           this.testStatusCache.set(item.id, "passed");
           anyPassed = true;
         } else if (status === "failed") {
-          run.failed(item, this.failureMessage(item, result.scenarioDetails, "Test failed"), durationMs);
+          if (!live || live.shouldApplyFinal(item, status, detail)) {
+            run.failed(item, this.failureMessage(item, result.scenarioDetails, "Test failed"), durationMs);
+          }
           this.testStatusCache.set(item.id, "failed");
           anyFailed = true;
         } else {
-          run.skipped(item);
+          if (!live || live.shouldApplyFinal(item, "skipped", detail)) {run.skipped(item);}
         }
         return;
       }
@@ -933,21 +1007,31 @@ export class PlaywrightBddTestProvider {
     item: vscode.TestItem,
     run: vscode.TestRun,
     result: RunOutputResult,
-    featurePath: string
+    featurePath: string,
+    live?: LiveTestRunProgress
   ): void {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    const status = this.resolveStatusForItem(item, result.scenarioResults ?? {}, featurePath, workspaceRoot);
-    const durationMs = this.findDetailForItem(item, result.scenarioDetails)?.durationMs;
+    const mapped = this.resolveStatusForItem(
+      item,
+      result.scenarioResults ?? {},
+      featurePath,
+      workspaceRoot
+    );
+    const status = mapped ?? live?.statusFor(item) ?? (result.success ? "passed" : "failed");
+    const detail = this.findDetailForItem(item, result.scenarioDetails, status);
+    const durationMs = detail?.durationMs;
 
-    if (status === "passed" || (!status && result.success)) {
-      run.passed(item, durationMs);
+    if (status === "passed") {
+      if (!live || live.shouldApplyFinal(item, status, detail)) {run.passed(item, durationMs);}
       this.testStatusCache.set(item.id, "passed");
-    } else if (status === "failed" || (!status && !result.success)) {
+    } else if (status === "failed") {
       const fallback = result.error?.trim() ? result.error : "Test failed: see the Test Results output panel.";
-      run.failed(item, this.failureMessage(item, result.scenarioDetails, fallback), durationMs);
+      if (!live || live.shouldApplyFinal(item, status, detail)) {
+        run.failed(item, this.failureMessage(item, result.scenarioDetails, fallback), durationMs);
+      }
       this.testStatusCache.set(item.id, "failed");
     } else {
-      run.skipped(item);
+      if (!live || live.shouldApplyFinal(item, status, detail)) {run.skipped(item);}
     }
   }
 
@@ -961,7 +1045,7 @@ export class PlaywrightBddTestProvider {
     details: ScenarioResult[] | undefined,
     fallback: string
   ): vscode.TestMessage {
-    const detail = this.findDetailForItem(item, details);
+    const detail = this.findDetailForItem(item, details, "failed");
     const base = detail?.errorMessage?.trim() ? detail.errorMessage : fallback;
     // Append the stack so the failure peek shows clickable frames into the step-definition code.
     const text = detail?.errorStack?.trim() ? `${base}\n\n${detail.errorStack}` : base;
@@ -981,13 +1065,21 @@ export class PlaywrightBddTestProvider {
   /** Match a TestItem to its parsed scenario result by source line first, then by name. */
   private findDetailForItem(
     item: vscode.TestItem,
-    details: ScenarioResult[] | undefined
+    details: ScenarioResult[] | undefined,
+    status?: ScenarioStatus
   ): ScenarioResult | undefined {
     if (!details || details.length === 0) {return undefined;}
+    const featurePath = item.uri ? normalizePathKey(item.uri.fsPath) : undefined;
+    const inFile = featurePath
+      ? details.filter((detail) => normalizePathKey(detail.featurePath) === featurePath)
+      : [];
+    const candidates = inFile.length > 0 ? inFile : details;
+    const withStatus = status ? candidates.filter((detail) => detail.status === status) : [];
+    const preferred = withStatus.length > 0 ? withStatus : candidates;
     const line = this.lineFromId(item.id);
     return (
-      details.find((d) => line !== undefined && d.lineNumber === line) ??
-      details.find((d) => d.scenarioName === item.label)
+      preferred.find((detail) => line !== undefined && detail.lineNumber === line) ??
+      preferred.find((detail) => detail.scenarioName === item.label)
     );
   }
 
@@ -1003,27 +1095,52 @@ export class PlaywrightBddTestProvider {
    * rolled up from their children. This replaces the old command-side logic that marked an item
    * and all its descendants with one status derived solely from the process exit code.
    */
+  public beginExternalRun(
+    filePath: string,
+    target?: { lineNumber?: number }
+  ): RunProgressSession {
+    return beginExternalTestRun({
+      controller: this.testController,
+      filePath,
+      lineNumber: target?.lineNumber,
+      lineFor: (item) => this.scenarioByTestId.get(item.id)?.lineNumber,
+      createProgress: (run, roots, fallback) => this.createLiveProgress(run, roots, fallback),
+      applyFinal: (run, result, live) =>
+        this.applyExternalRunResultTo(run, filePath, result, target, live),
+    });
+  }
+
   public applyExternalRunResult(
     filePath: string,
     result: RunOutputResult,
     target?: { lineNumber?: number }
   ): void {
-    const results = result.scenarioResults ?? {};
     const run = this.testController.createTestRun(new vscode.TestRunRequest());
     try {
-      if (Object.keys(results).length === 0) {
-        // The report had no parseable scenarios (e.g. bddgen/compile failure before any test
-        // ran). Fall back to a blanket status on the targeted item so the icon isn't left stale.
-        this.applyBlanketStatus(filePath, run, result, target?.lineNumber);
-        return;
-      }
-      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-      this.testController.items.forEach((item) =>
-        this.applyMappedStatus(item, run, result, results, filePath, workspaceRoot)
-      );
+      this.applyExternalRunResultTo(run, filePath, result, target);
     } finally {
       run.end();
     }
+  }
+
+  private applyExternalRunResultTo(
+    run: vscode.TestRun,
+    filePath: string,
+    result: RunOutputResult,
+    target?: { lineNumber?: number },
+    live?: LiveTestRunProgress
+  ): void {
+    const results = result.scenarioResults ?? {};
+    if (Object.keys(results).length === 0) {
+      // The report had no parseable scenarios (e.g. bddgen/compile failure before any test
+      // ran). Fall back to a blanket status on the targeted item so the icon isn't left stale.
+      this.applyBlanketStatus(filePath, run, result, target?.lineNumber, live);
+      return;
+    }
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    this.testController.items.forEach((item) =>
+      this.applyMappedStatus(item, run, result, results, filePath, workspaceRoot, live)
+    );
   }
 
   /** Recursively apply mapped statuses to a subtree; returns the rolled-up status of file items. */
@@ -1033,20 +1150,25 @@ export class PlaywrightBddTestProvider {
     result: RunOutputResult,
     results: Record<string, ScenarioStatus>,
     filePath: string,
-    workspaceRoot: string
+    workspaceRoot: string,
+    live?: LiveTestRunProgress
   ): ScenarioStatus | undefined {
     if (item.children.size === 0) {
       if (item.uri?.fsPath !== filePath) {return undefined;}
-      const status = this.resolveStatusForItem(item, results, filePath, workspaceRoot);
-      const durationMs = this.findDetailForItem(item, result.scenarioDetails)?.durationMs;
+      const status = this.resolveStatusForItem(item, results, filePath, workspaceRoot) ??
+        live?.statusFor(item);
+      const detail = this.findDetailForItem(item, result.scenarioDetails, status);
+      const durationMs = detail?.durationMs;
       if (status === "passed") {
-        run.passed(item, durationMs);
+        if (!live || live.shouldApplyFinal(item, status, detail)) {run.passed(item, durationMs);}
         this.testStatusCache.set(item.id, "passed");
       } else if (status === "failed") {
-        run.failed(item, this.failureMessage(item, result.scenarioDetails, "Test failed"), durationMs);
+        if (!live || live.shouldApplyFinal(item, status, detail)) {
+          run.failed(item, this.failureMessage(item, result.scenarioDetails, "Test failed"), durationMs);
+        }
         this.testStatusCache.set(item.id, "failed");
       } else if (status === "skipped") {
-        run.skipped(item);
+        if (!live || live.shouldApplyFinal(item, status, detail)) {run.skipped(item);}
       }
       return status;
     }
@@ -1055,7 +1177,15 @@ export class PlaywrightBddTestProvider {
     let anyPassed = false;
     let anySkipped = false;
     item.children.forEach((child) => {
-      const childStatus = this.applyMappedStatus(child, run, result, results, filePath, workspaceRoot);
+      const childStatus = this.applyMappedStatus(
+        child,
+        run,
+        result,
+        results,
+        filePath,
+        workspaceRoot,
+        live
+      );
       if (childStatus === "failed") {anyFailed = true;}
       else if (childStatus === "passed") {anyPassed = true;}
       else if (childStatus === "skipped") {anySkipped = true;}
@@ -1083,18 +1213,33 @@ export class PlaywrightBddTestProvider {
     filePath: string,
     run: vscode.TestRun,
     result: RunOutputResult,
-    lineNumber?: number
+    lineNumber?: number,
+    live?: LiveTestRunProgress
   ): void {
-    const mark = (item: vscode.TestItem): void => {
-      if (result.success) {
-        run.passed(item);
+    const parentStatus = (statuses: readonly ScenarioStatus[]): ScenarioStatus => {
+      if (!result.success || statuses.includes("failed")) {return "failed";}
+      if (statuses.includes("passed")) {return "passed";}
+      return "skipped";
+    };
+    const mark = (item: vscode.TestItem): ScenarioStatus => {
+      const childStatuses: ScenarioStatus[] = [];
+      item.children.forEach((child) => childStatuses.push(mark(child)));
+      const status = item.children.size === 0
+        ? live?.statusFor(item) ?? (result.success ? "passed" : "failed")
+        : parentStatus(childStatuses);
+      const detail = this.findDetailForItem(item, result.scenarioDetails, status);
+      const apply = item.children.size > 0 || !live || live.shouldApplyFinal(item, status, detail);
+      if (status === "passed") {
+        if (apply) {run.passed(item);}
         this.testStatusCache.set(item.id, "passed");
-      } else {
+      } else if (status === "failed") {
         const fallback = result.error?.trim() ? result.error : "Test failed: see the Test Results output panel.";
-        run.failed(item, this.failureMessage(item, result.scenarioDetails, fallback));
+        if (apply) {run.failed(item, this.failureMessage(item, result.scenarioDetails, fallback));}
         this.testStatusCache.set(item.id, "failed");
+      } else if (apply) {
+        run.skipped(item);
       }
-      item.children.forEach((child) => mark(child));
+      return status;
     };
 
     const visit = (item: vscode.TestItem): boolean => {
@@ -1288,7 +1433,7 @@ export class PlaywrightBddTestProvider {
 
     const status = this.resolveStatusForItem(test, results, featurePath, workspaceRoot);
     if (status === "passed") {
-      run.passed(test, this.findDetailForItem(test, details)?.durationMs);
+      run.passed(test, this.findDetailForItem(test, details, status)?.durationMs);
       this.testStatusCache.set(test.id, "passed");
     } else if (status === "failed") {
       run.failed(test, this.failureMessage(test, details, "Test failed"));

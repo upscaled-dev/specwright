@@ -37,7 +37,9 @@ export class StatusBar implements vscode.Disposable {
 
   private handle(event: TestRunEvent): void {
     if (event.kind === "running") {
-      this.item.text = "$(loading~spin) Specwright: running…";
+      this.item.text = event.total === undefined
+        ? "$(loading~spin) Specwright: running…"
+        : `$(loading~spin) Specwright: ${event.completed ?? 0}/${event.total}`;
       this.item.tooltip = formatTooltip(this.lastRunAt);
       return;
     }

@@ -72,7 +72,7 @@ npm run release        # bump version (package.json + package-lock.json), update
 
 `release:patch` / `release:minor` / `release:major` choose the bump type; `release:dry-run` previews without writing.
 
-The bundle entry point is [src/extension.ts](src/extension.ts); esbuild emits a single `dist/extension.js` with `vscode` marked external.
+The bundle entry points are [src/extension.ts](src/extension.ts) and the live Playwright reporter. Esbuild emits `dist/extension.js` and `dist/specwright-live-reporter.js`, with `vscode` marked external.
 
 ## Adding a setting
 
