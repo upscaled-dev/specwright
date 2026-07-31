@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.44] - 2026-07-31
 ### Added
 
 - **Run Locally and Publish can run a selected set of mapped scenarios.** Cmd/Ctrl-select scenario rows in the Traceability tree, then right-click one selected row and run the existing command to execute that selection as one batch before the Publish workflow opens. The single-row and all-mapped shortcuts still work as before.
