@@ -286,6 +286,7 @@ interface ContainerRig {
   sets: NewContainerSpec[];
   plans: NewContainerSpec[];
   executions: NewExecutionSpec[];
+  signals: Array<AbortSignal | undefined>;
   // What the standalone create wrote to the publish ledger.
   recorded: Array<{ key: string; summary: string }>;
   logger: Logger;
@@ -298,7 +299,7 @@ interface ContainerRigOptions {
   credentials?: boolean;
   snapshot?: TraceabilitySnapshot;
   created?: AuthoredTest;
-  create?: () => Promise<AuthoredTest>;
+  create?: (signal?: AbortSignal) => Promise<AuthoredTest>;
   recordError?: Error;
 }
 
@@ -306,6 +307,7 @@ function containerRig(options: ContainerRigOptions = {}): ContainerRig {
   const sets: NewContainerSpec[] = [];
   const plans: NewContainerSpec[] = [];
   const executions: NewExecutionSpec[] = [];
+  const signals: Array<AbortSignal | undefined> = [];
   const recorded: Array<{ key: string; summary: string }> = [];
   const created = options.created ?? { key: "CALC-90", issueId: "9000", warnings: [] };
   const create = options.create ?? ((): Promise<AuthoredTest> => Promise.resolve(created));
@@ -317,17 +319,20 @@ function containerRig(options: ContainerRigOptions = {}): ContainerRig {
       ...(options.seams === false
         ? {}
         : {
-            createTestSet: (spec: NewContainerSpec) => {
+            createTestSet: (spec: NewContainerSpec, signal?: AbortSignal) => {
               sets.push(spec);
-              return create();
+              signals.push(signal);
+              return create(signal);
             },
-            createTestPlan: (spec: NewContainerSpec) => {
+            createTestPlan: (spec: NewContainerSpec, signal?: AbortSignal) => {
               plans.push(spec);
-              return create();
+              signals.push(signal);
+              return create(signal);
             },
-            createTestExecution: (spec: NewExecutionSpec) => {
+            createTestExecution: (spec: NewExecutionSpec, signal?: AbortSignal) => {
               executions.push(spec);
-              return create();
+              signals.push(signal);
+              return create(signal);
             },
           }),
     },
@@ -347,13 +352,30 @@ function containerRig(options: ContainerRigOptions = {}): ContainerRig {
       return options.recordError ? Promise.reject(options.recordError) : Promise.resolve();
     },
   };
-  return { commands: new TraceabilityAuthoringCommands(logger, deps), sets, plans, executions, recorded, logger };
+  return { commands: new TraceabilityAuthoringCommands(logger, deps), sets, plans, executions, signals, recorded, logger };
 }
 
 // The name prompt and the modal, both answered: a container create runs on a named, confirmed batch.
 function nameAndConfirm(kind: string, name: string | undefined = "Regression suite"): WarnCalls {
   vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(name as never);
   return vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(`Create ${kind}` as never);
+}
+
+function captureProgressCancel(): () => void {
+  let cancel = (): void => {};
+  vi.spyOn(vscode.window, "withProgress").mockImplementation((_options, task) =>
+    (task as (progress: unknown, token: unknown) => Thenable<unknown>)(
+      { report: () => {} },
+      {
+        isCancellationRequested: false,
+        onCancellationRequested: (listener: () => void) => {
+          cancel = listener;
+          return { dispose: () => {} };
+        },
+      }
+    )
+  );
+  return () => cancel();
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -1139,24 +1161,34 @@ describe("TraceabilityAuthoringCommands container creates", () => {
   it("sends one Test Set holding the checked tests' issue ids and reports the created key", async () => {
     nameAndConfirm("Test Set");
     const info = vi.spyOn(vscode.window, "showInformationMessage");
-    const { commands, sets, plans } = containerRig();
+    const progress = vi.spyOn(vscode.window, "withProgress");
+    const { commands, sets, plans, signals } = containerRig();
 
     await commands.createTestSet();
 
     expect(sets).toEqual([{ project: "CALC", summary: "Regression suite", testIssueIds: ["45678", "45679"] }]);
     expect(plans).toEqual([]);
+    expect(progress.mock.calls[0]?.[0]).toMatchObject({
+      location: vscode.ProgressLocation.Notification,
+      title: "Creating Xray Test Set in CALC…",
+      cancellable: true,
+    });
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(false);
     expect(String(info.mock.calls.at(-1)?.[0])).toBe("Created Test Set CALC-90 holding 2 tests.");
   });
 
   it("routes the plan verb to its own seam, trimming the name it was given", async () => {
     nameAndConfirm("Test Plan", "  Release 4  ");
     const info = vi.spyOn(vscode.window, "showInformationMessage");
-    const { commands, sets, plans } = containerRig({ selected: ["CALC-2"] });
+    const { commands, sets, plans, signals } = containerRig({ selected: ["CALC-2"] });
 
     await commands.createTestPlan();
 
     expect(plans).toEqual([{ project: "CALC", summary: "Release 4", testIssueIds: ["45679"] }]);
     expect(sets).toEqual([]);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(false);
     expect(String(info.mock.calls.at(-1)?.[0])).toBe("Created Test Plan CALC-90 holding 1 test.");
   });
 
@@ -1212,6 +1244,54 @@ describe("TraceabilityAuthoringCommands container creates", () => {
 
     expect(String(error.mock.calls[0]?.[0])).toBe("Could not create this Test Set: permission denied");
     expect(logged.mock.calls[0]?.[1]).toMatchObject({ project: "CALC" });
+  });
+
+  it("does not start the POST or report an ambiguous result when progress was already cancelled", async () => {
+    const warn = nameAndConfirm("Test Plan");
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((_options, task) =>
+      (task as (progress: unknown, token: unknown) => Thenable<unknown>)(
+        { report: () => {} },
+        {
+          isCancellationRequested: true,
+          onCancellationRequested: (listener: () => void) => {
+            listener();
+            return { dispose: () => {} };
+          },
+        }
+      )
+    );
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const { commands, plans } = containerRig();
+
+    await commands.createTestPlan();
+
+    expect(plans).toEqual([]);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("aborts an in-flight Test Set and warns that the POST may still have landed", async () => {
+    const warn = nameAndConfirm("Test Set");
+    const cancel = captureProgressCancel();
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const { commands, sets, signals } = containerRig({
+      create: (signal) =>
+        new Promise<AuthoredTest>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        }),
+    });
+
+    const pending = commands.createTestSet();
+    await flush();
+    cancel();
+    await pending;
+
+    expect(sets).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "Cancelled while waiting for Xray. The Test Set may still have been created; check in Jira before retrying."
+    );
+    expect(error).not.toHaveBeenCalled();
   });
 
   it("runs one container create at a time, so a second click cannot author a duplicate", async () => {
@@ -1410,6 +1490,33 @@ describe("TraceabilityAuthoringCommands.createTestExecution", () => {
     expect(String(error.mock.calls[0]?.[0])).toBe("Could not create this Test Execution: permission denied");
     expect(recorded).toEqual([]);
     expect(logged.mock.calls[0]?.[1]).toMatchObject({ project: "CALC" });
+  });
+
+  it("aborts an in-flight execution without writing a ledger entry", async () => {
+    const warn = nameAndConfirm("Test Execution");
+    const cancel = captureProgressCancel();
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    let release!: () => void;
+    const { commands, executions, signals, recorded } = containerRig({
+      create: () =>
+        new Promise<AuthoredTest>((resolve) => {
+          release = () => resolve({ key: "XNP-7", warnings: [] });
+        }),
+    });
+
+    const pending = commands.createTestExecution();
+    await flush();
+    cancel();
+    release();
+    await pending;
+
+    expect(executions).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(recorded).toEqual([]);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "Cancelled while waiting for Xray. The Test Execution may still have been created; check in Jira before retrying."
+    );
+    expect(error).not.toHaveBeenCalled();
   });
 
   // The guard takes a thunk, so the joined invocation never even opens its prompt: one input box across

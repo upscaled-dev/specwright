@@ -161,6 +161,7 @@ interface ExecutorDeps {
   debug?: typeof vscode.debug;
   bddgenDiagnostics?: BddgenDiagnosticsProvider;
   mirror?: BreakpointMirror;
+  runArtifactStore?: NonNullable<PlaywrightBddExtensionContext["runArtifactStore"]>;
 }
 
 function makeExecutor(
@@ -191,6 +192,7 @@ function makeExecutor(
     commandBuilder,
     traceabilityAdapter: {} as PlaywrightBddExtensionContext["traceabilityAdapter"],
     ...(deps.bddgenDiagnostics ? { bddgenDiagnostics: deps.bddgenDiagnostics } : {}),
+    ...(deps.runArtifactStore ? { runArtifactStore: deps.runArtifactStore } : {}),
   };
   executor.setContext(context);
   const events: TestRunEvent[] = [];
@@ -242,9 +244,17 @@ describe("TestExecutor preRunCommand", () => {
       }
       return { success: true, output: "{}", error: "", returnCode: 0 };
     };
-    const { executor, events } = makeExecutor(config, failingShell);
+    const contributeShard = vi.fn();
+    const runArtifactStore = { contributeShard } as unknown as NonNullable<
+      PlaywrightBddExtensionContext["runArtifactStore"]
+    >;
+    const { executor, events } = makeExecutor(config, failingShell, { runArtifactStore });
+    const scenario = { filePath: "/tmp/x.feature", line: 1, name: "S", kind: "scenario" as const };
 
-    const result = await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 1 });
+    const result = await executor.runScenarioWithOutput(
+      { filePath: "/tmp/x.feature", lineNumber: 1, artifactBatch: 5 },
+      { scenario, resultLines: [1] }
+    );
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.command).toBe("false");
@@ -253,6 +263,12 @@ describe("TestExecutor preRunCommand", () => {
     expect(result.error).toContain("17");
     const last = events[events.length - 1];
     expect(last?.kind).toBe("failure");
+    expect(contributeShard).toHaveBeenCalledOnce();
+    expect(contributeShard).toHaveBeenCalledWith(5, expect.objectContaining({
+      success: false,
+      details: [],
+      invocation: scenario,
+    }));
   });
 
   it("continues to playwright when the pre-run command exits zero", async () => {
@@ -300,15 +316,34 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
       }
       return { success: true, output: "{}", error: "", returnCode: 0 };
     };
-    const { executor, events } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), failingBddgen);
+    const contributeShard = vi.fn();
+    const runArtifactStore = { contributeShard } as unknown as NonNullable<
+      PlaywrightBddExtensionContext["runArtifactStore"]
+    >;
+    const { executor, events } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), failingBddgen, {
+      runArtifactStore,
+    });
+    const target = {
+      scenario: { filePath: "/tmp/x.feature", line: 5, name: "S", kind: "scenario" as const },
+      resultLines: [5],
+    };
 
-    const result = await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 5 });
+    const result = await executor.runScenarioWithOutput(
+      { filePath: "/tmp/x.feature", lineNumber: 5, artifactBatch: 7 },
+      target
+    );
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.command).toBe("npx bddgen");
     expect(result.success).toBe(false);
     expect(result.error).toContain("bddgen failed");
     expect(events[events.length - 1]?.kind).toBe("failure");
+    expect(contributeShard).toHaveBeenCalledOnce();
+    expect(contributeShard).toHaveBeenCalledWith(7, expect.objectContaining({
+      success: false,
+      details: [],
+      invocation: target.scenario,
+    }));
   });
 
   it("skips the separate bddgen step when bddgenCommand is empty (defineBddProject auto-gen)", async () => {
@@ -318,6 +353,93 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.command).toContain("--reporter=json");
+  });
+});
+
+describe("TestExecutor traceability artifact scope", () => {
+  it("filters the artifact to the selected Examples block without filtering the run result", async () => {
+    const filePath = nodePath.join(process.cwd(), "features/calc.feature");
+    const selectedFile = "features/calc.feature";
+    const report = JSON.stringify({
+      suites: [{
+        title: "Calculator",
+        suites: [{
+          title: "Divide",
+          specs: [9, 14, 15].map((line, index) => ({
+            title: `Example #${index + 1}`,
+            tests: [{
+              annotations: [{ type: `${selectedFile}:${line}` }],
+              results: [{ status: "passed" }],
+            }],
+          })).concat([{
+            title: "Example #foreign",
+            tests: [{
+              annotations: [{ type: "features/other.feature:14" }],
+              results: [{ status: "passed" }],
+            }],
+          }]),
+        }],
+      }],
+    });
+    const contributeShard = vi.fn();
+    const runArtifactStore = { contributeShard } as unknown as NonNullable<
+      PlaywrightBddExtensionContext["runArtifactStore"]
+    >;
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "" }),
+      async () => ({ success: true, output: report, error: "", returnCode: 0 }),
+      { runArtifactStore }
+    );
+    const block = {
+      filePath,
+      line: 12,
+      name: "Divide · edge cases",
+      kind: "examplesBlock" as const,
+      outlineName: "Divide",
+      examplesBlockName: "edge cases",
+    };
+
+    const result = await executor.runScenarioWithOutput(
+      { filePath, outlineName: "Divide", artifactBatch: 4 },
+      { scenario: block, resultLines: [14, 15] }
+    );
+
+    expect(result.scenarioDetails?.map((detail) => detail.lineNumber)).toEqual([9, 14, 15, 14]);
+    expect(contributeShard).toHaveBeenCalledOnce();
+    const capture = contributeShard.mock.calls[0]?.[1] as {
+      details: Array<{ featurePath: string; lineNumber?: number }>;
+      invocation: unknown;
+    };
+    expect(capture.details.map((detail) => detail.lineNumber)).toEqual([14, 15]);
+    expect(capture.details.map((detail) => detail.featurePath)).toEqual([filePath, filePath]);
+    expect(capture.invocation).toEqual(block);
+  });
+
+  it("contributes one failed shard when the Playwright process cannot spawn", async () => {
+    const contributeShard = vi.fn();
+    const runArtifactStore = { contributeShard } as unknown as NonNullable<
+      PlaywrightBddExtensionContext["runArtifactStore"]
+    >;
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "" }),
+      async () => {throw new Error("spawn failed");},
+      { runArtifactStore }
+    );
+    const scenario = { filePath: "/abs/a.feature", line: 3, name: "A", kind: "scenario" as const };
+
+    const result = await executor.runScenarioWithOutput(
+      { filePath: scenario.filePath, scenarioName: scenario.name, artifactBatch: 6 },
+      { scenario, resultLines: [3] }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("spawn failed");
+    expect(contributeShard).toHaveBeenCalledOnce();
+    expect(contributeShard).toHaveBeenCalledWith(6, expect.objectContaining({
+      success: false,
+      details: [],
+      invocation: scenario,
+    }));
   });
 });
 
@@ -1166,23 +1288,47 @@ describe("TestExecutor spec-line target no-tests retry", () => {
   it("reruns with name-grep when Playwright finds no tests for the spec-line target", async () => {
     writeSpec();
     const feature = write("features/a.feature", "Feature: F");
+    const retryReport = JSON.stringify({
+      suites: [{
+        specs: [
+          {
+            title: "S",
+            tests: [{ annotations: [{ type: `${feature}:3` }], results: [{ status: "passed" }] }],
+          },
+          {
+            title: "S",
+            tests: [{
+              annotations: [{ type: `${nodePath.join(tmpDir, "features/other.feature")}:3` }],
+              results: [{ status: "passed" }],
+            }],
+          },
+        ],
+      }],
+    });
     const calls: string[] = [];
     const shell: ShellRunner = async (command) => {
       calls.push(command);
       if (command.includes("a.feature.spec.js")) {
         return { success: false, output: "Error: no tests found", error: "", returnCode: 1 };
       }
-      return { success: true, output: "{}", error: "", returnCode: 0 };
+      return { success: true, output: retryReport, error: "", returnCode: 0 };
     };
+    const contributeShard = vi.fn();
+    const runArtifactStore = { contributeShard } as unknown as NonNullable<
+      PlaywrightBddExtensionContext["runArtifactStore"]
+    >;
     const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
       workspace: makeWorkspace(),
+      runArtifactStore,
     });
+    const scenario = { filePath: feature, line: 3, name: "S", kind: "scenario" as const };
 
     const result = await executor.runScenarioWithOutput({
       filePath: feature,
       lineNumber: 3,
       scenarioName: "S",
-    });
+      artifactBatch: 9,
+    }, { scenario, resultLines: [3] });
 
     expect(calls).toHaveLength(2);
     // The target must use forward slashes; Playwright treats CLI file filters as regexes, so
@@ -1192,6 +1338,18 @@ describe("TestExecutor spec-line target no-tests retry", () => {
     expect(calls[1]).toContain("--grep");
     expect(calls[1]).not.toContain("a.feature.spec.js");
     expect(result.success).toBe(true);
+    expect(contributeShard).toHaveBeenCalledOnce();
+    expect(contributeShard).toHaveBeenCalledWith(9, expect.objectContaining({
+      success: true,
+      exitCode: 0,
+      invocation: scenario,
+    }));
+    const capture = contributeShard.mock.calls[0]?.[1] as {
+      command: string;
+      details: Array<{ featurePath: string; lineNumber?: number }>;
+    };
+    expect(capture.command).toContain("--grep");
+    expect(capture.details).toMatchObject([{ featurePath: feature, lineNumber: 3 }]);
   });
 
   it("does not retry when the targeted run failed for a different reason", async () => {

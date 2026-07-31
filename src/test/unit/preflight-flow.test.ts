@@ -90,6 +90,40 @@ describe("invocationsAfterExclusions", () => {
       { kind: "tags", expression: "@smoke" },
     ]);
   });
+
+  it("keeps an unexcluded same-named scenario at a different line", () => {
+    const first = ref({ name: "Repeated title", line: 3 });
+    const second = ref({ name: "Repeated title", line: 8 });
+    const invocations: BatchInvocation[] = [
+      { kind: "scenario", ref: first },
+      { kind: "scenario", ref: second },
+    ];
+
+    expect(invocationsAfterExclusions(invocations, [first])).toEqual([
+      { kind: "scenario", ref: second },
+    ]);
+  });
+
+  it("excludes one Examples block without dropping its outline or sibling block", () => {
+    const outline = ref({ line: 3, name: "Divide", kind: "outline", outlineName: "Divide" });
+    const first = ref({
+      line: 8,
+      name: "Divide · edge cases",
+      kind: "examplesBlock",
+      outlineName: "Divide",
+      examplesBlockName: "edge cases",
+    });
+    const second = { ...first, line: 14 };
+    const invocations: BatchInvocation[] = [outline, first, second].map((scenario) => ({
+      kind: "scenario",
+      ref: scenario,
+    }));
+
+    expect(invocationsAfterExclusions(invocations, [first])).toEqual([
+      { kind: "scenario", ref: outline },
+      { kind: "scenario", ref: second },
+    ]);
+  });
 });
 
 describe("runPreflightFlow", () => {

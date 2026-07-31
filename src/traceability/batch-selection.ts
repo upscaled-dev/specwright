@@ -1,5 +1,7 @@
 import { BatchSelection } from "./contracts";
 import type { TraceabilitySnapshot } from "./traceability-model";
+import type { OutlineExampleRow } from "../types";
+import type { ArtifactCaptureTarget } from "./run-artifact-store";
 import { ScenarioRef, normalizePath, refIdentity, sameScenario } from "./scenario-ref";
 
 // One thing to run for a resolved batch. `scenario` greps by name/outline; `grep` runs one combined
@@ -23,6 +25,58 @@ export interface BatchResolutionOptions {
   // Canonical member test keys of the target Test Plan, when the selection is `test-plan-derived`
   // (slice 2d's remote plan lookup supplies them). Absent/empty → that scope resolves to nothing.
   readonly planTestKeys?: readonly string[] | undefined;
+}
+
+export function batchSelectionFromScenarios(
+  refs: readonly ScenarioRef[]
+): BatchSelection {
+  const seen = new Set<string>();
+  const scenarios = refs.filter((ref) => {
+    const id = refIdentity(ref);
+    if (seen.has(id)) {return false;}
+    seen.add(id);
+    return true;
+  });
+  const first = scenarios[0];
+  if (!first) {return { kind: "all-mapped" };}
+  return scenarios.length === 1
+    ? { kind: "scenario", scenario: first }
+    : { kind: "multi-select", scenarios };
+}
+
+// Resolve the exact report rows owned by one mapped invocation. Split Examples blocks override the
+// enclosing outline, matching the ownership rule used to build the traceability snapshot.
+export function artifactCaptureTarget(
+  scenario: ScenarioRef,
+  rows: readonly OutlineExampleRow[],
+  mapped: readonly ScenarioRef[]
+): ArtifactCaptureTarget {
+  if (scenario.kind === "scenario") {
+    return { scenario, ...(scenario.line > 0 ? { resultLines: [scenario.line] } : {}) };
+  }
+  if (scenario.kind === "examplesBlock") {
+    return {
+      scenario,
+      resultLines: rows
+        .filter((row) => row.examplesBlockLineNumber === scenario.line)
+        .map((row) => row.lineNumber),
+    };
+  }
+  const file = normalizePath(scenario.filePath);
+  const splitBlocks = new Set(
+    mapped
+      .filter((ref) => ref.kind === "examplesBlock" && normalizePath(ref.filePath) === file)
+      .map((ref) => ref.line)
+  );
+  return {
+    scenario,
+    resultLines: rows
+      .filter((row) =>
+        row.outlineLineNumber === scenario.line
+        && !splitBlocks.has(row.examplesBlockLineNumber)
+      )
+      .map((row) => row.lineNumber),
+  };
 }
 
 function allScenarioRefs(snapshot: TraceabilitySnapshot): ScenarioRef[] {
@@ -75,7 +129,12 @@ export function resolveBatchSelection(
   options: BatchResolutionOptions = {}
 ): ResolvedBatch {
   const known = allScenarioRefs(snapshot);
-  const canonical = (ref: ScenarioRef): ScenarioRef => known.find((k) => sameScenario(k, ref)) ?? ref;
+  const canonical = (ref: ScenarioRef): ScenarioRef => {
+    const exact = known.find((candidate) => refIdentity(candidate) === refIdentity(ref));
+    if (exact) {return exact;}
+    const fuzzy = known.filter((candidate) => candidate.kind === ref.kind && sameScenario(candidate, ref));
+    return fuzzy.length === 1 ? fuzzy[0] ?? ref : ref;
+  };
 
   switch (selection.kind) {
     case "scenario": {
@@ -96,10 +155,11 @@ export function resolveBatchSelection(
     }
     case "all-mapped": {
       const scenarios = mappedScenarioRefs(snapshot);
-      // Collapse to one combined-grep invocation (one bddgen regeneration for the whole set) instead
-      // of one full bddgen+playwright pass per scenario. Exclusion stays surgical; the grep is
-      // rebuilt from the remaining refs (see `invocationsAfterExclusions`).
-      const invocations = scenarios.length > 0 ? [{ kind: "grep" as const, refs: scenarios }] : [];
+      // A combined grep is safe for plain scenarios. Outline and Examples-block mappings need their
+      // own invocation so artifact capture can retain the rows each mapping owns.
+      const invocations = scenarios.every((ref) => ref.kind === "scenario")
+        ? scenarios.length > 0 ? [{ kind: "grep" as const, refs: scenarios }] : []
+        : scenarios.map((ref) => ({ kind: "scenario" as const, ref }));
       return { scenarios, invocations };
     }
     case "test-plan-derived": {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { Memento } from "vscode";
 import { Logger } from "../../utils/logger";
 import {
@@ -6,6 +6,7 @@ import {
   RunArtifactStore,
   ShardCapture,
   buildArtifactResults,
+  scopeArtifactDetails,
 } from "../../traceability/run-artifact-store";
 import { BatchSelection, PreflightDecision, RunArtifact, RunArtifactResult } from "../../traceability/contracts";
 import { ScenarioResult } from "../../utils/playwright-json-parser";
@@ -54,6 +55,17 @@ function artifact(over: Partial<RunArtifact> = {}): RunArtifact {
 }
 
 describe("buildArtifactResults", () => {
+  it("fails closed when a mapped invocation owns no result lines", () => {
+    expect(scopeArtifactDetails(
+      [scenario()],
+      {
+        scenario: { filePath: "/ws/a.feature", line: 3, name: "S", kind: "scenario" },
+        resultLines: [],
+      },
+      "/ws"
+    )).toEqual([]);
+  });
+
   it("emits one result per plain scenario, defaulting attempts and flaky", () => {
     const results = buildArtifactResults([scenario({ durationMs: 40 })], "/ws");
     expect(results).toHaveLength(1);
@@ -206,6 +218,19 @@ describe("RunArtifactStore", () => {
     expect(store.latest()).toEqual(sealed);
   });
 
+  it("seals partial when an invocation-scoped run captures no owned result", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    const batch = store.beginBatch({
+      kind: "scenario",
+      scenario: { filePath: "/ws/a.feature", line: 3, name: "S", kind: "scenario" },
+    });
+    store.contributeShard(batch, shard({
+      invocation: { filePath: "/ws/a.feature", line: 3, name: "S", kind: "scenario" },
+    }));
+
+    expect(store.sealBatch(batch, false)?.state).toBe("partial");
+  });
+
   it("rejects a shard or seal carrying a foreign or stale batch handle", () => {
     const store = new RunArtifactStore(fakeMemento(), logger);
     const batch = store.beginBatch(FEATURE_SEL);
@@ -331,12 +356,32 @@ describe("testKey threading and preflight decisions", () => {
 
   it("threads the resolver factory through a captured batch so latestOutcome lights up", () => {
     const store = new RunArtifactStore(fakeMemento(), logger);
-    store.setKeyResolver(() => (s) => (s.name === "Logs in" ? "CALC-7" : undefined));
+    const factory = vi.fn(() => (s: { name: string }) => (s.name === "Logs in" ? "CALC-7" : undefined));
+    store.setKeyResolver(factory);
     const batch = store.beginBatch(FEATURE_SEL);
     store.contributeShard(batch, shard({ details: [scenario({ scenarioName: "Logs in", status: "failed" })] }));
     const sealed = store.sealBatch(batch, false);
+    expect(factory).toHaveBeenCalledWith();
     expect(sealed?.results[0]?.testKey).toBe("CALC-7");
     expect(store.latestOutcome("CALC-7")).toBe("failed");
+  });
+
+  it("normalizes a relative report path before resolving its mapped key", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    store.setKeyResolver(() => (scenarioRef) =>
+      scenarioRef.filePath === "/ws/a.feature" ? "CALC-8" : undefined
+    );
+    const batch = store.beginBatch(SEL);
+
+    store.contributeShard(batch, shard({
+      workingDir: "/ws",
+      details: [scenario({ featurePath: "a.feature" })],
+    }));
+
+    expect(store.sealBatch(batch, false)?.results[0]).toMatchObject({
+      testKey: "CALC-8",
+      scenario: { filePath: "/ws/a.feature" },
+    });
   });
 
   it("freezes the resolver at beginBatch so a sync mid-batch can't split one artifact's keys", () => {
@@ -354,6 +399,43 @@ describe("testKey threading and preflight decisions", () => {
     store.contributeShard(batch, shard({ details: [scenario({ scenarioName: "S", lineNumber: 8 })] }));
     const sealed = store.sealBatch(batch, false);
     expect(sealed?.results.map((r) => r.testKey)).toEqual(["K1", "K1"]);
+  });
+
+  it("resolves each outline shard against the invocation that produced it", () => {
+    const outline = { filePath: "/ws/a.feature", line: 3, name: "Divide", kind: "outline" as const };
+    const block = {
+      filePath: "/ws/a.feature",
+      line: 8,
+      name: "Divide · edge cases",
+      kind: "examplesBlock" as const,
+      outlineName: "Divide",
+      examplesBlockName: "edge cases",
+    };
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    store.setKeyResolver(() => (_scenario, invocation) =>
+      invocation?.kind === "examplesBlock" ? "CALC-2" : "CALC-1"
+    );
+    const batch = store.beginBatch({ kind: "multi-select", scenarios: [outline, block] });
+    store.contributeShard(batch, shard({
+      details: [scenario({ scenarioName: "common", outlineName: "Divide", lineNumber: 9 })],
+      invocation: outline,
+    }));
+    store.contributeShard(batch, shard({
+      details: [
+        scenario({ scenarioName: "zero", outlineName: "Divide", lineNumber: 14 }),
+        scenario({ scenarioName: "negative", outlineName: "Divide", lineNumber: 15 }),
+      ],
+      invocation: block,
+    }));
+
+    expect(store.sealBatch(batch, false)?.results).toMatchObject([
+      { testKey: "CALC-1", scenario: outline, iterations: [{ name: "common" }] },
+      {
+        testKey: "CALC-2",
+        scenario: block,
+        iterations: [{ name: "zero" }, { name: "negative" }],
+      },
+    ]);
   });
 
   it("seals the preflight decisions the batch opened with onto the artifact", () => {

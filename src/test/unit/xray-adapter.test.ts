@@ -132,7 +132,9 @@ describe("XrayAdapter", () => {
 describe("XrayAdapter connection capability", () => {
   it("exposes a thin connection view over the credential store when one is supplied", async () => {
     const store = new XrayCredentialStore(mapSecretStorage());
-    const adapter = new XrayAdapter(configWith({ "xray.siteUrl": "acme.atlassian.net" }), store);
+    const adapter = new XrayAdapter(configWith({ "xray.siteUrl": "acme.atlassian.net" }), {
+      credentialStore: store,
+    });
 
     expect(adapter.connection?.label).toBe("acme.atlassian.net");
     expect(await adapter.connection?.isConnected()).toBe(false);
@@ -144,7 +146,7 @@ describe("XrayAdapter connection capability", () => {
   it("reports disconnected when the site is unset even with stored credentials", async () => {
     const store = new XrayCredentialStore(mapSecretStorage());
     await store.setCredentials("acme.atlassian.net", "id-1", "secret-1");
-    const adapter = new XrayAdapter(configWith({}), store);
+    const adapter = new XrayAdapter(configWith({}), { credentialStore: store });
     expect(await adapter.connection?.isConnected()).toBe(false);
   });
 });
@@ -281,7 +283,7 @@ describe("XrayAdapter.testAuthoring", () => {
   it("delegates to the injected authoring capability when the live adapter carries one", async () => {
     const created = { key: "CALC-9", warnings: [] };
     const authoring = { createTest: vi.fn(() => Promise.resolve(created)) };
-    const adapter = new XrayAdapter(configWith({}), undefined, undefined, undefined, undefined, undefined, authoring);
+    const adapter = new XrayAdapter(configWith({}), { testAuthoring: authoring });
 
     await expect(
       adapter.testAuthoring?.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" })

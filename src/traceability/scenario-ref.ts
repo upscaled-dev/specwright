@@ -27,11 +27,12 @@ export function refIdentity(ref: ScenarioRef): string {
   return `${normalizePath(ref.filePath)}|${ref.line}|${ref.name}|${ref.kind}`;
 }
 
-// Two refs name the same scenario when they share a file and either the same 1-based line or the
-// same title. The line is authoritative for plain scenarios; outline rows reported by Playwright
-// carry an example-row line (not the `Scenario Outline:` line), so the title fallback reunites them.
+// Two refs name the same executable unit when they share a file and either the same 1-based line or
+// the same title. A plain scenario never matches an outline-shaped unit. Outline rows reported by
+// Playwright carry an example-row line, so the title fallback reunites outlines and Examples blocks.
 export function sameScenario(a: ScenarioRef, b: ScenarioRef): boolean {
   if (normalizePath(a.filePath) !== normalizePath(b.filePath)) {return false;}
+  if ((a.kind === "scenario") !== (b.kind === "scenario")) {return false;}
   if (a.line > 0 && a.line === b.line) {return true;}
   return a.name === b.name;
 }

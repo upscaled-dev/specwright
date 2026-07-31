@@ -24,6 +24,10 @@ import {
 } from "../utils/working-dir";
 import { BreakpointMirror } from "./breakpoint-mirror";
 import { parseBddFileData, resolveGeneratedSpecPath } from "../parsers/bdd-file-data-parser";
+import {
+  scopeArtifactDetails,
+  type ArtifactCaptureTarget,
+} from "../traceability/run-artifact-store";
 
 /**
  * A test run result enriched with the per-scenario outcomes parsed from Playwright's JSON
@@ -34,6 +38,12 @@ export type RunOutputResult = TestRunResult & {
   scenarioResults?: Record<string, ScenarioStatus>;
   scenarioDetails?: ScenarioResult[];
 };
+
+interface ScenarioPlaywrightAttempt {
+  readonly result: RunOutputResult;
+  readonly command: string;
+  readonly exitCode: number;
+}
 
 // Worst status wins when one scenario ran under several projects (failed > skipped > passed), so
 // a chromium-passed / firefox-failed scenario counts as failed no matter which result the report
@@ -349,7 +359,8 @@ export class TestExecutor {
   }
 
   public async runScenarioWithOutput(
-    options: TestExecutionOptions
+    options: TestExecutionOptions,
+    artifactTarget?: ArtifactCaptureTarget
   ): Promise<RunOutputResult> {
     const start = Date.now();
     const workingDir = this.getWorkingDirectory(options.filePath);
@@ -360,6 +371,15 @@ export class TestExecutor {
     const preRunFailure = await this.runPreRunHook(workingDir, signal);
     if (preRunFailure) {
       if (signal?.aborted) { return this.cancelledResult(start); }
+      this.contributeArtifactShard(
+        options.artifactBatch,
+        workingDir,
+        this.config.preRunCommand || "pre-run hook",
+        false,
+        1,
+        [],
+        artifactTarget
+      );
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return { success: false, output: "", error: preRunFailure, duration: Math.max(1, Date.now() - start) };
     }
@@ -376,6 +396,15 @@ export class TestExecutor {
         if (signal?.aborted) { return this.cancelledResult(start); }
         this.publishBddgenDiagnostics(gen, workingDir);
         if (!gen.success) {
+          this.contributeArtifactShard(
+            options.artifactBatch,
+            workingDir,
+            bddgenCommand,
+            false,
+            gen.returnCode,
+            [],
+            artifactTarget
+          );
           this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
           const detail = gen.error.trim() === "" ? gen.output : gen.error;
           return {
@@ -387,13 +416,22 @@ export class TestExecutor {
         }
       } catch (error) {
         if (signal?.aborted) { return this.cancelledResult(start); }
+        this.contributeArtifactShard(
+          options.artifactBatch,
+          workingDir,
+          bddgenCommand,
+          false,
+          1,
+          [],
+          artifactTarget
+        );
         this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
         return { success: false, output: "", error: errMsg(error), duration: Math.max(1, Date.now() - start) };
       }
     }
 
     const enriched = this.withSpecLineTarget(options);
-    const result = await this.runScenarioPlaywright(enriched, workingDir, start, signal);
+    let attempt = await this.runScenarioPlaywright(enriched, workingDir, start, signal);
 
     // Safety net: a spec-line target Playwright doesn't recognize (stale spec, path-filter
     // quirk) makes it report "no tests found"; the run ends with nothing executed and every
@@ -402,14 +440,25 @@ export class TestExecutor {
     // errors, failing tests) would fail identically again and must surface as-is.
     const specLineTargetWasAdded =
       enriched.specLineTarget !== undefined && options.specLineTarget === undefined;
-    if (specLineTargetWasAdded && !signal?.aborted && foundNoTests(result)) {
+    if (specLineTargetWasAdded && !signal?.aborted && foundNoTests(attempt.result)) {
       this.logger.warn(
         `Playwright found no tests for the spec-line target ${enriched.specLineTarget}; ` +
           "retrying with a name-based --grep."
       );
-      return this.runScenarioPlaywright(options, workingDir, start, signal);
+      attempt = await this.runScenarioPlaywright(options, workingDir, start, signal);
     }
-    return result;
+    if (!signal?.aborted) {
+      this.contributeArtifactShard(
+        options.artifactBatch,
+        workingDir,
+        attempt.command,
+        attempt.result.success,
+        attempt.exitCode,
+        attempt.result.scenarioDetails ?? [],
+        artifactTarget
+      );
+    }
+    return attempt.result;
   }
 
   /** The playwright half of a scenario run: execute with a JSON report and map the outcome. */
@@ -418,7 +467,7 @@ export class TestExecutor {
     workingDir: string,
     start: number,
     signal: AbortSignal | undefined
-  ): Promise<RunOutputResult> {
+  ): Promise<ScenarioPlaywrightAttempt> {
     const { playwrightCommand } = this.commandBuilder().buildScenarioCommandParts(options);
 
     reportSequence += 1;
@@ -433,20 +482,34 @@ export class TestExecutor {
         await this.shellRunner(command, workingDir, { PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath }, signal),
         command
       );
-      if (signal?.aborted) { return this.cancelledResult(start); }
+      if (signal?.aborted) {
+        return { result: this.cancelledResult(start), command, exitCode: result.returnCode };
+      }
       // When bddgenCommand is undefined (defineBddProject auto-gen) bddgen runs inside
       // `playwright test`, so its errors surface here rather than in the separate step above.
       // publish() is a no-op parse+clear on non-bddgen failures, so calling it unconditionally
       // is safe and is the only path those errors reach the Problems panel.
       this.publishBddgenDiagnostics(result, workingDir);
-      return this.buildOutputResult(result, reportPath, workingDir, start, command, options.artifactBatch);
+      return {
+        result: this.buildOutputResult(result, reportPath, workingDir, start, command, undefined),
+        command,
+        exitCode: result.returnCode,
+      };
     } catch (error) {
-      if (signal?.aborted) { return this.cancelledResult(start); }
-      // A spawn/binary failure never reaches buildOutputResult, so contribute the failed invocation's
-      // shard here: one shard per invocation, and the batch honestly seals partial.
-      this.contributeArtifactShard(options.artifactBatch, workingDir, command, false, 1, []);
+      if (signal?.aborted) {
+        return { result: this.cancelledResult(start), command, exitCode: 1 };
+      }
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
-      return { success: false, output: "", error: errMsg(error), duration: Math.max(1, Date.now() - start) };
+      return {
+        result: {
+          success: false,
+          output: "",
+          error: errMsg(error),
+          duration: Math.max(1, Date.now() - start),
+        },
+        command,
+        exitCode: 1,
+      };
     }
   }
 
@@ -642,6 +705,14 @@ export class TestExecutor {
     const preRunFailure = await this.runPreRunHook(workingDir, signal);
     if (preRunFailure) {
       if (signal?.aborted) { return this.cancelledResult(start); }
+      this.contributeArtifactShard(
+        artifactBatch,
+        workingDir,
+        this.config.preRunCommand || "pre-run hook",
+        false,
+        1,
+        []
+      );
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return {
         success: false,
@@ -741,7 +812,8 @@ export class TestExecutor {
     command: string,
     success: boolean,
     exitCode: number,
-    details: ScenarioResult[]
+    details: ScenarioResult[],
+    artifactTarget?: ArtifactCaptureTarget
   ): void {
     if (artifactBatch === undefined) { return; }
     const workspaceRoot = this.workspaceRootFor(workingDir);
@@ -750,8 +822,9 @@ export class TestExecutor {
       command: this.commandSummary(command, workspaceRoot),
       success,
       exitCode,
-      details,
+      details: scopeArtifactDetails(details, artifactTarget, workingDir),
       workspaceRoot,
+      invocation: artifactTarget?.scenario,
     });
   }
 
@@ -779,7 +852,8 @@ export class TestExecutor {
     workingDir: string,
     start: number,
     command: string,
-    artifactBatch: number | undefined
+    artifactBatch: number | undefined,
+    artifactTarget?: ArtifactCaptureTarget
   ): RunOutputResult {
     const scenarioDetails = this.readScenarioDetails(reportPath, result.output);
     const scenarioResults = this.playwrightJsonParser.toStatusMap(scenarioDetails, workingDir);
@@ -788,7 +862,15 @@ export class TestExecutor {
     this.context?.runResultStore?.ingest(scenarioResults);
     // Same seam feeds the richer artifact store. The report is unlinked in readScenarioDetails, so
     // the shard carries the already-parsed details.
-    this.contributeArtifactShard(artifactBatch, workingDir, command, result.success, result.returnCode, scenarioDetails);
+    this.contributeArtifactShard(
+      artifactBatch,
+      workingDir,
+      command,
+      result.success,
+      result.returnCode,
+      scenarioDetails,
+      artifactTarget
+    );
     const { passed, failed } = countScenarioStatuses(scenarioDetails);
     this.runEventEmitter.fire({
       kind: result.success && failed === 0 ? "success" : "failure",

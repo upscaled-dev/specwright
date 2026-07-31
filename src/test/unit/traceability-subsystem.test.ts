@@ -13,7 +13,7 @@ import {
   ConnectionIndicator,
   TraceabilityTreeDataProvider,
 } from "../../traceability/traceability-tree-data-provider";
-import { TraceabilityModel } from "../../traceability/traceability-model";
+import { TraceabilityModel, type TraceabilitySnapshot } from "../../traceability/traceability-model";
 import { TraceabilityAdapterRegistry } from "../../traceability/adapter-registry";
 import { RunResultStore } from "../../traceability/run-result-store";
 import { FeatureParser } from "../../parsers/feature-parser";
@@ -306,6 +306,89 @@ describe("TraceabilitySubsystem lifecycle", () => {
 
     expect(subsystem.traceabilityPanelActive).toBe(true);
     expect(treeViews.__treeViewCounters.createCount).toBe(1);
+    subsystem.dispose();
+  });
+
+  it("enables native multi-selection on the traceability tree", () => {
+    const createTreeView = vi.spyOn(vscode.window, "createTreeView");
+    const { config } = makeConfig();
+    const { subsystem } = build(config);
+
+    subsystem.applyCurrent();
+
+    expect(createTreeView).toHaveBeenCalledWith(
+      "playwrightBddRunner.traceability",
+      expect.objectContaining({ canSelectMany: true })
+    );
+    subsystem.dispose();
+  });
+
+  it("scopes an Examples-block result to the selected mapping", () => {
+    const { config } = makeConfig();
+    const { subsystem } = build(config);
+    const outline = { filePath: "/ws/a.feature", line: 3, name: "Divide", kind: "outline" as const };
+    const block = {
+      filePath: "/ws/a.feature",
+      line: 8,
+      name: "Divide · edge cases",
+      kind: "examplesBlock" as const,
+      outlineName: "Divide",
+      examplesBlockName: "edge cases",
+    };
+    const snapshot: TraceabilitySnapshot = {
+      links: [
+        { testKey: "CALC-1", scenario: outline, reqKeys: [] },
+        { testKey: "CALC-2", scenario: block, reqKeys: [] },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeProjects: ["CALC"],
+      errors: [],
+    };
+    (subsystem as unknown as { model: { snapshot: TraceabilitySnapshot; dispose: () => void } }).model = {
+      snapshot,
+      dispose: () => undefined,
+    };
+
+    const resolve = subsystem.captureKeyResolver();
+
+    expect(resolve({ ...outline, line: 10 }, block)).toBe("CALC-2");
+    subsystem.dispose();
+  });
+
+  it("uses each invocation when an outline and its Examples block are both selected", () => {
+    const { config } = makeConfig();
+    const { subsystem } = build(config);
+    const outline = { filePath: "/ws/a.feature", line: 3, name: "Divide", kind: "outline" as const };
+    const block = {
+      filePath: "/ws/a.feature",
+      line: 8,
+      name: "Divide · edge cases",
+      kind: "examplesBlock" as const,
+      outlineName: "Divide",
+      examplesBlockName: "edge cases",
+    };
+    const snapshot: TraceabilitySnapshot = {
+      links: [
+        { testKey: "CALC-1", scenario: outline, reqKeys: [] },
+        { testKey: "CALC-2", scenario: block, reqKeys: [] },
+      ],
+      untraced: [],
+      orphans: [],
+      stale: false,
+      completeProjects: ["CALC"],
+      errors: [],
+    };
+    (subsystem as unknown as { model: { snapshot: TraceabilitySnapshot; dispose: () => void } }).model = {
+      snapshot,
+      dispose: () => undefined,
+    };
+    const resolve = subsystem.captureKeyResolver();
+    const result = { ...outline, line: 10 };
+
+    expect(resolve(result, outline)).toBe("CALC-1");
+    expect(resolve(result, block)).toBe("CALC-2");
     subsystem.dispose();
   });
 

@@ -26,6 +26,7 @@ import { TagDecorationProvider } from "./tag-decoration";
 import { RunResultStore } from "./run-result-store";
 import { MappingPageSizeStore, mappingPageSizeStore } from "./mapping-page-size";
 import { ProjectScopeStore, projectScopeStore } from "./project-scope";
+import { refIdentity } from "./scenario-ref";
 
 const FALLBACK_PROVIDER_ID = "xray";
 const CONNECTED_CONTEXT_KEY = "playwrightBddRunner.traceability.connected";
@@ -162,12 +163,18 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     return this.model?.snapshot;
   }
 
-  // A testKey resolver frozen over the snapshot's links AS THEY STAND NOW. The artifact store calls
-  // this at `beginBatch` so one artifact keys off a single consistent snapshot even if a sync lands
-  // mid-batch (the model swaps `current` wholesale on rebuild, so the captured array never mutates).
+  // A testKey resolver frozen over the snapshot's links AS THEY STAND NOW. A traceability command
+  // supplies its canonical invocation so an Examples-block result resolves against that exact mapping;
+  // other run surfaces retain the full-snapshot fallback.
   public captureKeyResolver(): ArtifactKeyResolver {
     const links = this.model?.snapshot.links ?? [];
-    return (scenario) => findLinkForScenario(links, scenario)?.testKey;
+    return (scenario, invocation) => {
+      const invocationId = invocation ? refIdentity(invocation) : undefined;
+      const invocationLinks = invocationId
+        ? links.filter((link) => refIdentity(link.scenario) === invocationId)
+        : undefined;
+      return findLinkForScenario(invocationLinks ?? links, scenario)?.testKey;
+    };
   }
 
   // A synchronous, awaitable rebuild; the debounced watcher path can't be awaited, so the preflight
@@ -267,6 +274,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.adapterSubscriptions.push(model.onDidChange(() => this._onDidChangeSnapshot.fire()));
     this.treeView = vscode.window.createTreeView("playwrightBddRunner.traceability", {
       treeDataProvider: provider,
+      canSelectMany: true,
     });
     // Grammar-driven tag diagnostics are offline (no connection needed) and rebuild with the panel
     // on any prefix/provider change, so they always lint against the active adapter's grammar.

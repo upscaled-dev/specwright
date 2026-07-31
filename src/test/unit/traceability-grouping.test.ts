@@ -3,18 +3,9 @@ import * as path from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as vscode from "vscode";
 import { CommandManager } from "../../commands/command-manager";
-import { FeatureParser } from "../../parsers/feature-parser";
-import { PlaywrightBddExtensionContext } from "../../types";
-import { Logger } from "../../utils/logger";
-import { ExtensionConfig } from "../../core/extension-config";
-import { TestExecutor } from "../../core/test-executor";
-import { TestDiscoveryManager } from "../../core/test-discovery-manager";
-import { TestOrganizationManager } from "../../core/test-organization";
-import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
-import { CommandBuilder } from "../../core/command-builder";
-import { XrayAdapter } from "../../xray/xray-adapter";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { JiraAccessError, searchJiraProjects } from "../../xray/jira-project-search";
+import { captureHandlers, makeContext } from "./helpers/command-manager-harness";
 
 vi.mock("../../xray/jira-project-search", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../xray/jira-project-search")>();
@@ -31,39 +22,6 @@ interface Pkg {
 const pkg = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf-8")
 ) as Pkg;
-
-function makeContext(): PlaywrightBddExtensionContext {
-  const logger = Logger.create();
-  const config = ExtensionConfig.create();
-  return {
-    logger,
-    config,
-    testExecutor: TestExecutor.create(),
-    discoveryManager: TestDiscoveryManager.create(logger, config),
-    organizationManager: TestOrganizationManager.create(logger),
-    featureParser: FeatureParser.create(logger),
-    playwrightJsonParser: PlaywrightJsonParser.create(logger),
-    commandBuilder: CommandBuilder.create(config, logger),
-    traceabilityAdapter: new XrayAdapter(config),
-  };
-}
-
-function captureHandlers(context: PlaywrightBddExtensionContext): Map<string, (...a: unknown[]) => Promise<void>> {
-  const handlers = new Map<string, (...a: unknown[]) => Promise<void>>();
-  const commandsApi = vscode.commands as unknown as { registerCommand: unknown };
-  const original = commandsApi.registerCommand;
-  commandsApi.registerCommand = (cmd: string, cb: (...a: unknown[]) => Promise<void>): { dispose: () => void } => {
-    handlers.set(cmd, cb);
-    return { dispose: () => {} };
-  };
-  try {
-    const mgr = CommandManager.create(context);
-    mgr.registerCommands({ subscriptions: [] } as unknown as vscode.ExtensionContext);
-  } finally {
-    commandsApi.registerCommand = original;
-  }
-  return handlers;
-}
 
 describe("traceability grouping toggle contributions", () => {
   const CMD = "playwrightBddRunner.traceability.toggleGrouping";

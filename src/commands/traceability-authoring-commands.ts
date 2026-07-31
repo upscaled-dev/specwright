@@ -64,8 +64,17 @@ function issueIdFor(snapshot: TraceabilitySnapshot | undefined, key: string): st
 // The write one container verb runs, and how that verb reads its own seam off a capability that need
 // not expose it. Bound at read time so an adapter implementing the seam as a class method keeps its
 // receiver, like the push path does.
-type ContainerSeam = (spec: NewContainerSpec) => Promise<AuthoredTest>;
+type ContainerSeam = (spec: NewContainerSpec, signal?: AbortSignal) => Promise<AuthoredTest>;
 type SeamOf = (authoring: TestAuthoringCapability) => ContainerSeam | undefined;
+
+// A cancel before the seam is called proves nothing was sent. Once the seam has been called, an abort
+// cannot prove whether the single POST landed, so the command reports that ambiguity instead of turning
+// it into either a failed create or a safe retry.
+class CreateCancellation extends Error {
+  constructor(readonly requestStarted: boolean) {
+    super("Create cancelled");
+  }
+}
 
 // The authoring commands: creating remote tests from local scenarios in bulk, pushing a scenario's text
 // to its test, and gathering picked tests into a new container. The single-scenario create still lives
@@ -197,7 +206,7 @@ export class TraceabilityAuthoringCommands {
     try {
       const outcome = await runContainerCreate(keys, project, summary, {
         issueIdFor: (key) => issueIdFor(snapshot, key),
-        create: seam,
+        create: (spec) => this.runCreate(kind, adapter.label, project, (signal) => seam(spec, signal)),
       });
       if (outcome.kind === "unresolved") {
         const unresolved = outcome.keys.join(", ");
@@ -234,7 +243,9 @@ export class TraceabilityAuthoringCommands {
       return;
     }
     try {
-      const created = await seam({ project, summary });
+      const created = await this.runCreate(kind, adapter.label, project, (signal) =>
+        seam({ project, summary }, signal)
+      );
       if (created.key !== undefined) {
         await this.recordExecution(created.key, summary);
       }
@@ -303,6 +314,46 @@ export class TraceabilityAuthoringCommands {
     return choice === action;
   }
 
+  private async runCreate<T>(
+    kind: string,
+    providerLabel: string,
+    project: string,
+    create: (signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    return vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `Creating ${providerLabel} ${kind} in ${project}…`,
+        cancellable: true,
+      },
+      async (_progress, token) => {
+        const controller = new AbortController();
+        token.onCancellationRequested(() => controller.abort());
+        if (token.isCancellationRequested) {
+          controller.abort();
+        }
+        if (controller.signal.aborted) {
+          throw new CreateCancellation(false);
+        }
+        try {
+          const created = await create(controller.signal);
+          if (controller.signal.aborted) {
+            throw new CreateCancellation(true);
+          }
+          return created;
+        } catch (error) {
+          if (error instanceof CreateCancellation) {
+            throw error;
+          }
+          if (controller.signal.aborted) {
+            throw new CreateCancellation(true);
+          }
+          throw error;
+        }
+      }
+    );
+  }
+
   // Every container create reports the same way: warnings logged verbatim and appended to the line, and a
   // response that carried no key reported as an honest gap rather than a failure, since the issue exists
   // remotely either way. `landed` is the sentence for the readable case, which only the caller can word.
@@ -329,6 +380,14 @@ export class TraceabilityAuthoringCommands {
   }
 
   private reportCreateFailure(kind: string, project: string, error: unknown): void {
+    if (error instanceof CreateCancellation) {
+      if (error.requestStarted) {
+        vscode.window.showWarningMessage(
+          `Cancelled while waiting for Xray. The ${kind} may still have been created; check in Jira before retrying.`
+        );
+      }
+      return;
+    }
     this.logger.error(`Creating a ${kind} failed`, { project, error: errMsg(error) });
     vscode.window.showErrorMessage(`Could not create this ${kind}: ${errMsg(error)}`);
   }

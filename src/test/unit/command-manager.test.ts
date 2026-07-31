@@ -1,18 +1,15 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as vscode from "vscode";
 import { CommandManager } from "../../commands/command-manager";
+import { TraceabilityCommands } from "../../commands/traceability-commands";
+import { TraceabilityLinkCommands } from "../../commands/traceability-link-commands";
+import { TraceabilityPublishCommands } from "../../commands/traceability-publish-commands";
 import { FeatureParser } from "../../parsers/feature-parser";
-import { PlaywrightBddExtensionContext } from "../../types";
 import { Logger } from "../../utils/logger";
 import { ExtensionConfig } from "../../core/extension-config";
 import { TestExecutor } from "../../core/test-executor";
-import { TestDiscoveryManager } from "../../core/test-discovery-manager";
-import { TestOrganizationManager } from "../../core/test-organization";
-import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
-import { CommandBuilder } from "../../core/command-builder";
 import { ExternalRef, RunArtifact, SyncProgress, SyncScope, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayAdapter } from "../../xray/xray-adapter";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
@@ -21,14 +18,14 @@ import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { NO_MAPPING_PAGE_SIZE } from "../../traceability/mapping-page-size";
 import { NO_PROJECT_SCOPE, ProjectScopeStore, projectScopeStore } from "../../traceability/project-scope";
-import { RunArtifactStore } from "../../traceability/run-artifact-store";
+import { ArtifactCaptureTarget, RunArtifactStore } from "../../traceability/run-artifact-store";
 import { PublishLedger } from "../../traceability/publish-ledger";
 import { BoardViewModel, scenarioDropId } from "../../traceability/board-data";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { PreflightChoice } from "../../traceability/preflight-flow";
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
-import type { Memento } from "vscode";
+import { captureHandlers, fakeDoc, makeContext, memento, writeTempFeature } from "./helpers/command-manager-harness";
 
 // The webview-panel stub the board opens onto: `__posted` records what the host sent, `__receive`
 // delivers an inbound message, and the reset disposes every panel between tests.
@@ -44,37 +41,33 @@ const win = vscode.window as unknown as {
   __resetWebviewPanels: () => void;
 };
 
-function makeContext(overrides?: Partial<PlaywrightBddExtensionContext>): PlaywrightBddExtensionContext {
-  const logger = Logger.create();
-  const config = ExtensionConfig.create();
-  const base: PlaywrightBddExtensionContext = {
-    logger,
-    config,
-    testExecutor: TestExecutor.create(),
-    discoveryManager: TestDiscoveryManager.create(logger, config),
-    organizationManager: TestOrganizationManager.create(logger),
-    featureParser: FeatureParser.create(logger),
-    playwrightJsonParser: PlaywrightJsonParser.create(logger),
-    commandBuilder: CommandBuilder.create(config, logger),
-    traceabilityAdapter: new XrayAdapter(config),
-  };
-  return { ...base, ...(overrides ?? {}) };
+function traceabilityCommands(manager: CommandManager): TraceabilityCommands {
+  return (manager as unknown as { traceabilityCommands: TraceabilityCommands })
+    .traceabilityCommands;
 }
 
-function memento(): Memento {
-  const store = new Map<string, unknown>();
-  return {
-    keys: () => [...store.keys()],
-    get: (k: string, d?: unknown) => (store.has(k) ? store.get(k) : d),
-    update: (k: string, v: unknown) => { store.set(k, JSON.parse(JSON.stringify(v))); return Promise.resolve(); },
-  } as unknown as Memento;
+function linkCommands(manager: CommandManager): TraceabilityLinkCommands {
+  return (
+    traceabilityCommands(manager) as unknown as {
+      getLinkCommands: () => TraceabilityLinkCommands;
+    }
+  ).getLinkCommands();
 }
 
-function writeTempFeature(content: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cmdmgr-"));
-  const filePath = path.join(dir, "tmp.feature");
-  fs.writeFileSync(filePath, content, "utf-8");
-  return filePath;
+function publishCommands(manager: CommandManager): TraceabilityPublishCommands {
+  return (
+    traceabilityCommands(manager) as unknown as {
+      getPublishCommands: () => TraceabilityPublishCommands;
+    }
+  ).getPublishCommands();
+}
+
+function traceabilityBoardDeps(manager: CommandManager): BoardPanelDeps {
+  return (
+    traceabilityCommands(manager) as unknown as {
+      boardDeps: () => BoardPanelDeps;
+    }
+  ).boardDeps();
 }
 
 describe("CommandManager.resolveOutlineName: cache", () => {
@@ -487,23 +480,6 @@ function stubAdapter(resolve: (key: string) => string | undefined): Traceability
   };
 }
 
-function captureHandlers(context: PlaywrightBddExtensionContext): Map<string, (...a: unknown[]) => Promise<void>> {
-  const handlers = new Map<string, (...a: unknown[]) => Promise<void>>();
-  const commandsApi = vscode.commands as unknown as { registerCommand: unknown };
-  const original = commandsApi.registerCommand;
-  commandsApi.registerCommand = (cmd: string, cb: (...a: unknown[]) => Promise<void>): { dispose: () => void } => {
-    handlers.set(cmd, cb);
-    return { dispose: () => {} };
-  };
-  try {
-    const mgr = CommandManager.create(context);
-    mgr.registerCommands({ subscriptions: [] } as unknown as vscode.ExtensionContext);
-  } finally {
-    commandsApi.registerCommand = original;
-  }
-  return handlers;
-}
-
 describe("traceability browse/copy command handlers", () => {
   beforeEach(() => envHooks.__resetEnv());
 
@@ -717,21 +693,6 @@ describe("traceability linkScenario command", () => {
     await confirmLink(pending, "5");
   });
 
-  function fakeDoc(text: string): vscode.TextDocument {
-    const sep = text.includes("\r\n") ? "\r\n" : "\n";
-    const lines = text.split(sep);
-    return {
-      uri: vscode.Uri.file("/ws/a.feature"),
-      eol: sep === "\r\n" ? vscode.EndOfLine.CRLF : vscode.EndOfLine.LF,
-      getText: () => text,
-      lineAt: (n: number) => ({
-        text: lines[n] ?? "",
-        rangeIncludingLineBreak: new vscode.Range(n, 0, n + 1, 0),
-      }),
-      save: () => Promise.resolve(true),
-    } as unknown as vscode.TextDocument;
-  }
-
   async function reMap(feature: string): Promise<string> {
     const adapter = new InMemoryTraceabilityAdapter();
     adapter.seedCatalogue([{ key: "9", summary: "Nine" }], []);
@@ -896,13 +857,11 @@ describe("traceability sync command handler", () => {
   }
 
   const runSyncOn = (mgr: CommandManager): Promise<void> =>
-    (mgr as unknown as { syncTraceability: () => Promise<void> }).syncTraceability();
+    traceabilityCommands(mgr).syncTraceability();
 
   // The board's two ways into the sync: the Sync now button and the quiet per-project load.
   const boardLoads = (mgr: CommandManager): { runSync: () => Promise<void>; autoSync: (key: string) => Promise<void> } =>
-    (mgr as unknown as {
-      boardDeps: () => { runSync: () => Promise<void>; autoSync: (key: string) => Promise<void> };
-    }).boardDeps();
+    traceabilityBoardDeps(mgr);
 
   const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -1108,7 +1067,7 @@ describe("traceability sync command handler", () => {
   // The strip's whole lifecycle: the pages it counts, the handover to the repaint, and the clear that
   // keeps a failed run from stranding it.
   async function openBoardFor(mgr: CommandManager): Promise<StubBoardPanel> {
-    (mgr as unknown as { openBoard: () => void }).openBoard();
+    traceabilityCommands(mgr).openBoard();
     const panel = win.__webviewPanels[0]!;
     await panel.__receive({ type: "ready" });
     return panel;
@@ -1175,9 +1134,9 @@ describe("traceability sync command handler", () => {
 
   it("passes the resolved sync scope into the board model, so the empty available group says the right thing", () => {
     const built = (settings: Record<string, unknown>, tagDerived: string[] = []): BoardViewModel =>
-      (managerFor(syncSubsystem({ tagDerived, completeProjects: [] }), settings) as unknown as {
-        boardDeps: () => { buildModel: () => BoardViewModel };
-      }).boardDeps().buildModel();
+      traceabilityBoardDeps(
+        managerFor(syncSubsystem({ tagDerived, completeProjects: [] }), settings)
+      ).buildModel();
 
     // Either half catches an inverted scope bit at the call site, since it flips both branches at once.
     expect(built({ "xray.syncProjectKeys": ["CALC"] })).toMatchObject({
@@ -1228,6 +1187,7 @@ describe("traceability runAndPublish: preflight batch flow", () => {
   const A: ScenarioRef = { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" };
   const B: ScenarioRef = { filePath: "/ws/a.feature", line: 8, name: "B", kind: "scenario" };
   const READY_LINK: TraceLink = { testKey: "CALC-1", scenario: A, reqKeys: [], meta: { key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } } };
+  const READY_B_LINK: TraceLink = { testKey: "CALC-2", scenario: B, reqKeys: [], meta: { key: "CALC-2", testType: { name: "Cucumber", kind: "Gherkin" } } };
   const FLAGGED_LINK: TraceLink = { testKey: "CALC-2", scenario: B, reqKeys: [], remoteMissing: true };
 
   function snapshot(links: TraceLink[]): TraceabilitySnapshot {
@@ -1236,7 +1196,9 @@ describe("traceability runAndPublish: preflight batch flow", () => {
 
   function harness(links: TraceLink[]) {
     const store = new RunArtifactStore(memento(), Logger.create());
-    const runScenarioWithOutput = vi.fn(() => Promise.resolve({ success: true, output: "", error: "", duration: 1 }));
+    const runScenarioWithOutput = vi.fn((_options: unknown, _target?: ArtifactCaptureTarget) =>
+      Promise.resolve({ success: true, output: "", error: "", duration: 1 })
+    );
     const runGrepWithOutput = vi.fn((_names: readonly string[]) => Promise.resolve({ success: true, output: "", error: "", duration: 1 }));
     const executor = { runScenarioWithOutput, runGrepWithOutput, runPathFilterWithOutput: vi.fn(), runAllTestsWithTagsOutput: vi.fn() };
     const config = ExtensionConfig.create();
@@ -1261,10 +1223,119 @@ describe("traceability runAndPublish: preflight batch flow", () => {
     });
   }
 
+  it("runs each mapped scenario in a tree multi-selection once", async () => {
+    const { mgr, store, runScenarioWithOutput, runGrepWithOutput } = harness([READY_LINK, READY_B_LINK]);
+    const first = { kind: "link", link: READY_LINK };
+    const second = { kind: "link", link: READY_B_LINK };
+    const untraced = {
+      kind: "untraced",
+      item: { scenario: { ...B, line: 12, name: "Untraced" } },
+    };
+
+    await traceabilityCommands(mgr).runAndPublish(
+      first,
+      [first, { kind: "testKey", testKey: "CALC-1" }, untraced, second, first, second]
+    );
+
+    expect(runGrepWithOutput).not.toHaveBeenCalled();
+    expect(runScenarioWithOutput).toHaveBeenCalledTimes(2);
+    expect(runScenarioWithOutput.mock.calls.map(([options]) =>
+      (options as { scenarioName?: string }).scenarioName
+    )).toEqual(["A", "B"]);
+    expect(runScenarioWithOutput.mock.calls.map(([, target]) => target)).toEqual([
+      { scenario: A, resultLines: [3] },
+      { scenario: B, resultLines: [8] },
+    ]);
+    expect(store.latest()?.selection).toEqual({ kind: "multi-select", scenarios: [A, B] });
+  });
+
+  it("keeps a single selected tree row on the single-scenario path", async () => {
+    const { mgr, store, runScenarioWithOutput, runGrepWithOutput } = harness([READY_LINK]);
+    const node = { kind: "link", link: READY_LINK };
+
+    await traceabilityCommands(mgr).runAndPublish(node, [node, { kind: "section" }]);
+
+    expect(runGrepWithOutput).not.toHaveBeenCalled();
+    expect(runScenarioWithOutput).toHaveBeenCalledOnce();
+    expect(store.latest()?.selection).toEqual({ kind: "scenario", scenario: A });
+  });
+
+  it("captures disjoint rows for a selected outline and two Examples blocks", async () => {
+    const filePath = writeTempFeature([
+      "Feature: Calculator",
+      "",
+      "@TEST_CALC-1",
+      "Scenario Outline: Divide",
+      "  Given <n>",
+      "",
+      "  Examples: common",
+      "    | n |",
+      "    | 1 |",
+      "",
+      "  @TEST_CALC-2",
+      "  Examples: edge cases",
+      "    | n |",
+      "    | 0 |",
+      "    | 2 |",
+      "",
+      "  @TEST_CALC-3",
+      "  Examples: edge cases",
+      "    | n |",
+      "    | -1 |",
+    ].join("\n"));
+    const outline: ScenarioRef = {
+      filePath,
+      line: 4,
+      name: "Divide",
+      kind: "outline",
+      outlineName: "Divide",
+    };
+    const block: ScenarioRef = {
+      filePath,
+      line: 12,
+      name: "Divide · edge cases",
+      kind: "examplesBlock",
+      outlineName: "Divide",
+      examplesBlockName: "edge cases",
+    };
+    const siblingBlock: ScenarioRef = {
+      filePath,
+      line: 18,
+      name: "Divide · edge cases",
+      kind: "examplesBlock",
+      outlineName: "Divide",
+      examplesBlockName: "edge cases",
+    };
+    const outlineLink: TraceLink = { ...READY_LINK, scenario: outline };
+    const blockLink: TraceLink = { ...READY_B_LINK, scenario: block };
+    const siblingLink: TraceLink = {
+      ...READY_LINK,
+      testKey: "CALC-3",
+      scenario: siblingBlock,
+      meta: { key: "CALC-3", testType: { name: "Cucumber", kind: "Gherkin" } },
+    };
+    const { mgr, runScenarioWithOutput } = harness([outlineLink, blockLink, siblingLink]);
+    const first = { kind: "link", link: outlineLink };
+    const second = { kind: "link", link: blockLink };
+    const third = { kind: "link", link: siblingLink };
+
+    try {
+      await traceabilityCommands(mgr).runAndPublish(first, [first, second, third]);
+    } finally {
+      fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+    }
+
+    expect(runScenarioWithOutput.mock.calls.map(([, target]) => target)).toEqual([
+      { scenario: outline, resultLines: [9] },
+      { scenario: block, resultLines: [14, 15] },
+      { scenario: siblingBlock, resultLines: [20] },
+    ]);
+  });
+
   it("resolves all-mapped, classifies, and runs the whole set in one combined-grep on local-only", async () => {
     const { mgr, store, runGrepWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
     pickBy((c) => c.kind === "run" && c.outcome === "local-only");
-    await mgr.runAndPublish();
+    await traceabilityCommands(mgr).runAndPublish();
     expect(runGrepWithOutput).toHaveBeenCalledTimes(1);
     expect(runGrepWithOutput.mock.calls[0]![0]).toEqual(["A", "B"]);
     expect(store.latest()?.preflight).toEqual([
@@ -1275,7 +1346,7 @@ describe("traceability runAndPublish: preflight batch flow", () => {
   it("rebuilds the grep without the flagged scenario and records its exclusion on exclude", async () => {
     const { mgr, store, runGrepWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
     pickBy((c) => c.kind === "run" && c.outcome === "exclude");
-    await mgr.runAndPublish();
+    await traceabilityCommands(mgr).runAndPublish();
     // The combined grep runs only the ready scenario; the flagged one is surgically removed.
     expect(runGrepWithOutput).toHaveBeenCalledTimes(1);
     expect(runGrepWithOutput.mock.calls[0]![0]).toEqual(["A"]);
@@ -1288,7 +1359,7 @@ describe("traceability runAndPublish: preflight batch flow", () => {
     const { mgr, store, runGrepWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
     vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
     const info = vi.spyOn(vscode.window, "showInformationMessage");
-    await mgr.runAndPublish();
+    await traceabilityCommands(mgr).runAndPublish();
     expect(runGrepWithOutput).not.toHaveBeenCalled();
     expect(store.latest()).toBeUndefined();
     expect(String(info.mock.calls.at(-1)?.[0])).toContain("cancelled");
@@ -1297,7 +1368,7 @@ describe("traceability runAndPublish: preflight batch flow", () => {
   it("runs directly with no quick-pick when every scenario is ready", async () => {
     const { mgr, store, runGrepWithOutput } = harness([READY_LINK]);
     const quickPick = vi.spyOn(vscode.window, "showQuickPick");
-    await mgr.runAndPublish();
+    await traceabilityCommands(mgr).runAndPublish();
     expect(quickPick).not.toHaveBeenCalled();
     expect(runGrepWithOutput).toHaveBeenCalledTimes(1);
     expect(runGrepWithOutput.mock.calls[0]![0]).toEqual(["A"]);
@@ -1314,7 +1385,7 @@ describe("traceability runAndPublish: preflight batch flow", () => {
         { isCancellationRequested: true, onCancellationRequested: (cb: () => void) => { cb(); return { dispose: () => {} }; } }
       )
     );
-    await mgr.runAndPublish();
+    await traceabilityCommands(mgr).runAndPublish();
     expect(runGrepWithOutput).not.toHaveBeenCalled();
     expect(store.latest()?.state).toBe("cancelled");
   });
@@ -1356,13 +1427,11 @@ describe("traceability openBoard command handler", () => {
     } as unknown as TraceabilitySubsystem;
   }
 
-  const boardDeps = (mgr: CommandManager): { knownProjects: () => string[]; projectScope: ProjectScopeStore } =>
-    (mgr as unknown as {
-      boardDeps: () => { knownProjects: () => string[]; projectScope: ProjectScopeStore };
-    }).boardDeps();
+  const boardDeps = (mgr: CommandManager): { knownProjects: () => readonly string[]; projectScope: ProjectScopeStore } =>
+    traceabilityBoardDeps(mgr);
 
   const openBoard = (mgr: CommandManager): void =>
-    (mgr as unknown as { openBoard: () => void }).openBoard();
+    traceabilityCommands(mgr).openBoard();
 
   it("opens the Coverage Board webview when the panel is active", () => {
     const mgr = CommandManager.create(makeContext());
@@ -1531,7 +1600,7 @@ describe("traceability publishLastRun: Publish tab", () => {
     const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
     mgr.setTraceabilitySubsystem(connectedSubsystem());
 
-    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    const promise = publishCommands(mgr).runPublish();
     await flush();
 
     const panel = win.__webviewPanels[0]!;
@@ -1557,7 +1626,7 @@ describe("traceability publishLastRun: Publish tab", () => {
     );
     mgr.setTraceabilitySubsystem(connectedSubsystem(["SHOP", "MATH"]));
 
-    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    const promise = publishCommands(mgr).runPublish();
     await flush();
     const panel = win.__webviewPanels[0]!;
     await panel.__receive({ type: "ready" });
@@ -1585,7 +1654,7 @@ describe("traceability publishLastRun: Publish tab", () => {
     knownProjectKeys: string[];
     runs: Array<{ project: { value: string; fromDerivation: boolean; fromScope?: boolean } }>;
   }> {
-    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    const promise = publishCommands(mgr).runPublish();
     await flush();
     const panel = win.__webviewPanels[0]!;
     await panel.__receive({ type: "ready" });
@@ -1656,7 +1725,7 @@ describe("traceability publishLastRun: Publish tab", () => {
       },
     } as unknown as TraceabilitySubsystem);
 
-    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    const promise = publishCommands(mgr).runPublish();
     await flush();
     const panel = win.__webviewPanels[0]!;
     await panel.__receive({ type: "ready" });
@@ -1744,7 +1813,7 @@ describe("traceability publishLastRun: Publish tab", () => {
       })
     );
 
-    const promise = (mgr as unknown as { runPublish: (id?: string) => Promise<void> }).runPublish();
+    const promise = publishCommands(mgr).runPublish();
     await flush();
     const panel = win.__webviewPanels[0]!;
     await panel.__receive({ type: "ready" });
@@ -1758,7 +1827,7 @@ describe("traceability publishLastRun: Publish tab", () => {
   it("guides the user and opens no board when no publishing capability is connected", async () => {
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     const mgr = CommandManager.create(makeContext());
-    await (mgr as unknown as { runPublish: () => Promise<void> }).runPublish();
+    await publishCommands(mgr).runPublish();
     expect(win.__webviewPanels).toHaveLength(0);
     expect(String(info.mock.calls[0]?.[0])).toContain("Connect");
   });
@@ -1769,7 +1838,7 @@ describe("traceability publishLastRun: Publish tab", () => {
     const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
     mgr.setTraceabilitySubsystem(connectedSubsystem());
 
-    await (mgr as unknown as { runPublish: () => Promise<void> }).runPublish();
+    await publishCommands(mgr).runPublish();
 
     expect(win.__webviewPanels).toHaveLength(0);
     expect(String(info.mock.calls[0]?.[0])).toContain("No local runs to publish");
@@ -1847,7 +1916,7 @@ describe("traceability board drag-to-link drop handler", () => {
   }
 
   const drop = (mgr: CommandManager, dropId: string, key: string): Promise<void> =>
-    (mgr as unknown as { applyBoardDrop: (d: string, k: string) => Promise<void> }).applyBoardDrop(dropId, key);
+    linkCommands(mgr).applyBoardDrop(dropId, key);
 
   it("writes the tag via a single WorkspaceEdit inserting the grammar-built tag", async () => {
     const { mgr, applied } = harness(dropSnapshot());
@@ -1860,7 +1929,7 @@ describe("traceability board drag-to-link drop handler", () => {
   it("routes through the shared applyTagInsert rather than duplicating the insert", async () => {
     const { mgr, applied } = harness(dropSnapshot());
     const insert = vi.spyOn(
-      mgr as unknown as { applyTagInsert: (...a: unknown[]) => Promise<unknown> },
+      linkCommands(mgr) as unknown as { applyTagInsert: (...a: unknown[]) => Promise<unknown> },
       "applyTagInsert"
     );
     await drop(mgr, scenarioDropId(A), "5");
@@ -1962,12 +2031,12 @@ describe("traceability board unlink handler", () => {
   }
 
   const unlink = (mgr: CommandManager, dropId: string, key: string): Promise<void> =>
-    (mgr as unknown as { applyBoardUnlink: (d: string, k: string) => Promise<void> }).applyBoardUnlink(dropId, key);
+    linkCommands(mgr).applyBoardUnlink(dropId, key);
 
   it("routes a valid pair through applyTagRemove with the exact ref and key", async () => {
     const { mgr } = harness(unlinkSnapshot());
     const remove = vi.spyOn(
-      mgr as unknown as { applyTagRemove: (...a: unknown[]) => Promise<unknown> },
+      linkCommands(mgr) as unknown as { applyTagRemove: (...a: unknown[]) => Promise<unknown> },
       "applyTagRemove"
     );
     await unlink(mgr, scenarioDropId(A), "1");
@@ -2024,7 +2093,7 @@ describe("traceability bulkCreateTests wiring", () => {
 
   // The command reads its selection off the open board, so drive one check through the panel.
   async function selectOnBoard(mgr: CommandManager): Promise<void> {
-    BoardPanel.open((mgr as unknown as { boardDeps: () => BoardPanelDeps }).boardDeps());
+    BoardPanel.open(traceabilityBoardDeps(mgr));
     const panel = win.__webviewPanels[0]!;
     await panel.__receive({ type: "ready" });
     await panel.__receive({ surface: "board", type: "select", id: scenarioDropId(A), on: true });
@@ -2042,9 +2111,11 @@ describe("traceability bulkCreateTests wiring", () => {
     } as unknown as vscode.SecretStorage));
     await selectOnBoard(mgr);
 
-    const run = (mgr as unknown as {
-      getTraceabilityAuthoringCommands: () => { bulkCreateTests: () => Promise<void> };
-    }).getTraceabilityAuthoringCommands();
+    const run = (
+      traceabilityCommands(mgr) as unknown as {
+        getAuthoringCommands: () => { bulkCreateTests: () => Promise<void> };
+      }
+    ).getAuthoringCommands();
 
     await expect(run.bulkCreateTests()).resolves.toBeUndefined();
     expect(String(info.mock.calls.at(-1)?.[0])).toContain("Connect to your test tracker");
@@ -2106,7 +2177,7 @@ describe("board refresh on a settings change", () => {
     mgr.setTraceabilitySubsystem(subsystem);
     mgr.registerBoardSerializer({ subscriptions: registered } as unknown as vscode.ExtensionContext);
     return {
-      openBoard: () => (mgr as unknown as { openBoard: () => void }).openBoard(),
+      openBoard: () => traceabilityCommands(mgr).openBoard(),
       fire: (...changed: string[]) => listener?.({ affectsConfiguration: (key: string) => changed.includes(key) }),
     };
   }
@@ -2195,7 +2266,7 @@ describe("traceability clearLocalRunHistory", () => {
   }
 
   const clear = (mgr: CommandManager): Promise<void> =>
-    (mgr as unknown as { clearLocalRunHistory: () => Promise<void> }).clearLocalRunHistory();
+    publishCommands(mgr).clearLocalRunHistory();
 
   it("clears nothing when the confirm is dismissed", async () => {
     const { mgr, store, ledger } = harness();
@@ -2302,7 +2373,9 @@ describe("traceability pending attachments against a reference the response neve
     const warn = vi.spyOn(vscode.window, "showWarningMessage");
 
     const result = await (
-      mgr as unknown as { attachPendingForRun: (id: string, site: string) => Promise<{ remaining: number }> }
+      publishCommands(mgr) as unknown as {
+        attachPendingForRun: (id: string, site: string) => Promise<{ remaining: number }>;
+      }
     ).attachPendingForRun("run-1", SITE);
 
     expect(result).toEqual({ remaining: 1 });
@@ -2315,7 +2388,7 @@ describe("traceability pending attachments against a reference the response neve
     const warn = vi.spyOn(vscode.window, "showWarningMessage");
 
     await (
-      mgr as unknown as {
+      publishCommands(mgr) as unknown as {
         retryAttachments: (id: string, site: string, key: string, files: readonly string[]) => Promise<void>;
       }
     ).retryAttachments("run-1", SITE, "", ["/ws/report.zip"]);

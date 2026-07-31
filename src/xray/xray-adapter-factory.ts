@@ -117,16 +117,15 @@ export function createXrayAdapterFactory(
       // client/state, so it fills all three adapter slots. The linkScenario picker's remote-search
       // section is thereby gated on the live (synced) adapter, never the browse-only instance.
       // Authoring rides the same live client, so the "create a new test" entry is gated the same way.
-      return new XrayAdapter(
-        ctx.config,
+      return new XrayAdapter(ctx.config, {
         credentialStore,
         verify,
         metadata,
-        metadata,
+        remoteSearch: metadata,
         resultPublishing,
         testAuthoring,
-        metadata
-      );
+        projectDirectory: metadata,
+      });
     },
   };
 }

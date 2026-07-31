@@ -13,7 +13,7 @@ import { OutlineExampleRow, Scenario } from "../types";
 import { extractKeys, malformedTestTags } from "./tag-extraction";
 import { hasGherkinDrift } from "./push-gherkin";
 import { RunResultStore } from "./run-result-store";
-import { ScenarioRef, sameScenario } from "./scenario-ref";
+import { normalizePath, ScenarioRef, refIdentity, sameScenario } from "./scenario-ref";
 import {
   KeyGrammar,
   RemoteMetadataSnapshot,
@@ -94,12 +94,45 @@ const EMPTY_SNAPSHOT: TraceabilitySnapshot = {
   errors: [],
 };
 
-// Artifact testKey resolution keys off `sameScenario` so a run's refs and the snapshot's refs agree.
+function nearestOutlineLink(links: readonly TraceLink[], ref: ScenarioRef): TraceLink | undefined {
+  const outlineName = ref.kind === "outline" ? ref.outlineName ?? ref.name : undefined;
+  if (!outlineName || ref.line <= 0) {return undefined;}
+  let nearestOutline: TraceLink | undefined;
+  let nearestBlock: TraceLink | undefined;
+  for (const link of links) {
+    const candidate = link.scenario;
+    const candidateOutline = candidate.kind === "outline"
+      ? candidate.outlineName ?? candidate.name
+      : candidate.kind === "examplesBlock"
+        ? candidate.outlineName
+        : undefined;
+    if (
+      candidateOutline === outlineName
+      && normalizePath(candidate.filePath) === normalizePath(ref.filePath)
+      && candidate.line > 0
+      && candidate.line <= ref.line
+    ) {
+      if (candidate.kind === "outline" && (!nearestOutline || candidate.line > nearestOutline.scenario.line)) {
+        nearestOutline = link;
+      } else if (candidate.kind === "examplesBlock" && (!nearestBlock || candidate.line > nearestBlock.scenario.line)) {
+        nearestBlock = link;
+      }
+    }
+  }
+  return nearestOutline ?? nearestBlock;
+}
+
+// Artifact results preserve exact plain-scenario lines. Outline results carry an example-row line, so
+// resolve them to the nearest preceding outline declaration before using the line-less fallback. A
+// resolver scoped to a selected Examples block has no outline candidate, so its block is the fallback.
 export function findLinkForScenario(
   links: readonly TraceLink[],
   ref: ScenarioRef
 ): TraceLink | undefined {
-  return links.find((link) => sameScenario(link.scenario, ref));
+  const id = refIdentity(ref);
+  return links.find((link) => refIdentity(link.scenario) === id)
+    ?? nearestOutlineLink(links, ref)
+    ?? links.find((link) => sameScenario(link.scenario, ref));
 }
 
 // The link dialog's "Linked" section: the links a scenario already carries `@TEST_` tags for.

@@ -152,7 +152,7 @@ Push is available only for a synced Gherkin-compatible Xray test with a remote i
 
 ## Run locally and publish results
 
-Use **Specwright: Run Locally and Publish…** from the Traceability panel, a mapped-scenario row, or the Command Palette. It runs the selected scenario or all mapped scenarios through your local Playwright configuration, then opens the Publish workflow.
+Use **Specwright: Run Locally and Publish…** from the Traceability panel, a mapped-scenario row, or the Command Palette. In the Traceability tree, Cmd/Ctrl-select mapped-scenario rows, then right-click one selected row and choose **Run Locally and Publish…** to run that selection. A single row runs one scenario; the panel toolbar and Command Palette run all mapped scenarios. Specwright runs the batch through your local Playwright configuration, then opens the Publish workflow.
 
 Before running, Specwright checks for unmapped scenarios, invalid or duplicate mappings, and known incompatible Xray test types. You can repair a mapping, run all flagged scenarios locally, or exclude flagged scenarios from the batch. An explicitly excluded or unmapped result is not sent to Xray. If you choose **Run all locally** and later choose Publish, review the publishable-result summary carefully: a result that still has a usable test mapping can remain eligible for publishing. To guarantee a flagged result stays local, exclude it or cancel the batch.
 

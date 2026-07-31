@@ -102,7 +102,11 @@ function xrayHarness(): AdapterContractHarness {
     onCredentialsChange: credentialStore.onDidChange,
     listProjects: () => Promise.resolve(undefined),
   });
-  const adapter = new XrayAdapter(config, credentialStore, () => Promise.resolve({ status: "ok", message: "ok" }), metadata);
+  const adapter = new XrayAdapter(config, {
+    credentialStore,
+    verify: () => Promise.resolve({ status: "ok", message: "ok" }),
+    metadata,
+  });
 
   return {
     adapter,

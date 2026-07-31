@@ -1,4 +1,11 @@
-import { PublishOutcome, PublishRequest, RunArtifact, RunArtifactOutcome, RunArtifactResult } from "./contracts";
+import {
+  PreflightDecision,
+  PublishOutcome,
+  PublishRequest,
+  RunArtifact,
+  RunArtifactOutcome,
+  RunArtifactResult,
+} from "./contracts";
 import { plural } from "../utils/text";
 import { sameScenario } from "./scenario-ref";
 
@@ -18,25 +25,40 @@ export interface PublishableResults {
   readonly unmappedCount: number;
 }
 
+function matchesExclusion(result: RunArtifactResult, decision: PreflightDecision): boolean {
+  if (result.testKey !== undefined && decision.testKey !== undefined && result.testKey !== decision.testKey) {
+    return false;
+  }
+  const excluded = decision.scenario;
+  if (
+    result.testKey !== undefined
+    && result.testKey === decision.testKey
+    && result.scenario.kind === "outline"
+    && excluded.kind === "examplesBlock"
+  ) {
+    return true;
+  }
+  if (result.scenario.kind === "scenario" && excluded.kind === "scenario" && result.scenario.line > 0 && excluded.line > 0) {
+    return result.scenario.line === excluded.line && sameScenario(result.scenario, excluded);
+  }
+  return sameScenario(result.scenario, excluded);
+}
+
 // The publish reconciliation seam (the CONTRACT at preflight-flow.ts): a result being present in the
 // artifact is NOT consent to publish it. Drop every result whose scenario carries an `exclude` decision,
 // then drop keyless results; nothing maps those to a remote test. Exclusion is checked first so a user's
 // explicit exclusion is counted as such, never as merely unmapped.
 //
-// Exclusion matching uses the contract's fuzzy `sameScenario` (path+name, line-tolerant), NOT strict
-// `refIdentity`: preflight records the outline DECLARATION-line ref (`scenarioRefFromScenario`) while the
-// capture path records the example-ROW-line ref (run-artifact-store.ts `buildOutlineResult`), so strict
-// identity would fail to drop an excluded outline. Exclusion favors recall; over-dropping is safer than
-// publishing excluded results; deliberately divergent from 2c's strict duplicate-detection ruling.
+// A different frozen test key rules out a different mapping first. Plain scenario results retain their
+// declaration line, so exclusions cannot take out a same-titled sibling. Outlines stay title-tolerant:
+// preflight records the declaration line while capture records an example-row line.
 export function publishableResults(artifact: RunArtifact): PublishableResults {
-  const excludedRefs = artifact.preflight
-    .filter((decision) => decision.outcome === "exclude")
-    .map((decision) => decision.scenario);
+  const exclusions = artifact.preflight.filter((decision) => decision.outcome === "exclude");
   const publishable: PublishableResult[] = [];
   let excludedCount = 0;
   let unmappedCount = 0;
   for (const result of artifact.results) {
-    if (excludedRefs.some((ref) => sameScenario(result.scenario, ref))) {
+    if (exclusions.some((decision) => matchesExclusion(result, decision))) {
       excludedCount += 1;
       continue;
     }

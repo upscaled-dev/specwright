@@ -92,8 +92,8 @@ describe("publishableResults", () => {
     expect(result.unmappedCount).toBe(0);
   });
 
-  it("exclusion favors recall (fuzzy sameScenario): a same-name row on a different line is dropped, a different-name row is kept", () => {
-    const sameName = ref("features/calc.feature", 12, "Add", "scenario");
+  it("uses the title fallback when an outline decision and captured result differ in line", () => {
+    const sameName = ref("features/calc.feature", 12, "Add", "outline");
     const otherName = ref("features/calc.feature", 20, "Multiply", "scenario");
     const decisionRef = ref("features/calc.feature", 3, "Add", "outline");
     const result = publishableResults(
@@ -103,6 +103,67 @@ describe("publishableResults", () => {
       )
     );
     expect(result.publishable.map((r) => r.testKey)).toEqual(["CALC-2"]);
+    expect(result.excludedCount).toBe(1);
+  });
+
+  it("does not exclude a same-titled plain scenario for an outline decision", () => {
+    const outline = ref("features/calc.feature", 12, "Repeated title", "outline");
+    const plain = ref("features/calc.feature", 20, "Repeated title", "scenario");
+    const result = publishableResults(
+      artifact(
+        [makeResult(outline, { testKey: "CALC-1" }), makeResult(plain, { testKey: "CALC-2" })],
+        [{ scenario: outline, testKey: "CALC-1", state: "incompatible-test-type", outcome: "exclude" }]
+      )
+    );
+
+    expect(result.publishable.map((entry) => entry.testKey)).toEqual(["CALC-2"]);
+    expect(result.excludedCount).toBe(1);
+  });
+
+  it("uses the mapped key to keep a same-titled outline out of another outline's exclusion", () => {
+    const excluded = ref("features/calc.feature", 5, "Repeated title", "outline");
+    const excludedResult = ref("features/calc.feature", 10, "Repeated title", "outline");
+    const keptResult = ref("features/calc.feature", 30, "Repeated title", "outline");
+    const result = publishableResults(
+      artifact(
+        [makeResult(excludedResult, { testKey: "CALC-1" }), makeResult(keptResult, { testKey: "CALC-2" })],
+        [{ scenario: excluded, testKey: "CALC-1", state: "incompatible-test-type", outcome: "exclude" }]
+      )
+    );
+
+    expect(result.publishable.map((entry) => entry.testKey)).toEqual(["CALC-2"]);
+    expect(result.excludedCount).toBe(1);
+  });
+
+  it("honors an Examples-block exclusion after capture normalizes it to an outline result", () => {
+    const block: ScenarioRef = {
+      ...ref("features/calc.feature", 5, "Divide · edge cases", "examplesBlock"),
+      outlineName: "Divide",
+      examplesBlockName: "edge cases",
+    };
+    const captured = ref("features/calc.feature", 10, "Divide", "outline");
+    const result = publishableResults(
+      artifact(
+        [makeResult(captured, { testKey: "CALC-1" })],
+        [{ scenario: block, testKey: "CALC-1", state: "incompatible-test-type", outcome: "exclude" }]
+      )
+    );
+
+    expect(result.publishable).toEqual([]);
+    expect(result.excludedCount).toBe(1);
+  });
+
+  it("does not exclude a same-named plain scenario at a different line", () => {
+    const excluded = ref("features/calc.feature", 3, "Repeated title", "scenario");
+    const kept = ref("features/calc.feature", 12, "Repeated title", "scenario");
+    const result = publishableResults(
+      artifact(
+        [makeResult(excluded, { testKey: "CALC-1" }), makeResult(kept, { testKey: "CALC-2" })],
+        [{ scenario: excluded, testKey: "CALC-1", state: "incompatible-test-type", outcome: "exclude" }]
+      )
+    );
+
+    expect(result.publishable.map((entry) => entry.testKey)).toEqual(["CALC-2"]);
     expect(result.excludedCount).toBe(1);
   });
 

@@ -9,7 +9,7 @@ import {
 } from "../../xray/xray-result-publishing";
 import { ImportResponse, ImportTransport, StepResolver } from "../../xray/execution-importers";
 import { NotSupportedError, PreflightDecision, RunArtifact, RunArtifactResult, ShardInfo } from "../../traceability/contracts";
-import { EvidenceFs } from "../../traceability/evidence-resolution";
+import { EVIDENCE_MAX_FILE_BYTES, EVIDENCE_MAX_TOTAL_BYTES, EvidenceFs } from "../../traceability/evidence-resolution";
 import { ScenarioRef } from "../../traceability/scenario-ref";
 import { Logger, LogLevel } from "../../utils/logger";
 import type { OutputChannel } from "vscode";
@@ -383,6 +383,46 @@ describe("createXrayResultPublishing: evidence resolution + attachTo", () => {
     const body = t.postJson.mock.calls[0]![1] as { tests: Array<{ evidence?: unknown[] }> };
     expect(body.tests[0]!.evidence).toHaveLength(1);
     expect(outcome.issueEvidenceFiles).toEqual([]);
+  });
+
+  it("shares the total evidence budget across results, so the second skips after the first exhausts it", async () => {
+    const fullRefs = Array.from(
+      { length: EVIDENCE_MAX_TOTAL_BYTES / EVIDENCE_MAX_FILE_BYTES },
+      (_, index) => `test-results/full-${index}.png`
+    );
+    const secondRef = "test-results/second.png";
+    const fullFile = Buffer.alloc(EVIDENCE_MAX_FILE_BYTES);
+    const budgetFs = fakeFs(
+      Object.fromEntries([
+        ...fullRefs.map((ref) => [path.join("/ws", ref), fullFile] as const),
+        [path.join("/ws", secondRef), Buffer.from("overflow")] as const,
+      ])
+    );
+    const t = spyTransport();
+    const publishing = createXrayResultPublishing(
+      makeDeps({
+        transport: t.transport,
+        evidenceFs: budgetFs,
+        workspaceRootFor: () => "/ws",
+        attachTo: () => "evidence",
+      })
+    );
+
+    const outcome = await publishing.publish(
+      evidenceArtifact(
+        [
+          mapped("first", "CALC-1", { evidenceRefs: fullRefs }),
+          mapped("second", "CALC-2", { evidenceRefs: [secondRef] }),
+        ],
+        [shard("/ws")]
+      ),
+      APPEND
+    );
+
+    const body = t.postJson.mock.calls[0]![1] as { tests: Array<{ evidence?: unknown[] }> };
+    expect(body.tests[0]!.evidence).toHaveLength(fullRefs.length);
+    expect(body.tests[1]!.evidence).toBeUndefined();
+    expect(outcome.warnings).toContain("Skipped 1 file over the 25 MB evidence total.");
   });
 });
 

@@ -10,6 +10,7 @@ import { Logger } from "../../utils/logger";
 import { normalizePathKey, PlaywrightJsonParser, ScenarioStatus } from "../../utils/playwright-json-parser";
 import {
   buildTraceabilitySnapshot,
+  findLinkForScenario,
   findPlaywrightReport,
   linkedTestsForScenario,
   ParsedFeatureInput,
@@ -670,8 +671,63 @@ describe("linkedTestsForScenario", () => {
   });
 
   it("keeps sameScenario's title fallback for a line-less ref (outline-row reunification)", () => {
-    const links = [linkAt("CALC-1", ref(4, "Adding"))];
+    const outlineRef: ScenarioRef = { ...ref(4, "Adding"), kind: "outline" };
+    const links = [linkAt("CALC-1", outlineRef)];
     const outlineRowRef: ScenarioRef = { filePath: "/ws/a.feature", line: 0, name: "Adding", kind: "outline" };
     expect(linkedTestsForScenario(links, outlineRowRef).map((l) => l.testKey)).toEqual(["CALC-1"]);
+  });
+});
+
+describe("findLinkForScenario", () => {
+  const ref = (line: number, kind: ScenarioRef["kind"] = "scenario"): ScenarioRef => ({
+    filePath: "/ws/a.feature",
+    line,
+    name: "Repeated title",
+    kind,
+  });
+
+  it("prefers an exact line when a feature contains same-named scenarios", () => {
+    const links: TraceLink[] = [
+      { testKey: "CALC-1", scenario: ref(4), reqKeys: [] },
+      { testKey: "CALC-2", scenario: ref(15), reqKeys: [] },
+    ];
+
+    expect(findLinkForScenario(links, ref(15))?.testKey).toBe("CALC-2");
+  });
+
+  it("retains the title fallback for an outline result reported on an example row", () => {
+    const links: TraceLink[] = [{ testKey: "CALC-1", scenario: ref(4, "outline"), reqKeys: [] }];
+
+    expect(findLinkForScenario(links, ref(15, "outline"))?.testKey).toBe("CALC-1");
+  });
+
+  it("does not resolve an outline result to a same-titled plain scenario", () => {
+    const links: TraceLink[] = [
+      { testKey: "CALC-1", scenario: ref(4), reqKeys: [] },
+      { testKey: "CALC-2", scenario: ref(8, "outline"), reqKeys: [] },
+    ];
+
+    expect(findLinkForScenario(links, ref(15, "outline"))?.testKey).toBe("CALC-2");
+  });
+
+  it("resolves same-titled outline results by their nearest preceding declaration", () => {
+    const links: TraceLink[] = [
+      { testKey: "CALC-1", scenario: ref(4, "outline"), reqKeys: [] },
+      { testKey: "CALC-2", scenario: ref(20, "outline"), reqKeys: [] },
+    ];
+
+    expect(findLinkForScenario(links, ref(25, "outline"))?.testKey).toBe("CALC-2");
+  });
+
+  it("resolves a named Examples block when the batch scoped out its enclosing outline", () => {
+    const block: ScenarioRef = {
+      ...ref(20, "examplesBlock"),
+      name: "Repeated title · edge cases",
+      outlineName: "Repeated title",
+      examplesBlockName: "edge cases",
+    };
+    const links: TraceLink[] = [{ testKey: "CALC-2", scenario: block, reqKeys: [] }];
+
+    expect(findLinkForScenario(links, ref(25, "outline"))?.testKey).toBe("CALC-2");
   });
 });

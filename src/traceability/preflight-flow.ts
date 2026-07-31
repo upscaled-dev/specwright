@@ -7,7 +7,7 @@ import {
 } from "./contracts";
 import { BatchInvocation, ResolvedBatch } from "./batch-selection";
 import type { TraceabilitySnapshot } from "./traceability-model";
-import { ScenarioRef, sameScenario } from "./scenario-ref";
+import { ScenarioRef, refIdentity } from "./scenario-ref";
 import { classifyPreflight } from "./preflight";
 
 // A terminal outcome records this on every non-`ready` item; `repair`/`cancel` never persist.
@@ -29,7 +29,8 @@ export function recordDecisions(
 }
 
 function isExcluded(ref: ScenarioRef, excluded: readonly ScenarioRef[]): boolean {
-  return excluded.some((ex) => sameScenario(ref, ex));
+  const id = refIdentity(ref);
+  return excluded.some((candidate) => refIdentity(candidate) === id);
 }
 
 // Removes excluded scenarios from the invocations. A per-scenario invocation is dropped outright; a

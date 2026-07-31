@@ -109,9 +109,60 @@ interface EvidencePlan {
   readonly notes: readonly string[];
 }
 
+interface EvidenceStreams {
+  readonly embed: boolean;
+  readonly issue: boolean;
+  readonly issueFallback: boolean;
+}
+
+interface ResolvedRefs {
+  readonly embeds: EmbeddedEvidence[];
+  readonly issueFiles: string[];
+  readonly missing: EvidenceSkip[];
+}
+
+function evidenceStreams(mode: AttachTo, jiraAvailable: boolean): EvidenceStreams {
+  const wantsIssue = mode === "issue" || mode === "both";
+  const issueFallback = wantsIssue && !jiraAvailable;
+  return {
+    embed: mode === "evidence" || mode === "both" || issueFallback,
+    issue: wantsIssue && jiraAvailable,
+    issueFallback,
+  };
+}
+
+function resolveRefs(
+  result: PublishableResult,
+  roots: readonly string[],
+  fsImpl: EvidenceFs,
+  embedder: EvidenceEmbedder,
+  streams: EvidenceStreams
+): ResolvedRefs {
+  const embeds: EmbeddedEvidence[] = [];
+  const issueFiles: string[] = [];
+  const missing: EvidenceSkip[] = [];
+  for (const ref of result.evidenceRefs) {
+    const abs = resolveEvidencePath(ref, roots, fsImpl.exists);
+    if (abs === undefined) {
+      missing.push({ ref, reason: "missing" });
+      continue;
+    }
+    if (streams.embed) {
+      const embedded = embedder.embed(ref, abs);
+      if (embedded !== undefined) {
+        embeds.push(embedded);
+      }
+    }
+    if (streams.issue) {
+      issueFiles.push(abs);
+    }
+  }
+  return { embeds, issueFiles, missing };
+}
+
 // One resolution pass over the publishable set, split by the `attachTo` mode: `evidence`/`both` reads
 // + base64-embeds under the shared size budget; `issue`/`both` resolves refs to absolute paths for the
-// post-import Jira upload. Missing files are noted once regardless of stream — never a crash.
+// post-import Jira upload. Missing files are noted once regardless of stream, never a crash.
 //
 // `jiraAvailable` guards the issue stream: without Jira credentials there is no destination for the
 // upload, so an `issue`/`both` mode FALLS BACK to embedding in the payload (never silently loses the
@@ -122,46 +173,28 @@ function planEvidence(
   deps: XrayResultPublishingDeps,
   jiraAvailable: boolean
 ): EvidencePlan {
-  const mode = deps.attachTo();
   const fsImpl = deps.evidenceFs ?? nodeEvidenceFs;
   const roots = evidenceRoots(
     artifact.shards.map((shard) => shard.workingDir),
     deps.workspaceRootFor
   );
-  const wantsIssue = mode === "issue" || mode === "both";
-  const issueFallback = wantsIssue && !jiraAvailable;
-  const wantEmbed = mode === "evidence" || mode === "both" || issueFallback;
-  const wantIssue = wantsIssue && jiraAvailable;
+  const streams = evidenceStreams(deps.attachTo(), jiraAvailable);
   const embedder = new EvidenceEmbedder(fsImpl);
   const perResult = new Map<PublishableResult, EmbeddedEvidence[]>();
   const issueFiles: string[] = [];
   const missing: EvidenceSkip[] = [];
 
   for (const result of results) {
-    const embeds: EmbeddedEvidence[] = [];
-    for (const ref of result.evidenceRefs) {
-      const abs = resolveEvidencePath(ref, roots, fsImpl.exists);
-      if (abs === undefined) {
-        missing.push({ ref, reason: "missing" });
-        continue;
-      }
-      if (wantEmbed) {
-        const embedded = embedder.embed(ref, abs);
-        if (embedded !== undefined) {
-          embeds.push(embedded);
-        }
-      }
-      if (wantIssue) {
-        issueFiles.push(abs);
-      }
+    const resolved = resolveRefs(result, roots, fsImpl, embedder, streams);
+    if (resolved.embeds.length > 0) {
+      perResult.set(result, resolved.embeds);
     }
-    if (embeds.length > 0) {
-      perResult.set(result, embeds);
-    }
+    issueFiles.push(...resolved.issueFiles);
+    missing.push(...resolved.missing);
   }
 
   const notes: string[] = [];
-  if (issueFallback) {
+  if (streams.issueFallback) {
     notes.push("Jira credentials missing: evidence embedded in the payload instead.");
   }
   const skipNote = summarizeEvidenceSkips([...embedder.skips, ...missing]);
@@ -286,10 +319,10 @@ async function publishAppend(
 
 /**
  * The Xray `resultPublishing` capability: reconcile → importer → client. `searchTargets` needs Jira
- * credentials (the GraphQL schema has no execution/plan query — §5); without them it rejects with a
+ * credentials (the GraphQL schema has no execution/plan query, §5); without them it rejects with a
  * `NotSupportedError` and the dialog falls back to a plain key input. `publish` reconciles INSIDE
  * (importers never see an excluded/keyless result) and its single import POST creates the execution
- * WITH results — nothing runs remotely.
+ * WITH results; nothing runs remotely.
  */
 export function createXrayResultPublishing(deps: XrayResultPublishingDeps): ResultPublishingCapability {
   const searchIssues = deps.searchIssues ?? searchJiraIssues;

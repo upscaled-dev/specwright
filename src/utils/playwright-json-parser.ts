@@ -187,7 +187,7 @@ export function normalizePathKey(p: string): string {
 }
 
 // path.posix.isAbsolute alone misses normalized win32 drive paths like `C:/repo`.
-function isAbsolutePathKey(p: string): boolean {
+export function isAbsolutePathKey(p: string): boolean {
   return path.posix.isAbsolute(p) || /^[A-Za-z]:\//.test(p);
 }
 

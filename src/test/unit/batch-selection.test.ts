@@ -41,6 +41,17 @@ describe("resolveBatchSelection", () => {
     ]);
   });
 
+  it("canonicalizes a same-named scenario by exact identity before title fallback", () => {
+    const first = ref({ name: "Duplicate", line: 3 });
+    const second = ref({ name: "Duplicate", line: 8 });
+    const snapshot = { ...SNAP, links: [link(first, "CALC-1"), link(second, "CALC-2")] };
+
+    expect(resolveBatchSelection({ kind: "multi-select", scenarios: [second] }, snapshot)).toEqual({
+      scenarios: [second],
+      invocations: [{ kind: "scenario", ref: second }],
+    });
+  });
+
   it("feature → every scenario in the file and one path-filter invocation carrying the source file", () => {
     const resolved = resolveBatchSelection({ kind: "feature", filePath: "/ws/features/a.feature" }, SNAP);
     expect(resolved.scenarios).toEqual([A1, A2, UNTAGGED]);
@@ -65,6 +76,38 @@ describe("resolveBatchSelection", () => {
   it("all-mapped → no invocation when nothing is mapped", () => {
     const resolved = resolveBatchSelection({ kind: "all-mapped" }, { ...SNAP, links: [] });
     expect(resolved.invocations).toEqual([]);
+  });
+
+  it("all-mapped keeps outline-shaped mappings in separate invocations", () => {
+    const outline = ref({ line: 20, name: "Outline", kind: "outline", outlineName: "Outline" });
+    const block = ref({
+      line: 25,
+      name: "Outline · edge cases",
+      kind: "examplesBlock",
+      outlineName: "Outline",
+      examplesBlockName: "edge cases",
+    });
+    const snapshot = { ...SNAP, links: [link(A1, "CALC-1"), link(outline, "CALC-2"), link(block, "CALC-3")] };
+
+    expect(resolveBatchSelection({ kind: "all-mapped" }, snapshot).invocations).toEqual([
+      { kind: "scenario", ref: A1 },
+      { kind: "scenario", ref: outline },
+      { kind: "scenario", ref: block },
+    ]);
+  });
+
+  it("does not canonicalize a shifted Examples block to its same-named outline", () => {
+    const outline = ref({ line: 20, name: "Outline", kind: "outline", outlineName: "Outline" });
+    const block = ref({
+      line: 25,
+      name: "Outline",
+      kind: "examplesBlock",
+      outlineName: "Outline",
+    });
+    const staleBlock = { ...block, line: 24 };
+    const snapshot = { ...SNAP, links: [link(outline, "CALC-1"), link(block, "CALC-2")] };
+
+    expect(resolveBatchSelection({ kind: "scenario", scenario: staleBlock }, snapshot).scenarios).toEqual([block]);
   });
 
   it("tag-expression → routes the expression through the tags invocation, no offline scenario set", () => {

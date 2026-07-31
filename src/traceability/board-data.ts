@@ -24,7 +24,7 @@ export interface BoardScenarioCard {
 }
 
 // One linked scenario shown as a row on a mapped test card: its name and workspace-relative
-// "path:line" for display, plus `unlinkId` — the scenario's `scenarioDropId` — the handle the row's
+// "path:line" for display, plus `unlinkId`, the scenario's `scenarioDropId`, the handle the row's
 // Unlink button posts back so the removal resolves to exactly this scenario.
 export interface BoardTestLink {
   readonly name: string;
@@ -119,7 +119,7 @@ export function syncProgressText(event: SyncProgressEvent): string {
 export const RENDERING_PROGRESS = "Rendering…";
 
 // Best-fit workspace-relative path with forward slashes (a Playwright grep/path regex never sees a
-// backslash — see the regex-path gotcha). Picks the root that contains the file; falls back to the
+// backslash; see the regex-path gotcha). Picks the root that contains the file; falls back to the
 // absolute path forward-slashed when the file sits outside every root.
 function toWorkspaceRelative(filePath: string, roots: readonly string[]): string {
   let best: string | undefined;
@@ -328,7 +328,7 @@ export function groupMatrixRows(rows: readonly MatrixRow[]): MatrixGroup[] {
  * mapped tests (grouped by key, with their linked scenario count and one unlinkable row per linked
  * scenario) shown below, each key-sorted. The matrix rows join requirement, test, scenario, the in-file
  * `@<prefix><key>` tag, and last result, one row per link, untraced scenario, and orphan. Renders
- * offline from tags alone — with no remote sync, `orphans` is empty and mapped cards carry no summary.
+ * offline from tags alone. With no remote sync, `orphans` is empty and mapped cards carry no summary.
  * An undefined snapshot (panel off or still building) yields empty columns, still with the available
  * group's empty state so the board explains itself before the first sync.
  */
@@ -508,7 +508,7 @@ function executionAction(mode: LedgerEntry["mode"]): string {
 
 // Imported reads the recorded `total` (the whole publishable count); the pass rate is honest only when
 // passed+failed+skipped accounts for every imported result, so a run with a timed-out or interrupted
-// result — where the three counts fall short of `total` — dashes the rate rather than overstating it.
+// result where the three counts fall short of `total` dashes the rate rather than overstating it.
 function executionImported(entry: LedgerEntry): string {
   return entry.total === undefined ? DASH : String(entry.total);
 }

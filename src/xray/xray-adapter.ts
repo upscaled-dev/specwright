@@ -19,7 +19,7 @@ import { hasExecutionRef } from "../traceability/publish-core";
 import { XrayCredentialStore } from "./xray-credential-store";
 
 // A Jira/Xray issue key: a project part (which may itself contain hyphens/underscores), then a
-// trailing `-<number>`. The project is everything before that last `-<number>` — so JIRA_KEY_SHAPE
+// trailing `-<number>`. The project is everything before that last `-<number>`, so JIRA_KEY_SHAPE
 // and projectFromKey agree on multi-segment keys like AB-CD-123.
 export const JIRA_KEY_SHAPE = /^[A-Za-z][A-Za-z0-9_-]*-\d+$/;
 
@@ -31,7 +31,7 @@ export function projectFromKey(key: string): string {
 
 /**
  * Accept a bare host, a full URL, or a trailing-slashed value and reduce it to a bare host.
- * Lowercased: hostnames are case-insensitive, and the result keys SecretStorage entries — case
+ * Lowercased: hostnames are case-insensitive, and the result keys SecretStorage entries, so case
  * variants of one site must resolve to one credential slot.
  */
 export function normalizeSiteUrl(raw: string): string {
@@ -50,7 +50,7 @@ const DEFAULT_REQ_PREFIX = "REQ_";
 export const canonicalizeXrayKey = (key: string): string => key.toUpperCase();
 
 // Xray publishes only Gherkin/Cucumber outcomes (§1 out-of-scope: Manual/Generic). A missing
-// testType means a partial snapshot never fetched it — `unknown` never blocks preflight.
+// testType means a partial snapshot never fetched it, so `unknown` never blocks preflight.
 export function classifyXrayBinding(meta: TestCaseMetadata | undefined): AutomationBindingClassification {
   const kind = meta?.testType?.kind;
   if (kind === undefined) {
@@ -59,7 +59,7 @@ export function classifyXrayBinding(meta: TestCaseMetadata | undefined): Automat
   return kind === "Gherkin" ? "compatible" : "incompatible-test-type";
 }
 
-// P2 delivers `classify` (offline validation). `bind` — writing the binding to the remote — is a P3
+// P2 delivers `classify` (offline validation). `bind`, writing the binding to the remote, is a P3
 // write path and rejects with a typed `NotSupportedError` until then, keeping the local-execution
 // invariant.
 const xrayAutomationBinding: AutomationBindingCapability = {
@@ -77,7 +77,7 @@ function effectivePrefix(prefix: string, fallback: string): string {
 
 // Thin read-side view of the landed connection slice: the credential store's change event, the
 // normalized site as the label, and a credential probe. Connect/disconnect stay in the Xray
-// commands — this capability only reports state to the neutral subsystem.
+// commands. This capability only reports state to the neutral subsystem.
 function xrayConnection(
   config: ExtensionConfig,
   credentialStore: XrayCredentialStore,
@@ -98,6 +98,16 @@ function xrayConnection(
   };
 }
 
+interface XrayAdapterCapabilities {
+  credentialStore?: XrayCredentialStore;
+  verify?: () => Promise<ConnectionVerifyResult>;
+  metadata?: MetadataCapability;
+  remoteSearch?: RemoteSearchCapability;
+  resultPublishing?: ResultPublishingCapability;
+  testAuthoring?: TestAuthoringCapability;
+  projectDirectory?: ProjectDirectoryCapability;
+}
+
 export class XrayAdapter implements TraceabilityAdapter {
   public readonly id = "xray";
   public readonly label = "Xray";
@@ -115,22 +125,15 @@ export class XrayAdapter implements TraceabilityAdapter {
   // command instance (built without a credential store or client) leaves them undefined. The live
   // capability instance implements metadata, remote search, and the project directory over one piece of
   // connection state, so the factory passes it in all three slots.
-  constructor(
-    private readonly config: ExtensionConfig,
-    credentialStore?: XrayCredentialStore,
-    verify?: () => Promise<ConnectionVerifyResult>,
-    metadata?: MetadataCapability,
-    remoteSearch?: RemoteSearchCapability,
-    resultPublishing?: ResultPublishingCapability,
-    testAuthoring?: TestAuthoringCapability,
-    projectDirectory?: ProjectDirectoryCapability
-  ) {
-    this.connection = credentialStore ? xrayConnection(config, credentialStore, verify) : undefined;
-    this.metadata = metadata;
-    this.remoteSearch = remoteSearch;
-    this.resultPublishing = resultPublishing;
-    this.testAuthoring = testAuthoring;
-    this.projectDirectory = projectDirectory;
+  constructor(private readonly config: ExtensionConfig, capabilities: XrayAdapterCapabilities = {}) {
+    this.connection = capabilities.credentialStore
+      ? xrayConnection(config, capabilities.credentialStore, capabilities.verify)
+      : undefined;
+    this.metadata = capabilities.metadata;
+    this.remoteSearch = capabilities.remoteSearch;
+    this.resultPublishing = capabilities.resultPublishing;
+    this.testAuthoring = capabilities.testAuthoring;
+    this.projectDirectory = capabilities.projectDirectory;
   }
 
   public get keyGrammar(): KeyGrammar {
