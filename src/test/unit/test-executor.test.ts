@@ -6,7 +6,7 @@ import * as vscode from "vscode";
 import { TestExecutor, ShellRunner, TestRunEvent, withJsonReporter } from "../../core/test-executor";
 import { ExtensionConfig } from "../../core/extension-config";
 import { Logger } from "../../utils/logger";
-import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
+import { normalizePathKey, PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { CommandBuilder } from "../../core/command-builder";
 import { BreakpointMirror } from "../../core/breakpoint-mirror";
 import { PlaywrightBddExtensionContext } from "../../types";
@@ -427,7 +427,10 @@ describe("TestExecutor traceability artifact scope", () => {
       invocation: unknown;
     };
     expect(capture.details.map((detail) => detail.lineNumber)).toEqual([14, 15]);
-    expect(capture.details.map((detail) => detail.featurePath)).toEqual([filePath, filePath]);
+    expect(capture.details.map((detail) => detail.featurePath)).toEqual([
+      normalizePathKey(filePath),
+      normalizePathKey(filePath),
+    ]);
     expect(capture.invocation).toEqual(block);
   });
 
@@ -1365,7 +1368,10 @@ describe("TestExecutor spec-line target no-tests retry", () => {
       details: Array<{ featurePath: string; lineNumber?: number }>;
     };
     expect(capture.command).toContain("--grep");
-    expect(capture.details).toMatchObject([{ featurePath: feature, lineNumber: 3 }]);
+    expect(capture.details).toMatchObject([{
+      featurePath: normalizePathKey(feature),
+      lineNumber: 3,
+    }]);
   });
 
   it("does not retry when the targeted run failed for a different reason", async () => {

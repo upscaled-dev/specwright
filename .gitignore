@@ -24,6 +24,10 @@ test-results/
 *.log
 
 .claude/
+.agents/
+.codex/
+/AGENTS.md
+/CLAUDE.md
 scripts/claude-sandbox.sh
 
 # Internal working documents — not part of the shipped repo

@@ -12,6 +12,9 @@ eslint.config.mjs
 commitlint.config.mjs
 .husky/**
 .claude/**
+.agents/**
+.codex/**
+AGENTS.md
 CLAUDE.md
 
 # Build/test artifacts

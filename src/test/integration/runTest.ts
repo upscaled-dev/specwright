@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { runTests } from "@vscode/test-electron";
+import { downloadAndUnzipVSCode, runTests } from "@vscode/test-electron";
+import { resolveVSCodeExecutablePath } from "./vscode-executable-path";
 
 async function main(): Promise<void> {
   // If this env var is set in the host shell (e.g. when running inside another Electron app), the test runner's Electron will behave as Node and fail to launch. Strip it.
@@ -16,8 +17,10 @@ async function main(): Promise<void> {
     "fixtures",
     "workspace"
   );
+  const downloadedExecutablePath = await downloadAndUnzipVSCode({ extensionDevelopmentPath });
 
   await runTests({
+    vscodeExecutablePath: resolveVSCodeExecutablePath(downloadedExecutablePath),
     extensionDevelopmentPath,
     extensionTestsPath,
     launchArgs: [
