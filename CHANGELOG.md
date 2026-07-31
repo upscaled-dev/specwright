@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.4.45] - 2026-07-31
 ### Added
 
 - **Long runs now report each scenario as soon as it finishes.** Test Explorer items, the Test Results output, the status bar, and editor-run progress update while Playwright is still active. The final JSON report still reconciles the completed run. Feature and scenario runs started from CodeLens or editor menus now show a cancellable progress notification too.
