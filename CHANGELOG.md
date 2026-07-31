@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Closing the coverage board cancels a publish in flight.** A publish used to keep importing results and uploading attachments after the board was gone. Cancellation now reaches the result import and every attachment upload: the work stops at the next file, the report names each attachment still pending, and a cancel that lands after the import completed still names the execution it created.
 - **The publish dialog reports a failed issue search instead of showing no matches.** A search that failed (missing Jira credentials, a network or permission problem) emptied the result list, which reads exactly like "no such issue". The list now carries the reason, and the project field still offers the keys already known locally.
 - A gateway error page no longer becomes the text of a publish failure toast. An HTML response falls back to the plain status, and the page itself is in the output channel.
 - Connection failures name their underlying cause (a refused connection, a certificate rejection, a proxy fault) rather than only "fetch failed".
