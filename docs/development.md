@@ -148,7 +148,7 @@ src/
   test/
     __mocks__/vscode.ts                   # vitest mock of `vscode`
     unit/*.test.ts                        # vitest unit tests
-    unit/fixtures/                        # committed .feature snapshots for parser tests
+    unit/fixtures/                        # .feature.txt snapshots for parser tests, off the discovery glob
     integration/                          # @vscode/test-electron suites
 features/                                 # sample Gherkin + TS steps
 playwright.config.ts                      # sample playwright-bdd config

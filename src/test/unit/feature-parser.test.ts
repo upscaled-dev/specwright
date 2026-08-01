@@ -25,7 +25,8 @@ function makeLoggerMock(): Logger {
  *
  * The files under src/test/unit/fixtures/ are snapshots of features/ taken from git history.
  * The repo-root features/ directory is a live manual-testing sandbox whose tags and scenarios
- * drift, so the pinned lens counts must never read it.
+ * drift, so the pinned lens counts must never read it. The snapshots carry a .feature.txt
+ * extension on purpose, so workspace feature discovery never picks them up.
  */
 
 const FIXTURES_DIR = path.resolve(__dirname, "fixtures");
@@ -364,28 +365,28 @@ describe("FeatureParser.provideScenarioCodeLenses: counts per fixture", () => {
 
   it("background.feature: 1 Run Feature + 3 tag lenses + 2 scenarios * 2 = 8", () => {
     const parser = FeatureParser.create();
-    const content = readFixture("background.feature");
+    const content = readFixture("background.feature.txt");
     const lenses = parser.provideScenarioCodeLenses(content, "background.feature");
     expect(lenses).toHaveLength(8);
   });
 
   it("rules.feature: 1 Run Feature + 1 tag (@rules) + 3 scenarios * 2 = 8", () => {
     const parser = FeatureParser.create();
-    const content = readFixture("rules.feature");
+    const content = readFixture("rules.feature.txt");
     const lenses = parser.provideScenarioCodeLenses(content, "rules.feature");
     expect(lenses).toHaveLength(8);
   });
 
   it("outline-multi-examples.feature: 1 Run Feature + 3 tags + 1 outline*2 + 5 example rows*2 = 16", () => {
     const parser = FeatureParser.create();
-    const content = readFixture("outline-multi-examples.feature");
+    const content = readFixture("outline-multi-examples.feature.txt");
     const lenses = parser.provideScenarioCodeLenses(content, "outline-multi-examples.feature");
     expect(lenses).toHaveLength(16);
   });
 
   it("complex.feature: 1 Run Feature + 5 tags + 2 scenarios*2 + 1 outline*2 + 2 rows*2 = 16", () => {
     const parser = FeatureParser.create();
-    const content = readFixture("complex.feature");
+    const content = readFixture("complex.feature.txt");
     const lenses = parser.provideScenarioCodeLenses(content, "complex.feature");
     expect(lenses).toHaveLength(16);
   });
@@ -816,7 +817,7 @@ describe("isOutlineExampleRow: gating helper", () => {
 describe("FeatureParser.parseFeatureFile: fs path sanity", () => {
   it("loads complex.feature from disk and produces the same shape as parseFeatureContent", () => {
     const parser = FeatureParser.create();
-    const fixturePath = path.join(FIXTURES_DIR, "complex.feature");
+    const fixturePath = path.join(FIXTURES_DIR, "complex.feature.txt");
     const fromFs = parser.parseFeatureFile(fixturePath);
     const fromString = parser.parseFeatureContent(fs.readFileSync(fixturePath, "utf-8"));
     expect(fromFs).not.toBeNull();
