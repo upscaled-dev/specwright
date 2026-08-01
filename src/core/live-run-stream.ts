@@ -27,7 +27,8 @@ export interface LiveRunStreamHandlers {
  * Tails the append-only JSONL file produced by the Specwright Playwright reporter.
  *
  * `watch` drains records already present, then polls the open file at low latency. `finish` stops
- * polling, performs one last drain (including a final record without a newline), and removes it.
+ * polling and performs one last drain, including a final record without a newline. The owning
+ * temporary report removes the closed side-channel file with the rest of its directory.
  */
 export class LiveRunStream {
   private readonly sourceBySpecPath = new Map<string, BddSourceData | undefined>();
@@ -51,7 +52,7 @@ export class LiveRunStream {
     return stream;
   }
 
-  /** Final drain and best-effort cleanup. Safe to call more than once. */
+  /** Final drain and file-handle cleanup. Safe to call more than once. */
   public finish(): void {
     if (this.finished) {
       return;
@@ -73,7 +74,6 @@ export class LiveRunStream {
         try { fs.closeSync(this.fd); } catch { /* best effort */ }
         this.fd = undefined;
       }
-      try { fs.unlinkSync(this.reportPath); } catch { /* best effort */ }
     }
   }
 

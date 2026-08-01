@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import { FeatureParser, isOutlineExampleRow } from "../parsers/feature-parser";
 import { groupScenariosByOutline } from "./group-scenarios";
 import { OUTLINE_ID_SEPARATOR } from "./constants";
@@ -39,6 +38,7 @@ import {
   beginExternalTestRun,
   LiveTestRunProgress,
 } from "./live-test-run-progress";
+import { TemporaryReport } from "../core/temporary-report";
 
 /**
  * Pull bddgen's "Missing step definitions" block (count + suggested snippets) out of captured
@@ -75,9 +75,6 @@ export function suggestedFeatureGlob(featurePath: string, workspaceRoot?: string
 }
 
 type RunStatus = "started" | "passed" | "failed";
-
-// Disambiguates report paths when several items are debugged within the same millisecond.
-let debugReportSequence = 0;
 
 /** workspaceState key under which the chosen organization strategy type is persisted. */
 const ORG_STRATEGY_STATE_KEY = "playwrightBddRunner.organizationStrategyType";
@@ -1329,18 +1326,16 @@ export class PlaywrightBddTestProvider {
           const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
           // The debugged command runs in a terminal (no stdout capture), so the only way to
           // learn the outcome is Playwright's file-based JSON report.
-          debugReportSequence += 1;
-          const jsonReportPath = path.join(
-            os.tmpdir(),
-            `playwright-bdd-debug-report-${process.pid}-${Date.now()}-${debugReportSequence}.json`
-          );
-          run.started(test);
-          // Debugging a feature/outline runs every descendant with one command; mark them all
-          // started so the Explorer shows what is actually running (mirrors runSingleTopLevelItem).
-          if (test.children.size > 0) {
-            this.markDescendantsStarted(test, run);
-          }
+          const report = TemporaryReport.create((error) => {
+            this.context.logger.warn(`Temporary Playwright report cleanup failed: ${error.message}`);
+          });
           try {
+            run.started(test);
+            // Debugging a feature/outline runs every descendant with one command; mark them all
+            // started so the Explorer shows what is actually running (mirrors runSingleTopLevelItem).
+            if (test.children.size > 0) {
+              this.markDescendantsStarted(test, run);
+            }
             // The testing service considers a Debug-kind request done once the handler resolves and
             // its TestRun ends; returning at session start made VS Code tear down the run before the
             // debuggee attached, so feature-file breakpoints never bound from the Test Explorer.
@@ -1351,7 +1346,7 @@ export class PlaywrightBddTestProvider {
               ...(outlineName ? { outlineName } : {}),
               debug: true,
               waitForSessionEnd: true,
-              jsonReportPath,
+              jsonReportPath: report.jsonPath,
               signal,
             });
             // A cancelled session writes at most a partial report; ingesting it would seal
@@ -1359,10 +1354,10 @@ export class PlaywrightBddTestProvider {
             if (signal.aborted) {
               this.markSubtreeSkipped(test, run);
             } else {
-              this.applyDebugReportStatus(test, run, jsonReportPath, batch);
+              this.applyDebugReportStatus(test, run, report.jsonPath, batch);
             }
           } finally {
-            try { fs.unlinkSync(jsonReportPath); } catch { /* best effort */ }
+            report.dispose();
           }
         }
       } catch (testError) {

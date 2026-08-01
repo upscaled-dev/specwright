@@ -17,7 +17,7 @@ export interface LiveRunStatus {
 }
 
 interface LiveRunSessionOptions {
-  readonly reportPath: string;
+  readonly liveReportPath: string;
   readonly reporterPath: string;
   readonly progress: RunProgressObserver;
   readonly signal?: AbortSignal | undefined;
@@ -27,13 +27,12 @@ interface LiveRunSessionOptions {
 
 /** Create one extension-owned reporter side channel. Failure leaves the test run usable. */
 export function openLiveRunSession(options: LiveRunSessionOptions): LiveRunHandle | undefined {
-  const liveReportPath = `${options.reportPath}.live.jsonl`;
   try {
-    fs.writeFileSync(liveReportPath, "", "utf8");
+    fs.writeFileSync(options.liveReportPath, "", "utf8");
     let passed = 0;
     let failed = 0;
     const statusByScenario = new Map<string, ScenarioStatus>();
-    const stream = LiveRunStream.watch(liveReportPath, {
+    const stream = LiveRunStream.watch(options.liveReportPath, {
       onBegin: (record) => {
         if (options.signal?.aborted) {return;}
         options.onStatus({ passed, failed, completed: 0, total: record.total });
@@ -60,14 +59,13 @@ export function openLiveRunSession(options: LiveRunSessionOptions): LiveRunHandl
     return {
       stream,
       env: {
-        [LIVE_REPORT_FILE_ENV]: liveReportPath,
+        [LIVE_REPORT_FILE_ENV]: options.liveReportPath,
         PW_TEST_REPORTER: options.reporterPath,
       },
     };
   } catch (error) {
     const resolved = error instanceof Error ? error : new Error(String(error));
     try {options.onError(resolved);} catch { /* live reporting must not fail the run */ }
-    try {fs.unlinkSync(liveReportPath);} catch { /* best effort */ }
     return undefined;
   }
 }

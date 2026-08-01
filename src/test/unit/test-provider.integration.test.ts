@@ -572,7 +572,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
     expect(run.outcome.skipped).not.toContain(`${fixture.featurePath}:4`);
     expect(run.outcome.ended).toBe(true);
-    expect(fs.existsSync(reportPath), "tmp report should be deleted after the run").toBe(false);
+    expect(fs.existsSync(path.dirname(reportPath)), "tmp report directory should be deleted after the run").toBe(false);
   });
 
   it("debugTests leaves the status unset when no JSON report was written", async () => {
@@ -591,6 +591,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     });
 
     const config = vscode.debug.__startDebuggingCalls[0]!.config;
+    const reportPath = (config["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
     vscode.debug.__fireTerminate({
       configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
     });
@@ -602,6 +603,54 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(run.outcome.failed).toEqual([]);
     expect(run.outcome.skipped).toEqual([]);
     expect(run.outcome.ended).toBe(true);
+    expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
+  });
+
+  it("debugTests removes the report directory when VS Code declines the launch", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const startDebugging = vscode.debug.startDebugging;
+    (vscode.debug as { startDebugging: typeof vscode.debug.startDebugging }).startDebugging = (folder, config) => {
+      vscode.debug.__startDebuggingCalls.push({ folder, config: config as Record<string, unknown> });
+      return Promise.resolve(false);
+    };
+    try {
+      const { provider, controller } = buildProvider(shell);
+      await provider.discoverTests();
+      const leaf = controller.find(`${fixture.featurePath}:4`)!;
+
+      await controller.profile("Debug")!.runHandler(
+        new vscode.TestRunRequest([leaf]),
+        new vscode.CancellationTokenSource().token
+      );
+
+      const config = vscode.debug.__startDebuggingCalls[0]!.config;
+      const reportPath = (config["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
+      expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
+    } finally {
+      (vscode.debug as { startDebugging: typeof vscode.debug.startDebugging }).startDebugging = startDebugging;
+    }
+  });
+
+  it("debugTests removes an unparseable report after the session", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    const leaf = controller.find(`${fixture.featurePath}:4`)!;
+    const pending = Promise.resolve(controller.profile("Debug")!.runHandler(
+      new vscode.TestRunRequest([leaf]),
+      new vscode.CancellationTokenSource().token
+    ));
+
+    await vi.waitFor(() => expect(vscode.debug.__startDebuggingCalls).toHaveLength(1));
+    const config = vscode.debug.__startDebuggingCalls[0]!.config;
+    const reportPath = (config["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
+    fs.writeFileSync(reportPath, "{broken");
+    vscode.debug.__fireTerminate({
+      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
+    });
+
+    await pending;
+    expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
   });
 
   it("debugTests rolls a feature item up from the report's per-scenario statuses", async () => {
@@ -698,6 +747,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
     });
     const root = { id: "root", configuration: vscode.debug.__startDebuggingCalls[0]!.config };
+    const reportPath = (root.configuration["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
     vscode.debug.__fireStart(root);
     source.cancel();
     await pending;
@@ -711,6 +761,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
     expect(vscode.debug.__stopDebuggingCalls).toEqual([root]);
     expect(artifactStore.latest()?.state).toBe("cancelled");
+    expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
   });
 
   it("scopes the run summary to the target when the report's featurePath differs only by Windows drive-letter case/separators", async () => {

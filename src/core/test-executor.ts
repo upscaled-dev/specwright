@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import {
   TestExecutionOptions,
   TestRunResult,
@@ -30,6 +29,7 @@ import {
 } from "../traceability/run-artifact-store";
 import { openLiveRunSession, type LiveRunHandle } from "./live-run-session";
 import type { RunProgressObserver } from "./run-progress";
+import { TemporaryReport } from "./temporary-report";
 
 /**
  * A test run result enriched with the per-scenario outcomes parsed from Playwright's JSON
@@ -99,8 +99,6 @@ export function withJsonReporter(command: string): string {
   if (reporters.includes("json")) {return command;}
   return command.replace(reporterFlag, `--reporter=${match[1]},json`);
 }
-
-let reportSequence = 0;
 
 type CommandResult = { success: boolean; output: string; error: string; returnCode: number };
 
@@ -482,23 +480,19 @@ export class TestExecutor {
   ): Promise<ScenarioPlaywrightAttempt> {
     const { playwrightCommand } = this.commandBuilder().buildScenarioCommandParts(options);
 
-    reportSequence += 1;
-    const reportPath = path.join(
-      os.tmpdir(),
-      `playwright-bdd-report-${process.pid}-${Date.now()}-${reportSequence}.json`
-    );
     const command = this.config.useConfigReporters
       ? playwrightCommand
       : withJsonReporter(playwrightCommand);
-    const live = this.openLiveRun(reportPath, progress, signal);
+    const report = this.createTemporaryReport();
 
     try {
+      const live = this.openLiveRun(report.livePath, progress, signal);
       let commandResult: CommandResult;
       try {
         commandResult = await this.shellRunner(
           command,
           workingDir,
-          { PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath, ...(live?.env ?? {}) },
+          { PLAYWRIGHT_JSON_OUTPUT_NAME: report.jsonPath, ...(live?.env ?? {}) },
           signal
         );
       } finally {
@@ -506,7 +500,6 @@ export class TestExecutor {
       }
       const result = this.withBinaryHint(commandResult, command);
       if (signal?.aborted) {
-        this.discardReport(reportPath);
         return { result: this.cancelledResult(start), command, exitCode: result.returnCode };
       }
       // When bddgenCommand is undefined (defineBddProject auto-gen) bddgen runs inside
@@ -515,12 +508,11 @@ export class TestExecutor {
       // is safe and is the only path those errors reach the Problems panel.
       this.publishBddgenDiagnostics(result, workingDir);
       return {
-        result: this.buildOutputResult(result, reportPath, workingDir, start, command, undefined),
+        result: this.buildOutputResult(result, report.jsonPath, workingDir, start, command, undefined),
         command,
         exitCode: result.returnCode,
       };
     } catch (error) {
-      this.discardReport(reportPath);
       if (signal?.aborted) {
         return { result: this.cancelledResult(start), command, exitCode: 1 };
       }
@@ -535,6 +527,8 @@ export class TestExecutor {
         command,
         exitCode: 1,
       };
+    } finally {
+      report.dispose();
     }
   }
 
@@ -760,26 +754,22 @@ export class TestExecutor {
       };
     }
 
-    reportSequence += 1;
-    const reportPath = path.join(
-      os.tmpdir(),
-      `playwright-bdd-report-${process.pid}-${Date.now()}-${reportSequence}.json`
-    );
     const baseCommand = buildCommand();
     // Normally we force `--reporter=json` for result mapping. With useConfigReporters the user's
     // config owns the reporter list (so a custom reporter survives); a `--reporter` here would
     // override it. We still set PLAYWRIGHT_JSON_OUTPUT_NAME below, which steers a bare `['json']`
     // reporter in their config to our temp file.
     const command = this.config.useConfigReporters ? baseCommand : withJsonReporter(baseCommand);
-    const live = this.openLiveRun(reportPath, progress, signal);
+    const report = this.createTemporaryReport();
 
     try {
+      const live = this.openLiveRun(report.livePath, progress, signal);
       let commandResult: CommandResult;
       try {
         commandResult = await this.shellRunner(
           command,
           workingDir,
-          { PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath, ...(live?.env ?? {}) },
+          { PLAYWRIGHT_JSON_OUTPUT_NAME: report.jsonPath, ...(live?.env ?? {}) },
           signal
         );
       } finally {
@@ -787,13 +777,11 @@ export class TestExecutor {
       }
       const result = this.withBinaryHint(commandResult, command);
       if (signal?.aborted) {
-        this.discardReport(reportPath);
         return this.cancelledResult(start);
       }
       this.publishBddgenDiagnostics(result, workingDir);
-      return this.buildOutputResult(result, reportPath, workingDir, start, command, artifactBatch);
+      return this.buildOutputResult(result, report.jsonPath, workingDir, start, command, artifactBatch);
     } catch (error) {
-      this.discardReport(reportPath);
       if (signal?.aborted) { return this.cancelledResult(start); }
       this.contributeArtifactShard(artifactBatch, workingDir, command, false, 1, []);
       this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
@@ -803,18 +791,26 @@ export class TestExecutor {
         error: errMsg(error),
         duration: Math.max(1, Date.now() - start),
       };
+    } finally {
+      report.dispose();
     }
+  }
+
+  private createTemporaryReport(): TemporaryReport {
+    return TemporaryReport.create((error) => {
+      this.logger.warn(`Temporary Playwright report cleanup failed: ${error.message}`);
+    });
   }
 
   /** Open the extension-owned reporter stream for one captured Playwright invocation. */
   private openLiveRun(
-    reportPath: string,
+    liveReportPath: string,
     progress: RunProgressObserver | undefined,
     signal: AbortSignal | undefined
   ): LiveRunHandle | undefined {
     if (progress === undefined) {return undefined;}
     return openLiveRunSession({
-      reportPath,
+      liveReportPath,
       reporterPath: path.join(__dirname, "specwright-live-reporter.js"),
       progress,
       signal,
@@ -928,8 +924,8 @@ export class TestExecutor {
     // Feed the badge store before the ephemeral report is gone: this is the extension-launched run
     // that leaves nothing on disk for the traceability panel to scan (§3.5).
     this.context?.runResultStore?.ingest(scenarioResults);
-    // Same seam feeds the richer artifact store. The report is unlinked in readScenarioDetails, so
-    // the shard carries the already-parsed details.
+    // Same seam feeds the richer artifact store. The shard carries already-parsed details before
+    // the enclosing temporary-report lifetime ends.
     this.contributeArtifactShard(
       artifactBatch,
       workingDir,
@@ -964,9 +960,7 @@ export class TestExecutor {
    */
   private readScenarioDetails(reportPath: string, output: string): ScenarioResult[] {
     if (fs.existsSync(reportPath)) {
-      const details = this.playwrightJsonParser.parseFromFile(reportPath);
-      this.discardReport(reportPath);
-      return details;
+      return this.playwrightJsonParser.parseFromFile(reportPath);
     }
     const details = this.playwrightJsonParser.parse(output);
     if (this.config.useConfigReporters && details.length === 0) {
@@ -976,10 +970,6 @@ export class TestExecutor {
       );
     }
     return details;
-  }
-
-  private discardReport(reportPath: string): void {
-    try {fs.unlinkSync(reportPath);} catch { /* best effort */ }
   }
 
   /** Test hooks: shrink the debug watchdog timings so tests don't wait seconds. */

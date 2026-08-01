@@ -11,6 +11,7 @@ import { CommandBuilder } from "../../core/command-builder";
 import { BreakpointMirror } from "../../core/breakpoint-mirror";
 import { PlaywrightBddExtensionContext } from "../../types";
 import { BddgenDiagnosticsProvider } from "../../providers/bddgen-diagnostics-provider";
+import { LIVE_REPORT_FILE_ENV } from "../../core/live-reporter-protocol";
 
 interface ShellCall {
   command: string;
@@ -213,6 +214,64 @@ describe("withJsonReporter", () => {
       .toBe("npx playwright test --reporter=json");
     expect(withJsonReporter("npx playwright test --reporter=list,json"))
       .toBe("npx playwright test --reporter=list,json");
+  });
+});
+
+describe("TestExecutor temporary report lifetime", () => {
+  type Mode = "normal" | "scenario";
+  type Outcome = "success" | "runner failure" | "spawn failure" | "cancellation" | "parse failure";
+
+  const cases: Array<[Mode, Outcome]> = [
+    ["normal", "success"],
+    ["normal", "runner failure"],
+    ["normal", "spawn failure"],
+    ["normal", "cancellation"],
+    ["normal", "parse failure"],
+    ["scenario", "success"],
+    ["scenario", "runner failure"],
+    ["scenario", "spawn failure"],
+    ["scenario", "cancellation"],
+    ["scenario", "parse failure"],
+  ];
+
+  it.each(cases)("removes the %s report directory after %s", async (mode, outcome) => {
+    let jsonPath: string | undefined;
+    let livePath: string | undefined;
+    const controller = new AbortController();
+    if (outcome === "cancellation") {
+      controller.abort();
+    }
+    const shell: ShellRunner = async (_command, _workingDir, env) => {
+      jsonPath = env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"];
+      livePath = env?.[LIVE_REPORT_FILE_ENV];
+      if (outcome === "spawn failure") {
+        throw new Error("spawn failed");
+      }
+      if (jsonPath !== undefined) {
+        fs.writeFileSync(jsonPath, outcome === "parse failure" ? "{broken" : JSON.stringify({ suites: [] }));
+      }
+      return outcome === "runner failure"
+        ? { success: false, output: "", error: "runner failed", returnCode: 1 }
+        : { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell);
+    const options = { filePath: "/tmp/x.feature", signal: controller.signal, progress: {} };
+
+    const result = mode === "normal"
+      ? await executor.runFeatureFileWithOutput(options)
+      : await executor.runScenarioWithOutput(options);
+
+    expect(jsonPath).toBeDefined();
+    expect(livePath).toBeDefined();
+    expect(nodePath.dirname(jsonPath!)).toBe(nodePath.dirname(livePath!));
+    expect(fs.existsSync(nodePath.dirname(jsonPath!))).toBe(false);
+    if (outcome === "spawn failure") {
+      expect(result.error).toContain("spawn failed");
+    } else if (outcome === "cancellation") {
+      expect(result.error).toBe("Cancelled");
+    } else if (outcome === "runner failure") {
+      expect(result.error).toBe("runner failed");
+    }
   });
 });
 

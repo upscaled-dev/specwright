@@ -110,14 +110,14 @@ describe("LiveRunStream", () => {
     expect(malformed).toEqual(["{not json}"]);
   });
 
-  it("drains a final record without a newline and removes the event file", () => {
+  it("drains a final record without a newline and leaves cleanup to its owner", () => {
     watch();
     fs.appendFileSync(reportPath, `${JSON.stringify(beginRecord())}\n${JSON.stringify(testEndRecord())}`);
 
     stream!.finish();
 
     expect(ended).toHaveLength(1);
-    expect(fs.existsSync(reportPath)).toBe(false);
+    expect(fs.existsSync(reportPath)).toBe(true);
   });
 
   it("falls back to the generated spec path when source metadata cannot be resolved", () => {

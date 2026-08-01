@@ -9,12 +9,10 @@ import type { ScenarioResult } from "../../utils/playwright-json-parser";
 
 describe("openLiveRunSession", () => {
   let root: string;
-  let reportPath: string;
   let specPath: string;
 
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "live-run-session-"));
-    reportPath = path.join(root, "report.json");
     specPath = path.join(root, ".features-gen", "sample.feature.spec.js");
     fs.mkdirSync(path.dirname(specPath), { recursive: true });
     fs.writeFileSync(specPath, [
@@ -34,7 +32,7 @@ describe("openLiveRunSession", () => {
     const results: ScenarioResult[] = [];
     const errors: Error[] = [];
     const handle = openLiveRunSession({
-      reportPath,
+      liveReportPath: path.join(root, "live.jsonl"),
       reporterPath: "/extension/specwright-live-reporter.js",
       progress: { onTestEnd: (result) => results.push(result) },
       onStatus: (status) => statuses.push(status),
