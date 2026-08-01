@@ -314,6 +314,159 @@ describe("scenario.outlineName: Map<test.id, Scenario> lookup model", () => {
   });
 });
 
+describe("CommandManager palette run commands", () => {
+  const window = vscode.window as unknown as { activeTextEditor: unknown };
+
+  afterEach(() => {
+    window.activeTextEditor = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it("resolves the active feature and cursor for zero-argument run and debug commands", async () => {
+    const exec = {
+      runScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
+      runFeatureFileWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
+      debugScenario: vi.fn().mockResolvedValue(undefined),
+    };
+    window.activeTextEditor = {
+      document: fakeDoc("Feature: Palette\n\nScenario: chosen\n  Given a step\n"),
+      selection: { active: { line: 3 } },
+    };
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("@smoke");
+    const handlers = captureHandlers(makeContext({ testExecutor: exec as unknown as TestExecutor }));
+
+    await handlers.get("playwrightBddRunner.runScenario")!();
+    await handlers.get("playwrightBddRunner.debugScenario")!();
+    await handlers.get("playwrightBddRunner.runFeatureFile")!();
+    await handlers.get("playwrightBddRunner.runScenarioWithTags")!();
+    await handlers.get("playwrightBddRunner.runFeatureFileWithTags")!();
+
+    expect(exec.runScenarioWithOutput).toHaveBeenCalledTimes(2);
+    expect(exec.runScenarioWithOutput.mock.calls.map(([options]) => options)).toEqual([
+      expect.objectContaining({ filePath: "/ws/a.feature", lineNumber: 3, scenarioName: "chosen" }),
+      expect.objectContaining({ filePath: "/ws/a.feature", lineNumber: 3, scenarioName: "chosen", tags: "@smoke" }),
+    ]);
+    expect(exec.debugScenario).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: "/ws/a.feature", lineNumber: 3, scenarioName: "chosen",
+    }));
+    expect(exec.runFeatureFileWithOutput.mock.calls.map(([options]) => options)).toEqual([
+      expect.objectContaining({ filePath: "/ws/a.feature" }),
+      expect.objectContaining({ filePath: "/ws/a.feature", tags: "@smoke" }),
+    ]);
+  });
+
+  it("picks a discovered feature and scenario when no feature editor is active", async () => {
+    const filePath = writeTempFeature("Feature: Palette\n\nScenario: picked\n  Given a step\n");
+    const exec = {
+      runScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
+    };
+    const discoveryManager = { discoverTestFiles: vi.fn().mockResolvedValue([filePath]) };
+    vi.spyOn(vscode.window, "showQuickPick").mockImplementation((items) =>
+      Promise.resolve((items as Array<unknown>)[0] as never)
+    );
+    const handlers = captureHandlers(makeContext({
+      discoveryManager: discoveryManager as never,
+      testExecutor: exec as unknown as TestExecutor,
+    }));
+
+    try {
+      await handlers.get("playwrightBddRunner.runScenario")!();
+    } finally {
+      fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+    }
+
+    expect(discoveryManager.discoverTestFiles).toHaveBeenCalledOnce();
+    expect(exec.runScenarioWithOutput).toHaveBeenCalledWith(expect.objectContaining({
+      filePath, lineNumber: 3, scenarioName: "picked",
+    }));
+  });
+
+  it("treats target and tag prompt cancellation as a quiet no-op", async () => {
+    const exec = {
+      runScenarioWithOutput: vi.fn(),
+      runFeatureFileWithOutput: vi.fn(),
+    };
+    const errors = vi.spyOn(vscode.window, "showErrorMessage");
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const handlers = captureHandlers(makeContext({
+      discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue(["/ws/a.feature"]) } as never,
+      testExecutor: exec as unknown as TestExecutor,
+    }));
+
+    await handlers.get("playwrightBddRunner.runScenario")!();
+
+    window.activeTextEditor = {
+      document: fakeDoc("Feature: Palette\n\nScenario: chosen\n  Given a step\n"),
+      selection: { active: { line: 3 } },
+    };
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined);
+    await handlers.get("playwrightBddRunner.runFeatureFileWithTags")!();
+
+    expect(exec.runScenarioWithOutput).not.toHaveBeenCalled();
+    expect(exec.runFeatureFileWithOutput).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it("passes a palette outline target through to execution", async () => {
+    const exec = {
+      runScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
+      debugScenario: vi.fn().mockResolvedValue(undefined),
+    };
+    window.activeTextEditor = {
+      document: fakeDoc([
+        "Feature: Palette",
+        "Scenario Outline: Divide",
+        "  Given <n>",
+        "  Examples:",
+        "    | n |",
+        "    | 1 |",
+      ].join("\n")),
+      selection: { active: { line: 2 } },
+    };
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("@smoke");
+    const handlers = captureHandlers(makeContext({ testExecutor: exec as unknown as TestExecutor }));
+
+    await handlers.get("playwrightBddRunner.runScenario")!();
+    await handlers.get("playwrightBddRunner.debugScenario")!();
+    await handlers.get("playwrightBddRunner.runScenarioWithTags")!();
+
+    expect(exec.runScenarioWithOutput.mock.calls.map(([options]) => options)).toEqual([
+      expect.objectContaining({ lineNumber: 2, scenarioName: "Divide", outlineName: "Divide" }),
+      expect.objectContaining({ lineNumber: 2, scenarioName: "Divide", outlineName: "Divide", tags: "@smoke" }),
+    ]);
+    expect(exec.debugScenario).toHaveBeenCalledWith(expect.objectContaining({
+      lineNumber: 2, scenarioName: "Divide", outlineName: "Divide",
+    }));
+  });
+
+  it("surfaces selected-file and empty-tag errors through the command handler", async () => {
+    const exec = { runFeatureFileWithOutput: vi.fn() };
+    const errors = vi.spyOn(vscode.window, "showErrorMessage");
+    vi.spyOn(vscode.window, "showQuickPick").mockImplementation((items) =>
+      Promise.resolve((items as Array<unknown>)[0] as never)
+    );
+    const handlers = captureHandlers(makeContext({
+      discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue(["/ws/missing.feature"]) } as never,
+      testExecutor: exec as unknown as TestExecutor,
+    }));
+
+    await handlers.get("playwrightBddRunner.runFeatureFile")!();
+
+    window.activeTextEditor = {
+      document: fakeDoc("Feature: Palette\nScenario: chosen\n"),
+      selection: { active: { line: 1 } },
+    };
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("  ");
+    await handlers.get("playwrightBddRunner.runFeatureFileWithTags")!();
+
+    expect(exec.runFeatureFileWithOutput).not.toHaveBeenCalled();
+    expect(errors.mock.calls.map(([message]) => String(message))).toEqual([
+      expect.stringContaining("Unable to read feature file: /ws/missing.feature"),
+      expect.stringContaining("Tags are required"),
+    ]);
+  });
+});
+
 describe("CommandManager: StepDefinitionProvider caching", () => {
   type StepDefProviderAccess = { getStepDefinitionProvider: () => unknown };
 
@@ -343,6 +496,63 @@ describe("command contributions ↔ handler registrations parity", () => {
   const pkg = JSON.parse(
     fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf-8")
   ) as PackageJson;
+
+  const paletteCommands = {
+    visible: [
+      "playwrightBddRunner.discoverTests",
+      "playwrightBddRunner.refreshTests",
+      "playwrightBddRunner.runAllTests",
+      "playwrightBddRunner.runScenario",
+      "playwrightBddRunner.debugScenario",
+      "playwrightBddRunner.runAllTestsParallel",
+      "playwrightBddRunner.runFeatureFile",
+      "playwrightBddRunner.runScenarioWithTags",
+      "playwrightBddRunner.runFeatureFileWithTags",
+      "playwrightBddRunner.setOrganizationStrategy",
+      "playwrightBddRunner.setTagBasedOrganization",
+      "playwrightBddRunner.setFileBasedOrganization",
+      "playwrightBddRunner.setScenarioTypeOrganization",
+      "playwrightBddRunner.setFlatOrganization",
+      "playwrightBddRunner.setFeatureBasedOrganization",
+      "playwrightBddRunner.debugOrganization",
+      "playwrightBddRunner.showOutput",
+      "playwrightBddRunner.validateConfiguration",
+      "playwrightBddRunner.generateStepDefinitions",
+      "playwrightBddRunner.goToStepDefinition",
+      "playwrightBddRunner.refreshStepsPanel",
+      "playwrightBddRunner.exportSteps",
+      "playwrightBddRunner.exportScenarios",
+      "playwrightBddRunner.insertStep",
+      "playwrightBddRunner.traceability.runAndPublish",
+      "playwrightBddRunner.traceability.publishLastRun",
+      "playwrightBddRunner.traceability.sync",
+      "playwrightBddRunner.traceability.openBoard",
+      "playwrightBddRunner.traceability.manageConnection",
+      "playwrightBddRunner.traceability.connect",
+      "playwrightBddRunner.traceability.disconnect",
+      "playwrightBddRunner.traceability.testConnection",
+      "playwrightBddRunner.traceability.toggleGrouping",
+      "playwrightBddRunner.traceability.switchDefaultProject",
+      "playwrightBddRunner.traceability.clearLocalRunHistory",
+      "playwrightBddRunner.traceability.bulkCreateTests",
+      "playwrightBddRunner.traceability.createTestSet",
+      "playwrightBddRunner.traceability.createTestPlan",
+      "playwrightBddRunner.traceability.createTestExecution",
+    ],
+    hidden: [
+      "playwrightBddRunner.runScenarioWithContext",
+      "playwrightBddRunner.debugScenarioWithContext",
+      "playwrightBddRunner.runFeatureFileWithContext",
+      "playwrightBddRunner.generateStepDefinitionForStep",
+      "playwrightBddRunner.scaffoldStepFromPanel",
+      "playwrightBddRunner.scaffoldFeatureFromPanel",
+      "playwrightBddRunner.traceability.openIssue",
+      "playwrightBddRunner.traceability.copyKey",
+      "playwrightBddRunner.traceability.linkScenario",
+      "playwrightBddRunner.traceability.hidePanel",
+      "playwrightBddRunner.traceability.pushScenarioText",
+    ],
+  };
 
   function registeredCommandIds(): string[] {
     const registered: string[] = [];
@@ -383,6 +593,28 @@ describe("command contributions ↔ handler registrations parity", () => {
     const contributed = pkg.contributes.commands.map((c) => c.command).sort();
     const registered = registeredCommandIds().sort();
     expect(registered).toEqual(contributed);
+  });
+
+  it("classifies every contributed command as palette-visible or explicitly hidden", () => {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    const paletteIds = palette.flatMap((entry) => entry.command === undefined ? [] : [entry.command]);
+    const contributed = pkg.contributes.commands.map((c) => c.command).sort();
+    const classified = [...paletteCommands.visible, ...paletteCommands.hidden].sort();
+    const effectiveVisible = contributed.filter(
+      (command) => {
+        const entries = palette.filter((entry) => entry.command === command);
+        return entries.length === 0 || entries.some((entry) => entry.when !== "false");
+      }
+    ).sort();
+
+    expect(new Set(paletteIds).size).toBe(paletteIds.length);
+    expect(classified).toEqual(contributed);
+    expect(effectiveVisible).toEqual([...paletteCommands.visible].sort());
+    for (const command of paletteCommands.hidden) {
+      const entries = palette.filter((entry) => entry.command === command);
+      expect(entries).toHaveLength(1);
+      expect(entries.every((entry) => entry.when === "false")).toBe(true);
+    }
   });
 
   it("places the Steps panel commands in the view menus, gated on the stepsExplorer view", () => {
@@ -795,11 +1027,11 @@ describe("traceability linkScenario contributions", () => {
     expect(whens).toContain("view == playwrightBddRunner.traceability && viewItem == traceabilityScenario");
   });
 
-  it("gates the palette entry on the traceability panel being enabled", () => {
+  it("hides the node action from the palette", () => {
     const palette = pkg.contributes.menus["commandPalette"]!;
-    expect(palette.find((e) => e.command === CMD)?.when).toBe(
-      "config.playwrightBddRunner.traceability.enablePanel"
-    );
+    const entries = palette.filter((entry) => entry.command === CMD);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.when).toBe("false");
   });
 });
 

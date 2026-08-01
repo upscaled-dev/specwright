@@ -15,7 +15,7 @@ If the Testing view is empty, start with [Troubleshooting: features do not appea
 | **Testing** view | Run, debug, stop, or inspect features, scenarios, outlines, and Examples rows. |
 | **Feature editor** | Use CodeLens above a feature, scenario, outline, or Examples row. |
 | **Editor and Explorer context menus** | Choose **Run Feature File** or other file-level actions. Use CodeLens or the Testing view to select an individual scenario or Examples row. |
-| **Command Palette** | Use commands under the **Specwright** category, with a `.feature` file open. |
+| **Command Palette** | Use commands under the **Specwright** category. Run and debug commands use the open `.feature` file, or let you pick one. |
 
 ![Run and Debug CodeLens in a feature file](../images/running_feature_code_lens.gif)
 
@@ -102,7 +102,7 @@ Use VS Code's **Stop** action in the Testing view. For a feature or scenario run
 
 ## Commands
 
-All commands appear under **Specwright** in the Command Palette. The run, discovery, and step commands are listed there with a `.feature` file open.
+Palette run and debug commands use the active `.feature` file. If none is open, select a feature file; scenario commands then use the scenario at the cursor or ask you to choose one. Commands that run with tags also ask for a tag expression.
 
 | Task | Commands |
 | --- | --- |
@@ -112,7 +112,7 @@ All commands appear under **Specwright** in the Command Palette. The run, discov
 | Change the Testing view | **Set Organization Strategy**, **Organize by Tags**, **Organize by File**, **Organize by Scenario Type**, **Flat Organization**, **Hierarchical Organization** |
 | Inspect the extension | **Show Test Output**, **Validate Configuration** |
 
-Some commands take their target from the menu or CodeLens item that launched them. The Testing view and CodeLens are the clearest way to choose an individual scenario or Examples row.
+CodeLens and menu actions continue to pass their exact target. The Testing view and CodeLens are the clearest way to choose an individual Scenario Outline Examples row.
 
 ## Limits to be aware of
 

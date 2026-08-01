@@ -724,10 +724,6 @@
           "when": "resourceExtname == .feature"
         },
         {
-          "command": "playwrightBddRunner.runFeatureFile",
-          "when": "resourceExtname == .feature"
-        },
-        {
           "command": "playwrightBddRunner.generateStepDefinitions",
           "when": "resourceExtname == .feature"
         },
@@ -769,7 +765,7 @@
         },
         {
           "command": "playwrightBddRunner.traceability.linkScenario",
-          "when": "config.playwrightBddRunner.traceability.enablePanel"
+          "when": "false"
         },
         {
           "command": "playwrightBddRunner.traceability.runAndPublish",
@@ -789,6 +785,10 @@
         },
         {
           "command": "playwrightBddRunner.traceability.hidePanel",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.pushScenarioText",
           "when": "false"
         },
         {

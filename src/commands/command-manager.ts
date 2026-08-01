@@ -23,6 +23,7 @@ import type { XrayCredentialStore } from "../xray/xray-credential-store";
 import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
 import { GenerateStepsCommand } from "./generate-steps";
 import { runInsertStep } from "./insert-step";
+import { commandArgFsPath, outlineNameForScenario, promptPaletteTags, resolvePaletteFeature, resolvePaletteScenario } from "./palette-target-resolver";
 import { TraceabilityCommands } from "./traceability-commands";
 import { runCapturedWithProgress } from "./captured-run-progress";
 
@@ -257,14 +258,7 @@ export class CommandManager {
     scenarioName: string | undefined
   ): string | undefined {
     if (!scenarioName) {return undefined;}
-    const parsed = this.getParsedFeature(filePath);
-    if (!parsed) {return undefined;}
-    const match = parsed.scenarios.find(
-      (s) =>
-        s.name === scenarioName &&
-        (lineNumber === undefined || s.lineNumber === lineNumber)
-    );
-    return match?.isScenarioOutline ? match.outlineName : undefined;
+    return outlineNameForScenario(this.getParsedFeature(filePath), lineNumber, scenarioName);
   }
 
   private getParsedFeature(filePath: string): ParsedFeature | undefined {
@@ -294,7 +288,8 @@ export class CommandManager {
     scenarioName: string | undefined,
     tags?: string,
     signal?: AbortSignal,
-    progress?: RunProgressObserver
+    progress?: RunProgressObserver,
+    paletteOutlineName?: string,
   ): Promise<RunOutputResult> {
     if (lineNumber === undefined) {
       const featureName = this.getParsedFeature(filePath)?.feature;
@@ -307,7 +302,7 @@ export class CommandManager {
       });
     }
 
-    const outlineName = this.resolveOutlineName(filePath, lineNumber, scenarioName);
+    const outlineName = paletteOutlineName ?? this.resolveOutlineName(filePath, lineNumber, scenarioName);
     const opts: TestExecutionOptions = {
       filePath,
       lineNumber,
@@ -329,9 +324,6 @@ export class CommandManager {
     } else {
       this.logger.error(`${label} failed`, { error: result.error, duration: result.duration });
     }
-    // Surface the captured test output to the output channel. These commands run the test
-    // once via the *WithOutput executor path (no live terminal), so without this the user
-    // would see no output at all.
     const combined = [result.output, result.error]
       .filter((s): s is string => typeof s === "string" && s.trim() !== "")
       .join("\n");
@@ -365,18 +357,22 @@ export class CommandManager {
   }
 
   private async runScenario(...args: CommandArguments): Promise<void> {
-    const [filePath, lineNumber, scenarioName] = args as [string, number | undefined, string | undefined];
-    if (!filePath) {throw new Error("File path is required");}
-
+    let [filePath, lineNumber, scenarioName] = args as [string | undefined, number | undefined, string | undefined];
+    let outlineName: string | undefined;
+    if (!filePath) {
+      const target = await resolvePaletteScenario(this.context);
+      if (!target) {return;}
+      ({ filePath, lineNumber, scenarioName, outlineName } = target);
+    }
     await this.runCapturedCommand("Scenario", filePath, lineNumber, (signal, progress) =>
-      this.runScenarioCore(filePath, lineNumber, scenarioName, undefined, signal, progress)
+      this.runScenarioCore(filePath, lineNumber, scenarioName, undefined, signal, progress, outlineName)
     );
   }
 
   private async runFeature(...args: CommandArguments): Promise<void> {
-    const [filePath] = args as [string];
-    if (!filePath) {throw new Error("File path is required");}
-
+    let [filePath] = args as [string | undefined];
+    filePath ??= await resolvePaletteFeature(this.context);
+    if (!filePath) {return;}
     await this.runCapturedCommand("Feature", filePath, undefined, (signal, progress) => {
       const featureName = this.getParsedFeature(filePath)?.feature;
       return this.context.testExecutor.runFeatureFileWithOutput({
@@ -394,11 +390,15 @@ export class CommandManager {
   }
 
   private async debugScenario(...args: CommandArguments): Promise<void> {
-    const [filePath, lineNumber, scenarioName] = args as [string, number | undefined, string | undefined];
-    if (!filePath) {throw new Error("File path is required");}
-
+    let [filePath, lineNumber, scenarioName] = args as [string | undefined, number | undefined, string | undefined];
+    let outlineName: string | undefined;
+    if (!filePath) {
+      const target = await resolvePaletteScenario(this.context);
+      if (!target) {return;}
+      ({ filePath, lineNumber, scenarioName, outlineName } = target);
+    }
     this.logger.info(`Debugging scenario: ${scenarioName ?? "unnamed"}`, { filePath, lineNumber });
-    const outlineName = this.resolveOutlineName(filePath, lineNumber, scenarioName);
+    outlineName ??= this.resolveOutlineName(filePath, lineNumber, scenarioName);
     await this.context.testExecutor.debugScenario({
       filePath,
       ...(lineNumber !== undefined ? { lineNumber } : {}),
@@ -445,22 +445,33 @@ export class CommandManager {
   }
 
   private async runFeatureWithTags(...args: CommandArguments): Promise<void> {
-    const [filePath, tags] = args as [string, string];
-    if (!filePath) {throw new Error("File path is required");}
+    let [filePath, tags] = args as [string | undefined, string | undefined];
+    if (!filePath) {
+      filePath = await resolvePaletteFeature(this.context);
+      if (!filePath) {return;}
+      tags = await promptPaletteTags();
+      if (tags === undefined) {return;}
+    }
     if (!tags) {throw new Error("Tags are required");}
-
     await this.runCapturedCommand("Feature with tags", filePath, undefined, (signal, progress) =>
       this.context.testExecutor.runFeatureFileWithOutput({ filePath, tags, signal, progress })
     );
   }
 
   private async runScenarioWithTags(...args: CommandArguments): Promise<void> {
-    const [filePath, lineNumber, scenarioName, tags] = args as [string, number | undefined, string | undefined, string];
-    if (!filePath) {throw new Error("File path is required");}
+    let [filePath, lineNumber, scenarioName, tags] = args as [string | undefined, number | undefined, string | undefined, string | undefined];
+    let outlineName: string | undefined;
+    if (!filePath) {
+      const target = await resolvePaletteScenario(this.context);
+      if (!target) {return;}
+      ({ filePath, lineNumber, scenarioName, outlineName } = target);
+      tags = await promptPaletteTags();
+      if (tags === undefined) {return;}
+    }
     if (!tags) {throw new Error("Tags are required");}
 
     await this.runCapturedCommand("Scenario with tags", filePath, lineNumber, (signal, progress) =>
-      this.runScenarioCore(filePath, lineNumber, scenarioName, tags, signal, progress)
+      this.runScenarioCore(filePath, lineNumber, scenarioName, tags, signal, progress, outlineName)
     );
   }
 
@@ -469,19 +480,8 @@ export class CommandManager {
     await this.context.testExecutor.runAllTestsInParallel();
   }
 
-  /**
-   * Commands wired into editor/explorer context menus are invoked by VS Code with a
-   * `vscode.Uri` as the first argument; programmatic/CodeLens callers pass a string path.
-   * Normalize both to an fsPath so downstream path operations don't receive a Uri object.
-   */
-  private firstArgToFsPath(arg: unknown): string | undefined {
-    if (typeof arg === "string") {return arg;}
-    const fsPath = (arg as { fsPath?: unknown } | undefined)?.fsPath;
-    return typeof fsPath === "string" ? fsPath : undefined;
-  }
-
   private async runScenarioWithContext(...args: CommandArguments): Promise<void> {
-    const filePath = this.firstArgToFsPath(args[0]);
+    const filePath = commandArgFsPath(args[0]);
     if (!filePath) {throw new Error("File path is required");}
     const lineNumber = typeof args[1] === "number" ? args[1] : undefined;
     const scenarioName = typeof args[2] === "string" ? args[2] : undefined;
@@ -492,7 +492,7 @@ export class CommandManager {
   }
 
   private async debugScenarioWithContext(...args: CommandArguments): Promise<void> {
-    const filePath = this.firstArgToFsPath(args[0]);
+    const filePath = commandArgFsPath(args[0]);
     if (!filePath) {throw new Error("File path is required");}
     const lineNumber = typeof args[1] === "number" ? args[1] : undefined;
     const scenarioName = typeof args[2] === "string" ? args[2] : undefined;
@@ -508,7 +508,7 @@ export class CommandManager {
   }
 
   private async runFeatureFileWithContext(...args: CommandArguments): Promise<void> {
-    const filePath = this.firstArgToFsPath(args[0]);
+    const filePath = commandArgFsPath(args[0]);
     if (!filePath) {throw new Error("File path is required");}
 
     await this.runCapturedCommand("Feature with context", filePath, undefined, (signal, progress) => {
