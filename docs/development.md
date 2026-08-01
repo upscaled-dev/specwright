@@ -73,7 +73,11 @@ The DevContainer is intentionally tool-agnostic: it ships only what the project 
 src/
   extension.ts                            # activation, wiring
   commands/
-    command-manager.ts                    # registers all playwrightBddRunner.* commands
+    command-manager.ts                    # registers all playwrightBddRunner.* commands; run/debug handlers
+    traceability-commands.ts              # traceability hub: board, sync, project scope; owns the two below
+    traceability-link-commands.ts         # link/unlink/create-from-scenario, tag writes, board mutations
+    traceability-publish-commands.ts      # run+publish, publish last run, attachments, run history
+    traceability-authoring-commands.ts    # bulk create, container create, push flows
     captured-run-progress.ts              # cancellable editor-run notification + live counts
     generate-steps.ts                     # orchestrates "Generate Missing Step Definitions"
     insert-step.ts                        # "Insert Step…" snippet builder + QuickPick
@@ -174,6 +178,6 @@ The repo has a convention for both (see the relevant `.claude/skills/*` markdown
 
 **Adding a command**:
 1. Declare it under `contributes.commands` in [package.json](../package.json) (with `category: "Specwright"` so it groups properly in the command palette).
-2. Register the handler in [CommandManager](../src/commands/command-manager.ts).
+2. Register it in [CommandManager](../src/commands/command-manager.ts): every command id stays in its registration table. Run/debug handler bodies live there too; traceability handler bodies belong in the module that owns the flow ([traceability-commands.ts](../src/commands/traceability-commands.ts) for board/sync, its link module for tag and link flows, its publish module for run+publish), with CommandManager delegating.
 3. If it's discoverable from a context menu, add it to the relevant `contributes.menus` block.
 4. Update [docs/runs.md](runs.md#commands).

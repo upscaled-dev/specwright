@@ -292,17 +292,6 @@ export class TraceabilityCommands {
       : false;
   }
 
-  private mergeCreatedKey(
-    adapter: TraceabilityAdapter | undefined,
-    key: string
-  ): void {
-    adapter?.remoteSearch?.mergeKeys([key]).catch((error) => {
-      this.logger.warn("Xray metadata merge for a newly created test failed", {
-        error: errMsg(error),
-      });
-    });
-  }
-
   private async refreshBoard(what: string): Promise<boolean> {
     try {
       await this.deps.subsystem()?.rebuildNow();
@@ -542,7 +531,6 @@ export class TraceabilityCommands {
       snapshot: () => this.deps.subsystem()?.getSnapshot(),
       board: () => this.board(),
       siteUrl: () => this.siteUrl(),
-      merge: (adapter, key) => this.mergeCreatedKey(adapter, key),
     });
     return this.linkCommands;
   }

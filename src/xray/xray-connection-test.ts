@@ -12,6 +12,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 const CONNECT_COMMAND = "playwrightBddRunner.traceability.connect";
 
 const MAX_PROBE_KEYS = 20;
+const NETWORK_FAILURE = "Could not reach Xray: check your network connection.";
 const MAX_PROJECT_PROBES = 3;
 
 export function rateLimitHeaders(headers: Headers): Record<string, string> {
@@ -416,7 +417,7 @@ export async function probeXrayConnection(
       ok: false,
       stage: "network",
       site,
-      message: "Could not reach Xray: check your network connection.",
+      message: NETWORK_FAILURE,
     };
   }
   if (!auth.ok) {
@@ -454,41 +455,47 @@ export async function probeXrayConnection(
     });
   }
 
-  const jql = buildKeysJql(keys);
-  let projects: XrayProjectSummary[];
-  let projectFailures: number;
-  try {
-    const probeA = await graphqlRequest(base, logger, jwt, "getTests", testsQuery(jql));
-    const probeB = await graphqlRequest(base, logger, jwt, "getTests + coverableIssues", coverageQuery(jql));
-    if (!probeA.ok || !probeB.ok) {
-      return finish({
-        ok: false,
-        stage: "graphql",
-        site,
-        message: graphqlFailureMessage(probeA.ok ? probeB : probeA),
-      });
-    }
-    await probeErrorShape(base, logger, jwt);
-    const probed = await probeProjects(base, logger, jwt, keys, jiraKeys, jira.truncated);
-    projects = probed.summaries;
-    projectFailures = probed.failed;
-  } catch (error) {
-    logger.error(`GraphQL request error: ${scrubJwtLike(errMsg(error))}`);
-    return finish({
-      ok: false,
-      stage: "network",
-      site,
-      message: "Could not reach Xray: check your network connection.",
-    });
+  const leg = await runGraphqlLeg(base, logger, jwt, keys, jiraKeys, jira.truncated);
+  if (!leg.ok) {
+    return finish({ ok: false, stage: leg.stage, site, message: leg.message });
   }
 
   return finish({
     ok: true,
     stage: "ok",
     site,
-    message: successMessage(site, projects, projectFailures, jira),
-    projects,
+    message: successMessage(site, leg.projects, leg.failed, jira),
+    projects: leg.projects,
   });
+}
+
+type GraphqlLegResult =
+  | { readonly ok: true; readonly projects: XrayProjectSummary[]; readonly failed: number }
+  | { readonly ok: false; readonly stage: "graphql" | "network"; readonly message: string };
+
+/** The GraphQL probe sequence: two shape probes, the error-shape probe, then per-project counts. */
+async function runGraphqlLeg(
+  base: string,
+  logger: Logger,
+  jwt: string,
+  keys: string[],
+  jiraKeys: Set<string> | undefined,
+  jiraTruncated: boolean
+): Promise<GraphqlLegResult> {
+  const jql = buildKeysJql(keys);
+  try {
+    const probeA = await graphqlRequest(base, logger, jwt, "getTests", testsQuery(jql));
+    const probeB = await graphqlRequest(base, logger, jwt, "getTests + coverableIssues", coverageQuery(jql));
+    if (!probeA.ok || !probeB.ok) {
+      return { ok: false, stage: "graphql", message: graphqlFailureMessage(probeA.ok ? probeB : probeA) };
+    }
+    await probeErrorShape(base, logger, jwt);
+    const probed = await probeProjects(base, logger, jwt, keys, jiraKeys, jiraTruncated);
+    return { ok: true, projects: probed.summaries, failed: probed.failed };
+  } catch (error) {
+    logger.error(`GraphQL request error: ${scrubJwtLike(errMsg(error))}`);
+    return { ok: false, stage: "network", message: NETWORK_FAILURE };
+  }
 }
 
 // Command wrapper: keeps the connect-before-testing gate and the toast presentation. The panel

@@ -65,8 +65,8 @@ function buildHoverMarkdown(matches: ParsedStepDefWithFile[]): vscode.MarkdownSt
   // No command links are emitted and step-file content is interpolated raw,
   // so the markdown must stay untrusted.
   const md = new vscode.MarkdownString();
-  const suffix = matches.length > 1 ? "es" : "";
-  md.appendMarkdown(`**Playwright-BDD step**: ${matches.length} match${suffix}\n\n`);
+  const noun = matches.length > 1 ? "matches" : "match";
+  md.appendMarkdown(`**Playwright-BDD step**: ${matches.length} ${noun}\n\n`);
   for (const match of matches) {
     const rel = toWorkspaceRelative(match.filePath);
     md.appendMarkdown(`- \`${match.pattern}\`: ${rel}:${match.line + 1}\n`);

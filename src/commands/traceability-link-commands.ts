@@ -41,7 +41,6 @@ export interface TraceabilityLinkCommandDeps {
   readonly snapshot: () => TraceabilitySnapshot | undefined;
   readonly board: () => BoardPanel;
   readonly siteUrl: () => string;
-  readonly merge: (adapter: TraceabilityAdapter | undefined, key: string) => void;
 }
 
 function issueKeyFromArg(arg: unknown): string | undefined {
@@ -236,7 +235,7 @@ export class TraceabilityLinkCommands {
         vscode.window.showErrorMessage(message);
       },
     };
-    const merge = (key: string): void => this.deps.merge(adapter, key);
+    const merge = (key: string): void => this.merge(adapter, key);
     try {
       await authorScenarioTest(spec, adapter.label, ui, {
         createTest: (input, signal) => authoring.createTest(input, signal),
@@ -261,7 +260,16 @@ export class TraceabilityLinkCommands {
   }
 
   public mergeCreatedKey(key: string): void {
-    this.deps.merge(this.deps.activeAdapter(), key);
+    this.merge(this.deps.activeAdapter(), key);
+  }
+
+  // Fire-and-forget: metadata freshness is best-effort and must never block a create flow.
+  private merge(adapter: TraceabilityAdapter | undefined, key: string): void {
+    adapter?.remoteSearch?.mergeKeys([key]).catch((error) => {
+      this.logger.warn("Xray metadata merge for a newly created test failed", {
+        error: errMsg(error),
+      });
+    });
   }
 
   private async resolveProjectForCreate(): Promise<string | undefined> {
