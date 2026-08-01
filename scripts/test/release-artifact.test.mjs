@@ -91,7 +91,7 @@ test("release orchestration keeps artifact gates mandatory and ordered", () => {
 
 test("CI packages only after quality and integration and keeps maps outside the VSIX", () => {
   const workflow = readFileSync(resolve(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  assert.match(workflow, /package:\n[\s\S]*?needs: \[quality, integration\]/u);
+  assert.match(workflow, /package:\r?\n[\s\S]*?needs: \[quality, integration\]/u);
   assert.match(workflow, /run: npm run package:release[\s\S]*?run: xvfb-run -a npm run test:vsix[\s\S]*?run: npm run verify:release/u);
   assert.match(workflow, /attestations: write/u);
 
