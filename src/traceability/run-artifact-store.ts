@@ -7,6 +7,7 @@ import {
   normalizePathKey,
 } from "../utils/playwright-json-parser";
 import { Logger } from "../utils/logger";
+import { EXECUTION_LIMITS } from "../core/execution-limits";
 import type { ScenarioRef } from "./scenario-ref";
 import {
   BatchSelection,
@@ -312,6 +313,22 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+function serializedBytes(artifacts: readonly RunArtifact[]): number {
+  return Buffer.byteLength(JSON.stringify(artifacts));
+}
+
+function pruneArtifacts(artifacts: RunArtifact[], maxArtifacts: number): boolean {
+  let changed = false;
+  while (
+    artifacts.length > maxArtifacts ||
+    serializedBytes(artifacts) > EXECUTION_LIMITS.artifactBytesPerWorkspace
+  ) {
+    artifacts.pop();
+    changed = true;
+  }
+  return changed;
+}
+
 // The last few sealed run artifacts, newest first, mirrored into workspaceState so they survive a
 // reload. A publish buffer, not a history feature: older artifacts drop silently past the cap.
 export class RunArtifactStore implements RunArtifactStoreContract {
@@ -334,10 +351,13 @@ export class RunArtifactStore implements RunArtifactStoreContract {
     private readonly logger: Logger
   ) {
     const stored = memento.get<unknown>(RunArtifactStore.STORAGE_KEY);
-    this.artifacts = (Array.isArray(stored) ? stored : [])
+    const candidates = Array.isArray(stored) ? stored : [];
+    this.artifacts = candidates
       .filter(isValidArtifact)
       .slice(0, RunArtifactStore.MAX)
       .map((artifact) => deepFreeze(artifact));
+    const pruned = pruneArtifacts(this.artifacts, RunArtifactStore.MAX);
+    if (pruned || this.artifacts.length !== candidates.length) {this.save();}
   }
 
   // Installed once at wiring time (the traceability model outlives batches and provider swaps). The
@@ -366,15 +386,23 @@ export class RunArtifactStore implements RunArtifactStoreContract {
     if (handle !== this.openHandle || builder === undefined) {return undefined;}
     this.openBuilder = undefined;
     this.openHandle = undefined;
-    this.append(builder.seal(cancelled));
-    return this.artifacts[0];
+    const sealed = builder.seal(cancelled);
+    this.append(sealed);
+    return this.artifacts.find((artifact) => artifact.id === sealed.id);
   }
 
   public append(artifact: RunArtifact): void {
-    this.artifacts.unshift(deepFreeze(structuredClone(artifact)));
-    if (this.artifacts.length > RunArtifactStore.MAX) {
-      this.artifacts.length = RunArtifactStore.MAX;
+    const stored = deepFreeze(structuredClone(artifact));
+    if (serializedBytes([stored]) > EXECUTION_LIMITS.artifactBytesPerWorkspace) {
+      this.logger.warn("Run artifact exceeds the workspace storage budget and was not retained", {
+        artifactId: stored.id,
+        maxBytes: EXECUTION_LIMITS.artifactBytesPerWorkspace,
+      });
+      this.save();
+      return;
     }
+    this.artifacts.unshift(stored);
+    pruneArtifacts(this.artifacts, RunArtifactStore.MAX);
     this.persist();
   }
 
@@ -408,6 +436,10 @@ export class RunArtifactStore implements RunArtifactStoreContract {
   // the in-memory list, which is already current, so the announcement does not wait on the write.
   private persist(): void {
     this.changeEmitter.fire();
+    this.save();
+  }
+
+  private save(): void {
     Promise.resolve(this.memento.update(RunArtifactStore.STORAGE_KEY, this.artifacts)).catch(
       (error: unknown) => {
         this.logger.warn("Failed to persist run artifacts", { error: String(error) });

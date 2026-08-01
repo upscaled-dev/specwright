@@ -2,8 +2,16 @@ import { describe, it, expect, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { PlaywrightJsonParser, type ScenarioResult } from "../../utils/playwright-json-parser";
+import {
+  PlaywrightJsonParser,
+  type ScenarioResult,
+} from "../../utils/playwright-json-parser";
+import {
+  PlaywrightInlineAttachmentTooLargeError,
+  PlaywrightReportTooLargeError,
+} from "../../utils/playwright-report-reader";
 import { Logger } from "../../utils/logger";
+import { EXECUTION_LIMITS } from "../../core/execution-limits";
 
 describe("PlaywrightJsonParser", () => {
   const parser = PlaywrightJsonParser.create(Logger.create());
@@ -142,6 +150,128 @@ describe("PlaywrightJsonParser", () => {
       }],
     });
     expect(parser.parse(report)[0]?.attachmentPaths).toEqual(["/ws/test-results/trace.zip"]);
+  });
+
+  it("rejects a report exceeding the per-run byte limit", () => {
+    const actualBytes = EXECUTION_LIMITS.reportBytesPerRun + 1;
+    expect(() => parser.parse("x".repeat(actualBytes))).toThrow(PlaywrightReportTooLargeError);
+    expect(() => parser.parse("x".repeat(actualBytes))).toThrowError(
+      new PlaywrightReportTooLargeError(actualBytes)
+    );
+  });
+
+  it("accepts a report exactly at the per-run byte limit", () => {
+    const report = '{"suites":[]}' + " ".repeat(
+      EXECUTION_LIMITS.reportBytesPerRun - Buffer.byteLength('{"suites":[]}')
+    );
+
+    expect(parser.parse(report)).toEqual([]);
+  });
+
+  it("rejects an inline attachment exceeding its decoded byte limit", () => {
+    const actualBytes = EXECUTION_LIMITS.inlineAttachmentBytes + 1;
+    const report = JSON.stringify({
+      suites: [{
+        specs: [{
+          title: "Oversized evidence",
+          tests: [{
+            results: [{
+              status: "failed",
+              attachments: [{ name: "trace", body: Buffer.alloc(actualBytes).toString("base64") }],
+            }],
+          }],
+        }],
+      }],
+    });
+
+    expect(() => parser.parse(report)).toThrow(PlaywrightInlineAttachmentTooLargeError);
+    expect(() => parser.parse(report)).toThrowError(
+      new PlaywrightInlineAttachmentTooLargeError("trace", actualBytes)
+    );
+  });
+
+  it("accepts an inline attachment exactly at its decoded byte limit", () => {
+    const report = JSON.stringify({
+      suites: [{
+        specs: [{
+          title: "Bounded evidence",
+          tests: [{
+            results: [{
+              status: "passed",
+              attachments: [{
+                name: "trace",
+                body: Buffer.alloc(EXECUTION_LIMITS.inlineAttachmentBytes).toString("base64"),
+              }],
+            }],
+          }],
+        }],
+      }],
+    });
+
+    expect(parser.parse(report)).toMatchObject([{ scenarioName: "Bounded evidence" }]);
+  });
+
+  it("reads extension-launched report files asynchronously and checks their size before reading", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pw-report-"));
+    const reportPath = path.join(tempDir, "results.json");
+    try {
+      fs.writeFileSync(reportPath, JSON.stringify({
+        suites: [{ specs: [{ title: "Async", tests: [{ results: [{ status: "passed" }] }] }] }],
+      }));
+      await expect(parser.parseFromFileAsync(reportPath)).resolves.toMatchObject([
+        { scenarioName: "Async", status: "passed" },
+      ]);
+
+      fs.truncateSync(reportPath, EXECUTION_LIMITS.reportBytesPerRun + 1);
+      const oversizedRead = parser.parseFromFileAsync(reportPath);
+      await expect(oversizedRead).rejects.toBeInstanceOf(PlaywrightReportTooLargeError);
+      await expect(oversizedRead).rejects.toThrowError(
+        new PlaywrightReportTooLargeError(EXECUTION_LIMITS.reportBytesPerRun + 1)
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("parses a 10,000-scenario report off-thread within the recorded run budgets", async () => {
+    const report = JSON.stringify({
+      suites: [{
+        specs: Array.from({ length: 10_000 }, (_, index) => ({
+          title: `Scenario ${index}`,
+          tests: [{ results: [{ status: "passed", duration: index % 100 }] }],
+        })),
+      }],
+    });
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pw-benchmark-"));
+    const reportPath = path.join(tempDir, "results.json");
+    fs.writeFileSync(reportPath, report);
+    expect(Buffer.byteLength(report)).toBeGreaterThan(EXECUTION_LIMITS.asyncReportParseBytes);
+    let sampler: NodeJS.Timeout | undefined;
+    try {
+      const heapBefore = process.memoryUsage().heapUsed;
+      let peakHeap = heapBefore;
+      let eventLoopTicks = 0;
+      sampler = setInterval(() => {
+        peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed);
+        eventLoopTicks += 1;
+      }, 1);
+      const started = performance.now();
+
+      const results = await parser.parseFromFileAsync(reportPath);
+      const durationMs = performance.now() - started;
+      clearInterval(sampler);
+      sampler = undefined;
+      peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed);
+      const heapGrowthBytes = Math.max(0, peakHeap - heapBefore);
+
+      expect(results).toHaveLength(10_000);
+      expect(durationMs).toBeLessThan(EXECUTION_LIMITS.benchmarkDurationMs);
+      expect(heapGrowthBytes).toBeLessThan(EXECUTION_LIMITS.runHeapGrowthBytes);
+      expect(eventLoopTicks).toBeGreaterThan(0);
+    } finally {
+      if (sampler) {clearInterval(sampler);}
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("extracts feature path + line from annotation", () => {
@@ -417,6 +547,42 @@ describe("PlaywrightJsonParser", () => {
       // bddgen rewrites the generated spec between runs; the next parse must pick that up.
       writeSpec(25);
       expect(parser.parse(report)[0]?.lineNumber).toBe(25);
+    });
+
+    it("keeps generated-spec caches isolated across overlapping async parses", async () => {
+      const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pw-bdd-"));
+      tmpDirs.push(projectRoot);
+      const genDir = path.join(projectRoot, ".features-gen");
+      fs.mkdirSync(path.join(genDir, "features"), { recursive: true });
+      const specRel = "features/test.feature.spec.js";
+      const specPath = path.join(genDir, specRel);
+      const writeSpec = (pickleLine: number): void => fs.writeFileSync(specPath, [
+        "// Generated from: features/test.feature",
+        "const bddFileData = [ // bdd-data-start",
+        `  {"pwTestLine":14,"pickleLine":${pickleLine},"tags":[]},`,
+        "];",
+      ].join("\n"));
+      const report = JSON.stringify({
+        config: { rootDir: genDir, configFile: path.join(projectRoot, "playwright.config.ts") },
+        suites: [{ specs: [{
+          title: "Example #1",
+          file: specRel,
+          line: 14,
+          tests: [{ results: [{ status: "passed" }] }],
+        }] }],
+      });
+      const firstPath = path.join(projectRoot, "first.json");
+      const secondPath = path.join(projectRoot, "second.json");
+      fs.writeFileSync(firstPath, report.padEnd(EXECUTION_LIMITS.asyncReportParseBytes + 1));
+      fs.writeFileSync(secondPath, report.padEnd(8 * 1024 * 1024));
+      writeSpec(18);
+
+      const first = parser.parseFromFileAsync(firstPath);
+      const second = parser.parseFromFileAsync(secondPath);
+      expect((await first)[0]?.lineNumber).toBe(18);
+      writeSpec(25);
+
+      expect((await second)[0]?.lineNumber).toBe(25);
     });
 
     it("falls back to the spec file when the generated spec can't be read", () => {

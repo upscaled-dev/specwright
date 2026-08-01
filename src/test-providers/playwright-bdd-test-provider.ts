@@ -632,6 +632,7 @@ export class PlaywrightBddTestProvider {
         useReporterCounts ? completed : undefined,
         useReporterCounts ? total : undefined
       ),
+      onOutput: (stream, output) => live.appendOutput(stream, output),
     };
   }
 
@@ -698,6 +699,7 @@ export class PlaywrightBddTestProvider {
             artifactBatch: batch,
             progress,
           });
+          live.finishOutput();
           if (this.settleCancelledRun(signal, test, run, live)) {return;}
           this.appendRunOutput(run, result, test, test.uri.fsPath);
           this.applyResultsToChildren(test, run, result, test.uri.fsPath, live);
@@ -715,6 +717,7 @@ export class PlaywrightBddTestProvider {
             ...(outlineName ? { outlineName } : {}),
           };
           const result = await this.context.testExecutor.runScenarioWithOutput(options);
+          live.finishOutput();
           if (this.settleCancelledRun(signal, test, run, live)) {return;}
           this.appendRunOutput(run, result, test, test.uri.fsPath);
           this.applyResultsToChildren(test, run, result, test.uri.fsPath, live);
@@ -732,6 +735,7 @@ export class PlaywrightBddTestProvider {
             ...(outlineName ? { outlineName } : {}),
           };
           const result = await this.context.testExecutor.runScenarioWithOutput(options);
+          live.finishOutput();
           if (this.settleCancelledRun(signal, test, run, live)) {return;}
           this.appendRunOutput(run, result, test, test.uri.fsPath);
           this.applyStatusToItem(test, run, result, test.uri.fsPath, live);
@@ -758,6 +762,7 @@ export class PlaywrightBddTestProvider {
       const progress = this.liveProgressObserver(live);
       const tag = test.id.slice("tag:".length) || test.label;
       const result = await this.context.testExecutor.runAllTestsWithTagsOutput(tag, signal, batch, progress);
+      live.finishOutput();
       if (this.settleCancelledRun(signal, test, run, live)) {return;}
       this.appendRunOutput(run, result, test);
       this.applyResultsToChildren(test, run, result, undefined, live);
@@ -779,6 +784,7 @@ export class PlaywrightBddTestProvider {
         progress,
         ...(featureName ? { featureName } : {}),
       });
+      live.finishOutput();
       // Killed mid-group: don't aggregate the killed file's red result, and skip the whole subtree
       // rather than leaving the earlier files' statuses half-applied.
       if (this.settleCancelledRun(signal, test, run, live)) {return;}
@@ -842,6 +848,9 @@ export class PlaywrightBddTestProvider {
       .join("\n");
     const block = extractMissingStepsBlock(combined);
     if (block === "") {return "";}
+    if (result.outputStreamed) {
+      return 'Tip: run "Playwright-BDD: Generate Missing Step Definitions" to scaffold these.';
+    }
     return `${block}\n\nTip: run "Playwright-BDD: Generate Missing Step Definitions" to scaffold these.`;
   }
 
@@ -925,6 +934,7 @@ export class PlaywrightBddTestProvider {
       // multi-project/retry entries and overstates elapsed time.
       return this.context.playwrightJsonParser.formatResults(details, workspaceRoot, result.duration);
     }
+    if (result.outputStreamed) {return "";}
     // No parsed scenarios (e.g. a pre-run hook or bddgen failure): show the raw output so the
     // user still sees why the run produced nothing.
     return [result.output, result.error]
@@ -1354,7 +1364,7 @@ export class PlaywrightBddTestProvider {
             if (signal.aborted) {
               this.markSubtreeSkipped(test, run);
             } else {
-              this.applyDebugReportStatus(test, run, report.jsonPath, batch);
+              await this.applyDebugReportStatus(test, run, report.jsonPath, batch);
             }
           } finally {
             report.dispose();
@@ -1370,19 +1380,21 @@ export class PlaywrightBddTestProvider {
 
   // When the report is missing or unparseable the status is left unset; a stale icon is less
   // wrong than marking a passing debug run skipped/failed.
-  private applyDebugReportStatus(
+  private async applyDebugReportStatus(
     test: vscode.TestItem,
     run: vscode.TestRun,
     reportPath: string,
     batch: number | undefined
-  ): void {
-    if (!fs.existsSync(reportPath)) {
+  ): Promise<void> {
+    try {
+      await fs.promises.access(reportPath);
+    } catch {
       this.context.logger.debug(
         `No JSON report at ${reportPath} after the debug session; leaving the test status unset`
       );
       return;
     }
-    const details = this.context.playwrightJsonParser.parseFromFile(reportPath);
+    const details = await this.context.playwrightJsonParser.parseFromFileAsync(reportPath);
     if (details.length === 0) {
       this.context.logger.debug(
         `Debug JSON report at ${reportPath} contained no scenario results; leaving the test status unset`

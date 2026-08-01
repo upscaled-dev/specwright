@@ -65,6 +65,7 @@ export class LiveTestRunProgress {
   private readonly statusByItem = new Map<vscode.TestItem, ScenarioStatus>();
   private readonly resultByItem = new Map<vscode.TestItem, ScenarioResult>();
   private readonly startedItems = new Set<vscode.TestItem>();
+  private readonly pendingCarriageReturn = { stdout: false, stderr: false };
 
   public static create(options: LiveTestRunProgressOptions): LiveTestRunProgress {
     return new LiveTestRunProgress(options);
@@ -153,6 +154,21 @@ export class LiveTestRunProgress {
 
   public statusFor(item: vscode.TestItem): ScenarioStatus | undefined {
     return this.statusByItem.get(item);
+  }
+
+  /** Stream process output into the open Test Results run while the process is active. */
+  public appendOutput(stream: "stdout" | "stderr", text: string): void {
+    const joined = `${this.pendingCarriageReturn[stream] ? "\r" : ""}${text}`;
+    this.pendingCarriageReturn[stream] = joined.endsWith("\r");
+    const complete = this.pendingCarriageReturn[stream] ? joined.slice(0, -1) : joined;
+    if (complete !== "") {this.run.appendOutput(complete.replace(/\r\n|\n/g, "\r\n"));}
+  }
+
+  public finishOutput(): void {
+    for (const stream of ["stdout", "stderr"] as const) {
+      if (this.pendingCarriageReturn[stream]) {this.run.appendOutput("\r");}
+      this.pendingCarriageReturn[stream] = false;
+    }
   }
 
   /** Reapply a final result only when it changes state or visible result detail. */
@@ -304,10 +320,12 @@ export function beginExternalTestRun(options: ExternalTestRunOptions): RunProgre
       onTestEnd: (result, completed, total) => {
         live.apply(result, completed, total);
       },
+      onOutput: (stream, output) => live.appendOutput(stream, output),
     },
     complete: (result) => {
       if (ended) {return;}
       try {
+        live.finishOutput();
         if (result.error === "Cancelled") {live.cancel();}
         else {options.applyFinal(run, result, live);}
       } finally {
@@ -315,6 +333,7 @@ export function beginExternalTestRun(options: ExternalTestRunOptions): RunProgre
       }
     },
     end: () => {
+      live.finishOutput();
       live.cancel();
       close();
     },

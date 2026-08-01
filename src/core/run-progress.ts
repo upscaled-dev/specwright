@@ -5,6 +5,7 @@ import type { RunOutputResult } from "./test-executor";
 export interface RunProgressObserver {
   onBegin?(total: number): void;
   onTestEnd?(result: ScenarioResult, completed: number, total: number): void;
+  onOutput?(stream: "stdout" | "stderr", text: string): void;
 }
 
 /** One open UI run that consumes live events and reconciles the completed report. */
@@ -20,6 +21,7 @@ export function combineRunProgressObservers(
 ): RunProgressObserver | undefined {
   const active = observers.filter((observer): observer is RunProgressObserver => observer !== undefined);
   if (active.length === 0) {return undefined;}
+  const hasOutputConsumer = active.some((observer) => observer.onOutput !== undefined);
   return {
     onBegin: (total) => {
       for (const observer of active) {
@@ -33,5 +35,12 @@ export function combineRunProgressObservers(
         } catch { /* one UI consumer cannot block another */ }
       }
     },
+    ...(hasOutputConsumer ? {
+      onOutput: (stream: "stdout" | "stderr", output: string) => {
+        for (const observer of active) {
+          try {observer.onOutput?.(stream, output);} catch { /* one UI consumer cannot block another */ }
+        }
+      },
+    } : {}),
   };
 }

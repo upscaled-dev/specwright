@@ -12,6 +12,7 @@ import { BreakpointMirror } from "../../core/breakpoint-mirror";
 import { PlaywrightBddExtensionContext } from "../../types";
 import { BddgenDiagnosticsProvider } from "../../providers/bddgen-diagnostics-provider";
 import { LIVE_REPORT_FILE_ENV } from "../../core/live-reporter-protocol";
+import { EXECUTION_LIMITS } from "../../core/execution-limits";
 
 interface ShellCall {
   command: string;
@@ -272,6 +273,27 @@ describe("TestExecutor temporary report lifetime", () => {
     } else if (outcome === "runner failure") {
       expect(result.error).toBe("runner failed");
     }
+  });
+
+  it("fails an oversized report with its specific byte-limit diagnostic", async () => {
+    const shell: ShellRunner = async (_command, _workingDir, env) => {
+      const jsonPath = env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"];
+      if (jsonPath) {
+        fs.writeFileSync(jsonPath, "");
+        fs.truncateSync(jsonPath, EXECUTION_LIMITS.reportBytesPerRun + 1);
+      }
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell);
+
+    const result = await executor.runFeatureFileWithOutput({ filePath: "/tmp/x.feature" });
+
+    expect(result).toMatchObject({
+      success: false,
+      error:
+        `Playwright JSON report exceeds the ${EXECUTION_LIMITS.reportBytesPerRun}-byte limit ` +
+        `(received ${EXECUTION_LIMITS.reportBytesPerRun + 1} bytes).`,
+    });
   });
 });
 

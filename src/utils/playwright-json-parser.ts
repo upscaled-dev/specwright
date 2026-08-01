@@ -3,6 +3,13 @@ import * as path from "path";
 import { Logger } from "./logger";
 import { parseBddSourceData } from "../parsers/bdd-file-data-parser";
 import { resolveTestStatus } from "../core/test-result-status";
+import {
+  collectPlaywrightAttachmentPaths,
+  isPlaywrightReportLimitError,
+  parsePlaywrightReportText,
+  readPlaywrightReport,
+  readPlaywrightReportSync,
+} from "./playwright-report-reader";
 
 /**
  * Status as exposed to consumers. Playwright also reports `timedOut` and `interrupted`,
@@ -134,7 +141,7 @@ interface RawResult {
   duration?: number;
   error?: { message?: string; stack?: string };
   steps?: RawStep[];
-  attachments?: Array<{ path?: string }>;
+  attachments?: Array<{ name?: string; path?: string; body?: string }>;
 }
 
 interface RawTest {
@@ -154,19 +161,6 @@ function detailedOutcome(rawStatus: string | undefined): ScenarioOutcome {
   if (status === "interrupted") {return "interrupted";}
   if (status === "skipped") {return "skipped";}
   return "passed";
-}
-
-/** Collect on-disk evidence paths across every attempt, skipping inline (blob) attachments. */
-function collectAttachmentPaths(attempts: RawResult[]): string[] {
-  const paths: string[] = [];
-  for (const attempt of attempts) {
-    for (const attachment of attempt.attachments ?? []) {
-      if (typeof attachment.path === "string" && attachment.path !== "" && !paths.includes(attachment.path)) {
-        paths.push(attachment.path);
-      }
-    }
-  }
-  return paths;
 }
 
 /**
@@ -217,12 +211,17 @@ export class PlaywrightJsonParser {
 
     let raw: RawPlaywrightReport;
     try {
-      raw = JSON.parse(jsonText) as RawPlaywrightReport;
+      raw = parsePlaywrightReportText(jsonText) as RawPlaywrightReport;
     } catch (err) {
+      if (isPlaywrightReportLimitError(err)) {throw err;}
       this.logger.warn("Failed to parse Playwright JSON", { error: String(err) });
       return [];
     }
 
+    return this.parseReport(raw);
+  }
+
+  private parseReport(raw: RawPlaywrightReport): ScenarioResult[] {
     const ctx: ReportContext = {
       rootDir: raw.config?.rootDir,
       baseDir: raw.config?.configFile ? path.dirname(raw.config.configFile) : raw.config?.rootDir,
@@ -236,10 +235,26 @@ export class PlaywrightJsonParser {
   }
 
   public parseFromFile(jsonPath: string): ScenarioResult[] {
+    this.specDataCache.clear();
     try {
-      const text = fs.readFileSync(jsonPath, "utf8");
-      return this.parse(text);
+      return this.parseReport(readPlaywrightReportSync(jsonPath) as RawPlaywrightReport);
     } catch (err) {
+      if (isPlaywrightReportLimitError(err)) {throw err;}
+      this.logger.warn(`Could not read Playwright JSON report at ${jsonPath}`, {
+        error: String(err),
+      });
+      return [];
+    }
+  }
+
+  /** Read extension-launched reports without blocking the extension host on file I/O. */
+  public async parseFromFileAsync(jsonPath: string): Promise<ScenarioResult[]> {
+    try {
+      const raw = await readPlaywrightReport(jsonPath) as RawPlaywrightReport;
+      this.specDataCache.clear();
+      return this.parseReport(raw);
+    } catch (err) {
+      if (isPlaywrightReportLimitError(err)) {throw err;}
       this.logger.warn(`Could not read Playwright JSON report at ${jsonPath}`, {
         error: String(err),
       });
@@ -349,7 +364,7 @@ export class PlaywrightJsonParser {
       attempts.slice(0, -1).some((attempt) =>
         resolveTestStatus(attempt.status, test.expectedStatus) === "failed"
       );
-    const attachmentPaths = collectAttachmentPaths(attempts);
+    const attachmentPaths = collectPlaywrightAttachmentPaths(attempts);
 
     return {
       scenarioName,

@@ -574,7 +574,7 @@ export class TraceabilityModel implements vscode.Disposable {
       return store;
     }
     const scan = this.playwrightJsonParser.toStatusMap(
-      this.playwrightJsonParser.parseFromFile(found.path),
+      await this.playwrightJsonParser.parseFromFileAsync(found.path),
       found.root
     );
     return found.mtimeMs > this.runResultStore.lastIngestAt

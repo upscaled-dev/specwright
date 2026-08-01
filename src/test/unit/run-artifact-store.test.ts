@@ -10,6 +10,7 @@ import {
 } from "../../traceability/run-artifact-store";
 import { BatchSelection, PreflightDecision, RunArtifact, RunArtifactResult } from "../../traceability/contracts";
 import { ScenarioResult } from "../../utils/playwright-json-parser";
+import { EXECUTION_LIMITS } from "../../core/execution-limits";
 
 const logger = Logger.create();
 
@@ -198,6 +199,74 @@ describe("RunArtifactStore", () => {
     expect(store.list()).toHaveLength(10);
     expect(store.list()[0]?.id).toBe("run-12");
     expect(store.list()[9]?.id).toBe("run-3");
+  });
+
+  it("prunes oldest artifacts until persisted workspace data fits the byte budget", () => {
+    const memento = fakeMemento();
+    const store = new RunArtifactStore(memento, logger);
+    const command = "x".repeat(Math.floor(EXECUTION_LIMITS.artifactBytesPerWorkspace * 0.55));
+    const largeArtifact = (id: string): RunArtifact => artifact({
+      id,
+      shards: [{ workingDir: "/ws", command, exitCode: 0, success: true }],
+    });
+
+    store.append(largeArtifact("old"));
+    store.append(largeArtifact("new"));
+
+    expect(store.list().map((item) => item.id)).toEqual(["new"]);
+    const persisted = memento.get<RunArtifact[]>("specwright.runArtifacts") ?? [];
+    expect(Buffer.byteLength(JSON.stringify(persisted))).toBeLessThanOrEqual(
+      EXECUTION_LIMITS.artifactBytesPerWorkspace
+    );
+  });
+
+  it("drops an artifact that cannot fit in the workspace byte budget by itself", () => {
+    const memento = fakeMemento();
+    const store = new RunArtifactStore(memento, logger);
+    store.append(artifact({
+      id: "too-large",
+      shards: [{
+        workingDir: "/ws",
+        command: "x".repeat(EXECUTION_LIMITS.artifactBytesPerWorkspace),
+        exitCode: 0,
+        success: true,
+      }],
+    }));
+
+    expect(store.list()).toEqual([]);
+    expect(memento.get("specwright.runArtifacts")).toEqual([]);
+  });
+
+  it("does not return an older artifact when an oversized sealed batch is dropped", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    store.append(artifact({ id: "older" }));
+    const batch = store.beginBatch(SEL);
+    store.contributeShard(batch, shard({
+      command: "x".repeat(EXECUTION_LIMITS.artifactBytesPerWorkspace),
+      details: [scenario()],
+    }));
+
+    expect(store.sealBatch(batch, false)).toBeUndefined();
+    expect(store.latest()?.id).toBe("older");
+  });
+
+  it("rewrites oversized hydrated workspace state within the byte budget", () => {
+    const command = "x".repeat(Math.floor(EXECUTION_LIMITS.artifactBytesPerWorkspace * 0.55));
+    const memento = fakeMemento({
+      "specwright.runArtifacts": [
+        artifact({ id: "new", shards: [{ workingDir: "/ws", command, exitCode: 0, success: true }] }),
+        artifact({ id: "old", shards: [{ workingDir: "/ws", command, exitCode: 0, success: true }] }),
+      ],
+    });
+
+    const store = new RunArtifactStore(memento, logger);
+
+    expect(store.list().map((item) => item.id)).toEqual(["new"]);
+    const persisted = memento.get<RunArtifact[]>("specwright.runArtifacts") ?? [];
+    expect(persisted.map((item) => item.id)).toEqual(["new"]);
+    expect(Buffer.byteLength(JSON.stringify(persisted))).toBeLessThanOrEqual(
+      EXECUTION_LIMITS.artifactBytesPerWorkspace
+    );
   });
 
   it("latestOutcome scans newest-first for the test key (badge parity)", () => {

@@ -99,6 +99,22 @@ function progressFor(
 }
 
 describe("LiveTestRunProgress", () => {
+  it("streams split CRLF output without duplicating carriage returns", () => {
+    const feature = item("feature", "Sample feature", "/repo/features/sample.feature", 1);
+    const run = new RecordingRun();
+    const progress = progressFor(run, [feature], {});
+
+    progress.appendOutput("stdout", "first\nsecond\r");
+    progress.appendOutput("stdout", "\nthird\r");
+    progress.finishOutput();
+
+    expect(run.output).toEqual([
+      { text: "first\r\nsecond", item: undefined },
+      { text: "\r\nthird", item: undefined },
+      { text: "\r", item: undefined },
+    ]);
+  });
+
   it("starts the supplied scope once and marks matching leaves as each result arrives", () => {
     const feature = item("feature", "Sample feature", "/repo/features/sample.feature", 1);
     const first = item("first", "First scenario", "/repo/features/sample.feature", 4);
