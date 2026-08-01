@@ -1,0 +1,13 @@
+{
+  "name": "specwright-smoke-harness",
+  "displayName": "Specwright Smoke Harness",
+  "version": "1.0.0",
+  "publisher": "upscaled-dev",
+  "engines": {
+    "vscode": "^1.99.0"
+  },
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./noop.js"
+}

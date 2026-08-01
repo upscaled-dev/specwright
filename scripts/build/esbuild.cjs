@@ -34,7 +34,7 @@ async function main() {
     bundle: true,
     format: "cjs",
     minify: production,
-    sourcemap: !production,
+    sourcemap: production ? "external" : true,
     sourcesContent: false,
     platform: "node",
     outdir: "dist",

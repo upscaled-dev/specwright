@@ -9,7 +9,6 @@
 //   node scripts/release.mjs --type major          # 0.1.5 -> 1.0.0
 //   node scripts/release.mjs --version 0.2.0       # explicit version
 //   node scripts/release.mjs --type patch --dry-run
-//   node scripts/release.mjs --type patch --skip-tests
 //
 // Exit codes:
 //   0 success
@@ -30,13 +29,12 @@ const CHANGELOG_PATH = resolve(REPO_ROOT, "CHANGELOG.md");
 
 const args = parseArgs(process.argv.slice(2));
 const isDryRun = args["dry-run"] === true;
-const skipTests = args["skip-tests"] === true;
 
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === "--dry-run" || a === "--skip-tests") {
+    if (a === "--dry-run") {
       out[a.slice(2)] = true;
     } else if (a.startsWith("--")) {
       out[a.slice(2)] = argv[i + 1];
@@ -166,25 +164,31 @@ function updateChangelog(newVersion) {
   log(`CHANGELOG.md → new section '## [${newVersion}] - ${today}'`);
 }
 
-// 6. Run pipeline (tests / typecheck / lint already run by build:prod)
+// 6. Run source and contract gates before creating the release commit.
 function runPipeline() {
-  if (skipTests) { warn("skipping tests/lint/typecheck (--skip-tests)"); return; }
   run("npm run check-types");
   run("npm run lint");
-  run("npm test");
+  run("npm run test:coverage");
+  run("npm run test:contracts");
 }
 
-// 7. Package .vsix
-function packageVsix(newVersion) {
-  run("npm run clean");
-  run("node scripts/build/esbuild.cjs --production");
-  run(`npx vsce package --no-dependencies --out dist/specwright-${newVersion}.vsix`);
-}
-
-// 8. Commit + tag
-function commitAndTag(newVersion) {
+// 7. Commit the exact source state that the artifact identifies.
+function commitRelease(newVersion) {
   run("git add package.json package-lock.json CHANGELOG.md");
   run(`git commit -m "chore(release): v${newVersion}"`);
+}
+
+// 8. Build once, package once, and test that exact VSIX.
+function packageAndTest() {
+  run("npm run build:release");
+  run("npm run package:release");
+  run("npm run test:integration:built");
+  run("npm run test:vsix");
+  run("npm run verify:release");
+}
+
+// 9. Tag only after every artifact gate passes.
+function tagRelease(newVersion) {
   run(`git tag -a v${newVersion} -m "Release v${newVersion}"`);
 }
 
@@ -204,8 +208,9 @@ function commitAndTag(newVersion) {
   updatePackageVersion(next);
   updateChangelog(next);
   runPipeline();
-  packageVsix(next);
-  commitAndTag(next);
+  commitRelease(next);
+  packageAndTest();
+  tagRelease(next);
 
   log("");
   log(`✓ release ${next} prepared`);
@@ -213,11 +218,13 @@ function commitAndTag(newVersion) {
   log("Review what's about to be published:");
   log(`  git show v${next}`);
   log(`  ls -la dist/specwright-${next}.vsix`);
+  log(`  cat dist/specwright-${next}.vsix.sha256`);
   log("");
-  log("If everything looks right, publish:");
+  log("If everything looks right, start the tag workflow:");
   log(`  git push && git push origin v${next}`);
-  log(`  npx vsce publish --packagePath dist/specwright-${next}.vsix   # marketplace`);
+  log("  download the tested workflow artifact, verify its checksum, and publish that same VSIX");
   log("");
-  log("If something is wrong, undo locally:");
-  log(`  git reset --hard HEAD~1 && git tag -d v${next}`);
+  log("If something is wrong, remove the tag and revert the release commit:");
+  log(`  git tag -d v${next}`);
+  log(`  git revert --no-edit HEAD`);
 })();

@@ -8,13 +8,25 @@ export enum LogLevel {
   ERROR = 3,
 }
 
+function isLogOutputChannel(channel: vscode.OutputChannel): channel is vscode.LogOutputChannel {
+  const candidate = channel as Partial<vscode.LogOutputChannel>;
+  return typeof candidate.debug === "function" &&
+    typeof candidate.info === "function" &&
+    typeof candidate.warn === "function" &&
+    typeof candidate.error === "function";
+}
+
 export class Logger {
   private readonly outputChannel: vscode.OutputChannel;
+  private readonly logOutputChannel: vscode.LogOutputChannel | undefined;
   private logLevel: LogLevel;
+  private useHostLogLevel: boolean;
 
   constructor(outputChannel?: vscode.OutputChannel, initialLogLevel?: LogLevel) {
-    this.outputChannel = outputChannel ?? vscode.window.createOutputChannel("Specwright");
+    this.outputChannel = outputChannel ?? vscode.window.createOutputChannel("Specwright", { log: true });
+    this.logOutputChannel = isLogOutputChannel(this.outputChannel) ? this.outputChannel : undefined;
     this.logLevel = initialLogLevel ?? LogLevel.INFO;
+    this.useHostLogLevel = initialLogLevel === undefined && this.logOutputChannel !== undefined;
   }
 
   public static create(outputChannel?: vscode.OutputChannel, initialLogLevel?: LogLevel): Logger {
@@ -23,6 +35,7 @@ export class Logger {
 
   public setLogLevel(level: LogLevel): void {
     this.logLevel = level;
+    this.useHostLogLevel = false;
   }
 
   public getLogLevel(): LogLevel {
@@ -30,24 +43,37 @@ export class Logger {
   }
 
   public debug(message: string, data?: LogData): void {
-    if (this.logLevel <= LogLevel.DEBUG) {this.log("DEBUG", message, data);}
+    if (this.shouldLog(LogLevel.DEBUG)) {this.log(LogLevel.DEBUG, "DEBUG", message, data);}
   }
 
   public info(message: string, data?: LogData): void {
-    if (this.logLevel <= LogLevel.INFO) {this.log("INFO", message, data);}
+    if (this.shouldLog(LogLevel.INFO)) {this.log(LogLevel.INFO, "INFO", message, data);}
   }
 
   public warn(message: string, data?: LogData): void {
-    if (this.logLevel <= LogLevel.WARN) {this.log("WARN", message, data);}
+    if (this.shouldLog(LogLevel.WARN)) {this.log(LogLevel.WARN, "WARN", message, data);}
   }
 
   public error(message: string, data?: LogData): void {
-    if (this.logLevel <= LogLevel.ERROR) {this.log("ERROR", message, data);}
+    if (this.shouldLog(LogLevel.ERROR)) {this.log(LogLevel.ERROR, "ERROR", message, data);}
   }
 
-  private log(level: string, message: string, data?: LogData): void {
+  private shouldLog(level: LogLevel): boolean {
+    return this.useHostLogLevel || this.logLevel <= level;
+  }
+
+  private log(level: LogLevel, label: string, message: string, data?: LogData): void {
+    if (this.logOutputChannel) {
+      const rendered = data ? `${message}\n${Logger.safeStringify(data)}` : message;
+      if (level === LogLevel.DEBUG) {this.logOutputChannel.debug(rendered);}
+      else if (level === LogLevel.INFO) {this.logOutputChannel.info(rendered);}
+      else if (level === LogLevel.WARN) {this.logOutputChannel.warn(rendered);}
+      else {this.logOutputChannel.error(rendered);}
+      return;
+    }
+
     const timestamp = new Date().toISOString();
-    this.outputChannel.appendLine(`[${timestamp}] [${level}] ${message}`);
+    this.outputChannel.appendLine(`[${timestamp}] [${label}] ${message}`);
     if (data) {this.outputChannel.appendLine(Logger.safeStringify(data));}
   }
 

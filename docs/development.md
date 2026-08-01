@@ -6,6 +6,8 @@
 npm install
 npm run watch              # esbuild + tsc in parallel
 npm test                   # vitest (unit tests)
+npm run test:coverage      # unit tests plus enforced coverage floors
+npm run test:contracts     # release artifact contract tests
 npm run test:integration   # @vscode/test-electron (extension host)
 npm run lint
 npm run build              # clean + compile + bundle
@@ -15,7 +17,11 @@ Unit tests use [Vitest](https://vitest.dev/) with a minimal stub of the `vscode`
 
 ## Releasing
 
-Use the release script: it bumps the version in `package.json` and `package-lock.json` in lockstep (so the lockfile can't drift and dirty the next `npm ci`/install), updates `CHANGELOG.md`, runs typecheck, lint, and the unit tests, packages the `.vsix`, and creates a git commit + tag. It stops before pushing so you can review. The integration suite and packaging checks are not part of the release gate yet, so run `npm run test:integration` yourself before cutting a release.
+Release only from protected `main` and protect tags matching `v*` in the repository settings. The workflow itself uses read-only repository permissions; only the tag-only attestation job receives `id-token: write` and `attestations: write`.
+
+The release script bumps `package.json` and `package-lock.json` together, updates `CHANGELOG.md`, and runs the source gates. It then creates the release commit before building so the artifact manifest can name the exact commit. After that it builds production once, validates the package inventory, packages one VSIX, runs integration tests against that bundle, installs the VSIX into a clean extension profile, discovers a fixture scenario, and verifies that the VSIX SHA-256 did not change. The tag is created only after every gate passes.
+
+The release artifact set contains the VSIX, its checksum, a CycloneDX SBOM, and a manifest with a `components` array. The current component is the VS Code extension; future Core Service and execution-provider packages can add components without changing the manifest shape. Production source maps are excluded from the VSIX and retained as a separate CI artifact for 30 days. Restrict workflow-artifact access as part of the repository's release permissions.
 
 ```bash
 npm run release            # default: patch bump
@@ -34,13 +40,21 @@ node scripts/release.mjs --version 0.5.0
 After the script completes:
 
 ```bash
-git show v0.1.1             # review the release commit
-ls -la dist/                # see the .vsix
+git show v0.1.1                         # review the release commit
+cat dist/specwright-0.1.1.vsix.sha256  # review the tested digest
 git push && git push origin v0.1.1
-npx vsce publish --packagePath dist/specwright-0.1.1.vsix
 ```
 
-The script refuses to run when the git working tree is dirty, when there are no commits yet, or when the tag already exists. Source: [scripts/release.mjs](../scripts/release.mjs).
+The tag workflow repeats the quality, minimum/current-host integration, package-content, installed-VSIX smoke, and digest gates. Download the `specwright-<commit>` workflow artifact, verify its adjacent `.sha256`, and publish that same VSIX. Do not rebuild between download and publication.
+
+```bash
+shasum -a 256 -c specwright-0.1.1.vsix.sha256
+npx vsce publish --packagePath specwright-0.1.1.vsix
+```
+
+The script refuses a dirty tree, missing commit, or existing tag. If an artifact gate fails after the release commit, no tag is created; inspect the failure and use `git revert --no-edit HEAD` if the version bump should be abandoned. Before push, delete an unwanted tag with `git tag -d v0.1.1` and revert its commit. After publication, retain the previous workflow artifact and checksum, revert the faulty change, cut a new patch, and provide the previous VSIX for explicit downgrade while the correction is validated. `npm run release:dry-run` exercises the release and rollback command plan without changing Git or package files.
+
+The 22-file package allowlist lives in [scripts/package-contents.json](../scripts/package-contents.json). Update it deliberately when shipping a new file. Source: [scripts/release.mjs](../scripts/release.mjs) and [scripts/release-artifact.mjs](../scripts/release-artifact.mjs).
 
 ## DevContainer
 
