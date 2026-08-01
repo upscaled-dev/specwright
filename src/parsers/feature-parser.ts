@@ -4,6 +4,7 @@ import { OutlineExampleRow, OutlineStub, ParsedFeature, RegularScenario, Scenari
 import { Logger } from "../utils/logger";
 import { SCENARIO_KEYWORDS, scenarioGherkinSlice } from "./gherkin-slice";
 import { TAG_TOKEN_PATTERN } from "./tag-regex";
+import { substituteOutlineValues } from "./outline-values";
 
 export function isOutlineExampleRow(s: Scenario): s is OutlineExampleRow {
   return s.isScenarioOutline && "examplesBlockLineNumber" in s;
@@ -417,14 +418,11 @@ export class FeatureParser {
             examplesBlockLineNumber: block.blockLineNumber,
           };
           if (titleHasPlaceholders) {
-            // Same substitution Gherkin performs when compiling pickles: each `<header>` token
-            // is replaced by the row's value; tokens with no matching header stay literal.
-            let substituted = outline.scenario.name;
-            for (const [idx, value] of row.entries()) {
-              const header = block.headers[idx];
-              if (header) {substituted = substituted.replaceAll(`<${header}>`, value);}
-            }
-            exampleScenario.substitutedName = substituted;
+            exampleScenario.substitutedName = substituteOutlineValues(
+              outline.scenario.name,
+              block.headers,
+              row
+            );
           }
           if (block.name) {exampleScenario.examplesBlockName = block.name;}
           if (block.tags.length > 0) {exampleScenario.examplesBlockTags = block.tags;}

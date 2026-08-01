@@ -263,6 +263,15 @@ describe("computeDiagnostics scenario outline placeholder validation", () => {
   const matchAllDefs = (): ParsedStepDefWithFile[] =>
     defsFromSource("Given(/.*/, async () => {});\nWhen(/.*/, async () => {});\nThen(/.*/, async () => {});\n");
 
+  const outlineFeature = (step: string, column: string, values: string[]): string => [
+    "Feature: A",
+    "  Scenario Outline: values",
+    `    Given ${step}`,
+    "    Examples:",
+    `      | ${column} |`,
+    ...values.map((value) => `      | ${value} |`),
+  ].join("\n");
+
   it("emits no outline diagnostics when every placeholder maps to a column and every column is used", () => {
     const feature = [
       "Feature: A",
@@ -275,12 +284,57 @@ describe("computeDiagnostics scenario outline placeholder validation", () => {
       "      | Alice | 30  |",
     ].join("\n");
     const { diagnostics } = computeDiagnosticsWithInfo(feature, outlineDefs());
-    const outlineDiags = diagnostics.filter(
-      (d) =>
-        d.code === StepDiagnosticsProvider.UNDECLARED_PLACEHOLDER_CODE ||
-        d.code === StepDiagnosticsProvider.UNUSED_COLUMN_CODE
-    );
-    expect(outlineDiags).toHaveLength(0);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it("matches regex definitions against every substituted Examples value", () => {
+    const feature = outlineFeature("the colour is <colour>", "colour", ["red", "blue"]);
+    const defs = defsFromSource("Given(/^the colour is (red|blue)$/, async () => {});\n");
+
+    expect(computeDiagnosticsWithInfo(feature, defs).diagnostics).toEqual([]);
+  });
+
+  it("reports an outline step when one substituted value has no definition", () => {
+    const feature = outlineFeature("I have <count> widgets", "count", ["2", "many"]);
+    const defs = defsFromSource("Given('I have {int} widgets', async () => {});\n");
+
+    const { diagnostics } = computeDiagnosticsWithInfo(feature, defs);
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      code: StepDiagnosticsProvider.DIAGNOSTIC_CODE,
+      message: "Step has no matching definition: I have <count> widgets",
+    });
+  });
+
+  it("reports ambiguity from a substituted value", () => {
+    const feature = outlineFeature("I have <count> widgets", "count", ["2"]);
+    const defs = defsFromSource([
+      "Given('I have {int} widgets', async () => {});",
+      "Given(/^I have 2 widgets$/, async () => {});",
+    ].join("\n"));
+
+    const { diagnostics } = computeDiagnosticsWithInfo(feature, defs);
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.code).toBe(StepDiagnosticsProvider.AMBIGUOUS_DIAGNOSTIC_CODE);
+  });
+
+  it("allows different Examples values to match different single definitions", () => {
+    const feature = outlineFeature("I have <count> widgets", "count", ["one", "2"]);
+    const defs = defsFromSource([
+      "Given(/^I have one widgets$/, async () => {});",
+      "Given(/^I have 2 widgets$/, async () => {});",
+    ].join("\n"));
+
+    expect(computeDiagnosticsWithInfo(feature, defs).diagnostics).toEqual([]);
+  });
+
+  it("does not guess a parameter type when an outline has no Examples rows", () => {
+    const feature = outlineFeature("I have <count> widgets", "count", []);
+    const defs = defsFromSource("Given('I have {int} widgets', async () => {});\n");
+
+    expect(computeDiagnosticsWithInfo(feature, defs).diagnostics).toEqual([]);
   });
 
   it("flags a placeholder not present in any Examples column", () => {
