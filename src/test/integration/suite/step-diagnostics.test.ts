@@ -4,6 +4,7 @@ import * as vscode from "vscode";
 import type { ExtensionApi } from "../../../extension";
 
 const EXTENSION_ID = "upscaled-dev.specwright";
+const GENERATE_STEP_COMMAND = "playwrightBddRunner.generateStepDefinitionForStep";
 
 async function activateExtension(): Promise<ExtensionApi> {
   const ext = vscode.extensions.getExtension(EXTENSION_ID);
@@ -26,6 +27,25 @@ async function waitForDiagnostics(uri: vscode.Uri, expectedMin: number, timeoutM
     await new Promise((r) => setTimeout(r, 100));
   }
   return last;
+}
+
+async function waitForGenerateStepAction(
+  uri: vscode.Uri,
+  range: vscode.Range,
+  timeoutMs = 3000
+): Promise<vscode.CodeAction | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>(
+      "vscode.executeCodeActionProvider",
+      uri,
+      range
+    );
+    const action = actions?.find((candidate) => candidate.command?.command === GENERATE_STEP_COMMAND);
+    if (action) {return action;}
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return undefined;
 }
 
 suite("Step diagnostics on .feature files", () => {
@@ -60,22 +80,14 @@ suite("Step diagnostics on .feature files", () => {
     assert.ok(diagnostics.length > 0, "no Playwright-BDD diagnostics found before requesting code actions");
     const target = diagnostics[0]!;
 
-    const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>(
-      "vscode.executeCodeActionProvider",
-      uri,
-      target.range
-    );
-    assert.ok(actions && actions.length > 0, "expected at least one code action at the diagnostic range");
-    const ours = actions.filter(
-      (a) => a.command?.command === "playwrightBddRunner.generateStepDefinitionForStep"
-    );
+    const action = await waitForGenerateStepAction(uri, target.range);
     assert.ok(
-      ours.length > 0,
+      action,
       "expected at least one code action with command 'playwrightBddRunner.generateStepDefinitionForStep'"
     );
     assert.ok(
-      ours[0]!.title.startsWith("Create step definition for:"),
-      `unexpected action title: ${ours[0]!.title}`
+      action.title.startsWith("Create step definition for:"),
+      `unexpected action title: ${action.title}`
     );
   });
 
