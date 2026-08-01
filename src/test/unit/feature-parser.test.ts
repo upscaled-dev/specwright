@@ -20,10 +20,15 @@ function makeLoggerMock(): Logger {
  * Unit tests for the Gherkin parser at src/parsers/feature-parser.ts.
  *
  * Most tests use inline Gherkin strings via `parseFeatureContent` so they are pure.
- * One test (`parseFeatureFile sanity`) loads a fixture from disk to prove the fs path works.
+ * Five tests read from disk: the four pinned CodeLens counts and the `parseFeatureFile` sanity
+ * check, which proves the fs path works.
+ *
+ * The files under src/test/unit/fixtures/ are snapshots of features/ taken from git history.
+ * The repo-root features/ directory is a live manual-testing sandbox whose tags and scenarios
+ * drift, so the pinned lens counts must never read it.
  */
 
-const FIXTURES_DIR = path.resolve(__dirname, "../../../features");
+const FIXTURES_DIR = path.resolve(__dirname, "fixtures");
 
 const NL = "\n";
 const lines = (...rows: string[]): string => rows.join(NL);
