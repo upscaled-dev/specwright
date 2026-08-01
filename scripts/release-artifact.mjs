@@ -2,7 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -12,20 +12,33 @@ const PACKAGE_PATH = resolve(REPO_ROOT, "package.json");
 const CONTENTS_PATH = resolve(SCRIPT_DIR, "package-contents.json");
 const DIST_DIR = resolve(REPO_ROOT, "dist");
 
-function executable(name) {
-  return process.platform === "win32" ? `${name}.cmd` : name;
+// git resolves to git.exe and spawns directly on every platform. npm and npx are
+// .cmd shims on Windows, which Node refuses to spawn without a shell (EINVAL since
+// the CVE-2024-27980 patch); a shell command line needs whitespace-quoted arguments.
+export function spawnPlan(name, args, platform = process.platform) {
+  if (platform !== "win32" || name === "git") {
+    return { file: name, args, shell: false };
+  }
+  return {
+    file: name,
+    args: args.map((arg) => (/\s/u.test(arg) ? `"${arg}"` : arg)),
+    shell: true,
+  };
 }
 
 function capture(name, args) {
-  return execFileSync(executable(name), args, {
+  const plan = spawnPlan(name, args);
+  return execFileSync(plan.file, plan.args, {
     cwd: REPO_ROOT,
+    shell: plan.shell,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
   }).trim();
 }
 
 function run(name, args) {
-  execFileSync(executable(name), args, { cwd: REPO_ROOT, stdio: "inherit" });
+  const plan = spawnPlan(name, args);
+  execFileSync(plan.file, plan.args, { cwd: REPO_ROOT, shell: plan.shell, stdio: "inherit" });
 }
 
 export function listedPackageFiles(output) {
@@ -84,8 +97,12 @@ export function assertReleaseSource(status, commit) {
   return commit;
 }
 
-function pathsFor(version, requestedPath) {
-  const vsixPath = requestedPath ?? resolve(DIST_DIR, `specwright-${version}.vsix`);
+export function pathsFor(version, requestedPath) {
+  // A relative --out must anchor to the repo root: vsce runs with cwd REPO_ROOT,
+  // so resolving against process.cwd() would split the package and checksum steps.
+  const vsixPath = requestedPath
+    ? resolve(REPO_ROOT, requestedPath)
+    : resolve(DIST_DIR, `specwright-${version}.vsix`);
   const stem = vsixPath.endsWith(".vsix") ? vsixPath.slice(0, -5) : vsixPath;
   return {
     vsixPath,
@@ -131,35 +148,45 @@ export function createReleaseArtifact(requestedPath) {
   assertPackageContents(listed, expectedContents());
   console.log(`package contents: ${listed.length} expected files`);
 
-  run("npx", ["vsce", "package", "--no-dependencies", "--out", paths.vsixPath]);
-  const digest = sha256(paths.vsixPath);
-  const sbom = JSON.parse(capture("npm", [
-    "sbom",
-    "--package-lock-only",
-    "--sbom-format",
-    "cyclonedx",
-    "--omit",
-    "dev",
-  ]));
-  writeFileSync(paths.sbomPath, `${JSON.stringify(sbom, null, 2)}\n`);
-  writeFileSync(paths.checksumPath, `${digest}  ${basename(paths.vsixPath)}\n`);
-  writeFileSync(
-    paths.manifestPath,
-    `${JSON.stringify(artifactSet({
-      packageJson,
-      commit,
-      vsixPath: paths.vsixPath,
-      digest,
-      sbomPath: paths.sbomPath,
-    }), null, 2)}\n`
-  );
+  // The artifact set is all-or-nothing: a failure mid-write must not leave a
+  // VSIX without its checksum and manifest, or --verify and the smoke test
+  // start from a half-built dist.
+  try {
+    run("npx", ["vsce", "package", "--no-dependencies", "--out", paths.vsixPath]);
+    const digest = sha256(paths.vsixPath);
+    const sbom = JSON.parse(capture("npm", [
+      "sbom",
+      "--package-lock-only",
+      "--sbom-format",
+      "cyclonedx",
+      "--omit",
+      "dev",
+    ]));
+    writeFileSync(paths.sbomPath, `${JSON.stringify(sbom, null, 2)}\n`);
+    writeFileSync(paths.checksumPath, `${digest}  ${basename(paths.vsixPath)}\n`);
+    writeFileSync(
+      paths.manifestPath,
+      `${JSON.stringify(artifactSet({
+        packageJson,
+        commit,
+        vsixPath: paths.vsixPath,
+        digest,
+        sbomPath: paths.sbomPath,
+      }), null, 2)}\n`
+    );
+    console.log(`sha256: ${digest}`);
+  } catch (error) {
+    for (const partial of [paths.vsixPath, paths.sbomPath, paths.checksumPath, paths.manifestPath]) {
+      rmSync(partial, { force: true });
+    }
+    throw error;
+  }
 
   console.log(`release artifact: ${paths.vsixPath}`);
-  console.log(`sha256: ${digest}`);
   return paths;
 }
 
-function argumentValue(name) {
+export function argumentValue(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
 }

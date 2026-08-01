@@ -506,9 +506,11 @@ export class TestExecutor {
     const command = this.config.useConfigReporters
       ? playwrightCommand
       : withJsonReporter(playwrightCommand);
-    const report = this.createTemporaryReport();
+    // Created inside the try so a tmpdir failure becomes a failed result, not a rejection.
+    let report: TemporaryReport | undefined;
 
     try {
+      report = this.createTemporaryReport();
       const live = this.openLiveRun(report.livePath, progress, signal);
       let commandResult: CommandResult;
       try {
@@ -559,7 +561,7 @@ export class TestExecutor {
         exitCode: 1,
       };
     } finally {
-      report.dispose();
+      report?.dispose();
     }
   }
 
@@ -791,9 +793,11 @@ export class TestExecutor {
     // override it. We still set PLAYWRIGHT_JSON_OUTPUT_NAME below, which steers a bare `['json']`
     // reporter in their config to our temp file.
     const command = this.config.useConfigReporters ? baseCommand : withJsonReporter(baseCommand);
-    const report = this.createTemporaryReport();
+    // Created inside the try so a tmpdir failure becomes a failed result, not a rejection.
+    let report: TemporaryReport | undefined;
 
     try {
+      report = this.createTemporaryReport();
       const live = this.openLiveRun(report.livePath, progress, signal);
       let commandResult: CommandResult;
       try {
@@ -831,7 +835,7 @@ export class TestExecutor {
         duration: Math.max(1, Date.now() - start),
       };
     } finally {
-      report.dispose();
+      report?.dispose();
     }
   }
 

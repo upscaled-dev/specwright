@@ -86,7 +86,7 @@ If your project writes generated specs outside `.features-gen`, set `playwrightB
 
 While a run is active, the **Test Results** panel streams Playwright and `bddgen` output, marks each completed scenario, and writes lines such as `[127 / 500]`. After the run, it shows the final scenario summary with Gherkin steps, durations, failures, and clickable stack traces.
 
-Specwright keeps only the newest 256 KiB from stdout and stderr as diagnostic tails. The full process output still streams to Test Results. If a tail is truncated, a notice reports its retained and discarded byte counts. A Playwright JSON report larger than 16 MiB, or an inline report attachment larger than 1 MiB after base64 decoding, stops result ingestion with a specific size-limit message. File-based evidence paths are unaffected.
+Specwright keeps only the newest 256 KiB from stdout and stderr as diagnostic tails. The full process output still streams to Test Results. If a tail is truncated, a notice reports its retained and discarded byte counts. A Playwright JSON report larger than 16 MiB stops result ingestion for that run with a specific size-limit message; a workspace report over the limit is skipped for board badges instead of blocking them. Inline report attachments of any size are accepted, and file-based evidence paths are unaffected.
 
 <!-- Screenshot placeholder: ../images/test-results.png
 Show VS Code Test Results for one failed scenario, including a failing Gherkin step and a clickable stack trace. Remove sensitive paths and data. -->

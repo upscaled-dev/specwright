@@ -337,6 +337,38 @@ describe("computeDiagnostics scenario outline placeholder validation", () => {
     expect(computeDiagnosticsWithInfo(feature, defs).diagnostics).toEqual([]);
   });
 
+  it("still flags an unmatched placeholder-free step when the outline has no Examples rows", () => {
+    const feature = [
+      "Feature: A",
+      "  Scenario Outline: half-written",
+      "    Given I am logged inn",
+      "    Examples:",
+      "      | count |",
+    ].join("\n");
+    const defs = defsFromSource("Given('I am logged in', async () => {});\n");
+
+    const unmatched = computeDiagnosticsWithInfo(feature, defs).diagnostics.filter(
+      (d) => d.code === StepDiagnosticsProvider.DIAGNOSTIC_CODE
+    );
+
+    expect(unmatched).toHaveLength(1);
+    expect(unmatched[0]?.message).toBe("Step has no matching definition: I am logged inn");
+  });
+
+  it("substitutes a cell containing an escaped pipe as one value", () => {
+    const feature = [
+      "Feature: A",
+      "  Scenario Outline: piped",
+      "    Given I see \"<text>\" and \"<other>\"",
+      "    Examples:",
+      "      | text   | other |",
+      "      | a \\| b | c     |",
+    ].join("\n");
+    const defs = defsFromSource("Given('I see {string} and {string}', async () => {});\n");
+
+    expect(computeDiagnosticsWithInfo(feature, defs).diagnostics).toEqual([]);
+  });
+
   it("flags a placeholder not present in any Examples column", () => {
     const feature = [
       "Feature: A",

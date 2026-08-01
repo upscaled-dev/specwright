@@ -41,18 +41,18 @@ After the script completes:
 
 ```bash
 git show v0.1.1                         # review the release commit
-cat dist/specwright-0.1.1.vsix.sha256  # review the tested digest
+cat dist/specwright-0.1.1.vsix.sha256  # digest of the local build only
 git push && git push origin v0.1.1
 ```
 
-The tag workflow repeats the quality, minimum/current-host integration, package-content, installed-VSIX smoke, and digest gates. Download the `specwright-<commit>` workflow artifact, verify its adjacent `.sha256`, and publish that same VSIX. Do not rebuild between download and publication.
+The tag workflow repeats the quality, minimum/current-host integration, package-content, installed-VSIX smoke, and digest gates. Download the `specwright-<commit>` workflow artifact set and verify the downloaded VSIX against the `.sha256` and manifest that ship inside that same download, then publish that VSIX. The local digest printed above identifies the local build and will not match the CI build: `vsce` embeds timestamps, so each package run produces a distinct digest. Do not rebuild between download and publication.
 
 ```bash
-shasum -a 256 -c specwright-0.1.1.vsix.sha256
+shasum -a 256 -c specwright-0.1.1.vsix.sha256   # run inside the downloaded artifact set
 npx vsce publish --packagePath specwright-0.1.1.vsix
 ```
 
-The script refuses a dirty tree, missing commit, or existing tag. If an artifact gate fails after the release commit, no tag is created; inspect the failure and use `git revert --no-edit HEAD` if the version bump should be abandoned. Before push, delete an unwanted tag with `git tag -d v0.1.1` and revert its commit. After publication, retain the previous workflow artifact and checksum, revert the faulty change, cut a new patch, and provide the previous VSIX for explicit downgrade while the correction is validated. `npm run release:dry-run` exercises the release and rollback command plan without changing Git or package files.
+The script refuses a dirty tree, missing commit, or existing tag. If an artifact gate fails after the release commit, no tag is created and the script removes the release commit again, so a rerun starts from the same version. Before push, delete an unwanted tag with `git tag -d v0.1.1` and remove its commit with `git reset --hard HEAD~1`. After publication, retain the previous workflow artifact and checksum, revert the faulty change, cut a new patch, and provide the previous VSIX for explicit downgrade while the correction is validated. `npm run release:dry-run` exercises the release and rollback command plan without changing Git or package files.
 
 The 22-file package allowlist lives in [scripts/package-contents.json](../scripts/package-contents.json). Update it deliberately when shipping a new file. Source: [scripts/release.mjs](../scripts/release.mjs) and [scripts/release-artifact.mjs](../scripts/release-artifact.mjs).
 

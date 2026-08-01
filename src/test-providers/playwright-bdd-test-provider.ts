@@ -934,7 +934,11 @@ export class PlaywrightBddTestProvider {
       // multi-project/retry entries and overstates elapsed time.
       return this.context.playwrightJsonParser.formatResults(details, workspaceRoot, result.duration);
     }
-    if (result.outputStreamed) {return "";}
+    if (result.outputStreamed) {
+      // Streaming already delivered result.output, but result.error can carry synthesized
+      // guidance that never crossed the stream (missing-binary hint, bddgen failure).
+      return typeof result.error === "string" && result.error.trim() !== "" ? result.error : "";
+    }
     // No parsed scenarios (e.g. a pre-run hook or bddgen failure): show the raw output so the
     // user still sees why the run produced nothing.
     return [result.output, result.error]

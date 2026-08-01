@@ -5,6 +5,7 @@ import { FeatureParser, isOutlineExampleRow } from "../parsers/feature-parser";
 import { TestDiscoveryManager } from "../core/test-discovery-manager";
 import {
   PlaywrightJsonParser,
+  ScenarioResult,
   ScenarioStatus,
   normalizePathKey,
 } from "../utils/playwright-json-parser";
@@ -573,10 +574,19 @@ export class TraceabilityModel implements vscode.Disposable {
     if (!found) {
       return store;
     }
-    const scan = this.playwrightJsonParser.toStatusMap(
-      await this.playwrightJsonParser.parseFromFileAsync(found.path),
-      found.root
-    );
+    // The scanned report is user-owned; one over the size limit must degrade to
+    // store-only badges, not leave the whole snapshot permanently stale.
+    let scanned: ScenarioResult[];
+    try {
+      scanned = await this.playwrightJsonParser.parseFromFileAsync(found.path);
+    } catch (error) {
+      this.logger.warn("Skipping workspace Playwright report", {
+        path: found.path,
+        error: String(error),
+      });
+      return store;
+    }
+    const scan = this.playwrightJsonParser.toStatusMap(scanned, found.root);
     return found.mtimeMs > this.runResultStore.lastIngestAt
       ? { ...store, ...scan }
       : { ...scan, ...store };

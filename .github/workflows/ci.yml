@@ -167,6 +167,6 @@ jobs:
           path: candidate
 
       - name: Attest exact VSIX
-        uses: actions/attest@v4
+        uses: actions/attest-build-provenance@v2
         with:
           subject-path: candidate/*.vsix

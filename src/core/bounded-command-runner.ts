@@ -40,6 +40,9 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
       const child = spawn(command, {
         cwd: workingDir,
         shell: true,
+        // POSIX: detach so the child leads its own process group; killing that group on
+        // cancellation reaches playwright + browsers. With shell:true, signalling only the
+        // shell would orphan playwright. Windows uses taskkill /T instead (see killTree).
         ...(process.platform === "win32" ? {} : { detached: true }),
         env: { ...process.env, ...(extraEnv ?? {}) },
         stdio: ["pipe", "pipe", "pipe"],
@@ -102,6 +105,8 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
       const onAbort = (): void => {
         cancelled = true;
         killTree(child, logger);
+        // If the tree's `close` never arrives (grandchild holding pipes), force the stop after
+        // the same flush grace the exit path uses.
         const timer = setTimeout(() => {settle(130);}, 2_000);
         timer.unref?.();
       };
@@ -111,6 +116,10 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
       child.stderr?.on("data", onStderr);
       child.on("close", settle);
       child.on("exit", (code: number | null) => {
+        // `close` additionally waits for all stdio pipes to close. A grandchild that
+        // inherited them (web server, browser process; common on Windows) keeps the
+        // run hanging forever after playwright itself exited. Results come from the
+        // JSON report file, not stdout, so after a short flush grace settle anyway.
         const timer = setTimeout(() => {settle(code);}, 2_000);
         timer.unref?.();
       });
@@ -152,9 +161,11 @@ function killTree(child: ChildProcess, logger: Logger): void {
       const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
       killer.on("error", () => { /* taskkill unavailable; best effort */ });
     } else {
+      // Negative pid targets the process group the detached spawn made this child lead.
       process.kill(-child.pid, "SIGTERM");
     }
   } catch (error) {
+    // ESRCH: the group already exited between close and kill; nothing left to signal.
     if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
       logger.warn(`Failed to kill process tree: ${errMsg(error)}`);
     }

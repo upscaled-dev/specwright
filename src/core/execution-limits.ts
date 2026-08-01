@@ -1,21 +1,8 @@
 export const EXECUTION_LIMITS = {
   outputTailBytesPerStream: 256 * 1024,
   reportBytesPerRun: 16 * 1024 * 1024,
-  asyncReportParseBytes: 256 * 1024,
-  inlineAttachmentBytes: 1024 * 1024,
   artifactBytesPerWorkspace: 8 * 1024 * 1024,
-  benchmarkDurationMs: 2_000,
-  runHeapGrowthBytes: 96 * 1024 * 1024,
-  reportWorkerOldGenerationMb: 64,
-  reportWorkerYoungGenerationMb: 16,
 } as const;
-
-/**
- * A run can retain one report plus one bounded tail for each process stream. Parsed report
- * objects are transient and covered by the benchmark heap budget rather than this input budget.
- */
-export const RUN_INPUT_BUDGET_BYTES =
-  EXECUTION_LIMITS.reportBytesPerRun + 2 * EXECUTION_LIMITS.outputTailBytesPerStream;
 
 /** Retain the newest bytes from a stream without letting chunk metadata grow without bound. */
 export class BoundedOutputTail {
@@ -39,7 +26,10 @@ export class BoundedOutputTail {
   public format(stream: "stdout" | "stderr"): string {
     const retained = Buffer.concat(this.chunks, this.retainedBytes).toString("utf8");
     const notice = this.truncationNotice(stream);
-    return notice === undefined ? retained : `${notice}\n${retained}`;
+    if (notice === undefined) {return retained;}
+    // Trimming works on byte boundaries, so the retained head can start mid code
+    // point; drop the replacement characters the decoder puts there.
+    return `${notice}\n${retained.replace(/^�+/u, "")}`;
   }
 
   public truncationNotice(stream: "stdout" | "stderr"): string | undefined {

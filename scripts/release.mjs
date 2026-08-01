@@ -192,6 +192,20 @@ function tagRelease(newVersion) {
   run(`git tag -a v${newVersion} -m "Release v${newVersion}"`);
 }
 
+// The artifact gates need the release commit in place (release-artifact.mjs demands a
+// clean worktree recording that exact commit), so a gate failure would otherwise strand
+// an untagged, version-bumped commit: the next release run reads the bumped version and
+// skips this one forever. Remove the commit so a rerun starts from the same version.
+function rollbackReleaseCommit(newVersion) {
+  const subject = tryCapture("git log -1 --format=%s");
+  if (subject !== `chore(release): v${newVersion}`) {
+    warn(`HEAD is not the v${newVersion} release commit; leaving git state untouched.`);
+    return;
+  }
+  run("git reset --hard HEAD~1");
+  warn(`artifact gate failed: removed the v${newVersion} release commit and version bump. Fix and rerun.`);
+}
+
 // --- main ---
 
 (function main() {
@@ -209,7 +223,12 @@ function tagRelease(newVersion) {
   updateChangelog(next);
   runPipeline();
   commitRelease(next);
-  packageAndTest();
+  try {
+    packageAndTest();
+  } catch (error) {
+    rollbackReleaseCommit(next);
+    die(1, error instanceof Error ? error.message : String(error));
+  }
   tagRelease(next);
 
   log("");
@@ -222,9 +241,12 @@ function tagRelease(newVersion) {
   log("");
   log("If everything looks right, start the tag workflow:");
   log(`  git push && git push origin v${next}`);
-  log("  download the tested workflow artifact, verify its checksum, and publish that same VSIX");
+  log("  then download the workflow's artifact set (VSIX + .sha256 + manifest) and verify it:");
+  log(`  node scripts/release-artifact.mjs --verify --out <download>/specwright-${next}.vsix`);
+  log("  publish that verified VSIX. The local .sha256 above identifies the local build only;");
+  log("  vsce embeds timestamps, so local and CI digests differ by design.");
   log("");
-  log("If something is wrong, remove the tag and revert the release commit:");
+  log("If something is wrong, remove the tag and the release commit:");
   log(`  git tag -d v${next}`);
-  log(`  git revert --no-edit HEAD`);
+  log(`  git reset --hard HEAD~1`);
 })();

@@ -15,12 +15,13 @@ function makeChannel(): { lines: string[]; channel: vscode.OutputChannel } {
   return { lines, channel };
 }
 
-function makeLogChannel(): {
+function makeLogChannel(logLevel?: number): {
   calls: Array<{ level: string; message: string }>;
   channel: vscode.LogOutputChannel;
 } {
   const calls: Array<{ level: string; message: string }> = [];
   const channel = {
+    ...(logLevel === undefined ? {} : { logLevel }),
     appendLine: (): void => { throw new Error("LogOutputChannel appendLine should not be used"); },
     debug: (message: string): void => { calls.push({ level: "debug", message }); },
     info: (message: string): void => { calls.push({ level: "info", message }); },
@@ -70,15 +71,33 @@ describe("Logger", () => {
     expect(lines.some((l) => l.includes("visible"))).toBe(true);
   });
 
-  it("emits debug messages after setLogLevel(DEBUG)", () => {
+  it("emits debug messages when created at the DEBUG level", () => {
     const { lines, channel } = makeChannel();
-    const logger = Logger.create(channel);
+    const logger = Logger.create(channel, LogLevel.DEBUG);
 
-    logger.setLogLevel(LogLevel.DEBUG);
     logger.debug("now visible");
 
-    expect(logger.getLogLevel()).toBe(LogLevel.DEBUG);
     expect(lines.some((l) => l.includes("now visible"))).toBe(true);
+  });
+
+  it("honors the host channel's level before rendering", () => {
+    const { calls, channel } = makeLogChannel(vscode.LogLevel.Warning);
+    const logger = Logger.create(channel);
+
+    logger.debug("hidden", { big: "payload" });
+    logger.info("hidden");
+    logger.warn("kept");
+
+    expect(calls).toEqual([{ level: "warn", message: "kept" }]);
+  });
+
+  it("suppresses everything when the host level is Off", () => {
+    const { calls, channel } = makeLogChannel(vscode.LogLevel.Off);
+    const logger = Logger.create(channel);
+
+    logger.error("dropped");
+
+    expect(calls).toEqual([]);
   });
 
   it("filters info/warn below the ERROR level", () => {

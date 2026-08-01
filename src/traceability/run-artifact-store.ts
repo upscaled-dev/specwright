@@ -398,7 +398,9 @@ export class RunArtifactStore implements RunArtifactStoreContract {
         artifactId: stored.id,
         maxBytes: EXECUTION_LIMITS.artifactBytesPerWorkspace,
       });
-      this.save();
+      // The batch still closed; announce it so listeners refresh even though the
+      // buffer kept its previous contents.
+      this.persist();
       return;
     }
     this.artifacts.unshift(stored);

@@ -402,6 +402,20 @@ describe("RunArtifactStore", () => {
     expect(seen).toEqual([1, 2, 0]);
   });
 
+  it("still announces a batch whose artifact was too large to retain", () => {
+    const store = new RunArtifactStore(fakeMemento(), logger);
+    let fired = 0;
+    store.onDidChange(() => (fired += 1));
+
+    store.append(artifact({
+      id: "oversized",
+      results: [result({ evidenceRefs: ["x".repeat(9 * 1024 * 1024)] })],
+    }));
+
+    expect(store.list()).toHaveLength(0);
+    expect(fired).toBe(1);
+  });
+
   it("says nothing while a batch is merely open, since the buffer has not changed", () => {
     const store = new RunArtifactStore(fakeMemento(), logger);
     let fired = 0;

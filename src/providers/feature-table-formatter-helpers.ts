@@ -68,7 +68,8 @@ function leadingIndent(raw: string): string {
   return m ? m[0] : "";
 }
 
-function parseRow(row: string): string[] {
+/** Split one `| a | b |` row into cells, honoring the Gherkin `\|` escape. Cells keep the escape. */
+export function parseRow(row: string): string[] {
   const trimmed = row.trim();
   const inner = trimmed.slice(1, -1);
   const cells: string[] = [];

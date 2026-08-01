@@ -34,7 +34,9 @@ async function main() {
     bundle: true,
     format: "cjs",
     minify: production,
-    sourcemap: production ? "external" : true,
+    // "linked" writes dist/*.map with a sourceMappingURL comment; .vscodeignore
+    // excludes the maps from the VSIX, and the retained CI artifact stays attachable.
+    sourcemap: production ? "linked" : true,
     sourcesContent: false,
     platform: "node",
     outdir: "dist",

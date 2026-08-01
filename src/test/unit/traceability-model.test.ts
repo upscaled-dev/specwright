@@ -8,6 +8,7 @@ import { scenarioGherkinSlice } from "../../parsers/gherkin-slice";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { Logger } from "../../utils/logger";
 import { normalizePathKey, PlaywrightJsonParser, ScenarioStatus } from "../../utils/playwright-json-parser";
+import { EXECUTION_LIMITS } from "../../core/execution-limits";
 import {
   buildTraceabilitySnapshot,
   findLinkForScenario,
@@ -581,6 +582,21 @@ describe("TraceabilityModel.rebuild badge precedence (readStatusMap)", () => {
     expect(await rebuiltResult(featurePath, store)).toBe("passed");
   });
 
+  it("degrades to store badges when the workspace report exceeds the size limit", async () => {
+    // The scanned report is user-owned; oversized must mean "no scan", never a rebuild
+    // that rejects and freezes the snapshot.
+    const { root, featurePath, key } = makeWorkspace();
+    const store = new RunResultStore();
+    store.ingest({ [key]: "passed" });
+    const oversized = path.join(root, "results.json");
+    fs.writeFileSync(oversized, "");
+    fs.truncateSync(oversized, EXECUTION_LIMITS.reportBytesPerRun + 1);
+    const future = Date.now() + 100_000;
+    fs.utimesSync(oversized, new Date(future), new Date(future));
+
+    expect(await rebuiltResult(featurePath, store)).toBe("passed");
+  });
+
   it("badges from the store with no report on disk (the P1 exit criterion)", async () => {
     const { featurePath, key } = makeWorkspace();
     const store = new RunResultStore();
@@ -649,7 +665,7 @@ describe("findPlaywrightReport", () => {
     writeReport(root, "results.json", "{ not valid json", Date.now());
     const found = await findPlaywrightReport([root]);
     const parser = PlaywrightJsonParser.create(Logger.create());
-    const results = parser.parseFromFile(found!.path);
+    const results = await parser.parseFromFileAsync(found!.path);
     expect(results).toEqual([]);
     expect(parser.toStatusMap(results, found!.root)).toEqual({});
   });

@@ -8,6 +8,13 @@ export enum LogLevel {
   ERROR = 3,
 }
 
+const HOST_LEVEL: Record<LogLevel, vscode.LogLevel> = {
+  [LogLevel.DEBUG]: vscode.LogLevel.Debug,
+  [LogLevel.INFO]: vscode.LogLevel.Info,
+  [LogLevel.WARN]: vscode.LogLevel.Warning,
+  [LogLevel.ERROR]: vscode.LogLevel.Error,
+};
+
 function isLogOutputChannel(channel: vscode.OutputChannel): channel is vscode.LogOutputChannel {
   const candidate = channel as Partial<vscode.LogOutputChannel>;
   return typeof candidate.debug === "function" &&
@@ -19,8 +26,8 @@ function isLogOutputChannel(channel: vscode.OutputChannel): channel is vscode.Lo
 export class Logger {
   private readonly outputChannel: vscode.OutputChannel;
   private readonly logOutputChannel: vscode.LogOutputChannel | undefined;
-  private logLevel: LogLevel;
-  private useHostLogLevel: boolean;
+  private readonly logLevel: LogLevel;
+  private readonly useHostLogLevel: boolean;
 
   constructor(outputChannel?: vscode.OutputChannel, initialLogLevel?: LogLevel) {
     this.outputChannel = outputChannel ?? vscode.window.createOutputChannel("Specwright", { log: true });
@@ -31,15 +38,6 @@ export class Logger {
 
   public static create(outputChannel?: vscode.OutputChannel, initialLogLevel?: LogLevel): Logger {
     return new Logger(outputChannel, initialLogLevel);
-  }
-
-  public setLogLevel(level: LogLevel): void {
-    this.logLevel = level;
-    this.useHostLogLevel = false;
-  }
-
-  public getLogLevel(): LogLevel {
-    return this.logLevel;
   }
 
   public debug(message: string, data?: LogData): void {
@@ -58,8 +56,13 @@ export class Logger {
     if (this.shouldLog(LogLevel.ERROR)) {this.log(LogLevel.ERROR, "ERROR", message, data);}
   }
 
+  // Rendering happens before the channel filters, so honor the host level here:
+  // otherwise every debug() call pays safeStringify only for VS Code to discard it.
   private shouldLog(level: LogLevel): boolean {
-    return this.useHostLogLevel || this.logLevel <= level;
+    if (!this.useHostLogLevel) {return this.logLevel <= level;}
+    const host = this.logOutputChannel?.logLevel;
+    if (host === undefined) {return true;}
+    return host !== vscode.LogLevel.Off && host <= HOST_LEVEL[level];
   }
 
   private log(level: LogLevel, label: string, message: string, data?: LogData): void {

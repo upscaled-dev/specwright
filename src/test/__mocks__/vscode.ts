@@ -685,6 +685,7 @@ export const extensions = {
 export { Position, Range, Location, Uri };
 
 export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
+export const LogLevel = { Off: 0, Trace: 1, Debug: 2, Info: 3, Warning: 4, Error: 5 };
 export const ProgressLocation = { SourceControl: 1, Window: 10, Notification: 15 };
 export const QuickPickItemKind = { Separator: -1, Default: 0 };
 export const OverviewRulerLane = { Left: 1, Center: 2, Right: 4, Full: 7 };

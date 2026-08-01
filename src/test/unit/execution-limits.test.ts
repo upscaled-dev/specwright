@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  BoundedOutputTail,
-  EXECUTION_LIMITS,
-  RUN_INPUT_BUDGET_BYTES,
-} from "../../core/execution-limits";
+import { BoundedOutputTail } from "../../core/execution-limits";
 
 describe("BoundedOutputTail", () => {
   it("returns complete output while it remains within the limit", () => {
@@ -24,9 +20,12 @@ describe("BoundedOutputTail", () => {
     );
   });
 
-  it("defines one run input budget from the report and two output tails", () => {
-    expect(RUN_INPUT_BUDGET_BYTES).toBe(
-      EXECUTION_LIMITS.reportBytesPerRun + 2 * EXECUTION_LIMITS.outputTailBytesPerStream
+  it("drops the partial code point a byte-boundary cut leaves at the head", () => {
+    const tail = new BoundedOutputTail(2);
+    tail.append("éz");
+
+    expect(tail.format("stdout")).toBe(
+      "[Specwright truncated stdout: retained 2 bytes, discarded 1 bytes.]\nz"
     );
   });
 });

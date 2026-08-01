@@ -5,27 +5,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { downloadAndUnzipVSCode, runTests, runVSCodeCommand } from "@vscode/test-electron";
+import { argumentValue } from "./release-artifact.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
-
-function argumentValue(name) {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function minimumVersion(engineRange) {
-  const version = /^[~^]?(\d+\.\d+\.\d+)/u.exec(engineRange)?.[1];
-  if (!version) {throw new Error(`Cannot resolve a minimum VS Code version from '${engineRange}'`);}
-  return version;
-}
-
-function targetVersion() {
-  const requested = process.env.SPECWRIGHT_VSCODE_VERSION ?? "stable";
-  if (requested !== "minimum") {return requested;}
-  const packageJson = JSON.parse(readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"));
-  return minimumVersion(packageJson.engines.vscode);
-}
 
 function findVsix() {
   const requested = argumentValue("--vsix");
@@ -41,12 +24,6 @@ function findVsix() {
   return candidates[0];
 }
 
-function executablePath(downloadedPath) {
-  if (process.platform !== "darwin" || existsSync(downloadedPath)) {return downloadedPath;}
-  const codePath = resolve(dirname(downloadedPath), "Code");
-  return existsSync(codePath) ? codePath : downloadedPath;
-}
-
 async function main() {
   delete process.env.ELECTRON_RUN_AS_NODE;
   const vsixPath = findVsix();
@@ -54,7 +31,16 @@ async function main() {
   const smokeHarness = resolve(REPO_ROOT, "src", "test", "integration", "smoke-harness");
   if (!existsSync(smokeRunner)) {throw new Error("Compile integration tests before running the VSIX smoke test");}
 
-  const version = targetVersion();
+  // The integration build (a prerequisite of this script) already owns version and
+  // executable resolution; import the compiled module instead of duplicating it here.
+  const { resolveVSCodeExecutablePath, resolveVSCodeVersion } = await import(
+    pathToFileURL(resolve(REPO_ROOT, "out", "test", "integration", "vscode-executable-path.js")).href
+  );
+  const packageJson = JSON.parse(readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"));
+  const version = resolveVSCodeVersion(
+    process.env.SPECWRIGHT_VSCODE_VERSION ?? "stable",
+    packageJson.engines.vscode
+  );
   const profileRoot = mkdtempSync(resolve(tmpdir(), "specwright-vsix-smoke-"));
   const extensionsDir = resolve(profileRoot, "extensions");
   const userDataDir = resolve(profileRoot, "user-data");
@@ -72,7 +58,7 @@ async function main() {
     });
     const fixture = resolve(REPO_ROOT, "src", "test", "integration", "fixtures", "workspace");
     await runTests({
-      vscodeExecutablePath: executablePath(downloadedPath),
+      vscodeExecutablePath: resolveVSCodeExecutablePath(downloadedPath),
       extensionDevelopmentPath: smokeHarness,
       extensionTestsPath: smokeRunner,
       launchArgs: [

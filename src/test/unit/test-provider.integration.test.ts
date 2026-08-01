@@ -764,6 +764,29 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
   });
 
+  it("keeps the synthesized failure guidance when output already streamed", async () => {
+    // Streaming suppresses the raw tails in the final summary, but result.error carries
+    // synthesized guidance (bddgen failure, missing-binary hint) that never crossed the
+    // stream and must still reach Test Results.
+    const shell: ShellRunner = async () => ({
+      success: false,
+      output: "raw streamed tail",
+      error: "zsh: command not found: npx",
+      returnCode: 127,
+      outputStreamed: true,
+    });
+    const { controller } = buildProvider(shell);
+    const featurePath = "/repo/features/a.feature";
+    const featureItem = controller.createTestItem(featurePath, "A feature", { fsPath: featurePath });
+    controller.items.add(featureItem);
+
+    await runItem(controller, featureItem);
+
+    const output = controller.runs.at(-1)!.outcome.output.join("\n");
+    expect(output).toContain('The command "npx" was not found');
+    expect(output).not.toContain("raw streamed tail");
+  });
+
   it("scopes the run summary to the target when the report's featurePath differs only by Windows drive-letter case/separators", async () => {
     // The run targets one feature but the report attributes results to it AND another feature.
     // formatRunOutput must scope the summary to the target, comparing through normalizePathKey so a

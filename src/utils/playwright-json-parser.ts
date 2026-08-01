@@ -8,7 +8,6 @@ import {
   isPlaywrightReportLimitError,
   parsePlaywrightReportText,
   readPlaywrightReport,
-  readPlaywrightReportSync,
 } from "./playwright-report-reader";
 
 /**
@@ -232,19 +231,6 @@ export class PlaywrightJsonParser {
       this.walkSuite(suite, results, ctx);
     }
     return results;
-  }
-
-  public parseFromFile(jsonPath: string): ScenarioResult[] {
-    this.specDataCache.clear();
-    try {
-      return this.parseReport(readPlaywrightReportSync(jsonPath) as RawPlaywrightReport);
-    } catch (err) {
-      if (isPlaywrightReportLimitError(err)) {throw err;}
-      this.logger.warn(`Could not read Playwright JSON report at ${jsonPath}`, {
-        error: String(err),
-      });
-      return [];
-    }
   }
 
   /** Read extension-launched reports without blocking the extension host on file I/O. */
