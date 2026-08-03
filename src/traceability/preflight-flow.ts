@@ -57,11 +57,6 @@ export function invocationsAfterExclusions(
       if (!isExcluded(inv.ref, excluded)) {
         out.push(inv);
       }
-    } else if (inv.kind === "grep") {
-      const refs = inv.refs.filter((ref) => !isExcluded(ref, excluded));
-      if (refs.length > 0) {
-        out.push({ kind: "grep", refs });
-      }
     } else {
       out.push(inv);
     }

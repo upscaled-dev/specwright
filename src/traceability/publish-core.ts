@@ -184,8 +184,28 @@ export function publishOutcomeLead(outcome: PublishOutcome, request: PublishRequ
 }
 
 // One run's label in the dialog's newest-first dropdown: its local time and batch scope.
+export function batchSelectionLabel(kind: string): string {
+  const known: Record<string, string> = {
+    scenario: "Scenario",
+    "multi-select": "Selected scenarios",
+    feature: "Feature",
+    folder: "Folder",
+    "tag-expression": "Tag expression",
+    "all-mapped": "All mapped scenarios",
+    "test-plan-derived": "Test plan",
+    suite: "All tests",
+  };
+  return known[kind] ?? kind
+    .split(/[-_\s]+/)
+    .filter((part) => part !== "")
+    .map((part, index) => (index === 0
+      ? `${part.charAt(0).toUpperCase()}${part.slice(1)}`
+      : part.toLowerCase()))
+    .join(" ");
+}
+
 export function publishRunLabel(createdAt: number, selectionKind: string): string {
-  return `${new Date(createdAt).toLocaleString()} · ${selectionKind}`;
+  return `${new Date(createdAt).toLocaleString()} · ${batchSelectionLabel(selectionKind)}`;
 }
 
 // Create-mode Project prefill (§ point 2). Priority: (a) the single distinct project the run's own

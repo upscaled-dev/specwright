@@ -51,6 +51,7 @@ interface RenderMessage {
   testSetVerb: Verb;
   testPlanVerb: Verb;
   executionVerb: Verb;
+  runSelectedVerb: Verb;
 }
 interface Verb {
   label: string;
@@ -192,6 +193,8 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     createTestSet: () => undefined,
     createTestPlan: () => undefined,
     createTestExecution: () => undefined,
+    describeRunSelected: () => ({ runnable: 0, skipped: 0 }),
+    runSelected: () => undefined,
     knownProjects: () => PROJECTS,
     projectScope: fakeScope(),
     mappingPageSize: mappingPageSizeStore(memento(), () => undefined),
@@ -326,13 +329,13 @@ describe("BoardPanel", () => {
     expect(html).not.toContain("drag to link");
   });
 
-  // Four verb buttons across two panes, but four verbs rows: the shared section builder gives the Mapped
+  // Five verb buttons across two panes, but four verbs rows: the shared section builder gives the Mapped
   // section its own verbs row too, empty but height-holding, so the first section of each column lines up.
   it("skins every board button with the one verb class, each inside a verbs row", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
 
-    expect(html.split('class="verb"').length - 1).toBe(4);
+    expect(html.split('class="verb"').length - 1).toBe(5);
     expect(html).not.toContain('class="create-tests"');
     expect(html.split('<div class="verbs">').length - 1).toBe(4);
   });
@@ -1251,6 +1254,46 @@ describe("BoardPanel", () => {
       label: "Create Test Plan",
       enabled: false,
       hint: "Pick a project in the header to create a Test Plan in.",
+    });
+    expect(panel.webview.html).toContain('id="run-selected"');
+    expect(lastRender(panel)!.runSelectedVerb).toEqual({
+      label: "Run and publish selected",
+      enabled: false,
+      hint: "Check mapped tests to run and publish their scenarios.",
+    });
+  });
+
+  it("describes mapped and skipped checked tests and routes the exact host selection", async () => {
+    const runSelected = vi.fn();
+    const describeRunSelected = vi.fn((keys: readonly string[]) => ({
+      runnable: keys.includes("CALC-1") ? 1 : 0,
+      skipped: keys.includes("PAY-9") ? 1 : 0,
+    }));
+    const { panel } = await openReady({ runSelected, describeRunSelected });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "PAY-9", on: true });
+
+    expect(lastRender(panel)!.runSelectedVerb).toEqual({
+      label: "Run and publish selected",
+      enabled: true,
+      hint: "1 mapped scenario will run and publish. 1 checked test has no mapped scenario and will be skipped.",
+    });
+    const before = panel.webview.__posted.length;
+    await panel.__receive({ surface: "board", type: "runSelected" });
+    expect(runSelected).toHaveBeenCalledWith(["CALC-1", "PAY-9"]);
+    expect(panel.webview.__posted).toHaveLength(before);
+  });
+
+  it("keeps run selected disabled when every checked test is skipped", async () => {
+    const { panel } = await openReady({
+      describeRunSelected: () => ({ runnable: 0, skipped: 1 }),
+    });
+    await panel.__receive({ surface: "board", type: "select", target: "test", id: "PAY-9", on: true });
+
+    expect(lastRender(panel)!.runSelectedVerb).toEqual({
+      label: "Run and publish selected",
+      enabled: false,
+      hint: "No mapped scenarios will run. 1 checked test has no mapped scenario and will be skipped.",
     });
   });
 

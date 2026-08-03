@@ -1,8 +1,11 @@
 import type { ScenarioResult } from "../utils/playwright-json-parser";
+import type { DetailBudget } from "./execution-limits";
 import type { RunOutputResult } from "./test-executor";
 
 /** Per-run callbacks used to publish Playwright results before the process exits. */
 export interface RunProgressObserver {
+  /** The dispatching run's own live-detail budget, so N invocations cannot retain N times the cap. */
+  readonly detailBudget?: DetailBudget | undefined;
   onBegin?(total: number): void;
   onTestEnd?(result: ScenarioResult, completed: number, total: number): void;
   onOutput?(stream: "stdout" | "stderr", text: string): void;
@@ -15,6 +18,8 @@ export interface RunProgressSession {
   end(): void;
 }
 
+// `detailBudget` is deliberately not forwarded: only the gateway's own observer reaches the executor,
+// so a combined observer carrying one would hand each invocation its own budget.
 /** Fan one run's progress out to its independent UI consumers. */
 export function combineRunProgressObservers(
   ...observers: Array<RunProgressObserver | undefined>

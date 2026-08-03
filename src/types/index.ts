@@ -95,6 +95,12 @@ export interface TestExecutionOptions {
    * the builder falls back to grepping by scenario/outline name.
    */
   specLineTarget?: string;
+  /**
+   * Regex positional filter scoping a name-based `--grep` to one generated spec file. Set for
+   * whole-outline runs, whose title grep is intentional for every row of THAT outline but must not
+   * reach a same-titled outline in another feature file.
+   */
+  specFileFilter?: string;
   debug?: boolean;
   waitForSessionEnd?: boolean | undefined;
   /**
@@ -102,38 +108,6 @@ export interface TestExecutionOptions {
    * runs in a terminal, so stdout capture isn't available). Unset → no JSON reporter is added.
    */
   jsonReportPath?: string | undefined;
-  tags?: string;
-  parallel?: boolean;
-  reporter?: string;
-  dryRun?: boolean;
-  /** Aborts the spawned run when the Test Explorer stop button is pressed. */
-  signal?: AbortSignal | undefined;
-  /** Receives scenario result updates while Playwright is still running. */
-  progress?: RunProgressObserver | undefined;
-  /** Open run-artifact batch this invocation's shard belongs to; unset → no artifact is captured. */
-  artifactBatch?: number | undefined;
-}
-
-/**
- * Parallel execution options
- */
-export interface ParallelExecutionOptions {
-  featureFiles: string[];
-  maxProcesses: number;
-  tags?: string;
-}
-
-/**
- * Feature file execution options
- */
-export interface FeatureExecutionOptions {
-  filePath: string;
-  /**
-   * The Feature title (the text after `Feature:`). When provided, runs grep by this exact title
-   * instead of the filename, so a feature run can't accidentally match a different feature whose
-   * scenario titles happen to contain the filename.
-   */
-  featureName?: string;
   tags?: string;
   parallel?: boolean;
   reporter?: string;
@@ -196,6 +170,7 @@ export interface PlaywrightBddExtensionContext {
   logger: Logger;
   config: ExtensionConfig;
   testExecutor: TestExecutor;
+  executionGateway: import("../core/run-contracts").ExecutionGateway;
   discoveryManager: TestDiscoveryManager;
   organizationManager: TestOrganizationManager;
   featureParser: FeatureParser;

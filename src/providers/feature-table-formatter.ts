@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { docStringFenceState } from "../parsers/gherkin-slice";
 import { findTableBlocks, formatTableBlock } from "./feature-table-formatter-helpers";
 
 export class FeatureTableFormatter implements vscode.DocumentFormattingEditProvider {
@@ -26,19 +27,12 @@ export class FeatureTableFormatter implements vscode.DocumentFormattingEditProvi
 function computeDocStringSkip(text: string): Set<number> {
   const skip = new Set<number>();
   const lines = text.split(/\r?\n/);
-  let docStringDelimiter: string | null = null;
+  let docStringDelimiter: string | undefined;
   for (let i = 0; i < lines.length; i++) {
     const trimmed = (lines[i] ?? "").trim();
-    if (docStringDelimiter) {
-      skip.add(i);
-      // A docstring closes only with the delimiter type that opened it.
-      if (trimmed.startsWith(docStringDelimiter)) {docStringDelimiter = null;}
-      continue;
-    }
-    if (trimmed.startsWith(`"""`) || trimmed.startsWith("```")) {
-      skip.add(i);
-      docStringDelimiter = trimmed.startsWith(`"""`) ? `"""` : "```";
-    }
+    const fence = docStringFenceState(docStringDelimiter, trimmed);
+    docStringDelimiter = fence.fence;
+    if (fence.inString) {skip.add(i);}
   }
   return skip;
 }

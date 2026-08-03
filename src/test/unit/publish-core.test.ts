@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import * as vscode from "vscode";
 import {
   defaultPublishSummary,
   derivePublishProject,
@@ -17,7 +16,7 @@ import {
 } from "../../traceability/publish-core";
 import { projectFromKey } from "../../xray/xray-adapter";
 import { buildArtifactResults } from "../../traceability/run-artifact-store";
-import { refIdentity, sameScenario, scenarioRefFromScenario } from "../../traceability/scenario-ref";
+import { refIdentity, sameScenario } from "../../traceability/scenario-ref";
 import type {
   BatchSelection,
   PreflightDecision,
@@ -27,7 +26,6 @@ import type {
 } from "../../traceability/contracts";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { ScenarioResult } from "../../utils/playwright-json-parser";
-import type { OutlineStub } from "../../types";
 
 function ref(filePath: string, line: number, name: string, kind: ScenarioRef["kind"] = "scenario"): ScenarioRef {
   return { filePath, line, name, kind };
@@ -196,18 +194,13 @@ describe("publishableResults: outline exclusion (capture-path faithful)", () => 
     const capturedRef = captured[0]!.scenario;
 
     // Preflight path: the model/resolveBatchSelection ref is keyed off the outline DECLARATION line.
-    const outline: OutlineStub = {
-      name: "Divide",
-      line: declLine,
-      range: new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0)),
-      lineNumber: declLine,
-      steps: [],
+    const excludeRef: ScenarioRef = {
       filePath: feature,
-      isScenarioOutline: true,
-      outlineLineNumber: declLine,
+      line: declLine,
+      name: "Divide",
+      kind: "outline",
       outlineName: "Divide",
     };
-    const excludeRef = scenarioRefFromScenario(outline);
 
     // The mismatch that motivates fuzzy matching: strict identity misses it, fuzzy sameScenario catches it.
     expect(refIdentity(capturedRef)).not.toBe(refIdentity(excludeRef));
@@ -352,8 +345,12 @@ describe("hasExecutionRef / executionLabel", () => {
 
 describe("publishRunLabel", () => {
   it("pairs the run's local time with its batch scope", () => {
-    expect(publishRunLabel(Date.UTC(2026, 6, 22, 9, 0, 0), "all-mapped")).toContain("all-mapped");
-    expect(publishRunLabel(Date.UTC(2026, 6, 22, 9, 0, 0), "scenario")).toContain(" · scenario");
+    expect(publishRunLabel(Date.UTC(2026, 6, 22, 9, 0, 0), "all-mapped"))
+      .toContain("All mapped scenarios");
+    expect(publishRunLabel(Date.UTC(2026, 6, 22, 9, 0, 0), "scenario"))
+      .toContain(" · Scenario");
+    expect(publishRunLabel(Date.UTC(2026, 6, 22, 9, 0, 0), "future-scope"))
+      .toContain(" · Future scope");
   });
 });
 

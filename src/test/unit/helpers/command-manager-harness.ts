@@ -8,29 +8,45 @@ import { ExtensionConfig } from "../../../core/extension-config";
 import { TestDiscoveryManager } from "../../../core/test-discovery-manager";
 import { TestExecutor } from "../../../core/test-executor";
 import { TestOrganizationManager } from "../../../core/test-organization";
+import { ExtensionExecutionGateway } from "../../../core/execution-gateway";
 import { FeatureParser } from "../../../parsers/feature-parser";
+import type { ScenarioRef } from "../../../traceability/scenario-ref";
 import type { PlaywrightBddExtensionContext } from "../../../types";
 import { Logger } from "../../../utils/logger";
 import { PlaywrightJsonParser } from "../../../utils/playwright-json-parser";
 import { XrayAdapter } from "../../../xray/xray-adapter";
 
 export function makeContext(
-  overrides?: Partial<PlaywrightBddExtensionContext>
+  overrides?: Partial<PlaywrightBddExtensionContext> & {
+    mappedScenarios?: readonly ScenarioRef[];
+  }
 ): PlaywrightBddExtensionContext {
   const logger = Logger.create();
   const config = ExtensionConfig.create();
-  const base: PlaywrightBddExtensionContext = {
+  const testExecutor = TestExecutor.create();
+  const featureParser = FeatureParser.create(logger);
+  const base = {
     logger,
     config,
-    testExecutor: TestExecutor.create(),
+    testExecutor,
     discoveryManager: TestDiscoveryManager.create(logger, config),
     organizationManager: TestOrganizationManager.create(logger),
-    featureParser: FeatureParser.create(logger),
+    featureParser,
     playwrightJsonParser: PlaywrightJsonParser.create(logger),
     commandBuilder: CommandBuilder.create(config, logger),
     traceabilityAdapter: new XrayAdapter(config),
   };
-  return { ...base, ...(overrides ?? {}) };
+  const merged = { ...base, ...(overrides ?? {}) };
+  return {
+    ...merged,
+    executionGateway: overrides?.executionGateway ?? new ExtensionExecutionGateway(
+      merged.testExecutor,
+      merged.runArtifactStore,
+      merged.featureParser,
+      logger,
+      () => overrides?.mappedScenarios ?? []
+    ),
+  };
 }
 
 export function memento(): vscode.Memento {
@@ -68,11 +84,11 @@ export function captureHandlers(
   return handlers;
 }
 
-export function fakeDoc(text: string): vscode.TextDocument {
+export function fakeDoc(text: string, fsPath = "/ws/a.feature"): vscode.TextDocument {
   const separator = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split(separator);
   return {
-    uri: vscode.Uri.file("/ws/a.feature"),
+    uri: vscode.Uri.file(fsPath),
     eol: separator === "\r\n" ? vscode.EndOfLine.CRLF : vscode.EndOfLine.LF,
     getText: () => text,
     lineAt: (line: number) => ({

@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import { ExtensionConfig } from "../core/extension-config";
-import { TestExecutor } from "../core/test-executor";
 import { FeatureParser } from "../parsers/feature-parser";
 import {
   buildBoardViewModel,
@@ -35,6 +34,10 @@ import { JiraAccessError, JiraProject, searchJiraProjects } from "../xray/jira-p
 import { TraceabilityAuthoringCommands } from "./traceability-authoring-commands";
 import { TraceabilityLinkCommands } from "./traceability-link-commands";
 import { TraceabilityPublishCommands } from "./traceability-publish-commands";
+import { boardBatchSelection } from "./run-publish-selection";
+import { commandArgFsPath } from "./run-commands";
+import type { ExecutionGateway } from "../core/run-contracts";
+import { ExecutionAlreadyRunningError, ExecutionFailure } from "../core/execution-gateway";
 
 interface SyncRequest {
   readonly announce: boolean;
@@ -50,7 +53,7 @@ export interface TraceabilityCommandDeps {
   readonly publishLedger: () => PublishLedger | undefined;
   readonly extensionUri: () => vscode.Uri | undefined;
   readonly runArtifactStore: RunArtifactStore | undefined;
-  readonly testExecutor: TestExecutor;
+  readonly executionGateway: ExecutionGateway;
   readonly featureParser: FeatureParser;
 }
 
@@ -97,6 +100,47 @@ export class TraceabilityCommands {
   public runAndPublish(...args: unknown[]): Promise<void> {
     return this.getPublishCommands().runAndPublish(...args);
   }
+  // The view-title button's own command: it names the whole mapped set, which the node command must
+  // never infer from an empty argument list. "Whole" means whole within the board's project scope,
+  // the same scope the board shows and the sync fetches.
+  public runAndPublishAllMapped(): Promise<void> {
+    const project = this.selectedProject();
+    return this.getPublishCommands().runAndPublishSelection({
+      kind: "all-mapped",
+      ...(project ? { project } : {}),
+    });
+  }
+  public runAndPublishFeature(arg?: unknown): Promise<void> {
+    const filePath = commandArgFsPath(arg);
+    return filePath
+      ? this.getPublishCommands().runAndPublishSelection(
+          { kind: "feature", filePath },
+          "explorer"
+        )
+      : Promise.resolve();
+  }
+  public runAndPublishFolder(arg?: unknown): Promise<void> {
+    const folderPath = commandArgFsPath(arg);
+    return folderPath
+      ? this.getPublishCommands().runAndPublishSelection(
+          { kind: "folder", folderPath },
+          "explorer"
+        )
+      : Promise.resolve();
+  }
+  public async runAndPublishByTagExpression(): Promise<void> {
+    const expression = await vscode.window.showInputBox({
+      title: "Run and Publish by Tag Expression",
+      prompt: "Enter a playwright-bdd tag expression",
+      ignoreFocusOut: true,
+      validateInput: (value) => (value.trim() === "" ? "A tag expression is required." : undefined),
+    });
+    if (expression === undefined) {return;}
+    await this.getPublishCommands().runAndPublishSelection(
+      { kind: "tag-expression", expression },
+      "palette"
+    );
+  }
   public publishLastRun(): Promise<void> {return this.getPublishCommands().publishLastRun();}
   public clearLocalRunHistory(): Promise<void> {
     return this.getPublishCommands().clearLocalRunHistory();
@@ -106,7 +150,6 @@ export class TraceabilityCommands {
   public disconnect(): Promise<void> {return this.getConnectionCommands().disconnect();}
   public testConnection(): Promise<void> {return this.getConnectionCommands().testConnection();}
   public bulkCreateTests(): Promise<void> {return this.getAuthoringCommands().bulkCreateTests();}
-  public pushScenarioText(): Promise<void> {return this.getAuthoringCommands().pushScenarioText();}
   public createTestSet(): Promise<void> {return this.getAuthoringCommands().createTestSet();}
   public createTestPlan(): Promise<void> {return this.getAuthoringCommands().createTestPlan();}
   public createTestExecution(): Promise<void> {return this.getAuthoringCommands().createTestExecution();}
@@ -141,14 +184,18 @@ export class TraceabilityCommands {
     };
   }
 
+  /** The board's current project scope: undefined is All Projects, never a filter. */
+  private selectedProject(): string | undefined {
+    const subsystem = this.deps.subsystem();
+    return subsystem?.projectScope().get(this.projectUniverse(subsystem.getActiveAdapter()));
+  }
+
   private syncProjectKeys(
     adapter: TraceabilityAdapter | undefined,
     explicitKey?: string
   ): string[] {
     const sources = this.localProjectSources(adapter);
-    const selectedKey =
-      explicitKey ??
-      this.deps.subsystem()?.projectScope().get(this.projectUniverse(adapter));
+    const selectedKey = explicitKey ?? this.selectedProject();
     return resolveSyncProjectKeys({ ...sources, selectedKey });
   }
 
@@ -252,6 +299,32 @@ export class TraceabilityCommands {
             this.logger.warn("Creating a test execution from the board failed", {
               error: errMsg(error),
             });
+          });
+      },
+      describeRunSelected: (testKeys) => {
+        const snapshot = this.deps.subsystem()?.getSnapshot();
+        if (!snapshot) {return { runnable: 0, skipped: testKeys.length };}
+        const resolved = boardBatchSelection(testKeys, snapshot);
+        const runnable = resolved.selection.kind === "scenario"
+          ? 1
+          : resolved.selection.kind === "multi-select"
+            ? resolved.selection.scenarios.length
+            : 0;
+        return { runnable, skipped: resolved.skipped };
+      },
+      runSelected: (testKeys) => {
+        this.getPublishCommands()
+          .runAndPublishSelected(testKeys)
+          .catch((error) => {
+            this.logger.warn("Running selected board tests failed", { error: errMsg(error) });
+            if (error instanceof ExecutionAlreadyRunningError) {
+              vscode.window.showWarningMessage(error.message);
+            } else if (error instanceof ExecutionFailure) {
+              const saved = error.completion.artifactId ? " The partial run was saved." : "";
+              vscode.window.showErrorMessage(
+                `Run stopped before a complete report was available: ${error.message}${saved}`
+              );
+            }
           });
       },
       publishDelegate: this.getPublishCommands().publishDelegate(),
@@ -416,7 +489,13 @@ export class TraceabilityCommands {
   }
 
   public toggleGrouping(): void {
-    this.deps.subsystem()?.toggleGrouping();
+    const subsystem = this.deps.subsystem();
+    // The subsystem exists before its tree does; without the panel the toggle silently does nothing.
+    if (!subsystem?.traceabilityPanelActive) {
+      vscode.window.showInformationMessage("Enable the Traceability panel to change how it groups.");
+      return;
+    }
+    subsystem.toggleGrouping();
   }
 
   public async switchDefaultProject(): Promise<void> {
@@ -552,7 +631,7 @@ export class TraceabilityCommands {
       siteUrl: () => this.siteUrl(),
       idleEvent: this.boardChange.event,
       runArtifactStore: this.deps.runArtifactStore,
-      testExecutor: this.deps.testExecutor,
+      executionGateway: this.deps.executionGateway,
       featureParser: this.deps.featureParser,
     });
     return this.publishCommands;
@@ -564,12 +643,7 @@ export class TraceabilityCommands {
       adapter: () => this.deps.subsystem()?.getActiveAdapter(),
       selectedScenarios: () => BoardPanel.selectedScenarios(),
       selectedTests: () => BoardPanel.selectedTests(),
-      targetProject: () => {
-        const subsystem = this.deps.subsystem();
-        return subsystem
-          ?.projectScope()
-          .get(this.projectUniverse(subsystem.getActiveAdapter()));
-      },
+      targetProject: () => this.selectedProject(),
       credentialsPresent: async () => {
         const store = this.deps.credentialStore();
         return (

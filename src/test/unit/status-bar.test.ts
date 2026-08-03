@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import * as vscode from "vscode";
 import { StatusBar } from "../../ui/status-bar";
-import { TestRunEvent } from "../../core/test-executor";
+import type { ExecutionEvent, RunCompletion } from "../../core/run-contracts";
 
 interface CapturedItem {
   text: string;
@@ -13,9 +13,9 @@ interface CapturedItem {
   disposed: boolean;
 }
 
-class FakeExecutor {
-  private listeners: Array<(e: TestRunEvent) => void> = [];
-  public readonly onTestRunEvent = (listener: (e: TestRunEvent) => void) => {
+class FakeGateway {
+  private listeners: Array<(e: ExecutionEvent) => void> = [];
+  public readonly onEvent = (listener: (e: ExecutionEvent) => void) => {
     this.listeners.push(listener);
     return {
       dispose: () => {
@@ -24,10 +24,22 @@ class FakeExecutor {
       },
     };
   };
-  public fire(event: TestRunEvent): void {
+  public fire(event: ExecutionEvent): void {
     for (const l of this.listeners) { l(event); }
   }
   public get listenerCount(): number { return this.listeners.length; }
+}
+
+function completion(over: Partial<RunCompletion> = {}): RunCompletion {
+  return {
+    state: "complete",
+    results: [],
+    output: "",
+    passed: 0,
+    failed: 0,
+    durationMs: 1,
+    ...over,
+  };
 }
 
 function makeWindow(captured: CapturedItem[]): typeof vscode.window {
@@ -61,13 +73,13 @@ function makeWindow(captured: CapturedItem[]): typeof vscode.window {
 
 describe("StatusBar", () => {
   let captured: CapturedItem[];
-  let executor: FakeExecutor;
+  let gateway: FakeGateway;
   let statusBar: StatusBar;
 
   beforeEach(() => {
     captured = [];
-    executor = new FakeExecutor();
-    statusBar = new StatusBar(executor as unknown as Parameters<typeof StatusBar.create>[0], makeWindow(captured));
+    gateway = new FakeGateway();
+    statusBar = new StatusBar(gateway, makeWindow(captured));
   });
 
   it("renders idle state on creation", () => {
@@ -82,50 +94,61 @@ describe("StatusBar", () => {
   });
 
   it("updates to running state when a running event fires", () => {
-    executor.fire({ kind: "running", passed: 0, failed: 0 });
+    gateway.fire({ kind: "started", targetCount: 1 });
     const item = captured[0]!;
     expect(item.text).toBe("$(loading~spin) Specwright: running…");
     expect(item.tooltip).toBe("No runs this session");
   });
 
   it("shows completed and total counts while a run is active", () => {
-    executor.fire({ kind: "running", passed: 8, failed: 1, completed: 10, total: 25 });
+    gateway.fire({
+      kind: "case-finished",
+      result: {
+        scenario: { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" },
+        outcome: "passed",
+        durationMs: 1,
+        attempts: 1,
+        flaky: false,
+      },
+      completed: 10,
+      total: 25,
+    });
     expect(captured[0]!.text).toBe("$(loading~spin) Specwright: 10/25");
   });
 
   it("updates to success state with passed count and updates tooltip with last run time", () => {
-    executor.fire({ kind: "success", passed: 7, failed: 0 });
+    gateway.fire({ kind: "finished", completion: completion({ passed: 7 }) });
     const item = captured[0]!;
     expect(item.text).toBe("$(check) Specwright: passed 7");
     expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2}, click to show test output$/);
   });
 
   it("updates to failure state with passed/failed counts", () => {
-    executor.fire({ kind: "failure", passed: 3, failed: 2 });
+    gateway.fire({ kind: "finished", completion: completion({ passed: 3, failed: 2 }) });
     const item = captured[0]!;
     expect(item.text).toBe("$(error) Specwright: 3 passed, 2 failed");
     expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2}, click to show test output$/);
   });
 
   it("settles to a cancelled state instead of staying on the spinner", () => {
-    executor.fire({ kind: "running", passed: 0, failed: 0 });
-    executor.fire({ kind: "cancelled", passed: 0, failed: 0 });
+    gateway.fire({ kind: "started", targetCount: 1 });
+    gateway.fire({ kind: "finished", completion: completion({ state: "cancelled" }) });
     const item = captured[0]!;
     expect(item.text).toBe("$(circle-slash) Specwright: cancelled");
     expect(item.tooltip).toMatch(/^Last run at \d{2}:\d{2}:\d{2}, click to show test output$/);
   });
 
   it("preserves the last-run tooltip when transitioning back to running", () => {
-    executor.fire({ kind: "success", passed: 1, failed: 0 });
+    gateway.fire({ kind: "finished", completion: completion({ passed: 1 }) });
     const tooltipAfterSuccess = captured[0]!.tooltip;
-    executor.fire({ kind: "running", passed: 0, failed: 0 });
+    gateway.fire({ kind: "started", targetCount: 1 });
     expect(captured[0]!.tooltip).toBe(tooltipAfterSuccess);
   });
 
-  it("disposes the status bar item and unsubscribes from the executor", () => {
-    expect(executor.listenerCount).toBe(1);
+  it("disposes the status bar item and unsubscribes from the gateway", () => {
+    expect(gateway.listenerCount).toBe(1);
     statusBar.dispose();
     expect(captured[0]!.disposed).toBe(true);
-    expect(executor.listenerCount).toBe(0);
+    expect(gateway.listenerCount).toBe(0);
   });
 });

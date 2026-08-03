@@ -4,16 +4,15 @@ import type { OutlineExampleRow } from "../types";
 import type { ArtifactCaptureTarget } from "./run-artifact-store";
 import { ScenarioRef, normalizePath, refIdentity, sameScenario } from "./scenario-ref";
 
-// One thing to run for a resolved batch. `scenario` greps by name/outline; `grep` runs one combined
-// name-regex over several scenarios in a single bddgen+playwright pass (the all-mapped collapse);
-// `path-filter` carries the source feature file or folder; the executor resolves its working dir
-// (the owning Playwright config, monorepo-aware) and derives a forward-slashed, regex-escaped
-// positional filter relative to that dir; `tags` routes the expression through the `bddgen --tags`
-// path.
+// One thing to run for a resolved batch. `scenario` targets one exact scenario; `path-filter`
+// carries the source feature file or folder; the executor resolves its working dir (the owning
+// Playwright config, monorepo-aware) and derives a forward-slashed, regex-escaped positional filter
+// relative to that dir; `tags` routes the expression through the `bddgen --tags` path. There is
+// deliberately no combined-title invocation: a title grep spanning files can execute a same-titled
+// or chain-matched scenario the batch does not own.
 export type BatchInvocation =
-  | { readonly kind: "scenario"; readonly ref: ScenarioRef }
-  | { readonly kind: "grep"; readonly refs: readonly ScenarioRef[] }
-  | { readonly kind: "path-filter"; readonly target: string }
+  | { readonly kind: "scenario"; readonly ref: ScenarioRef; readonly tagExpression?: string | undefined }
+  | { readonly kind: "path-filter"; readonly target: string; readonly tagExpression?: string | undefined }
   | { readonly kind: "tags"; readonly expression: string };
 
 export interface ResolvedBatch {
@@ -25,6 +24,7 @@ export interface BatchResolutionOptions {
   // Canonical member test keys of the target Test Plan, when the selection is `test-plan-derived`
   // (slice 2d's remote plan lookup supplies them). Absent/empty → that scope resolves to nothing.
   readonly planTestKeys?: readonly string[] | undefined;
+  readonly projectOf?: ((testKey: string) => string) | undefined;
 }
 
 export function batchSelectionFromScenarios(
@@ -38,7 +38,9 @@ export function batchSelectionFromScenarios(
     return true;
   });
   const first = scenarios[0];
-  if (!first) {return { kind: "all-mapped" };}
+  // Nothing selected means nothing to run. Widening it to every mapped scenario here would let any
+  // caller that forgot a guard run the whole suite on an empty selection.
+  if (!first) {return { kind: "multi-select", scenarios: [] };}
   return scenarios.length === 1
     ? { kind: "scenario", scenario: first }
     : { kind: "multi-select", scenarios };
@@ -54,6 +56,10 @@ export function artifactCaptureTarget(
   if (scenario.kind === "scenario") {
     return { scenario, ...(scenario.line > 0 ? { resultLines: [scenario.line] } : {}) };
   }
+  // Both outline-shaped scopes read their rows from the parse. No rows at all means the feature did
+  // not parse, never that the scope owns nothing: capture scoped to an empty line set would discard
+  // every result the run produced, so the scope is left open instead.
+  if (rows.length === 0) {return { scenario };}
   if (scenario.kind === "examplesBlock") {
     return {
       scenario,
@@ -62,19 +68,24 @@ export function artifactCaptureTarget(
         .map((row) => row.lineNumber),
     };
   }
+  // An outline ref names one row when it carries that row's own line; otherwise it names the whole
+  // outline, by declaration line (the traceability mapping) or by title alone (a run target).
+  if (rows.some((row) => row.lineNumber === scenario.line)) {
+    return { scenario, resultLines: [scenario.line] };
+  }
   const file = normalizePath(scenario.filePath);
   const splitBlocks = new Set(
     mapped
       .filter((ref) => ref.kind === "examplesBlock" && normalizePath(ref.filePath) === file)
       .map((ref) => ref.line)
   );
+  const ownedByOutline = (row: OutlineExampleRow): boolean => (
+    scenario.line > 0 ? row.outlineLineNumber === scenario.line : row.outlineName === scenario.name
+  );
   return {
     scenario,
     resultLines: rows
-      .filter((row) =>
-        row.outlineLineNumber === scenario.line
-        && !splitBlocks.has(row.examplesBlockLineNumber)
-      )
+      .filter((row) => ownedByOutline(row) && !splitBlocks.has(row.examplesBlockLineNumber))
       .map((row) => row.lineNumber),
   };
 }
@@ -105,8 +116,8 @@ function mappedScenarioRefs(snapshot: TraceabilitySnapshot): ScenarioRef[] {
   return refs;
 }
 
-function pathFilterInvocation(target: string): BatchInvocation {
-  return { kind: "path-filter", target };
+function pathFilterInvocation(target: string, tagExpression?: string): BatchInvocation {
+  return { kind: "path-filter", target, ...(tagExpression ? { tagExpression } : {}) };
 }
 
 function underFolder(filePath: string, folderPath: string): boolean {
@@ -139,7 +150,14 @@ export function resolveBatchSelection(
   switch (selection.kind) {
     case "scenario": {
       const ref = canonical(selection.scenario);
-      return { scenarios: [ref], invocations: [{ kind: "scenario", ref }] };
+      return {
+        scenarios: [ref],
+        invocations: [{
+          kind: "scenario",
+          ref,
+          ...(selection.tagExpression ? { tagExpression: selection.tagExpression } : {}),
+        }],
+      };
     }
     case "multi-select": {
       const refs = selection.scenarios.map(canonical);
@@ -147,20 +165,27 @@ export function resolveBatchSelection(
     }
     case "feature": {
       const scenarios = known.filter((ref) => normalizePath(ref.filePath) === normalizePath(selection.filePath));
-      return { scenarios, invocations: [pathFilterInvocation(selection.filePath)] };
+      return {
+        scenarios,
+        invocations: [pathFilterInvocation(selection.filePath, selection.tagExpression)],
+      };
     }
     case "folder": {
       const scenarios = known.filter((ref) => underFolder(ref.filePath, selection.folderPath));
       return { scenarios, invocations: [pathFilterInvocation(selection.folderPath)] };
     }
     case "all-mapped": {
-      const scenarios = mappedScenarioRefs(snapshot);
-      // A combined grep is safe for plain scenarios. Outline and Examples-block mappings need their
-      // own invocation so artifact capture can retain the rows each mapping owns.
-      const invocations = scenarios.every((ref) => ref.kind === "scenario")
-        ? scenarios.length > 0 ? [{ kind: "grep" as const, refs: scenarios }] : []
-        : scenarios.map((ref) => ({ kind: "scenario" as const, ref }));
-      return { scenarios, invocations };
+      const project = selection.project;
+      const scenarios = project === undefined
+        ? mappedScenarioRefs(snapshot)
+        : mappedScenarioRefs({
+            ...snapshot,
+            links: snapshot.links.filter((link) => options.projectOf?.(link.testKey) === project),
+          });
+      return {
+        scenarios,
+        invocations: scenarios.map((ref) => ({ kind: "scenario", ref })),
+      };
     }
     case "test-plan-derived": {
       const planKeys = new Set(options.planTestKeys ?? []);
@@ -171,5 +196,9 @@ export function resolveBatchSelection(
     }
     case "tag-expression":
       return { scenarios: [], invocations: [{ kind: "tags", expression: selection.expression }] };
+    case "suite":
+      // No batch entry point produces this scope. Returning every known scenario with nothing to run
+      // would promise a full run and execute none of it.
+      throw new Error("A suite selection cannot be resolved into a publishable batch.");
   }
 }

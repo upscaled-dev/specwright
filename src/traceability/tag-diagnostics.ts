@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { KeyGrammar } from "./contracts";
 import { extractKeys, stateless } from "./tag-extraction";
 import { TAG_TOKEN_PATTERN } from "../parsers/tag-regex";
+import { docStringFenceState } from "../parsers/gherkin-slice";
 
 export type TagDiagnosticSeverity = "warning" | "information";
 
@@ -128,14 +129,9 @@ function scanUnits(
     const raw = lines[i] ?? "";
     const trimmed = raw.trim();
 
-    if (docString !== undefined) {
-      if (trimmed.startsWith(docString)) {
-        docString = undefined;
-      }
-      continue;
-    }
-    if (trimmed.startsWith(`"""`) || trimmed.startsWith("```")) {
-      docString = trimmed.startsWith(`"""`) ? `"""` : "```";
+    const fence = docStringFenceState(docString, trimmed);
+    docString = fence.fence;
+    if (fence.inString) {
       continue;
     }
     if (trimmed === "" || trimmed.startsWith("#")) {

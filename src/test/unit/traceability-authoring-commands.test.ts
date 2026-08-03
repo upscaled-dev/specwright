@@ -767,7 +767,7 @@ describe("TraceabilityAuthoringCommands.bulkCreateTests", () => {
 describe("TraceabilityAuthoringCommands.pushScenarioText", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("points a row-less palette invocation at the board and reads nothing remote", async () => {
+  it("points a row-less board message at the board and reads nothing remote", async () => {
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     const { commands, searched, pushes } = pushRig();
 

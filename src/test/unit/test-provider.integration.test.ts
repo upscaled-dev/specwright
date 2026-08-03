@@ -12,7 +12,7 @@ import * as path from "node:path";
 import * as vscode from "../__mocks__/vscode";
 import { PlaywrightBddTestProvider } from "../../test-providers/playwright-bdd-test-provider";
 import { OUTLINE_ID_SEPARATOR } from "../../test-providers/constants";
-import { TestExecutor, ShellRunner, TestRunEvent } from "../../core/test-executor";
+import { TestExecutor, ShellRunner } from "../../core/test-executor";
 import { CommandBuilder } from "../../core/command-builder";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { FeatureParser } from "../../parsers/feature-parser";
@@ -22,6 +22,8 @@ import { Logger } from "../../utils/logger";
 import { PlaywrightBddExtensionContext } from "../../types";
 import { BreakpointMirror } from "../../core/breakpoint-mirror";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
+import type { ExecutionEvent, ExecutionGateway } from "../../core/run-contracts";
+import { ExtensionExecutionGateway } from "../../core/execution-gateway";
 import { FakeTestController, FakeTestItem } from "./helpers/fake-test-controller";
 import {
   LIVE_REPORT_FILE_ENV,
@@ -77,7 +79,7 @@ function makeFixture(): Fixture {
       '  {"pwTestLine":6,"pickleLine":4},', // Passing scenario  → feature line 4
       '  {"pwTestLine":18,"pickleLine":12},', // Example #1      → feature line 12
       '  {"pwTestLine":24,"pickleLine":13},', // Example #2      → feature line 13
-      "];",
+      "]; // bdd-data-end",
     ].join("\n")
   );
   return { root, featurePath, genSpecPath };
@@ -86,7 +88,12 @@ function makeFixture(): Fixture {
 /** A Playwright JSON report for the given specs, written by the fake shell to the report path. */
 function reportJson(
   fixture: Fixture,
-  specs: Array<{ title: string; line: number; status: string }>
+  specs: Array<{
+    title: string;
+    line: number;
+    status: string;
+    steps?: Array<{ title: string; duration: number }>;
+  }>
 ): string {
   return JSON.stringify({
     config: {
@@ -99,7 +106,7 @@ function reportJson(
         title: s.title,
         file: "features/test.feature.spec.js",
         line: s.line,
-        tests: [{ results: [{ status: s.status, duration: 5, steps: [] }] }],
+        tests: [{ results: [{ status: s.status, duration: 5, steps: s.steps ?? [] }] }],
       })),
     }],
   });
@@ -138,6 +145,9 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     vscode.debug.__resetDebug();
     vscode.__resetFileWatchers();
     fixture = makeFixture();
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+      { uri: { fsPath: fixture.root } },
+    ];
     origReadFile = vscode.workspace.fs.readFile;
     // discovery + re-parse read the feature through the vscode fs shim.
     (vscode.workspace.fs as { readFile: unknown }).readFile = async (): Promise<Uint8Array> =>
@@ -146,14 +156,16 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
   afterEach(() => {
     (vscode.workspace.fs as { readFile: unknown }).readFile = origReadFile;
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
     try { fs.rmSync(fixture.root, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  function buildProvider(shell: ShellRunner): {
+  function buildProvider(shell: ShellRunner, executionGateway?: ExecutionGateway): {
     provider: PlaywrightBddTestProvider;
     controller: FakeTestController;
     executor: TestExecutor;
     artifactStore: RunArtifactStore;
+    gateway: ExecutionGateway;
     discoveryManager: { discoverTestFiles: ReturnType<typeof vi.fn>; clearCache: ReturnType<typeof vi.fn> };
   } {
     const logger = Logger.create();
@@ -174,13 +186,22 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       clearCache: vi.fn(),
     };
     const artifactStore = new RunArtifactStore(fakeMemento(), logger);
+    const featureParser = FeatureParser.create(logger);
+    const gateway = executionGateway ?? new ExtensionExecutionGateway(
+      executor,
+      artifactStore,
+      featureParser,
+      logger,
+      () => []
+    );
     const context: PlaywrightBddExtensionContext = {
       logger,
       config,
       testExecutor: executor,
+      executionGateway: gateway,
       discoveryManager: discoveryManager as never,
       organizationManager: TestOrganizationManager.create(logger),
-      featureParser: FeatureParser.create(logger),
+      featureParser,
       playwrightJsonParser: parser,
       commandBuilder,
       traceabilityAdapter: {} as PlaywrightBddExtensionContext["traceabilityAdapter"],
@@ -190,7 +211,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
     const controller = new FakeTestController();
     const provider = PlaywrightBddTestProvider.create(controller as never, context);
-    return { provider, controller, executor, artifactStore, discoveryManager };
+    return { provider, controller, executor, artifactStore, gateway, discoveryManager };
   }
 
   async function runItem(controller: FakeTestController, item: FakeTestItem): Promise<void> {
@@ -201,6 +222,27 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       new vscode.CancellationTokenSource().token
     );
   }
+
+  it("writes one run summary for a multi-root selection", async () => {
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const out = reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "passed" }]);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);}
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    const first = controller.find(`${fixture.featurePath}:4`)!;
+    const second = controller.find(`${fixture.featurePath}:12`)!;
+
+    await controller.profile("Run")!.runHandler(
+      new vscode.TestRunRequest([first, second]),
+      new vscode.CancellationTokenSource().token
+    );
+
+    const summaries = controller.runs.at(-1)!.outcome.output
+      .filter((text) => text.includes("1 scenario"));
+    expect(summaries).toHaveLength(1);
+  });
 
   it("marks a passing scenario PASSED in the tree (the report→item mapping holds)", async () => {
     const shell: ShellRunner = async (_cmd, _dir, env) => {
@@ -218,6 +260,57 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const last = controller.runs.at(-1)!;
     expect(last.outcome.passed).toContain(`${fixture.featurePath}:4`);
     expect(last.outcome.skipped).not.toContain(`${fixture.featurePath}:4`);
+  });
+
+  it("routes a Test Explorer scenario through the gateway and projects its live result", async () => {
+    const execute = vi.fn<ExecutionGateway["execute"]>(async (_intent, options) => {
+      const result = {
+        scenario: {
+          filePath: fixture.featurePath,
+          line: 4,
+          name: "Passing scenario",
+          kind: "scenario" as const,
+        },
+        outcome: "passed" as const,
+        durationMs: 5,
+        attempts: 1,
+        flaky: false,
+        evidenceRefs: [],
+      };
+      options?.onEvent?.({ kind: "case-finished", result, completed: 1, total: 1 });
+      return {
+        state: "complete",
+        results: [result],
+        passed: 1,
+        failed: 0,
+        durationMs: 5,
+        output: "",
+      };
+    });
+    const gateway = { execute, running: false };
+    const shell: ShellRunner = async () => ({
+      success: true,
+      output: "",
+      error: "",
+      returnCode: 0,
+    });
+    const { provider, controller } = buildProvider(shell, gateway);
+    await provider.discoverTests();
+    const leaf = controller.find(`${fixture.featurePath}:4`)!;
+
+    await runItem(controller, leaf);
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "run",
+        selection: expect.objectContaining({ kind: "scenario" }),
+        targets: [expect.objectContaining({ kind: "scenario" })],
+        metadata: { initiatedBy: "test-explorer" },
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+    expect(controller.runs.at(-1)!.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(controller.runs.at(-1)!.outcome.ended).toBe(true);
   });
 
   it("publishes a scenario result before the Playwright process finishes", async () => {
@@ -240,9 +333,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       };
       signalShellStarted?.();
     });
-    const { provider, controller, executor } = buildProvider(shell);
-    const events: TestRunEvent[] = [];
-    executor.onTestRunEvent((event) => events.push(event));
+    const { provider, controller } = buildProvider(shell);
     await provider.discoverTests();
 
     const feature = controller.find(fixture.featurePath)!;
@@ -256,18 +347,58 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(run.outcome.ended).toBe(false);
     expect(run.outcome.passed).not.toContain(fixture.featurePath);
     expect(run.outcome.output.join("")).toContain("[1 / 3] Passing scenario: passed");
-    expect(events).toContainEqual({
-      kind: "running",
-      passed: 1,
-      failed: 0,
-      completed: 1,
-      total: 3,
-    });
 
     releaseShell?.();
     await pending;
     expect(run.outcome.ended).toBe(true);
     expect(run.outcome.passed).toContain(fixture.featurePath);
+  });
+
+  it("recovers a completed live case into one partial completion and artifact", async () => {
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const reportPath = env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"];
+      const livePath = env?.[LIVE_REPORT_FILE_ENV];
+      if (reportPath && livePath) {
+        fs.appendFileSync(livePath, passingLiveRecords(fixture, 1));
+        fs.writeFileSync(reportPath, "{broken");
+      }
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { provider, controller, artifactStore, gateway } = buildProvider(shell);
+    const events: ExecutionEvent[] = [];
+    const subscription = gateway instanceof ExtensionExecutionGateway
+      ? gateway.onEvent((event) => events.push(event))
+      : undefined;
+    await provider.discoverTests();
+
+    try {
+      await runItem(controller, controller.find(fixture.featurePath)!);
+    } finally {
+      subscription?.dispose();
+    }
+
+    const caseEvents = events.filter((event) => event.kind === "case-finished");
+    const finished = events.find((event) => event.kind === "finished");
+    expect(caseEvents).toHaveLength(1);
+    expect(finished).toMatchObject({
+      kind: "finished",
+      completion: {
+        state: "partial",
+        passed: 1,
+        failed: 0,
+        results: [expect.objectContaining({ outcome: "passed" })],
+      },
+    });
+    const artifact = artifactStore.latest();
+    expect(artifact).toMatchObject({
+      state: "partial",
+      results: [expect.objectContaining({ outcome: "passed" })],
+    });
+    expect(finished?.kind === "finished" && finished.completion.artifactId).toBe(artifact?.id);
+    expect(caseEvents[0]?.kind === "case-finished" && caseEvents[0].result)
+      .toEqual(finished?.kind === "finished" && finished.completion.results[0]);
+    expect(finished?.kind === "finished" && finished.completion.results[0]?.scenario)
+      .toEqual(artifact?.results[0]?.scenario);
   });
 
   it("keeps an editor-triggered TestRun open for live results and final reconciliation", async () => {
@@ -366,7 +497,11 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
         resolve({ success: false, output: "", error: "Cancelled", returnCode: 130 });
       }, { once: true });
     });
-    const { provider, controller } = buildProvider(shell);
+    const { provider, controller, artifactStore, gateway } = buildProvider(shell);
+    const events: ExecutionEvent[] = [];
+    const subscription = gateway instanceof ExtensionExecutionGateway
+      ? gateway.onEvent((event) => events.push(event))
+      : undefined;
     await provider.discoverTests();
 
     const feature = controller.find(fixture.featurePath)!;
@@ -378,11 +513,27 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     );
 
     source.cancel();
-    await pending;
+    try {
+      await pending;
+    } finally {
+      subscription?.dispose();
+    }
     expect(run.outcome.skipped).not.toContain(`${fixture.featurePath}:4`);
     expect(run.outcome.skipped).toContain(`${fixture.featurePath}:12`);
     expect(run.outcome.skipped).toContain(`${fixture.featurePath}:13`);
     expect(run.outcome.ended).toBe(true);
+    expect(events.at(-1)).toMatchObject({
+      kind: "finished",
+      completion: {
+        state: "cancelled",
+        passed: 1,
+        results: [expect.objectContaining({ outcome: "passed" })],
+      },
+    });
+    expect(artifactStore.latest()).toMatchObject({
+      state: "cancelled",
+      results: [expect.objectContaining({ outcome: "passed" })],
+    });
   });
 
   it("passes the parsed scenario duration to run.passed", async () => {
@@ -413,9 +564,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       if (calls === 1) {source.cancel();}
       return { success: false, output: "", error: "killed", returnCode: 130 };
     };
-    const { provider, controller, executor } = buildProvider(shell);
-    const events: TestRunEvent[] = [];
-    executor.onTestRunEvent((e) => events.push(e));
+    const { provider, controller } = buildProvider(shell);
     await provider.discoverTests();
 
     const first = controller.find(`${fixture.featurePath}:4`)!;
@@ -427,7 +576,6 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(run.outcome.skipped).toContain(`${fixture.featurePath}:4`);
     expect(run.outcome.skipped).toContain(`${fixture.featurePath}:12`);
     expect(run.outcome.failed).toEqual([]);
-    expect(events.some((e) => e.kind === "failure")).toBe(false);
     expect(run.outcome.ended).toBe(true);
   });
 
@@ -446,8 +594,8 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       // The Test Explorer opened a batch; a codelens/palette run then fires at the shared seam with
       // no handle. Its parsed results must not land in the open Explorer artifact.
       const batch = artifactStore.beginBatch({ kind: "all-mapped" });
-      await executor.runFeatureFileWithOutput({ filePath: fixture.featurePath, featureName: "Sample feature" });
-      const sealed = artifactStore.sealBatch(batch, false);
+      await executor.runPathFilterWithOutput(fixture.featurePath);
+      const sealed = artifactStore.sealBatch(batch, "complete");
 
       expect(sealed?.shards).toEqual([]);
       expect(sealed?.results).toEqual([]);
@@ -482,6 +630,139 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       await runProfile.runHandler(new vscode.TestRunRequest([leaf]), source.token);
 
       expect(artifactStore.latest()?.state).toBe("cancelled");
+    });
+  });
+
+  it("renders the scenario's step lines in the run summary", async () => {
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+        fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], reportJson(fixture, [{
+          title: "Passing scenario",
+          line: 6,
+          status: "passed",
+          steps: [{ title: "Given I am on the test page", duration: 3 }],
+        }]));
+      }
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+
+    expect(controller.runs.at(-1)!.outcome.output.join("")).toContain("Given I am on the test page");
+  });
+
+  it("does not let one target's \"no tests found\" mask another target's empty failure", async () => {
+    // Run-wide output: the first target is genuinely out of scope, the second fails outright. The
+    // carve-out is only readable as one target's own when the run had exactly one.
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+        fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], JSON.stringify({ suites: [] }));
+      }
+      return { success: false, output: "", error: "Error: No tests found", returnCode: 1 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    const scenario = controller.find(`${fixture.featurePath}:4`)!;
+    const outline = controller.find(`${fixture.featurePath}${OUTLINE_ID_SEPARATOR}7:Math`)!;
+
+    await controller.profile("Run")!.runHandler(
+      new vscode.TestRunRequest([scenario, outline]),
+      new vscode.CancellationTokenSource().token
+    );
+
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.failed.map((entry) => entry.id)).toContain(outline.id);
+    expect(run.outcome.skipped).not.toContain(outline.id);
+  });
+
+  it("leaves a root the stopped run never reached skipped, not failed", async () => {
+    let runs = 0;
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      if (!env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+        return { success: true, output: "", error: "", returnCode: 0 };
+      }
+      runs += 1;
+      if (runs === 1) {
+        fs.writeFileSync(
+          env["PLAYWRIGHT_JSON_OUTPUT_NAME"],
+          reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "passed" }])
+        );
+        return { success: true, output: "", error: "", returnCode: 0 };
+      }
+      // The second invocation dies before writing anything, which stops the run.
+      return { success: false, output: "", error: "worker crashed", returnCode: 1 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    const scenario = controller.find(`${fixture.featurePath}:4`)!;
+    const outline = controller.find(`${fixture.featurePath}${OUTLINE_ID_SEPARATOR}7:Math`)!;
+
+    await controller.profile("Run")!.runHandler(
+      new vscode.TestRunRequest([scenario, outline]),
+      new vscode.CancellationTokenSource().token
+    );
+
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.failed).toEqual([]);
+    expect(run.outcome.skipped).toContain(outline.id);
+  });
+
+  describe("outline run targets", () => {
+    // The spec-line target is resolved against the run's working directory, so the fixture has to be
+    // the workspace for a row target to reach bddFileData at all.
+    beforeEach(() => {
+      (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+        { uri: { fsPath: fixture.root } },
+      ];
+    });
+
+    afterEach(() => {
+      (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+    });
+
+    function recordingShell(commands: string[]): ShellRunner {
+      return async (command, _dir, env) => {
+        commands.push(command);
+        if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+          fs.writeFileSync(
+            env["PLAYWRIGHT_JSON_OUTPUT_NAME"],
+            reportJson(fixture, [{ title: "Example #1", line: 18, status: "passed" }])
+          );
+        }
+        return { success: true, output: "", error: "", returnCode: 0 };
+      };
+    }
+
+    it("targets one example row by its own generated spec line", async () => {
+      const commands: string[] = [];
+      const warn = vi.spyOn(Logger.prototype, "warn");
+      const { provider, controller } = buildProvider(recordingShell(commands));
+      await provider.discoverTests();
+
+      await runItem(controller, controller.find(`${fixture.featurePath}:12`)!);
+
+      // pickleLine 12 maps to pwTestLine 18 in the fixture's bddFileData.
+      expect(commands.at(-1)).toContain("test.feature.spec.js:18");
+      expect(commands.at(-1)).not.toContain("--grep");
+      expect(warn.mock.calls.map(String).join("\n")).not.toContain("Could not target example row");
+    });
+
+    it("runs a whole outline by title with no line and no stale-spec warning", async () => {
+      const commands: string[] = [];
+      const warn = vi.spyOn(Logger.prototype, "warn");
+      const { provider, controller } = buildProvider(recordingShell(commands));
+      await provider.discoverTests();
+      const node = controller.find(`${fixture.featurePath}${OUTLINE_ID_SEPARATOR}7:Math`);
+      expect(node, "outline node should be discovered").toBeTruthy();
+
+      await runItem(controller, node!);
+
+      expect(commands.at(-1)).toContain('--grep "Math"');
+      expect(commands.at(-1)).not.toContain("test.feature.spec.js:");
+      expect(warn.mock.calls.map(String).join("\n")).not.toContain("Could not target example row");
     });
   });
 
@@ -575,7 +856,44 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(fs.existsSync(path.dirname(reportPath)), "tmp report directory should be deleted after the run").toBe(false);
   });
 
-  it("debugTests leaves the status unset when no JSON report was written", async () => {
+  it("debugTests seals partial when a nonempty report carries a global error", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller, artifactStore } = buildProvider(shell);
+    await provider.discoverTests();
+
+    const leaf = controller.find(`${fixture.featurePath}:4`)!;
+    const pending = Promise.resolve(
+      controller.profile("Debug")!.runHandler(
+        new vscode.TestRunRequest([leaf]),
+        new vscode.CancellationTokenSource().token
+      )
+    );
+    await vi.waitFor(() => expect(vscode.debug.__startDebuggingCalls).toHaveLength(1));
+
+    const config = vscode.debug.__startDebuggingCalls[0]!.config;
+    const reportPath = (config["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
+    const report = JSON.parse(
+      reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "passed" }])
+    ) as Record<string, unknown>;
+    report["errors"] = [{ message: "worker teardown failed" }];
+    fs.writeFileSync(reportPath, JSON.stringify(report));
+    vscode.debug.__fireTerminate({
+      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
+    });
+
+    await pending;
+
+    expect(artifactStore.latest()?.state).toBe("partial");
+    // The scenario itself reported passed; a run-level teardown error is not its failure.
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.failed).toEqual([]);
+    expect(run.outcome.output.join("")).toContain(
+      "Playwright reported a global error: worker teardown failed"
+    );
+  });
+
+  it("debugTests marks a missing final JSON report as an infrastructure failure", async () => {
     const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
     const { provider, controller } = buildProvider(shell);
     await provider.discoverTests();
@@ -600,7 +918,10 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const run = controller.runs.at(-1)!;
     expect(run.outcome.started).toContain(`${fixture.featurePath}:4`);
     expect(run.outcome.passed).toEqual([]);
-    expect(run.outcome.failed).toEqual([]);
+    expect(run.outcome.failed).toEqual([{
+      id: `${fixture.featurePath}:4`,
+      message: "The debug session completed without a readable JSON report",
+    }]);
     expect(run.outcome.skipped).toEqual([]);
     expect(run.outcome.ended).toBe(true);
     expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
@@ -764,10 +1085,9 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
   });
 
-  it("keeps the synthesized failure guidance when output already streamed", async () => {
-    // Streaming suppresses the raw tails in the final summary, but result.error carries
-    // synthesized guidance (bddgen failure, missing-binary hint) that never crossed the
-    // stream and must still reach Test Results.
+  it("reports the synthesized failure guidance once, under the streamed output", async () => {
+    // The guidance (bddgen failure, missing-binary hint) never crossed the stream, so the run's
+    // output projection carries it; the summary must not print the same line a second time.
     const shell: ShellRunner = async () => ({
       success: false,
       output: "raw streamed tail",
@@ -783,7 +1103,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     await runItem(controller, featureItem);
 
     const output = controller.runs.at(-1)!.outcome.output.join("\n");
-    expect(output).toContain('The command "npx" was not found');
+    expect(output.match(/The command "npx" was not found/g)).toHaveLength(1);
     expect(output).not.toContain("raw streamed tail");
   });
 

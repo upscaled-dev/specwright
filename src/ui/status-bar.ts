@@ -1,5 +1,9 @@
 import * as vscode from "vscode";
-import { TestExecutor, TestRunEvent } from "../core/test-executor";
+import type { ExecutionEvent } from "../core/run-contracts";
+
+interface GatewayEventSource {
+  onEvent(listener: (event: ExecutionEvent) => void): vscode.Disposable;
+}
 
 const SHOW_OUTPUT_COMMAND = "playwrightBddRunner.showOutput";
 const IDLE_TOOLTIP = "No runs this session";
@@ -17,17 +21,17 @@ export class StatusBar implements vscode.Disposable {
   private readonly subscription: vscode.Disposable;
   private lastRunAt: Date | undefined;
 
-  public static create(executor: TestExecutor, window: typeof vscode.window = vscode.window): StatusBar {
-    return new StatusBar(executor, window);
+  public static create(source: GatewayEventSource, window: typeof vscode.window = vscode.window): StatusBar {
+    return new StatusBar(source, window);
   }
 
-  constructor(executor: TestExecutor, window: typeof vscode.window = vscode.window) {
+  constructor(source: GatewayEventSource, window: typeof vscode.window = vscode.window) {
     this.item = window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
     this.item.command = SHOW_OUTPUT_COMMAND;
     this.setIdle();
     this.item.show();
 
-    this.subscription = executor.onTestRunEvent((event) => this.handle(event));
+    this.subscription = source.onEvent((event) => this.handleGateway(event));
   }
 
   public dispose(): void {
@@ -35,22 +39,25 @@ export class StatusBar implements vscode.Disposable {
     this.item.dispose();
   }
 
-  private handle(event: TestRunEvent): void {
-    if (event.kind === "running") {
-      this.item.text = event.total === undefined
-        ? "$(loading~spin) Specwright: running…"
-        : `$(loading~spin) Specwright: ${event.completed ?? 0}/${event.total}`;
+  private handleGateway(event: ExecutionEvent): void {
+    if (event.kind === "started") {
+      this.item.text = "$(loading~spin) Specwright: running…";
       this.item.tooltip = formatTooltip(this.lastRunAt);
       return;
     }
+    if (event.kind === "case-finished") {
+      this.item.text = `$(loading~spin) Specwright: ${event.completed}/${event.total}`;
+      return;
+    }
+    if (event.kind !== "finished") {return;}
     this.lastRunAt = new Date();
-    if (event.kind === "success") {
-      this.item.text = `$(check) Specwright: passed ${event.passed}`;
-    } else if (event.kind === "cancelled") {
-      // A deliberate stop is neither pass nor fail; without this the spinner outlives the run.
+    const completion = event.completion;
+    if (completion.state === "cancelled") {
       this.item.text = "$(circle-slash) Specwright: cancelled";
+    } else if (completion.state === "partial" || completion.failed > 0) {
+      this.item.text = `$(error) Specwright: ${completion.passed} passed, ${completion.failed} failed`;
     } else {
-      this.item.text = `$(error) Specwright: ${event.passed} passed, ${event.failed} failed`;
+      this.item.text = `$(check) Specwright: passed ${completion.passed}`;
     }
     this.item.tooltip = formatTooltip(this.lastRunAt);
   }

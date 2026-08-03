@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as path from "node:path";
-import { runBoundedCommand } from "../../core/bounded-command-runner";
+import { BoundedCommandOutput, runBoundedCommand } from "../../core/bounded-command-runner";
 import { EXECUTION_LIMITS } from "../../core/execution-limits";
 import { Logger } from "../../utils/logger";
 import { shellQuote } from "../../utils/shell";
@@ -115,5 +115,24 @@ describe("runBoundedCommand", () => {
     expect(result.success).toBe(false);
     expect(result.error).not.toBe("");
     expect(result.outputStreamed).toBeUndefined();
+  });
+
+  it("keeps command diagnostics local while one capture retains the whole run", async () => {
+    const capture = new BoundedCommandOutput(() => undefined);
+    await runBoundedCommand({
+      command: nodeCommand("process.stderr.write('first')"),
+      workingDir: process.cwd(),
+      logger,
+      onOutput: capture.onOutput,
+    });
+    const second = await runBoundedCommand({
+      command: nodeCommand("process.stderr.write('second');process.exitCode=1"),
+      workingDir: process.cwd(),
+      logger,
+      onOutput: capture.onOutput,
+    });
+
+    expect(second.error).toBe("second");
+    expect(capture.format()).toBe("firstsecond");
   });
 });

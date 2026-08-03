@@ -266,6 +266,30 @@ describe("PlaywrightJsonParser", () => {
     expect(parser.parse(report)[0]?.errorMessage).toBe("expected 1 to equal 2");
   });
 
+  it("marks a nonempty report incomplete when Playwright records a global error", () => {
+    const evidence = parser.inspect(JSON.stringify({
+      errors: [{ message: "worker teardown failed" }],
+      suites: [{
+        specs: [{
+          title: "Completed first",
+          tests: [{ results: [{ status: "passed" }] }],
+        }],
+      }],
+    }));
+
+    expect(evidence.details).toHaveLength(1);
+    expect(evidence.complete).toBe(false);
+    expect(evidence.failure).toContain("worker teardown failed");
+  });
+
+  it("marks malformed report text incomplete instead of treating it as an empty report", () => {
+    expect(parser.inspect("not json")).toMatchObject({
+      details: [],
+      complete: false,
+      failure: "The Playwright JSON report could not be parsed.",
+    });
+  });
+
   it("captures outlineName from a placeholder-bearing suite title when spec titles are substituted", () => {
     // An outline TITLE with `<placeholders>` makes playwright-bdd substitute the row values into
     // each generated test title (no "Example #N" shape); the raw placeholders only survive on the

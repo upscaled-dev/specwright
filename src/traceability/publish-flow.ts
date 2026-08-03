@@ -103,8 +103,8 @@ export interface PublishRunSources {
   // wires this to the FeatureParser step resolver; a test passes a fixed count.
   changedSinceRun(results: readonly PublishableResult[]): number;
   defaultProjectKey: string;
-  // The board's persisted project scope, when one is picked. It outranks the run-derived key for the
-  // dialog's project prefill; All Projects is the absence of a selection and leaves derivation alone.
+  // The board's persisted project scope, when one is picked. It fills old artifacts that carry no
+  // historical project provenance; a scoped artifact always keeps the project it actually ran.
   selectedProjectKey?: string | undefined;
   // A prior publish of the given artifact on the current site (or undefined); the ledger idempotency
   // read, per run, feeding the republish and pending-attachments banners.
@@ -179,6 +179,10 @@ function buildRunOption(
   const reconciled = publishableResults(artifact);
   const summary = summarizePublishable(reconciled);
   const planKey = artifact.selection.kind === "test-plan-derived" ? artifact.selection.planKey : undefined;
+  const runScope = artifact.selection.kind === "all-mapped"
+    ? artifact.selection.project
+    : undefined;
+  const effectiveScope = runScope ?? scopedProject;
   const prior = deps.priorEntryFor(artifact.id);
   const derived = derivePublishProject(reconciled.publishable, deps.defaultProjectKey, deps.projectOf);
   return {
@@ -188,7 +192,7 @@ function buildRunOption(
       label: publishRunLabel(artifact.createdAt, artifact.selection.kind),
       subtitle: publishDialogSubtitle(summary, deps.changedSinceRun(reconciled.publishable)),
       project:
-        scopedProject === undefined ? derived : { value: scopedProject, fromDerivation: false, fromScope: true },
+        effectiveScope === undefined ? derived : { value: effectiveScope, fromDerivation: false, fromScope: true },
       defaultSummary: defaultPublishSummary(artifact.createdAt, reconciled.publishable.length),
       ...(planKey !== undefined && planKey !== "" ? { prefillPlanKey: planKey } : {}),
       ...(prior

@@ -1,11 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { scenarioGherkinSlice } from "../parsers/gherkin-slice";
-import type { ParsedFeature, PlaywrightBddExtensionContext, Scenario } from "../types";
+import { isOutlineExampleRow } from "../parsers/feature-parser";
+import { scenarioScope } from "../parsers/gherkin-slice";
+import type { OutlineExampleRow, ParsedFeature, PlaywrightBddExtensionContext } from "../types";
 import { toWorkspaceRelative } from "../utils/workspace-path";
-
-type OutlineScenario = Exclude<Scenario, { isScenarioOutline: false }>;
 
 interface FeatureTarget {
   filePath: string;
@@ -18,35 +17,46 @@ interface ParsedFeatureTarget extends FeatureTarget {
   parsed: ParsedFeature;
 }
 
+// An outline header names the whole outline and carries no line: a declaration line has no generated
+// spec line to target, so the runner greps the outline title and runs every row.
 interface PaletteScenarioTarget {
   filePath: string;
-  lineNumber: number;
+  lineNumber?: number | undefined;
   scenarioName: string;
-  outlineName?: string;
+  outlineName?: string | undefined;
 }
 
 interface ScenarioScope {
   start: number;
   end: number;
   target: PaletteScenarioTarget;
-  rows: OutlineScenario[];
+  rows: OutlineExampleRow[];
 }
 
-function activeFeatureTarget(): FeatureTarget | undefined {
+function activeFeatureEditor(): vscode.TextEditor | undefined {
   const editor = vscode.window.activeTextEditor;
-  const document = editor?.document;
-  if (!editor || !document?.uri.fsPath.endsWith(".feature")) {return undefined;}
-  return {
-    filePath: document.uri.fsPath,
-    text: document.getText(),
-    cursorLine: editor.selection.active.line,
-  };
+  return editor?.document.uri.fsPath.endsWith(".feature") ? editor : undefined;
+}
+
+// The run reads the file from disk, so unsaved edits would resolve a cursor against text the runner
+// never sees. A refused save (read-only file, or a save participant) has to stop the run: resolving
+// against the buffer would run something else than what is on screen.
+async function savedForRun(document: vscode.TextDocument): Promise<boolean> {
+  if (!document.isDirty || await document.save()) {return true;}
+  vscode.window.showWarningMessage(
+    `${path.basename(document.uri.fsPath)} could not be saved. Save it, then run again.`
+  );
+  return false;
 }
 
 async function pickFeatureTarget(
   context: Pick<PlaywrightBddExtensionContext, "discoveryManager">,
 ): Promise<FeatureTarget | undefined> {
   const files = await context.discoveryManager.discoverTestFiles();
+  if (files.length === 0) {
+    vscode.window.showInformationMessage("No feature files were discovered.");
+    return undefined;
+  }
   const picked = await vscode.window.showQuickPick(
     files.map((filePath) => ({
       label: path.basename(filePath),
@@ -78,52 +88,43 @@ async function parseFeatureTarget(
 async function resolveFeatureTarget(
   context: Pick<PlaywrightBddExtensionContext, "discoveryManager" | "featureParser">,
 ): Promise<ParsedFeatureTarget | undefined> {
-  const target = activeFeatureTarget() ?? await pickFeatureTarget(context);
-  return target ? parseFeatureTarget(target, context) : undefined;
-}
-
-function scopeEnd(lines: readonly string[], lineNumber: number): number {
-  return lineNumber - 1 + scenarioGherkinSlice(lines, lineNumber).split("\n").length - 1;
-}
-
-function leadingTagStart(lines: readonly string[], start: number): number {
-  let tagStart = start;
-  for (let index = start - 1; index >= 0; index--) {
-    const line = lines[index]?.trim() ?? "";
-    if (line.startsWith("@")) {tagStart = index; continue;}
-    if (line === "" && tagStart !== start) {tagStart = index; continue;}
-    break;
+  const editor = activeFeatureEditor();
+  if (editor) {
+    if (!(await savedForRun(editor.document))) {return undefined;}
+    return parseFeatureTarget({
+      filePath: editor.document.uri.fsPath,
+      text: editor.document.getText(),
+      cursorLine: editor.selection.active.line,
+    }, context);
   }
-  return tagStart;
+  const picked = await pickFeatureTarget(context);
+  return picked ? parseFeatureTarget(picked, context) : undefined;
 }
 
 function scenarioScopes(target: ParsedFeatureTarget): ScenarioScope[] {
   const lines = target.text.split(/\r?\n/);
   const scopes: ScenarioScope[] = [];
-  const outlines = new Map<number, OutlineScenario[]>();
+  const outlines = new Map<number, { outlineName: string; rows: OutlineExampleRow[] }>();
   for (const scenario of target.parsed.scenarios) {
     if (!scenario.isScenarioOutline) {
-      const start = scenario.lineNumber - 1;
       scopes.push({
-        start: leadingTagStart(lines, start),
-        end: scopeEnd(lines, scenario.lineNumber),
+        ...scenarioScope(lines, scenario.lineNumber),
         target: { filePath: target.filePath, lineNumber: scenario.lineNumber, scenarioName: scenario.name },
         rows: [],
       });
       continue;
     }
-    const outline = scenario as OutlineScenario;
-    const key = outline.outlineLineNumber;
-    outlines.set(key, [...(outlines.get(key) ?? []), outline]);
+    // An outline with no Examples rows parses to a single stub sitting on the declaration line; it
+    // opens the scope but is not a row anyone can target.
+    const group = outlines.get(scenario.outlineLineNumber)
+      ?? { outlineName: scenario.outlineName, rows: [] };
+    if (isOutlineExampleRow(scenario)) {group.rows.push(scenario);}
+    outlines.set(scenario.outlineLineNumber, group);
   }
-  for (const [lineNumber, rows] of outlines) {
-    const outlineName = rows[0]?.outlineName;
-    if (!outlineName) {continue;}
-    const start = lineNumber - 1;
+  for (const [lineNumber, { outlineName, rows }] of outlines) {
     scopes.push({
-      start: leadingTagStart(lines, start),
-      end: scopeEnd(lines, lineNumber),
-      target: { filePath: target.filePath, lineNumber, scenarioName: outlineName, outlineName },
+      ...scenarioScope(lines, lineNumber),
+      target: { filePath: target.filePath, scenarioName: outlineName, outlineName },
       rows,
     });
   }
@@ -155,29 +156,13 @@ export async function resolvePaletteFeature(
 }
 
 export async function promptPaletteTags(): Promise<string | undefined> {
-  const input = await vscode.window.showInputBox({ prompt: "Tag expression to run" });
-  if (input === undefined) {return undefined;}
-  const tags = input.trim();
-  if (!tags) {throw new Error("Tags are required");}
-  return tags;
-}
-
-export function commandArgFsPath(arg: unknown): string | undefined {
-  if (typeof arg === "string") {return arg;}
-  const fsPath = (arg as { fsPath?: unknown } | undefined)?.fsPath;
-  return typeof fsPath === "string" ? fsPath : undefined;
-}
-
-export function outlineNameForScenario(
-  parsed: ParsedFeature | undefined,
-  lineNumber: number | undefined,
-  scenarioName: string | undefined,
-): string | undefined {
-  if (!scenarioName) {return undefined;}
-  const match = parsed?.scenarios.find(
-    (scenario) => scenario.name === scenarioName && (lineNumber === undefined || scenario.lineNumber === lineNumber)
-  );
-  return match?.isScenarioOutline ? match.outlineName : undefined;
+  const input = await vscode.window.showInputBox({
+    title: "Run with a tag expression",
+    prompt: "Tag expression to run",
+    ignoreFocusOut: true,
+    validateInput: (value) => (value.trim() === "" ? "A tag expression is required." : undefined),
+  });
+  return input === undefined ? undefined : input.trim();
 }
 
 export async function resolvePaletteScenario(

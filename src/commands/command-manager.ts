@@ -1,8 +1,4 @@
 import * as vscode from "vscode";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { RunOutputResult } from "../core/test-executor";
-import type { RunProgressObserver, RunProgressSession } from "../core/run-progress";
 import { StepDefinitionProvider } from "../providers/step-definition-provider";
 import { StepResolver, UnmatchedStep } from "../providers/step-resolver";
 import { StepUsageIndex } from "../providers/step-usage-index";
@@ -12,9 +8,7 @@ import type { TraceabilitySubsystem } from "../traceability/traceability-subsyst
 import {
   CommandArguments,
   CommandHandler,
-  ParsedFeature,
   PlaywrightBddExtensionContext,
-  TestExecutionOptions,
 } from "../types";
 import { Logger } from "../utils/logger";
 import { errMsg } from "../utils/text";
@@ -23,9 +17,8 @@ import type { XrayCredentialStore } from "../xray/xray-credential-store";
 import { exportScenariosCatalog, exportStepsCatalog } from "./export-catalogs";
 import { GenerateStepsCommand } from "./generate-steps";
 import { runInsertStep } from "./insert-step";
-import { commandArgFsPath, outlineNameForScenario, promptPaletteTags, resolvePaletteFeature, resolvePaletteScenario } from "./palette-target-resolver";
 import { TraceabilityCommands } from "./traceability-commands";
-import { runCapturedWithProgress } from "./captured-run-progress";
+import { RunCommands } from "./run-commands";
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -45,15 +38,6 @@ interface TestProviderLike {
   discoverTests?: () => Promise<void>;
   forceRefreshTestExplorer?: () => Promise<void>;
   persistOrganizationStrategy?: (strategyType: string) => void;
-  applyExternalRunResult?: (
-    filePath: string,
-    result: RunOutputResult,
-    target?: { lineNumber?: number }
-  ) => void;
-  beginExternalRun?: (
-    filePath: string,
-    target?: { lineNumber?: number }
-  ) => RunProgressSession;
 }
 
 interface UsageIndexHost {
@@ -79,10 +63,9 @@ const STRATEGY_TYPE_BY_VALUE: Record<string, string> = {
 const CATEGORY = "Specwright";
 
 export class CommandManager {
-  private readonly commands = new Map<string, vscode.Disposable>();
+  private readonly commands = new Map<string, { title: string; disposable: vscode.Disposable }>();
   private readonly context: PlaywrightBddExtensionContext;
   private testProvider: unknown;
-  private readonly parsedFeatureCache = new Map<string, { mtimeMs: number; parsed: ParsedFeature }>();
   private generateStepsCommand: GenerateStepsCommand | undefined;
   private generateStepsResolver: StepResolver | undefined;
   private stepDefinitionProvider: StepDefinitionProvider | undefined;
@@ -95,6 +78,7 @@ export class CommandManager {
   private publishLedger: PublishLedger | undefined;
   private extensionUri: vscode.Uri | undefined;
   private readonly traceabilityCommands: TraceabilityCommands;
+  private readonly runCommands: RunCommands;
 
   public static create(context: PlaywrightBddExtensionContext): CommandManager {
     return new CommandManager(context);
@@ -102,6 +86,7 @@ export class CommandManager {
 
   private constructor(context: PlaywrightBddExtensionContext) {
     this.context = context;
+    this.runCommands = new RunCommands(context, () => this.testProvider);
     this.traceabilityCommands = new TraceabilityCommands(context.logger, {
       config: context.config,
       fallbackAdapter: () => context.traceabilityAdapter,
@@ -111,7 +96,7 @@ export class CommandManager {
       publishLedger: () => this.publishLedger,
       extensionUri: () => this.extensionUri,
       runArtifactStore: context.runArtifactStore,
-      testExecutor: context.testExecutor,
+      executionGateway: context.executionGateway,
       featureParser: context.featureParser,
     });
   }
@@ -146,21 +131,6 @@ export class CommandManager {
     this.publishLedger = ledger;
   }
 
-  /**
-   * Reflect the outcome of a run triggered outside the Test Explorer (CodeLens, context menu)
-   * onto the tree. Delegates to the provider so the exact same per-scenario JSON-report mapping
-   * the Test Explorer uses is applied, keeping the gutter/Explorer icons consistent regardless
-   * of where the run was launched. No-ops when no provider is wired (e.g. in unit tests).
-   */
-  private applyRunStatus(filePath: string, result: RunOutputResult, lineNumber?: number): void {
-    const provider = this.testProvider as TestProviderLike | undefined;
-    provider?.applyExternalRunResult?.(
-      filePath,
-      result,
-      lineNumber !== undefined ? { lineNumber } : undefined
-    );
-  }
-
   public registerCommands(context: vscode.ExtensionContext): void {
     try {
       this.clearCommands();
@@ -168,26 +138,26 @@ export class CommandManager {
       this.extensionUri = context.extensionUri;
 
       const commands: CommandOptions[] = [
-        { command: "playwrightBddRunner.runScenario", title: "Run Scenario", category: CATEGORY, handler: this.runScenario.bind(this) },
-        { command: "playwrightBddRunner.runFeatureFile", title: "Run Feature File", category: CATEGORY, handler: this.runFeature.bind(this) },
-        { command: "playwrightBddRunner.runAllTests", title: "Run All Tests", category: CATEGORY, handler: this.runAllTests.bind(this) },
-        { command: "playwrightBddRunner.debugScenario", title: "Debug Scenario", category: CATEGORY, handler: this.debugScenario.bind(this) },
+        { command: "playwrightBddRunner.runScenario", title: "Run Scenario", category: CATEGORY, handler: this.runCommands.runScenario.bind(this.runCommands) },
+        { command: "playwrightBddRunner.runFeatureFile", title: "Run Feature File", category: CATEGORY, handler: this.runCommands.runFeature.bind(this.runCommands) },
+        { command: "playwrightBddRunner.runAllTests", title: "Run All Tests", category: CATEGORY, handler: this.runCommands.runAllTests.bind(this.runCommands) },
+        { command: "playwrightBddRunner.debugScenario", title: "Debug Scenario", category: CATEGORY, handler: this.runCommands.debugScenario.bind(this.runCommands) },
         { command: "playwrightBddRunner.refreshTests", title: "Refresh Tests", category: CATEGORY, handler: this.refreshTests.bind(this) },
         { command: "playwrightBddRunner.showOutput", title: "Show Test Output", category: CATEGORY, handler: this.showOutput.bind(this) },
         { command: "playwrightBddRunner.validateConfiguration", title: "Validate Configuration", category: CATEGORY, handler: this.validateConfiguration.bind(this) },
         { command: "playwrightBddRunner.discoverTests", title: "Discover Tests", category: CATEGORY, handler: this.discoverTests.bind(this) },
-        { command: "playwrightBddRunner.runFeatureFileWithTags", title: "Run Feature File with Tags", category: CATEGORY, handler: this.runFeatureWithTags.bind(this) },
-        { command: "playwrightBddRunner.runScenarioWithTags", title: "Run Scenario with Tags", category: CATEGORY, handler: this.runScenarioWithTags.bind(this) },
-        { command: "playwrightBddRunner.runAllTestsParallel", title: "Run All Tests in Parallel", category: CATEGORY, handler: this.runAllTestsParallel.bind(this) },
-        { command: "playwrightBddRunner.runScenarioWithContext", title: "Run Scenario", category: CATEGORY, handler: this.runScenarioWithContext.bind(this) },
-        { command: "playwrightBddRunner.debugScenarioWithContext", title: "Debug Scenario", category: CATEGORY, handler: this.debugScenarioWithContext.bind(this) },
-        { command: "playwrightBddRunner.runFeatureFileWithContext", title: "Run Feature File", category: CATEGORY, handler: this.runFeatureFileWithContext.bind(this) },
+        { command: "playwrightBddRunner.runFeatureFileWithTags", title: "Run Feature File with Tags", category: CATEGORY, handler: this.runCommands.runFeatureWithTags.bind(this.runCommands) },
+        { command: "playwrightBddRunner.runScenarioWithTags", title: "Run Scenario with Tags", category: CATEGORY, handler: this.runCommands.runScenarioWithTags.bind(this.runCommands) },
+        { command: "playwrightBddRunner.runAllTestsParallel", title: "Run All Tests in Parallel", category: CATEGORY, handler: this.runCommands.runAllTestsParallel.bind(this.runCommands) },
+        { command: "playwrightBddRunner.runScenarioWithContext", title: "Run Scenario", category: CATEGORY, handler: this.runCommands.runScenarioWithContext.bind(this.runCommands) },
+        { command: "playwrightBddRunner.debugScenarioWithContext", title: "Debug Scenario", category: CATEGORY, handler: this.runCommands.debugScenarioWithContext.bind(this.runCommands) },
+        { command: "playwrightBddRunner.runFeatureFileWithContext", title: "Run Feature File", category: CATEGORY, handler: this.runCommands.runFeatureWithContext.bind(this.runCommands) },
         { command: "playwrightBddRunner.setOrganizationStrategy", title: "Set Organization Strategy", category: CATEGORY, handler: this.setOrganizationStrategy.bind(this) },
         { command: "playwrightBddRunner.setTagBasedOrganization", title: "Organize by Tags", category: CATEGORY, handler: () => this.setStrategyByValue("tag") },
         { command: "playwrightBddRunner.setFileBasedOrganization", title: "Organize by File", category: CATEGORY, handler: () => this.setStrategyByValue("file") },
         { command: "playwrightBddRunner.setScenarioTypeOrganization", title: "Organize by Scenario Type", category: CATEGORY, handler: () => this.setStrategyByValue("scenarioType") },
         { command: "playwrightBddRunner.setFlatOrganization", title: "Flat Organization", category: CATEGORY, handler: () => this.setStrategyByValue("flat") },
-        { command: "playwrightBddRunner.setFeatureBasedOrganization", title: "Feature-Based (Hierarchical) Organization", category: CATEGORY, handler: () => this.setStrategyByValue("feature") },
+        { command: "playwrightBddRunner.setFeatureBasedOrganization", title: "Hierarchical Organization", category: CATEGORY, handler: () => this.setStrategyByValue("feature") },
         { command: "playwrightBddRunner.debugOrganization", title: "Debug Organization Strategy", category: CATEGORY, handler: this.debugOrganization.bind(this) },
         { command: "playwrightBddRunner.generateStepDefinitions", title: "Generate Missing Step Definitions", category: CATEGORY, handler: this.generateStepDefinitions.bind(this) },
         { command: "playwrightBddRunner.generateStepDefinitionForStep", title: "Create Step Definition For Step", category: CATEGORY, handler: this.generateStepDefinitionForStep.bind(this) },
@@ -202,6 +172,10 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.copyKey", title: "Copy Issue Key", category: CATEGORY, handler: this.traceabilityCommands.copyIssueKey.bind(this.traceabilityCommands) },
         { command: "playwrightBddRunner.traceability.linkScenario", title: "Link Scenario to Test", category: CATEGORY, handler: this.traceabilityCommands.linkScenario.bind(this.traceabilityCommands) },
         { command: "playwrightBddRunner.traceability.runAndPublish", title: "Run Locally and Publish…", category: CATEGORY, handler: this.traceabilityCommands.runAndPublish.bind(this.traceabilityCommands) },
+        { command: "playwrightBddRunner.traceability.runAndPublishAllMapped", title: "Run All Mapped Scenarios and Publish", category: CATEGORY, handler: () => this.traceabilityCommands.runAndPublishAllMapped() },
+        { command: "playwrightBddRunner.traceability.runAndPublishFeature", title: "Run and Publish", category: CATEGORY, handler: this.traceabilityCommands.runAndPublishFeature.bind(this.traceabilityCommands) },
+        { command: "playwrightBddRunner.traceability.runAndPublishFolder", title: "Run and Publish", category: CATEGORY, handler: this.traceabilityCommands.runAndPublishFolder.bind(this.traceabilityCommands) },
+        { command: "playwrightBddRunner.traceability.runAndPublishByTagExpression", title: "Run and Publish by Tag Expression", category: CATEGORY, handler: () => this.traceabilityCommands.runAndPublishByTagExpression() },
         { command: "playwrightBddRunner.traceability.publishLastRun", title: "Publish Last Run…", category: CATEGORY, handler: () => this.traceabilityCommands.publishLastRun() },
         // Wrapped rather than bound: a command handler is called with the invoking context's arguments,
         // which must never be read as a sync request. The palette and the view title always announce.
@@ -216,7 +190,6 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.switchDefaultProject", title: "Switch Default Project…", category: CATEGORY, handler: () => this.traceabilityCommands.switchDefaultProject() },
         { command: "playwrightBddRunner.traceability.clearLocalRunHistory", title: "Clear Local Run History…", category: CATEGORY, handler: () => this.traceabilityCommands.clearLocalRunHistory() },
         { command: "playwrightBddRunner.traceability.bulkCreateTests", title: "Create Tests from Scenarios…", category: CATEGORY, handler: () => this.traceabilityCommands.bulkCreateTests() },
-        { command: "playwrightBddRunner.traceability.pushScenarioText", title: "Push Scenario Text…", category: CATEGORY, handler: () => this.traceabilityCommands.pushScenarioText() },
         { command: "playwrightBddRunner.traceability.createTestSet", title: "Create Test Set…", category: CATEGORY, handler: () => this.traceabilityCommands.createTestSet() },
         { command: "playwrightBddRunner.traceability.createTestPlan", title: "Create Test Plan…", category: CATEGORY, handler: () => this.traceabilityCommands.createTestPlan() },
         { command: "playwrightBddRunner.traceability.createTestExecution", title: "Create Test Execution…", category: CATEGORY, handler: () => this.traceabilityCommands.createTestExecution() },
@@ -248,163 +221,13 @@ export class CommandManager {
         this.showErrorMessage(`Failed to execute ${options.title}: ${msg}`);
       }
     });
-    this.commands.set(options.command, disposable);
+    this.commands.set(options.command, { title: options.title, disposable });
     context.subscriptions.push(disposable);
   }
 
-  private resolveOutlineName(
-    filePath: string,
-    lineNumber: number | undefined,
-    scenarioName: string | undefined
-  ): string | undefined {
-    if (!scenarioName) {return undefined;}
-    return outlineNameForScenario(this.getParsedFeature(filePath), lineNumber, scenarioName);
-  }
-
-  private getParsedFeature(filePath: string): ParsedFeature | undefined {
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(filePath);
-    } catch {
-      return undefined;
-    }
-    const cached = this.parsedFeatureCache.get(filePath);
-    if (cached?.mtimeMs === stat.mtimeMs) {return cached.parsed;}
-
-    try {
-      const content = fs.readFileSync(filePath, "utf-8");
-      const parsed = this.context.featureParser.parseFeatureContent(content);
-      if (!parsed) {return undefined;}
-      this.parsedFeatureCache.set(filePath, { mtimeMs: stat.mtimeMs, parsed });
-      return parsed;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async runScenarioCore(
-    filePath: string,
-    lineNumber: number | undefined,
-    scenarioName: string | undefined,
-    tags?: string,
-    signal?: AbortSignal,
-    progress?: RunProgressObserver,
-    paletteOutlineName?: string,
-  ): Promise<RunOutputResult> {
-    if (lineNumber === undefined) {
-      const featureName = this.getParsedFeature(filePath)?.feature;
-      return this.context.testExecutor.runFeatureFileWithOutput({
-        filePath,
-        ...(featureName ? { featureName } : {}),
-        ...(tags ? { tags } : {}),
-        signal,
-        progress,
-      });
-    }
-
-    const outlineName = paletteOutlineName ?? this.resolveOutlineName(filePath, lineNumber, scenarioName);
-    const opts: TestExecutionOptions = {
-      filePath,
-      lineNumber,
-      ...(scenarioName !== undefined ? { scenarioName } : {}),
-      ...(outlineName ? { outlineName } : {}),
-      ...(tags ? { tags } : {}),
-      signal,
-      progress,
-    };
-    return this.context.testExecutor.runScenarioWithOutput(opts);
-  }
-
-  private logResult(label: string, result: RunOutputResult): void {
-    if (result.error === "Cancelled") {
-      this.logger.info(`${label} cancelled`, { duration: result.duration });
-      return;
-    } else if (result.success) {
-      this.logger.info(`${label} completed`, { duration: result.duration, outputLength: result.output.length });
-    } else {
-      this.logger.error(`${label} failed`, { error: result.error, duration: result.duration });
-    }
-    const combined = [result.output, result.error]
-      .filter((s): s is string => typeof s === "string" && s.trim() !== "")
-      .join("\n");
-    if (combined !== "") {
-      this.logger.info(`${label} output:\n${combined}`);
-      this.logger.showOutput();
-    }
-  }
-
-  private async runCapturedCommand(
-    label: string,
-    filePath: string,
-    lineNumber: number | undefined,
-    execute: (signal: AbortSignal, progress: RunProgressObserver) => Promise<RunOutputResult>
-  ): Promise<void> {
-    const provider = this.testProvider as TestProviderLike | undefined;
-    const target = lineNumber === undefined ? undefined : { lineNumber };
-    const session = provider?.beginExternalRun?.(filePath, target);
-    const result = await runCapturedWithProgress(
-      `Running ${label.toLowerCase()}: ${path.basename(filePath)}`,
-      session,
-      execute
-    );
-    if (!session && result.error !== "Cancelled") {
-      this.applyRunStatus(filePath, result, lineNumber);
-    }
-    this.logResult(label, result);
-    if (!result.success && result.error !== "Cancelled") {
-      throw new Error(`Test failed: ${result.error ?? "Unknown error"}`);
-    }
-  }
-
-  private async runScenario(...args: CommandArguments): Promise<void> {
-    let [filePath, lineNumber, scenarioName] = args as [string | undefined, number | undefined, string | undefined];
-    let outlineName: string | undefined;
-    if (!filePath) {
-      const target = await resolvePaletteScenario(this.context);
-      if (!target) {return;}
-      ({ filePath, lineNumber, scenarioName, outlineName } = target);
-    }
-    await this.runCapturedCommand("Scenario", filePath, lineNumber, (signal, progress) =>
-      this.runScenarioCore(filePath, lineNumber, scenarioName, undefined, signal, progress, outlineName)
-    );
-  }
-
-  private async runFeature(...args: CommandArguments): Promise<void> {
-    let [filePath] = args as [string | undefined];
-    filePath ??= await resolvePaletteFeature(this.context);
-    if (!filePath) {return;}
-    await this.runCapturedCommand("Feature", filePath, undefined, (signal, progress) => {
-      const featureName = this.getParsedFeature(filePath)?.feature;
-      return this.context.testExecutor.runFeatureFileWithOutput({
-        filePath,
-        ...(featureName ? { featureName } : {}),
-        signal,
-        progress,
-      });
-    });
-  }
-
-  private async runAllTests(): Promise<void> {
-    this.logger.info("Running all playwright-bdd tests");
-    await this.context.testExecutor.runAllTests();
-  }
-
-  private async debugScenario(...args: CommandArguments): Promise<void> {
-    let [filePath, lineNumber, scenarioName] = args as [string | undefined, number | undefined, string | undefined];
-    let outlineName: string | undefined;
-    if (!filePath) {
-      const target = await resolvePaletteScenario(this.context);
-      if (!target) {return;}
-      ({ filePath, lineNumber, scenarioName, outlineName } = target);
-    }
-    this.logger.info(`Debugging scenario: ${scenarioName ?? "unnamed"}`, { filePath, lineNumber });
-    outlineName ??= this.resolveOutlineName(filePath, lineNumber, scenarioName);
-    await this.context.testExecutor.debugScenario({
-      filePath,
-      ...(lineNumber !== undefined ? { lineNumber } : {}),
-      ...(scenarioName ? { scenarioName } : {}),
-      ...(outlineName ? { outlineName } : {}),
-    });
+  /** Registered id → the title its failure messages name. The manifest must declare the same string. */
+  public get registeredTitles(): ReadonlyMap<string, string> {
+    return new Map([...this.commands].map(([command, { title }]) => [command, title]));
   }
 
   private refreshTests(): void {
@@ -444,90 +267,12 @@ export class CommandManager {
     });
   }
 
-  private async runFeatureWithTags(...args: CommandArguments): Promise<void> {
-    let [filePath, tags] = args as [string | undefined, string | undefined];
-    if (!filePath) {
-      filePath = await resolvePaletteFeature(this.context);
-      if (!filePath) {return;}
-      tags = await promptPaletteTags();
-      if (tags === undefined) {return;}
-    }
-    if (!tags) {throw new Error("Tags are required");}
-    await this.runCapturedCommand("Feature with tags", filePath, undefined, (signal, progress) =>
-      this.context.testExecutor.runFeatureFileWithOutput({ filePath, tags, signal, progress })
-    );
-  }
-
-  private async runScenarioWithTags(...args: CommandArguments): Promise<void> {
-    let [filePath, lineNumber, scenarioName, tags] = args as [string | undefined, number | undefined, string | undefined, string | undefined];
-    let outlineName: string | undefined;
-    if (!filePath) {
-      const target = await resolvePaletteScenario(this.context);
-      if (!target) {return;}
-      ({ filePath, lineNumber, scenarioName, outlineName } = target);
-      tags = await promptPaletteTags();
-      if (tags === undefined) {return;}
-    }
-    if (!tags) {throw new Error("Tags are required");}
-
-    await this.runCapturedCommand("Scenario with tags", filePath, lineNumber, (signal, progress) =>
-      this.runScenarioCore(filePath, lineNumber, scenarioName, tags, signal, progress, outlineName)
-    );
-  }
-
-  private async runAllTestsParallel(): Promise<void> {
-    this.logger.info("Running all playwright-bdd tests in parallel");
-    await this.context.testExecutor.runAllTestsInParallel();
-  }
-
-  private async runScenarioWithContext(...args: CommandArguments): Promise<void> {
-    const filePath = commandArgFsPath(args[0]);
-    if (!filePath) {throw new Error("File path is required");}
-    const lineNumber = typeof args[1] === "number" ? args[1] : undefined;
-    const scenarioName = typeof args[2] === "string" ? args[2] : undefined;
-
-    await this.runCapturedCommand("Scenario with context", filePath, lineNumber, (signal, progress) =>
-      this.runScenarioCore(filePath, lineNumber, scenarioName, undefined, signal, progress)
-    );
-  }
-
-  private async debugScenarioWithContext(...args: CommandArguments): Promise<void> {
-    const filePath = commandArgFsPath(args[0]);
-    if (!filePath) {throw new Error("File path is required");}
-    const lineNumber = typeof args[1] === "number" ? args[1] : undefined;
-    const scenarioName = typeof args[2] === "string" ? args[2] : undefined;
-
-    const outlineName = this.resolveOutlineName(filePath, lineNumber, scenarioName);
-    await this.context.testExecutor.debugScenario({
-      filePath,
-      ...(lineNumber !== undefined ? { lineNumber } : {}),
-      ...(scenarioName ? { scenarioName } : {}),
-      ...(outlineName ? { outlineName } : {}),
-      debug: true,
-    });
-  }
-
-  private async runFeatureFileWithContext(...args: CommandArguments): Promise<void> {
-    const filePath = commandArgFsPath(args[0]);
-    if (!filePath) {throw new Error("File path is required");}
-
-    await this.runCapturedCommand("Feature with context", filePath, undefined, (signal, progress) => {
-      const featureName = this.getParsedFeature(filePath)?.feature;
-      return this.context.testExecutor.runFeatureFileWithOutput({
-        filePath,
-        ...(featureName ? { featureName } : {}),
-        signal,
-        progress,
-      });
-    });
-  }
-
   private showErrorMessage(message: string): void {
     vscode.window.showErrorMessage(message);
   }
 
   public dispose(): void {
-    for (const [, disposable] of this.commands) {
+    for (const { disposable } of this.commands.values()) {
       try { disposable.dispose(); } catch { /* ignore */ }
     }
     this.commands.clear();

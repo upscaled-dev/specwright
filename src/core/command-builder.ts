@@ -1,5 +1,4 @@
-import * as path from "node:path";
-import { TestExecutionOptions, FeatureExecutionOptions } from "../types";
+import { TestExecutionOptions } from "../types";
 import { ExtensionConfig } from "./extension-config";
 import { resolveWorkerCount } from "../commands/prompt-worker-count";
 import { shellQuote } from "../utils/shell";
@@ -25,7 +24,7 @@ function nonEmpty(value: string | undefined): string | undefined {
  * Targeting:
  *   - Tags     → `bddgen --tags "<expr>"` (filters which specs get generated)
  *   - Scenario → `playwright test --grep "<name>"`
- *   - Feature  → `playwright test --grep "<feature name>"` (or by generated spec path if known)
+ *   - Feature  → `playwright test "<generated spec path filter>"`
  *
  * Playwright-bdd does not support line-number selection the way behave does, so we fall back to
  * matching by scenario name via --grep. The line number is informational only.
@@ -60,20 +59,11 @@ export class CommandBuilder {
     return this._lastForcedWorkers;
   }
 
-  public buildScenarioCommand(options: TestExecutionOptions): string {
-    const parts: string[] = [];
-    const gen = this.buildBddgen(options.tags);
-    if (gen) {parts.push(gen);}
-    parts.push(this.buildPlaywright(options, /*greppedByName*/ true));
-    return parts.join(" && ");
-  }
-
   /**
-   * Same as {@link buildScenarioCommand} but split into its bddgen and playwright halves, so the
-   * executor can run bddgen FIRST and then resolve a precise `<spec>:<pwTestLine>` target from the
-   * freshly generated spec before running playwright (mirrors {@link buildDebugCommandParts}).
-   * `bddgenCommand` is undefined when bddgen is disabled (empty config) or generation is delegated
-   * to `defineBddProject`.
+   * A scenario run, split into its bddgen and playwright halves, so the executor can run bddgen
+   * FIRST and then resolve a precise `<spec>:<pwTestLine>` target from the freshly generated spec
+   * before running playwright (mirrors {@link buildDebugCommandParts}). `bddgenCommand` is undefined
+   * when generation is delegated and this run has no tag override.
    */
   public buildScenarioCommandParts(
     options: TestExecutionOptions
@@ -84,45 +74,30 @@ export class CommandBuilder {
     };
   }
 
-  public buildFeatureCommand(options: FeatureExecutionOptions): string {
-    const parts: string[] = [];
-    const gen = this.buildBddgen(options.tags);
-    if (gen) {parts.push(gen);}
-
-    const playwrightParts: string[] = [this.config.playwrightCommand];
-
-    // Prefer grepping by the Feature title: playwright-bdd names the generated `describe` after
-    // it, so the title appears verbatim in Playwright's grep target. This is far more precise
-    // than the filename basename, which matched unrelated features whose titles merely contained
-    // the filename (file `sample.feature` matched the "Sample feature" of another file). We keep
-    // it unanchored because Playwright's grep target may be prefixed by the spec file path; an
-    // `^` anchor would then match nothing. Basename stays as a last-resort fallback.
-    const grep = options.featureName
-      ? this.gripPattern(options.featureName)
-      : this.gripPattern(path.basename(options.filePath).replace(/\.feature$/, ""));
-    if (grep) {playwrightParts.push("--grep", this.quote(grep));}
-
-    this.appendCommonFlags(playwrightParts, {
-      reporter: options.reporter,
-      parallel: this.config.parallelExecution,
-      dryRun: options.dryRun ?? this.config.dryRun,
-    });
-
-    parts.push(playwrightParts.join(" "));
-    return parts.join(" && ");
-  }
-
   /**
    * Run every generated spec whose path matches a positional filter. Playwright treats the filter as
    * a regular expression, so the caller passes an already forward-slashed, regex-escaped path (see
    * `resolveBatchSelection`); a Windows-separator path would read as regex poison and match nothing
    * (the v0.3.9 gotcha). Used by the batch feature/folder scopes.
+   *
+   * `titles` intersects that filter with an anchored title grep, so several scenarios of one feature
+   * run in one pass and a same-titled scenario in another feature cannot join them.
    */
-  public buildPathFilterCommand(pathFilter: string): string {
+  public buildPathFilterCommand(
+    pathFilter: string,
+    tagExpression?: string,
+    titles: readonly string[] = []
+  ): string {
     const parts: string[] = [];
-    const gen = this.buildBddgen(undefined);
+    const gen = this.buildBddgen(tagExpression);
     if (gen) {parts.push(gen);}
     const playwrightParts: string[] = [this.config.playwrightCommand, this.quote(pathFilter)];
+    if (titles.length > 0) {
+      playwrightParts.push(
+        "--grep",
+        this.quote(titles.map((title) => this.exactTitlePattern(title)).join("|"))
+      );
+    }
     this.appendCommonFlags(playwrightParts, {
       reporter: this.config.reporter,
       parallel: this.config.parallelExecution,
@@ -137,28 +112,6 @@ export class CommandBuilder {
     const gen = this.buildBddgen(tag);
     if (gen) {parts.push(gen);}
     const playwrightParts: string[] = [this.config.playwrightCommand];
-    this.appendCommonFlags(playwrightParts, {
-      reporter: this.config.reporter,
-      parallel: this.config.parallelExecution,
-      dryRun: this.config.dryRun,
-    });
-    parts.push(playwrightParts.join(" "));
-    return parts.join(" && ");
-  }
-
-  /**
-   * Run several scenarios in one bddgen+playwright pass via a combined `--grep` regex; the batch
-   * all-mapped collapse. Each name is regex-escaped (and its outline `<placeholders>` wildcarded) the
-   * same way {@link buildScenarioCommand} escapes a single grep, then OR-joined. Stays UNANCHORED
-   * like every other grep here: Playwright's grep target is `path › describes › title › @tags`
-   * joined, so a `^`/`$` anchor would fail on the path prefix / appended tags and match nothing.
-   */
-  public buildGrepCommand(names: readonly string[]): string {
-    const parts: string[] = [];
-    const gen = this.buildBddgen(undefined);
-    if (gen) {parts.push(gen);}
-    const pattern = names.map((name) => this.gripPattern(name)).join("|");
-    const playwrightParts: string[] = [this.config.playwrightCommand, "--grep", this.quote(pattern)];
     this.appendCommonFlags(playwrightParts, {
       reporter: this.config.reporter,
       parallel: this.config.parallelExecution,
@@ -186,13 +139,15 @@ export class CommandBuilder {
       // Preferred: target the exact generated test by `<spec>:<pwTestLine>`. This is the only way
       // to debug a single Scenario Outline example row (grep on the source title can't isolate one).
       playwrightParts.push(this.quote(options.specLineTarget));
-    } else if (options.scenarioName) {
-      playwrightParts.push("--grep", this.quote(this.gripPattern(options.scenarioName, options.outlineName)));
     } else {
-      // No specific scenario (e.g. debugging a whole feature file): narrow to the feature's
-      // generated spec by its basename, mirroring buildFeatureCommand.
-      const base = path.basename(options.filePath).replace(/\.feature$/, "");
-      if (base) {playwrightParts.push("--grep", this.quote(this.gripPattern(base)));}
+      // A grep shape is always pinned to this feature's generated spec: an unscoped title (or,
+      // worse, a basename) grep would debug matches from other features too.
+      const fileFilter = nonEmpty(options.specFileFilter);
+      if (fileFilter !== undefined) {playwrightParts.push(this.quote(fileFilter));}
+      const grepName = nonEmpty(options.scenarioName) ?? nonEmpty(options.outlineName);
+      if (grepName) {
+        playwrightParts.push("--grep", this.quote(this.gripPattern(grepName, options.outlineName)));
+      }
     }
     if (options.jsonReportPath) {
       // The debugged run reports through PLAYWRIGHT_JSON_OUTPUT_NAME (file output); keep the
@@ -234,7 +189,11 @@ export class CommandBuilder {
       parts.push(this.quote(options.specLineTarget));
     } else {
       const grepName = nonEmpty(options.scenarioName) ?? nonEmpty(options.outlineName);
+      const fileFilter = nonEmpty(options.specFileFilter);
       if (greppedByName && grepName) {
+        if (fileFilter !== undefined) {
+          parts.push(this.quote(fileFilter));
+        }
         parts.push("--grep", this.quote(this.gripPattern(grepName, options.outlineName)));
       }
     }
@@ -248,14 +207,15 @@ export class CommandBuilder {
     return parts.join(" ");
   }
 
+  // An empty bddgenCommand is the user's statement that generation is delegated to their Playwright
+  // config, so nothing is synthesized here, tags or not.
   private buildBddgen(tagExpression?: string): string | undefined {
     const cmd = this.config.bddgenCommand.trim();
     if (!cmd) {return undefined;}
     const effective = tagExpression ?? this.config.tags;
-    if (effective && effective.trim() !== "") {
-      return `${cmd} --tags ${this.quote(effective)}`;
-    }
-    return cmd;
+    return effective && effective.trim() !== ""
+      ? `${cmd} --tags ${this.quote(effective)}`
+      : cmd;
   }
 
   private appendCommonFlags(
@@ -300,6 +260,19 @@ export class CommandBuilder {
     return base
       .replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")
       .replaceAll(/<[^>]*>/g, ".*");
+  }
+
+  /**
+   * Match one scenario title, not every title that contains it. Playwright greps against
+   * `<spec path> <describe titles> <test title> <@tags>` joined by spaces, so a test title always
+   * ends that string, past the test's own tags: anchoring there stops a longer title from being
+   * swept into a batch. It cannot separate a title from one that ends with it, since the join gives
+   * a title boundary no mark a space inside a title does not also have. Only a plain scenario title
+   * ends the string; an outline name is a describe followed by its row title, which is why the
+   * single-scenario greps stay unanchored.
+   */
+  private exactTitlePattern(scenarioName: string): string {
+    return `(?:^| )${this.gripPattern(scenarioName)}(?: @[^ ]+)*$`;
   }
 
   private quote(value: string): string {

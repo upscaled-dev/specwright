@@ -101,12 +101,13 @@ export interface RemoteMetadataSnapshot {
 // scenario set to preflight and the executor invocations to run. `test-plan-derived` is declared
 // here but only resolvable once slice 2d adds the remote plan lookup.
 export type BatchSelection =
-  | { readonly kind: "scenario"; readonly scenario: ScenarioRef }
+  | { readonly kind: "scenario"; readonly scenario: ScenarioRef; readonly tagExpression?: string | undefined }
   | { readonly kind: "multi-select"; readonly scenarios: readonly ScenarioRef[] }
-  | { readonly kind: "feature"; readonly filePath: string }
+  | { readonly kind: "feature"; readonly filePath: string; readonly tagExpression?: string | undefined }
   | { readonly kind: "folder"; readonly folderPath: string }
   | { readonly kind: "tag-expression"; readonly expression: string }
-  | { readonly kind: "all-mapped" }
+  | { readonly kind: "all-mapped"; readonly project?: string | undefined }
+  | { readonly kind: "suite" }
   | { readonly kind: "test-plan-derived"; readonly planKey: string };
 
 // Preflight verdict for one scenario about to run in a batch. `ready` means publishable-in-principle;

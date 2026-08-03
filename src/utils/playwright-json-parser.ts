@@ -86,6 +86,8 @@ export interface ScenarioResult {
   flaky?: boolean | undefined;
   /** Absolute paths to Playwright evidence attachments; present only when non-empty. */
   attachmentPaths?: string[] | undefined;
+  /** Playwright project that produced this entry, when the reporter identifies it. */
+  projectName?: string | undefined;
 }
 
 /** A single Gherkin step within a scenario run. */
@@ -99,6 +101,19 @@ export interface StepResult {
 interface RawPlaywrightReport {
   config?: { rootDir?: string; configFile?: string };
   suites?: RawSuite[];
+  errors?: RawError[];
+}
+
+interface RawError {
+  message?: string;
+  stack?: string;
+}
+
+export interface PlaywrightReportEvidence {
+  readonly details: ScenarioResult[];
+  readonly complete: boolean;
+  readonly failure?: string | undefined;
+  readonly failureKind?: "unreadable" | "global-error" | undefined;
 }
 
 /** Where the generated specs live (`config.rootDir`) and the project root (`configFile` dir). */
@@ -144,6 +159,7 @@ interface RawResult {
 }
 
 interface RawTest {
+  projectName?: string;
   annotations?: Array<{ type?: string; description?: string }>;
   expectedStatus?: string;
   results?: RawResult[];
@@ -206,6 +222,10 @@ export class PlaywrightJsonParser {
   }
 
   public parse(jsonText: string): ScenarioResult[] {
+    return this.inspect(jsonText).details;
+  }
+
+  public inspect(jsonText: string): PlaywrightReportEvidence {
     this.specDataCache.clear();
 
     let raw: RawPlaywrightReport;
@@ -214,10 +234,15 @@ export class PlaywrightJsonParser {
     } catch (err) {
       if (isPlaywrightReportLimitError(err)) {throw err;}
       this.logger.warn("Failed to parse Playwright JSON", { error: String(err) });
-      return [];
+      return {
+        details: [],
+        complete: false,
+        failure: "The Playwright JSON report could not be parsed.",
+        failureKind: "unreadable",
+      };
     }
 
-    return this.parseReport(raw);
+    return this.evidence(raw);
   }
 
   private parseReport(raw: RawPlaywrightReport): ScenarioResult[] {
@@ -235,17 +260,44 @@ export class PlaywrightJsonParser {
 
   /** Read extension-launched reports without blocking the extension host on file I/O. */
   public async parseFromFileAsync(jsonPath: string): Promise<ScenarioResult[]> {
+    return (await this.inspectFromFileAsync(jsonPath)).details;
+  }
+
+  public async inspectFromFileAsync(jsonPath: string): Promise<PlaywrightReportEvidence> {
     try {
       const raw = await readPlaywrightReport(jsonPath) as RawPlaywrightReport;
       this.specDataCache.clear();
-      return this.parseReport(raw);
+      return this.evidence(raw);
     } catch (err) {
       if (isPlaywrightReportLimitError(err)) {throw err;}
       this.logger.warn(`Could not read Playwright JSON report at ${jsonPath}`, {
         error: String(err),
       });
-      return [];
+      return {
+        details: [],
+        complete: false,
+        failure: "The Playwright JSON report could not be read.",
+        failureKind: "unreadable",
+      };
     }
+  }
+
+  private evidence(raw: RawPlaywrightReport): PlaywrightReportEvidence {
+    const details = this.parseReport(raw);
+    const errors = (raw.errors ?? [])
+      .map((error) => {
+        const message = error.message?.trim();
+        return message === undefined || message === "" ? error.stack?.trim() : message;
+      })
+      .filter((message): message is string => Boolean(message));
+    return errors.length === 0
+      ? { details, complete: true }
+      : {
+          details,
+          complete: false,
+          failure: `Playwright reported a global error: ${errors.join("\n")}`,
+          failureKind: "global-error",
+        };
   }
 
   /**
@@ -366,6 +418,7 @@ export class PlaywrightJsonParser {
       ...(attempts.length > 1 ? { attempts: attempts.length } : {}),
       ...(flaky ? { flaky } : {}),
       ...(attachmentPaths.length > 0 ? { attachmentPaths } : {}),
+      ...(test.projectName !== undefined ? { projectName: test.projectName } : {}),
     };
   }
 

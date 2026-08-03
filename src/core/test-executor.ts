@@ -4,15 +4,18 @@ import * as fs from "node:fs";
 import {
   TestExecutionOptions,
   TestRunResult,
-  ParallelExecutionOptions,
-  FeatureExecutionOptions,
   PlaywrightBddExtensionContext,
 } from "../types/index";
 import { Logger } from "../utils/logger";
 import { errMsg } from "../utils/text";
 import { ExtensionConfig } from "./extension-config";
-import { PlaywrightJsonParser, ScenarioStatus, ScenarioResult, normalizePathKey } from "../utils/playwright-json-parser";
-import { shellQuote } from "../utils/shell";
+import {
+  PlaywrightJsonParser,
+  type PlaywrightReportEvidence,
+  type ScenarioStatus,
+  type ScenarioResult,
+  normalizePathKey,
+} from "../utils/playwright-json-parser";
 import {
   canonicalCwd,
   findNearestPlaywrightConfigDir,
@@ -43,45 +46,36 @@ import {
 export type RunOutputResult = TestRunResult & {
   scenarioResults?: Record<string, ScenarioStatus>;
   scenarioDetails?: ScenarioResult[];
+  /** Present when the process did not produce a complete report, even if earlier cases landed. */
+  infrastructureFailure?: string;
   /** True when process chunks were already written to a live consumer. */
   outputStreamed?: boolean;
+  /** The executor could not prove its process tree ended; execution admission must stay closed. */
+  admissionUnsafe?: boolean;
 };
+
+function infrastructureResult(
+  start: number,
+  failure: string,
+  output = "",
+  outputStreamed = false,
+  admissionUnsafe = false
+): RunOutputResult {
+  return {
+    success: false,
+    output,
+    error: failure,
+    duration: Math.max(1, Date.now() - start),
+    infrastructureFailure: failure,
+    ...(outputStreamed ? { outputStreamed: true } : {}),
+    ...(admissionUnsafe ? { admissionUnsafe: true } : {}),
+  };
+}
 
 interface ScenarioPlaywrightAttempt {
   readonly result: RunOutputResult;
   readonly command: string;
   readonly exitCode: number;
-}
-
-// Worst status wins when one scenario ran under several projects (failed > skipped > passed), so
-// a chromium-passed / firefox-failed scenario counts as failed no matter which result the report
-// lists first. Mirrors PlaywrightJsonParser.toStatusMap's own severity rule.
-const STATUS_SEVERITY: Record<ScenarioStatus, number> = {
-  passed: 0,
-  skipped: 1,
-  failed: 2,
-};
-
-function countScenarioStatuses(
-  results: ScenarioResult[]
-): { passed: number; failed: number } {
-  // Key by file + line + name so same-named scenarios in different feature files (or different
-  // outline examples) are counted separately, while retries/projects of one scenario are not.
-  const byScenario = new Map<string, ScenarioStatus>();
-  for (const r of results) {
-    const key = `${r.featurePath}::${r.lineNumber ?? ""}::${r.scenarioName}`;
-    const prev = byScenario.get(key);
-    if (prev === undefined || STATUS_SEVERITY[r.status] > STATUS_SEVERITY[prev]) {
-      byScenario.set(key, r.status);
-    }
-  }
-  let passed = 0;
-  let failed = 0;
-  for (const status of byScenario.values()) {
-    if (status === "passed") { passed += 1; }
-    else if (status === "failed") { failed += 1; }
-  }
-  return { passed, failed };
 }
 
 /**
@@ -108,12 +102,6 @@ export function withJsonReporter(command: string): string {
 
 type CommandResult = BoundedCommandResult;
 
-export type TestRunEvent =
-  | { kind: "running"; passed: number; failed: number; completed?: number; total?: number }
-  | { kind: "success"; passed: number; failed: number }
-  | { kind: "failure"; passed: number; failed: number }
-  | { kind: "cancelled"; passed: number; failed: number };
-
 export type ShellRunner = (
   command: string,
   workingDir: string,
@@ -123,13 +111,8 @@ export type ShellRunner = (
 ) => Promise<CommandResult>;
 
 /**
- * Drives playwright-bdd via shell commands.
- *
- * Two execution modes:
- *   - `run*` methods: pipe the command into the VS Code Terminal so the user can see output.
- *   - `*WithOutput` methods: spawn the command via child_process, capture stdout/stderr, and
- *     parse a JSON Playwright report so we can attribute per-scenario status back to the VS
- *     Code Test Explorer.
+ * Drives playwright-bdd via captured shell commands and parses the JSON report so scenario
+ * status can be projected consistently to every UI surface.
  *
  * The final JSON reporter remains authoritative. A lightweight additional reporter writes
  * current results to a private side channel so consumers can update while Playwright is active.
@@ -140,16 +123,11 @@ export class TestExecutor {
   private readonly workspace: typeof vscode.workspace;
   private readonly window: typeof vscode.window;
   private readonly debug: typeof vscode.debug;
-  private terminal: vscode.Terminal | undefined;
-  private terminalCloseSubscription: vscode.Disposable | undefined;
   private readonly playwrightJsonParser: PlaywrightJsonParser;
   private context?: PlaywrightBddExtensionContext;
-  private readonly runEventEmitter = new vscode.EventEmitter<TestRunEvent>();
   private readonly defaultShellRunner: ShellRunner;
   private shellRunner: ShellRunner;
   private readonly mirror: BreakpointMirror;
-
-  public readonly onTestRunEvent: vscode.Event<TestRunEvent> = this.runEventEmitter.event;
 
   public static create(
     workspace?: typeof vscode.workspace,
@@ -213,16 +191,21 @@ export class TestExecutor {
     this.config.reload();
   }
 
-  // Public dispatch methods are async so future I/O (install checks, async config reads, etc.)
-  // can be threaded through without breaking callers. The bodies currently do no awaiting; the
-  // single `await Promise.resolve()` keeps the lint rule happy and the contract stable.
-  public async runScenario(options: TestExecutionOptions): Promise<void> {
-    await Promise.resolve();
-    const command = this.commandBuilder().buildScenarioCommand(this.withSpecLineTarget(options));
-    this.executeCommand(command, this.getWorkingDirectory(options.filePath));
+  public async debugScenario(options: TestExecutionOptions): Promise<void> {
+    try {
+      await this.launchDebugScenario(options);
+    } catch (error) {
+      const msg = errMsg(error);
+      this.logger.error(`Failed to start debug session: ${msg}`, {
+        filePath: options.filePath,
+        lineNumber: options.lineNumber,
+        scenarioName: options.scenarioName,
+      });
+      await this.window.showErrorMessage(`Failed to start Playwright debug session: ${msg}`);
+    }
   }
 
-  public async debugScenario(options: TestExecutionOptions): Promise<void> {
+  private async launchDebugScenario(options: TestExecutionOptions): Promise<void> {
     let mirrorId: string | undefined;
     try {
       // Run the targeted playwright command under VS Code's JS debugger via a `node-terminal`
@@ -253,12 +236,35 @@ export class TestExecutor {
       }
 
       const specPath = this.resolveSpecPath(workingDir, options.filePath);
+      if (specPath === undefined) {
+        throw new Error(
+          `Could not map ${options.filePath} into the working directory ${workingDir}. ` +
+            "No broader debug target was launched."
+        );
+      }
       mirrorId = this.mirror.mirrorBreakpoints(options.filePath, specPath);
 
       // Resolve the precise spec target from the freshly generated spec (bddgen just ran), so a
-      // single Scenario Outline row debugs exactly one test instead of grepping its title.
+      // single Scenario Outline row debugs exactly one test instead of grepping its title. The
+      // same exact-target contract as a run: a plain scenario whose line cannot be recovered
+      // refuses instead of debugging every title match, and every grep shape (whole outline,
+      // whole feature) is scoped to this feature's generated spec by positional filter.
+      const enriched = this.withSpecLineTarget(options, specPath);
+      if (
+        enriched.specLineTarget === undefined &&
+        options.scenarioName !== undefined &&
+        options.outlineName === undefined
+      ) {
+        const at = options.lineNumber ? `:${options.lineNumber}` : "";
+        throw new Error(
+          `Could not resolve the exact test at ${options.filePath}${at}: a name grep for ` +
+            `"${options.scenarioName}" would debug every match. No broader target was launched.`
+        );
+      }
       const { playwrightCommand } = this.commandBuilder().buildDebugCommandParts(
-        this.withSpecLineTarget(options, specPath)
+        enriched.specLineTarget !== undefined
+          ? enriched
+          : { ...enriched, specFileFilter: toPathFilterRegex(workingDir, specPath) }
       );
 
       const folder =
@@ -312,71 +318,7 @@ export class TestExecutor {
       if (mirrorId !== undefined) {
         this.mirror.release(mirrorId);
       }
-      const msg = errMsg(error);
-      this.logger.error(`Failed to start debug session: ${msg}`, {
-        filePath: options.filePath,
-        lineNumber: options.lineNumber,
-        scenarioName: options.scenarioName,
-      });
-      await this.window.showErrorMessage(`Failed to start Playwright debug session: ${msg}`);
-    }
-  }
-
-  public async runFeatureFile(options: FeatureExecutionOptions): Promise<void> {
-    await Promise.resolve();
-    const command = this.commandBuilder().buildFeatureCommand(options);
-    this.executeCommand(command, this.getWorkingDirectory(options.filePath));
-  }
-
-  public async runAllTests(): Promise<void> {
-    await Promise.resolve();
-    const command = this.commandBuilder().buildAllTestsCommand();
-    this.executeCommand(command, this.getWorkingDirectory());
-  }
-
-  public async runAllTestsWithTags(tag: string): Promise<void> {
-    await Promise.resolve();
-    const command = this.commandBuilder().buildTagCommand(tag);
-    this.executeCommand(command, this.getWorkingDirectory());
-  }
-
-  public async runTestsInParallel(options: ParallelExecutionOptions): Promise<void> {
-    await Promise.resolve();
-    // Parallel runs span one suite; infer the cwd from the first feature file.
-    const workingDir = this.getWorkingDirectory(options.featureFiles[0]);
-    this.window.showInformationMessage(
-      `Running playwright-bdd with ${options.maxProcesses} workers across ${options.featureFiles.length} feature file(s)`
-    );
-    // Playwright handles parallelism internally via --workers; we just trigger one command,
-    // forcing --workers=<maxProcesses> the same way the "Run in Parallel" profile does.
-    const builder = this.commandBuilder();
-    builder.setForceParallel(true, options.maxProcesses);
-    try {
-      const command = options.tags
-        ? builder.buildTagCommand(options.tags)
-        : builder.buildAllTestsCommand();
-      this.executeCommand(command, workingDir);
-    } finally {
-      builder.setForceParallel(false);
-    }
-  }
-
-  public async runAllTestsInParallel(): Promise<void> {
-    try {
-      const featureFiles = await this.discoverFeatureFiles();
-      if (featureFiles.length === 0) {
-        await this.window.showWarningMessage("No feature files found to run");
-        return;
-      }
-      await this.runTestsInParallel({
-        featureFiles,
-        maxProcesses: this.config.maxParallelProcesses,
-        tags: this.config.tags,
-      });
-    } catch (error) {
-      const msg = errMsg(error);
-      this.logger.error(`Failed to run tests in parallel: ${msg}`);
-      await this.window.showErrorMessage(`Failed to run tests in parallel: ${msg}`);
+      throw error;
     }
   }
 
@@ -388,11 +330,19 @@ export class TestExecutor {
     const workingDir = this.getWorkingDirectory(options.filePath);
     const signal = options.signal;
 
-    this.runEventEmitter.fire({ kind: "running", passed: 0, failed: 0 });
 
     const preRunFailure = await this.runPreRunHook(workingDir, signal, options.progress);
     if (preRunFailure) {
-      if (signal?.aborted) { return this.cancelledResult(start); }
+      if (signal?.aborted) {
+        return this.cancelledResult(
+          start,
+          undefined,
+          [],
+          "",
+          false,
+          preRunFailure.terminationFailure
+        );
+      }
       this.contributeArtifactShard(
         options.artifactBatch,
         workingDir,
@@ -402,15 +352,17 @@ export class TestExecutor {
         [],
         artifactTarget
       );
-      this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
-      return { success: false, output: "", error: preRunFailure, duration: Math.max(1, Date.now() - start) };
+      return infrastructureResult(
+        start,
+        preRunFailure.failure,
+        "",
+        false,
+        preRunFailure.terminationFailure !== undefined
+      );
     }
 
-    // Run bddgen separately FIRST (not chained with `&&`) so the generated spec, and its
-    // pickleLine→pwTestLine map, is fresh before we resolve the precise `<spec>:<pwTestLine>`
-    // target. This makes single-row targeting airtight even right after the feature was edited
-    // (mirrors the debug path). When bddgenCommand is undefined (empty config or defineBddProject
-    // auto-gen), generation happens inside `playwright test`, so we resolve from the existing spec.
+    // Run bddgen first so the generated pickleLine→pwTestLine map is fresh before resolving an
+    // exact spec target. A delegated, untagged run resolves from the existing generated spec.
     const { bddgenCommand } = this.commandBuilder().buildScenarioCommandParts(options);
     if (bddgenCommand !== undefined) {
       try {
@@ -424,7 +376,16 @@ export class TestExecutor {
           ),
           bddgenCommand
         );
-        if (signal?.aborted) { return this.cancelledResult(start); }
+        if (signal?.aborted) {
+          return this.cancelledResult(
+            start,
+            undefined,
+            [],
+            gen.output,
+            gen.outputStreamed,
+            gen.terminationFailure
+          );
+        }
         this.publishBddgenDiagnostics(gen, workingDir);
         if (!gen.success) {
           this.contributeArtifactShard(
@@ -436,15 +397,14 @@ export class TestExecutor {
             [],
             artifactTarget
           );
-          this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
           const detail = gen.error.trim() === "" ? gen.output : gen.error;
-          return {
-            success: false,
-            output: gen.output,
-            error: `bddgen failed (exit code ${gen.returnCode}): ${detail}`,
-            duration: Math.max(1, Date.now() - start),
-            ...(gen.outputStreamed ? { outputStreamed: true } : {}),
-          };
+          return infrastructureResult(
+            start,
+            `bddgen failed (exit code ${gen.returnCode}): ${detail}`,
+            gen.output,
+            gen.outputStreamed,
+            gen.terminationFailure !== undefined
+          );
         }
       } catch (error) {
         if (signal?.aborted) { return this.cancelledResult(start); }
@@ -457,39 +417,151 @@ export class TestExecutor {
           [],
           artifactTarget
         );
-        this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
-        return { success: false, output: "", error: errMsg(error), duration: Math.max(1, Date.now() - start) };
+        return infrastructureResult(start, errMsg(error));
       }
     }
 
-    const enriched = this.withSpecLineTarget(options);
+    let enriched: TestExecutionOptions;
+    try {
+      enriched = this.withSpecLineTarget(options);
+      // A run may proceed without an exact spec line only as a whole outline (title, no line),
+      // whose grep intentionally covers every row. A plain scenario names one exact test even when
+      // its line is stale or missing (the parse-miss line-0 shape), and its name grep would search
+      // the whole suite; no exact identity, no execution. Debug keeps its own name fallback:
+      // buildDebugCommandParts narrows by title under the debugger the user is driving.
+      if (
+        enriched.specLineTarget === undefined &&
+        options.scenarioName !== undefined &&
+        options.outlineName === undefined
+      ) {
+        const at = options.lineNumber ? `:${options.lineNumber}` : "";
+        throw new Error(
+          `Could not resolve the exact test at ${options.filePath}${at}: a name grep for ` +
+            `"${options.scenarioName}" would search the whole suite. No broader target was executed.`
+        );
+      }
+      // The whole-outline title grep intentionally covers every row of THIS outline, but unscoped
+      // it also runs a same-titled outline in another feature file. The generated spec positional
+      // pins it to its own feature; a feature that cannot map to a spec has no runnable identity.
+      if (enriched.specLineTarget === undefined && options.outlineName !== undefined) {
+        const specPath = this.resolveSpecPath(workingDir, options.filePath);
+        if (specPath === undefined) {
+          throw new Error(
+            `Could not scope the outline "${options.outlineName}" to its generated spec: ` +
+              `${options.filePath} is outside the working directory ${workingDir}. ` +
+              "No broader target was executed."
+          );
+        }
+        enriched = { ...enriched, specFileFilter: toPathFilterRegex(workingDir, specPath) };
+      }
+    } catch (error) {
+      const failure = errMsg(error);
+      this.contributeArtifactShard(
+        options.artifactBatch,
+        workingDir,
+        "exact scenario target resolution",
+        false,
+        1,
+        [],
+        artifactTarget
+      );
+      return infrastructureResult(start, failure);
+    }
     let attempt = await this.runScenarioPlaywright(enriched, workingDir, start, signal, options.progress);
 
-    // Safety net: a spec-line target Playwright doesn't recognize (stale spec, path-filter
-    // quirk) makes it report "no tests found"; the run ends with nothing executed and every
-    // Explorer item skipped. That's strictly worse than the imprecise name-grep, so rerun once
-    // without the target. Only the exact no-tests outcome retries; real failures (compile
-    // errors, failing tests) would fail identically again and must surface as-is.
+    // A generated line can drift between resolution and Playwright collecting the spec. Refresh
+    // generation, resolve the same source row again, and retry only that exact line. A title grep
+    // is not a safe fallback: for an outline row it runs every sibling, and for a plain scenario it
+    // can match a joined Feature/Rule/title chain the executor cannot prove unique.
     const specLineTargetWasAdded =
       enriched.specLineTarget !== undefined && options.specLineTarget === undefined;
     if (specLineTargetWasAdded && !signal?.aborted && foundNoTests(attempt.result)) {
       this.logger.warn(
         `Playwright found no tests for the spec-line target ${enriched.specLineTarget}; ` +
-          "retrying with a name-based --grep."
+          "regenerating and re-resolving the same source row."
       );
-      attempt = await this.runScenarioPlaywright(options, workingDir, start, signal, options.progress);
-    }
-    if (!signal?.aborted) {
-      this.contributeArtifactShard(
-        options.artifactBatch,
+      if (bddgenCommand !== undefined) {
+        const refreshed = this.withBinaryHint(
+          await this.shellRunner(
+            bddgenCommand,
+            workingDir,
+            undefined,
+            signal,
+            options.progress?.onOutput
+          ),
+          bddgenCommand
+        );
+        if (signal?.aborted) {
+          return this.cancelledResult(
+            start,
+            undefined,
+            [],
+            refreshed.output,
+            refreshed.outputStreamed,
+            refreshed.terminationFailure
+          );
+        }
+        this.publishBddgenDiagnostics(refreshed, workingDir);
+        if (!refreshed.success) {
+          const detail = refreshed.error.trim() === "" ? refreshed.output : refreshed.error;
+          this.contributeArtifactShard(
+            options.artifactBatch,
+            workingDir,
+            bddgenCommand,
+            false,
+            refreshed.returnCode,
+            [],
+            artifactTarget
+          );
+          return infrastructureResult(
+            start,
+            `bddgen failed while refreshing the exact target (exit code ${refreshed.returnCode}): ${detail}`,
+            refreshed.output,
+            refreshed.outputStreamed,
+            refreshed.terminationFailure !== undefined
+          );
+        }
+      }
+      let refreshedTarget: TestExecutionOptions;
+      try {
+        refreshedTarget = this.withSpecLineTarget(options);
+      } catch (error) {
+        const failure =
+          `Playwright found no tests for ${enriched.specLineTarget}, and the exact source row ` +
+          `could not be re-resolved: ${errMsg(error)}`;
+        this.contributeArtifactShard(
+          options.artifactBatch,
+          workingDir,
+          attempt.command,
+          false,
+          attempt.exitCode,
+          [],
+          artifactTarget
+        );
+        return infrastructureResult(
+          start,
+          failure,
+          attempt.result.output,
+          attempt.result.outputStreamed
+        );
+      }
+      attempt = await this.runScenarioPlaywright(
+        refreshedTarget,
         workingDir,
-        attempt.command,
-        attempt.result.success,
-        attempt.exitCode,
-        attempt.result.scenarioDetails ?? [],
-        artifactTarget
+        start,
+        signal,
+        options.progress
       );
     }
+    this.contributeArtifactShard(
+      options.artifactBatch,
+      workingDir,
+      attempt.command,
+      attempt.result.success,
+      attempt.exitCode,
+      attempt.result.scenarioDetails ?? [],
+      artifactTarget
+    );
     return attempt.result;
   }
 
@@ -508,10 +580,11 @@ export class TestExecutor {
       : withJsonReporter(playwrightCommand);
     // Created inside the try so a tmpdir failure becomes a failed result, not a rejection.
     let report: TemporaryReport | undefined;
+    let live: LiveRunHandle | undefined;
 
     try {
       report = this.createTemporaryReport();
-      const live = this.openLiveRun(report.livePath, progress, signal);
+      live = this.openLiveRun(report.livePath, progress, signal);
       let commandResult: CommandResult;
       try {
         commandResult = await this.shellRunner(
@@ -526,12 +599,21 @@ export class TestExecutor {
       }
       const result = this.withBinaryHint(commandResult, command);
       if (signal?.aborted) {
-        return { result: this.cancelledResult(start), command, exitCode: result.returnCode };
+        return {
+          result: this.cancelledResult(
+            start,
+            workingDir,
+            live?.recoverResults([]),
+            result.output,
+            result.outputStreamed,
+            result.terminationFailure
+          ),
+          command,
+          exitCode: result.returnCode,
+        };
       }
-      // When bddgenCommand is undefined (defineBddProject auto-gen) bddgen runs inside
-      // `playwright test`, so its errors surface here rather than in the separate step above.
-      // publish() is a no-op parse+clear on non-bddgen failures, so calling it unconditionally
-      // is safe and is the only path those errors reach the Problems panel.
+      // Delegated generation errors surface with the Playwright result. publish() is a no-op on
+      // other failures, so this is the one shared Problems-panel path.
       this.publishBddgenDiagnostics(result, workingDir);
       return {
         result: await this.buildOutputResult(
@@ -540,41 +622,27 @@ export class TestExecutor {
           workingDir,
           start,
           command,
-          undefined
+          undefined, live
         ),
         command,
         exitCode: result.returnCode,
       };
     } catch (error) {
       if (signal?.aborted) {
-        return { result: this.cancelledResult(start), command, exitCode: 1 };
+        return {
+          result: this.cancelledResult(start, workingDir, live?.recoverResults([])),
+          command,
+          exitCode: 1,
+        };
       }
-      this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
       return {
-        result: {
-          success: false,
-          output: "",
-          error: errMsg(error),
-          duration: Math.max(1, Date.now() - start),
-        },
+        result: infrastructureResult(start, errMsg(error)),
         command,
         exitCode: 1,
       };
     } finally {
       report?.dispose();
     }
-  }
-
-  public async runFeatureFileWithOutput(
-    options: FeatureExecutionOptions
-  ): Promise<RunOutputResult> {
-    return this.runWithJsonReport(
-      () => this.commandBuilder().buildFeatureCommand(options),
-      options.filePath,
-      options.signal,
-      options.artifactBatch,
-      options.progress
-    );
   }
 
   public async runAllTestsWithTagsOutput(
@@ -592,23 +660,6 @@ export class TestExecutor {
     );
   }
 
-  // Batch all-mapped collapse: run several scenarios in one bddgen+playwright pass via a combined
-  // `--grep`, capturing one shard for the whole set (one regeneration instead of one per scenario).
-  public async runGrepWithOutput(
-    names: readonly string[],
-    signal?: AbortSignal,
-    artifactBatch?: number,
-    progress?: RunProgressObserver
-  ): Promise<RunOutputResult> {
-    return this.runWithJsonReport(
-      () => this.commandBuilder().buildGrepCommand(names),
-      undefined,
-      signal,
-      artifactBatch,
-      progress
-    );
-  }
-
   // Batch feature/folder/all-mapped scopes: run every generated spec matching a positional path filter,
   // capturing the shard into the open artifact. `target` is the source feature file or folder; the
   // working dir is resolved from it the same way as every run (the owning Playwright-config package,
@@ -619,16 +670,116 @@ export class TestExecutor {
     target: string,
     signal?: AbortSignal,
     artifactBatch?: number,
-    progress?: RunProgressObserver
+    progress?: RunProgressObserver,
+    tagExpression?: string,
+    titles?: readonly string[]
   ): Promise<RunOutputResult> {
     const pathFilter = toPathFilterRegex(this.resolveWorkingDirectory(target), target);
     return this.runWithJsonReport(
-      () => this.commandBuilder().buildPathFilterCommand(pathFilter),
+      () => this.commandBuilder().buildPathFilterCommand(pathFilter, tagExpression, titles),
       target,
       signal,
       artifactBatch,
       progress
     );
+  }
+
+  public async runSuiteWithOutput(
+    signal?: AbortSignal,
+    artifactBatch?: number,
+    progress?: RunProgressObserver
+  ): Promise<RunOutputResult> {
+    return this.runWithJsonReport(
+      () => this.commandBuilder().buildAllTestsCommand(),
+      undefined,
+      signal,
+      artifactBatch,
+      progress
+    );
+  }
+
+  public async debugScenarioWithOutput(
+    options: TestExecutionOptions,
+    artifactTarget?: ArtifactCaptureTarget
+  ): Promise<RunOutputResult> {
+    const start = Date.now();
+    const workingDir = this.getWorkingDirectory(options.filePath);
+    const report = this.createTemporaryReport();
+    try {
+      await this.launchDebugScenario({
+        ...options,
+        waitForSessionEnd: true,
+        jsonReportPath: report.jsonPath,
+      });
+      if (options.signal?.aborted) {
+        return await this.cancelledDebugResult(start, workingDir, report.jsonPath);
+      }
+      const reportEvidence = await this.readScenarioReport(report.jsonPath, "");
+      const details = reportEvidence.details;
+      const infrastructureFailure = reportEvidence.complete
+        ? details.length === 0
+          ? "The debug session completed without a readable JSON report"
+          : undefined
+        : reportEvidence.failureKind === "unreadable"
+          ? "The debug session completed without a readable JSON report"
+          : reportEvidence.failure;
+      const anyFailed = details.some((detail) => detail.status === "failed");
+      this.context?.runResultStore?.ingest(
+        this.playwrightJsonParser.toStatusMap(details, workingDir)
+      );
+      this.contributeArtifactShard(
+        options.artifactBatch,
+        workingDir,
+        "playwright debug run",
+        infrastructureFailure === undefined && !anyFailed,
+        infrastructureFailure !== undefined || anyFailed ? 1 : 0,
+        details,
+        artifactTarget
+      );
+      return {
+        success: infrastructureFailure === undefined && !anyFailed,
+        output: "",
+        ...(infrastructureFailure ? {
+          error: infrastructureFailure,
+          infrastructureFailure,
+        } : {}),
+        duration: Math.max(1, Date.now() - start),
+        scenarioResults: this.playwrightJsonParser.toStatusMap(details, workingDir),
+        scenarioDetails: details,
+      };
+    } catch (error) {
+      if (options.signal?.aborted) {
+        return await this.cancelledDebugResult(start, workingDir, report.jsonPath);
+      }
+      this.contributeArtifactShard(
+        options.artifactBatch,
+        workingDir,
+        "playwright debug run",
+        false,
+        1,
+        [],
+        artifactTarget
+      );
+      throw error;
+    } finally {
+      report.dispose();
+    }
+  }
+
+  // Playwright writes the debug report only after the tests finish, so a stop that lands afterwards
+  // still has real results on disk. They are evidence of what ran; the run stays cancelled.
+  private async cancelledDebugResult(
+    start: number,
+    workingDir: string,
+    reportPath: string
+  ): Promise<RunOutputResult> {
+    const details = (await this.readScenarioReport(reportPath, "")).details;
+    if (details.length > 0) {
+      this.context?.runResultStore?.ingest(
+        this.playwrightJsonParser.toStatusMap(details, workingDir)
+      );
+    }
+    return this.cancelledResult(start, workingDir, details);
   }
 
   public async discoverFeatureFiles(): Promise<string[]> {
@@ -648,20 +799,13 @@ export class TestExecutor {
   }
 
   public dispose(): void {
-    if (this.terminal) {
-      this.terminal.dispose();
-      this.terminal = undefined;
-    }
-    this.terminalCloseSubscription?.dispose();
-    this.terminalCloseSubscription = undefined;
     this.mirror.dispose();
-    this.runEventEmitter.dispose();
   }
 
   /**
-   * Enrich options with a precise `specLineTarget` when one can be resolved, leaving them untouched
-   * otherwise (the command builder then falls back to name-based --grep). `specPath` is supplied by
-   * the debug path, which resolves it after running bddgen so the line map is fresh.
+   * Enrich a line-bearing target with its precise generated-test line. A target without a source
+   * line intentionally keeps the command builder's name path (for example, a whole outline). A
+   * line-bearing target must never widen to that path when exact resolution fails.
    */
   private withSpecLineTarget(
     options: TestExecutionOptions,
@@ -674,13 +818,14 @@ export class TestExecutor {
     if ("target" in resolution) {
       return { ...options, specLineTarget: resolution.target };
     }
-    // Falling back to name-grep. For a plain scenario that grep is precise, but for an outline
-    // row it matches EVERY example row of the outline; surface why, so N tests fanning out
-    // across Playwright's workers isn't a silent mystery.
-    if (options.outlineName !== undefined && options.lineNumber !== undefined) {
-      this.logger.warn(
-        `Could not target example row ${options.filePath}:${options.lineNumber} by generated spec line: ${resolution.reason}. ` +
-          `Falling back to --grep on the outline title, which runs ALL example rows of "${options.outlineName}".`
+    if (
+      options.lineNumber !== undefined &&
+      options.lineNumber > 0 &&
+      (options.scenarioName !== undefined || options.outlineName !== undefined)
+    ) {
+      throw new Error(
+        `Could not resolve the exact test at ${options.filePath}:${options.lineNumber}: ${resolution.reason}. ` +
+          "No broader target was executed."
       );
     }
     return options;
@@ -765,11 +910,19 @@ export class TestExecutor {
     const start = Date.now();
     const workingDir = this.getWorkingDirectory(forFile);
 
-    this.runEventEmitter.fire({ kind: "running", passed: 0, failed: 0 });
 
     const preRunFailure = await this.runPreRunHook(workingDir, signal, progress);
     if (preRunFailure) {
-      if (signal?.aborted) { return this.cancelledResult(start); }
+      if (signal?.aborted) {
+        return this.cancelledResult(
+          start,
+          undefined,
+          [],
+          "",
+          false,
+          preRunFailure.terminationFailure
+        );
+      }
       this.contributeArtifactShard(
         artifactBatch,
         workingDir,
@@ -778,13 +931,13 @@ export class TestExecutor {
         1,
         []
       );
-      this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
-      return {
-        success: false,
-        output: "",
-        error: preRunFailure,
-        duration: Math.max(1, Date.now() - start),
-      };
+      return infrastructureResult(
+        start,
+        preRunFailure.failure,
+        "",
+        false,
+        preRunFailure.terminationFailure !== undefined
+      );
     }
 
     const baseCommand = buildCommand();
@@ -795,10 +948,11 @@ export class TestExecutor {
     const command = this.config.useConfigReporters ? baseCommand : withJsonReporter(baseCommand);
     // Created inside the try so a tmpdir failure becomes a failed result, not a rejection.
     let report: TemporaryReport | undefined;
+    let live: LiveRunHandle | undefined;
 
     try {
       report = this.createTemporaryReport();
-      const live = this.openLiveRun(report.livePath, progress, signal);
+      live = this.openLiveRun(report.livePath, progress, signal);
       let commandResult: CommandResult;
       try {
         commandResult = await this.shellRunner(
@@ -813,7 +967,23 @@ export class TestExecutor {
       }
       const result = this.withBinaryHint(commandResult, command);
       if (signal?.aborted) {
-        return this.cancelledResult(start);
+        const cancelled = this.cancelledResult(
+          start,
+          workingDir,
+          live?.recoverResults([]),
+          result.output,
+          result.outputStreamed,
+          result.terminationFailure
+        );
+        this.contributeArtifactShard(
+          artifactBatch,
+          workingDir,
+          command,
+          false,
+          result.returnCode,
+          cancelled.scenarioDetails ?? []
+        );
+        return cancelled;
       }
       this.publishBddgenDiagnostics(result, workingDir);
       return await this.buildOutputResult(
@@ -822,18 +992,23 @@ export class TestExecutor {
         workingDir,
         start,
         command,
-        artifactBatch
+        artifactBatch, live
       );
     } catch (error) {
-      if (signal?.aborted) { return this.cancelledResult(start); }
+      if (signal?.aborted) {
+        const cancelled = this.cancelledResult(start, workingDir, live?.recoverResults([]));
+        this.contributeArtifactShard(
+          artifactBatch,
+          workingDir,
+          command,
+          false,
+          1,
+          cancelled.scenarioDetails ?? []
+        );
+        return cancelled;
+      }
       this.contributeArtifactShard(artifactBatch, workingDir, command, false, 1, []);
-      this.runEventEmitter.fire({ kind: "failure", passed: 0, failed: 0 });
-      return {
-        success: false,
-        output: "",
-        error: errMsg(error),
-        duration: Math.max(1, Date.now() - start),
-      };
+      return infrastructureResult(start, errMsg(error));
     } finally {
       report?.dispose();
     }
@@ -857,18 +1032,36 @@ export class TestExecutor {
       reporterPath: path.join(__dirname, "specwright-live-reporter.js"),
       progress,
       signal,
-      onStatus: (status) => this.runEventEmitter.fire({ kind: "running", ...status }),
+      ...(progress.detailBudget ? { detailBudget: progress.detailBudget } : {}),
       onError: (error) => this.logger.warn(`Live test result stream failed: ${error.message}`),
     });
   }
 
-  // A cancelled run fires "cancelled", never success/failure; the killed process exits
-  // non-zero, and announcing a failure would misrepresent a deliberate stop. Without any event
-  // the status bar would sit on "running…" until the next run, so the distinct kind lets it
-  // settle. The caller marks the affected items skipped.
-  private cancelledResult(start: number): RunOutputResult {
-    this.runEventEmitter.fire({ kind: "cancelled", passed: 0, failed: 0 });
-    return { success: false, output: "", error: "Cancelled", duration: Math.max(1, Date.now() - start) };
+  // A cancelled run is a deliberate stop, never a failure: the killed process exits non-zero,
+  // but the result says Cancelled and the caller marks the affected items skipped.
+  private cancelledResult(
+    start: number,
+    workingDir?: string,
+    scenarioDetails: ScenarioResult[] = [],
+    output = "",
+    outputStreamed = false,
+    terminationFailure?: string
+  ): RunOutputResult {
+    return {
+      success: false,
+      output,
+      error: terminationFailure ?? "Cancelled",
+      duration: Math.max(1, Date.now() - start),
+      ...(workingDir !== undefined && scenarioDetails.length > 0 ? {
+        scenarioDetails,
+        scenarioResults: this.playwrightJsonParser.toStatusMap(scenarioDetails, workingDir),
+      } : {}),
+      ...(outputStreamed ? { outputStreamed: true } : {}),
+      ...(terminationFailure ? {
+        infrastructureFailure: terminationFailure,
+        admissionUnsafe: true,
+      } : {}),
+    };
   }
 
   /**
@@ -960,9 +1153,24 @@ export class TestExecutor {
     start: number,
     command: string,
     artifactBatch: number | undefined,
+    live: LiveRunHandle | undefined,
     artifactTarget?: ArtifactCaptureTarget
   ): Promise<RunOutputResult> {
-    const scenarioDetails = await this.readScenarioDetails(reportPath, result.output);
+    const report = await this.readScenarioReport(reportPath, result.output);
+    const scenarioDetails = live?.recoverResults(report.details) ?? report.details;
+    const hasAssertionFailure = scenarioDetails.some((detail) =>
+      (detail.outcome ?? detail.status) !== "passed" && detail.status !== "skipped"
+    );
+    const infrastructureFailure = result.terminationFailure ?? (!report.complete
+      ? report.reportReadFailure
+        ? report.failure
+        : report.failureKind === "unreadable" && result.error.trim() !== ""
+        ? result.error
+        : report.failure
+      : !result.success && !hasAssertionFailure
+        ? result.error || "The Playwright process failed after producing no assertion failure."
+        : undefined);
+    const success = result.success && infrastructureFailure === undefined;
     const scenarioResults = this.playwrightJsonParser.toStatusMap(scenarioDetails, workingDir);
     // Feed the badge store before the ephemeral report is gone: this is the extension-launched run
     // that leaves nothing on disk for the traceability panel to scan (§3.5).
@@ -973,25 +1181,21 @@ export class TestExecutor {
       artifactBatch,
       workingDir,
       command,
-      result.success,
+      success,
       result.returnCode,
       scenarioDetails,
       artifactTarget
     );
-    const { passed, failed } = countScenarioStatuses(scenarioDetails);
-    this.runEventEmitter.fire({
-      kind: result.success && failed === 0 ? "success" : "failure",
-      passed,
-      failed,
-    });
     return {
-      success: result.success,
+      success,
       output: result.output,
-      error: result.error,
+      error: infrastructureFailure ?? result.error,
       duration: Math.max(1, Date.now() - start),
       scenarioResults,
       scenarioDetails,
+      ...(infrastructureFailure ? { infrastructureFailure } : {}),
       ...(result.outputStreamed ? { outputStreamed: true } : {}),
+      ...(result.terminationFailure ? { admissionUnsafe: true } : {}),
     };
   }
 
@@ -1002,21 +1206,36 @@ export class TestExecutor {
    * steer; no file + no parseable stdout almost always means that entry is missing, so we point
    * at the fix directly rather than letting it surface as a generic "out of scope" warning.
    */
-  private async readScenarioDetails(reportPath: string, output: string): Promise<ScenarioResult[]> {
+  private async readScenarioReport(
+    reportPath: string,
+    output: string
+  ): Promise<PlaywrightReportEvidence & { readonly reportReadFailure?: true }> {
     let hasReport = false;
     try {
       await fs.promises.access(reportPath);
       hasReport = true;
     } catch { /* no report file; fall back to legacy JSON stdout */ }
-    if (hasReport) {return this.playwrightJsonParser.parseFromFileAsync(reportPath);}
-    const details = this.playwrightJsonParser.parse(output);
-    if (this.config.useConfigReporters && details.length === 0) {
+    let report: PlaywrightReportEvidence & { readonly reportReadFailure?: true };
+    try {
+      report = hasReport
+        ? await this.playwrightJsonParser.inspectFromFileAsync(reportPath)
+        : this.playwrightJsonParser.inspect(output);
+    } catch (error) {
+      report = {
+        details: [],
+        complete: false,
+        failure: errMsg(error),
+        failureKind: "unreadable",
+        reportReadFailure: true,
+      };
+    }
+    if (this.config.useConfigReporters && report.details.length === 0) {
       this.logger.warn(
         "useConfigReporters is on but no JSON report was produced. Add a bare ['json'] entry " +
           "(no outputFile) to the reporter array in your Playwright config so results can be mapped."
       );
     }
-    return details;
+    return report;
   }
 
   /** Test hooks: shrink the debug watchdog timings so tests don't wait seconds. */
@@ -1075,7 +1294,7 @@ export class TestExecutor {
     workingDir: string,
     signal?: AbortSignal,
     progress?: RunProgressObserver
-  ): Promise<string | undefined> {
+  ): Promise<{ failure: string; terminationFailure?: string | undefined } | undefined> {
     const command = this.config.preRunCommand.trim();
     if (command === "") { return undefined; }
 
@@ -1095,7 +1314,10 @@ export class TestExecutor {
     const message = hint ? `${base}\n\n${hint}` : base;
     this.logger.error(message, { detail });
     this.logger.showOutput();
-    return message;
+    return {
+      failure: result.terminationFailure ?? message,
+      ...(result.terminationFailure ? { terminationFailure: result.terminationFailure } : {}),
+    };
   }
 
   private commandBuilder() {
@@ -1103,32 +1325,6 @@ export class TestExecutor {
       throw new Error("TestExecutor used before context was injected. Call setContext() during activation.");
     }
     return this.context.commandBuilder;
-  }
-
-  private executeCommand(command: string, workingDir: string): void {
-    try {
-      if (!command || command.trim() === "") {throw new Error("Command cannot be empty");}
-      if (!this.terminal) {
-        this.terminal = this.window.createTerminal("Specwright");
-        // Without this, a user-closed terminal leaves a disposed handle behind and every later
-        // run sends text into it; nothing visible happens. Drop the handle so the next run
-        // creates a fresh terminal.
-        this.terminalCloseSubscription ??= this.window.onDidCloseTerminal((closed) => {
-          if (closed === this.terminal) { this.terminal = undefined; }
-        });
-      }
-      this.terminal.show();
-      // cmd.exe has no `clear`; PowerShell accepts either, so `cls` is the safe Windows choice.
-      this.terminal.sendText(process.platform === "win32" ? "cls" : "clear");
-      if (workingDir && workingDir !== process.cwd()) {
-        this.terminal.sendText(`cd ${shellQuote(workingDir)}`);
-      }
-      this.terminal.sendText(command);
-    } catch (error) {
-      const msg = errMsg(error);
-      this.logger.error(`Failed to execute command: ${msg}`, { command, workingDir });
-      this.window.showErrorMessage(`Failed to execute test command: ${msg}`);
-    }
   }
 
   private async spawnCommand(

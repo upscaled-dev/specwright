@@ -1,4 +1,5 @@
 import type { Scenario } from "../types";
+import type { ScenarioResult } from "../utils/playwright-json-parser";
 
 // A location-and-identity handle for a scenario/outline, independent of any remote metadata. Kept in
 // its own vscode-free module so the preflight classifier and scope resolution stay pure; importing
@@ -37,17 +38,41 @@ export function sameScenario(a: ScenarioRef, b: ScenarioRef): boolean {
   return a.name === b.name;
 }
 
-// The ScenarioRef the model would derive for a parsed scenario; outlines collapse to one ref keyed
-// on the outline declaration line/title, matching `buildTraceabilitySnapshot`.
+// The ScenarioRef for the executable unit a parsed scenario is. An example row keeps its own line:
+// that is the only line resolving to a generated test, and it stays stable across retries and
+// projects. An outline that is not a row names the whole outline, so it gets `outlineRef`.
 export function scenarioRefFromScenario(scenario: Scenario): ScenarioRef {
   if (scenario.isScenarioOutline) {
-    return {
-      filePath: scenario.filePath,
-      line: scenario.outlineLineNumber,
-      name: scenario.outlineName,
-      kind: "outline",
-      outlineName: scenario.outlineName,
-    };
+    return "examplesBlockLineNumber" in scenario
+      ? {
+          filePath: scenario.filePath,
+          line: scenario.lineNumber,
+          name: scenario.outlineName,
+          kind: "outline",
+          outlineName: scenario.outlineName,
+        }
+      : outlineRef(scenario.filePath, scenario.outlineName);
   }
   return { filePath: scenario.filePath, line: scenario.lineNumber, name: scenario.name, kind: "scenario" };
+}
+
+// "Run this whole outline": no line, because an outline declaration line has no generated test behind
+// it. The runner greps the outline title instead, which runs every example row.
+export function outlineRef(filePath: string, outlineName: string): ScenarioRef {
+  return { filePath, line: 0, name: outlineName, kind: "outline", outlineName };
+}
+
+// The ScenarioRef one reported row denotes. The live reporter and the JSON report both produce
+// ScenarioResults, so keying both on this ref gives every layer one scenario identity.
+export function scenarioRefFromResult(result: ScenarioResult): ScenarioRef {
+  const line = result.lineNumber ?? 0;
+  return result.outlineName === undefined
+    ? { filePath: result.featurePath, line, name: result.scenarioName, kind: "scenario" }
+    : {
+        filePath: result.featurePath,
+        line,
+        name: result.scenarioName,
+        kind: "outline",
+        outlineName: result.outlineName,
+      };
 }

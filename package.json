@@ -571,6 +571,30 @@
         "icon": "$(play-circle)"
       },
       {
+        "command": "playwrightBddRunner.traceability.runAndPublishAllMapped",
+        "title": "Run All Mapped Scenarios and Publish",
+        "category": "Specwright",
+        "icon": "$(play-circle)"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.runAndPublishFeature",
+        "title": "Run and Publish",
+        "category": "Specwright",
+        "icon": "$(play-circle)"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.runAndPublishFolder",
+        "title": "Run and Publish",
+        "category": "Specwright",
+        "icon": "$(play-circle)"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.runAndPublishByTagExpression",
+        "title": "Run and Publish by Tag Expression",
+        "category": "Specwright",
+        "icon": "$(play-circle)"
+      },
+      {
         "command": "playwrightBddRunner.traceability.publishLastRun",
         "title": "Publish Last Run…",
         "category": "Specwright",
@@ -643,12 +667,6 @@
         "icon": "$(add)"
       },
       {
-        "command": "playwrightBddRunner.traceability.pushScenarioText",
-        "title": "Push Scenario Text…",
-        "category": "Specwright",
-        "icon": "$(arrow-circle-up)"
-      },
-      {
         "command": "playwrightBddRunner.traceability.createTestSet",
         "title": "Create Test Set…",
         "category": "Specwright",
@@ -708,22 +726,6 @@
     "menus": {
       "commandPalette": [
         {
-          "command": "playwrightBddRunner.discoverTests",
-          "when": "resourceExtname == .feature"
-        },
-        {
-          "command": "playwrightBddRunner.refreshTests",
-          "when": "resourceExtname == .feature"
-        },
-        {
-          "command": "playwrightBddRunner.runAllTests",
-          "when": "resourceExtname == .feature"
-        },
-        {
-          "command": "playwrightBddRunner.runAllTestsParallel",
-          "when": "resourceExtname == .feature"
-        },
-        {
           "command": "playwrightBddRunner.generateStepDefinitions",
           "when": "resourceExtname == .feature"
         },
@@ -769,6 +771,18 @@
         },
         {
           "command": "playwrightBddRunner.traceability.runAndPublish",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.runAndPublishFeature",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.runAndPublishFolder",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.runAndPublishByTagExpression",
           "when": "config.playwrightBddRunner.traceability.enablePanel"
         },
         {
@@ -788,7 +802,7 @@
           "when": "false"
         },
         {
-          "command": "playwrightBddRunner.traceability.pushScenarioText",
+          "command": "playwrightBddRunner.traceability.runAndPublishAllMapped",
           "when": "false"
         },
         {
@@ -827,7 +841,7 @@
           "group": "navigation@0"
         },
         {
-          "command": "playwrightBddRunner.traceability.runAndPublish",
+          "command": "playwrightBddRunner.traceability.runAndPublishAllMapped",
           "when": "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected",
           "group": "navigation@2"
         },
@@ -889,6 +903,11 @@
           "group": "traceability@1"
         },
         {
+          "command": "playwrightBddRunner.traceability.runAndPublish",
+          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityFile",
+          "group": "traceability@1"
+        },
+        {
           "command": "playwrightBddRunner.traceability.openIssue",
           "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityOrphan",
           "group": "inline@1"
@@ -927,6 +946,16 @@
           "submenu": "playwrightBddRunner.contextSubmenu",
           "when": "resourceExtname == .feature && resourceScheme == file",
           "group": "playwrightBddRunner@1"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.runAndPublishFeature",
+          "when": "resourceExtname == .feature && resourceScheme == file && config.playwrightBddRunner.traceability.enablePanel",
+          "group": "playwrightBddRunner@2"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.runAndPublishFolder",
+          "when": "explorerResourceIsFolder && resourceScheme == file && config.playwrightBddRunner.traceability.enablePanel",
+          "group": "playwrightBddRunner@2"
         }
       ],
       "testing/item/context": [

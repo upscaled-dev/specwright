@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { opensScenario, scenarioGherkinSlice } from "../../parsers/gherkin-slice";
+import { opensScenario, scenarioGherkinSlice, scenarioScope } from "../../parsers/gherkin-slice";
 
 describe("scenarioGherkinSlice", () => {
   const lines = (feature: string): string[] => feature.split("\n");
@@ -277,6 +277,63 @@ describe("scenarioGherkinSlice", () => {
     expect(scenarioGherkinSlice(lines(feature), 3)).toBe(
       "Scenario Outline: Add\n  Given <a>\n  Examples:\n    | a |\n    | 1 |"
     );
+  });
+});
+
+describe("scenarioScope", () => {
+  const lines = (feature: string): string[] => feature.split("\n");
+
+  // The blank line above a tag block belongs to the scenario the tags introduce, so a cursor resting
+  // in the gap resolves to the scenario below it rather than the one that just ended.
+  it("starts at the leading tag lines and ends on the last line of the block", () => {
+    const feature = [
+      "Feature: F",   // 0
+      "",             // 1
+      "@smoke",       // 2
+      "@REQ_CALC-9",  // 3
+      "Scenario: Login", // 4
+      "  Given a user",  // 5
+      "",                // 6
+      "Scenario: Other", // 7
+    ].join("\n");
+
+    expect(scenarioScope(lines(feature), 5)).toEqual({ start: 1, end: 5 });
+  });
+
+  it("collapses to the keyword line for a scenario with no body", () => {
+    const feature = ["Feature: F", "Scenario: Empty", "Scenario: Next", "  Given z"].join("\n");
+
+    expect(scenarioScope(lines(feature), 2)).toEqual({ start: 1, end: 1 });
+  });
+
+  it("runs the last scenario to the end of the file, trailing blank lines excluded", () => {
+    const feature = ["Feature: F", "Scenario: Last", "  Given a step", "", ""].join("\n");
+
+    expect(scenarioScope(lines(feature), 2)).toEqual({ start: 1, end: 2 });
+  });
+
+  // An unterminated doc string makes the fence-aware scan run to end of file. The scope still has to
+  // stop before the next scenario, or two scopes would claim the same lines and a cursor in the second
+  // would resolve to the first.
+  it("clamps at the next block when a doc string never closes", () => {
+    const feature = [
+      "Feature: F",        // 0
+      "Scenario: Broken",  // 1
+      "  Then the text is:", // 2
+      "    \"\"\"",        // 3
+      "    unterminated",  // 4
+      "",                  // 5
+      "@wip",              // 6
+      "Scenario: Next",    // 7
+      "  Given z",         // 8
+    ].join("\n");
+
+    const broken = scenarioScope(lines(feature), 2);
+    const next = scenarioScope(lines(feature), 8);
+
+    expect(broken.end).toBeLessThan(next.start);
+    expect(broken).toEqual({ start: 1, end: 4 });
+    expect(next).toEqual({ start: 5, end: 8 });
   });
 });
 

@@ -116,7 +116,7 @@ function boardPanesHtml(providerLabel: string): string {
   const mapped = mappingSection({
     id: "mapped",
     title: `Mapped ${providerLabel} tests`,
-    verbs: "",
+    verbs: `<button id="run-selected" class="verb" type="button" disabled>Run and publish selected</button>`,
     placeholder: "Filter by key or summary",
     searchLabel: `Filter mapped ${providerLabel} tests`,
   });
@@ -176,6 +176,7 @@ const BOARD_SCRIPT = `
   const createTestSet = document.getElementById('create-test-set');
   const createTestPlan = document.getElementById('create-test-plan');
   const createExecution = document.getElementById('create-execution');
+  const runSelected = document.getElementById('run-selected');
   const availableCards = document.getElementById('available-cards');
   const mappedCards = document.getElementById('mapped-cards');
   const scenarioCount = document.getElementById('scenario-count');
@@ -745,6 +746,7 @@ const BOARD_SCRIPT = `
   createTestSet.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestSet' }); });
   createTestPlan.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestPlan' }); });
   createExecution.addEventListener('click', function () { window.__spec.post('board', { type: 'createTestExecution' }); });
+  runSelected.addEventListener('click', function () { window.__spec.post('board', { type: 'runSelected' }); });
 
   window.__spec.register('board', function (msg) {
     if (msg.type === 'render') {
@@ -754,6 +756,7 @@ const BOARD_SCRIPT = `
       renderVerb(createTestSet, msg.testSetVerb || {}, 'Create Test Set');
       renderVerb(createTestPlan, msg.testPlanVerb || {}, 'Create Test Plan');
       renderVerb(createExecution, msg.executionVerb || {}, 'Create Execution');
+      renderVerb(runSelected, msg.runSelectedVerb || {}, 'Run and publish selected');
       renderMapping(msg);
       renderMatrix(msg.matrix || []);
       renderExecutions(msg.executions || []);

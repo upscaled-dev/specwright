@@ -418,6 +418,71 @@ describe("FeatureParser.provideScenarioCodeLenses: Gherkin keyword synonyms", ()
   });
 });
 
+describe("FeatureParser.provideScenarioCodeLenses: doc strings", () => {
+  it("offers no lens for a Scenario line inside a doc string, which is text the parser never sees", () => {
+    const parser = FeatureParser.create();
+    const content = lines(
+      "Feature: Fenced",
+      "",
+      "  Scenario: Real",
+      "    Then the text is:",
+      "      \"\"\"",
+      "      Scenario: not a scenario",
+      "      \"\"\"",
+      ""
+    );
+
+    const runLenses = parser
+      .provideScenarioCodeLenses(content, "fenced.feature")
+      .filter((lens) => lens.command?.command === "playwrightBddRunner.runScenario");
+
+    expect(runLenses.map((lens) => lens.command?.arguments?.[2])).toEqual(["Real"]);
+  });
+});
+
+// The lens is anchored on the scenario's keyword line and its range spans the scenario's block, so
+// both ends of that range are user-visible geometry.
+describe("FeatureParser scenario CodeLens ranges", () => {
+  function rangeOf(content: string, name: string): { start: number; end: number } {
+    const lens = FeatureParser.create()
+      .provideScenarioCodeLenses(content, "ranges.feature")
+      .find((l) => l.command?.command === "playwrightBddRunner.runScenario"
+        && l.command.arguments?.[2] === name);
+    if (!lens) {throw new Error(`no run lens for ${name}`);}
+    return { start: lens.range.start.line, end: lens.range.end.line };
+  }
+
+  it("ends a scenario before the next one's tag lines", () => {
+    const content = lines(
+      "Feature: Ranges", // 0
+      "",                // 1
+      "Scenario: First", // 2
+      "  Given a step",  // 3
+      "",                // 4
+      "@wip",            // 5
+      "Scenario: Second",// 6
+      "  Given another"  // 7
+    );
+
+    expect(rangeOf(content, "First")).toEqual({ start: 2, end: 3 });
+  });
+
+  it("ends a scenario before a stray comment sitting between scenarios", () => {
+    const content = lines(
+      "Feature: Ranges",  // 0
+      "Scenario: First",  // 1
+      "  Given a step",   // 2
+      "",                 // 3
+      "# a stray comment",// 4
+      "",                 // 5
+      "Scenario: Second", // 6
+      "  Given another"   // 7
+    );
+
+    expect(rangeOf(content, "First")).toEqual({ start: 1, end: 2 });
+  });
+});
+
 describe("FeatureParser.parseFeatureContent: hyphenated tag extraction", () => {
   it("preserves hyphenated tags like @rule-scoped in both scenario tags and CodeLens tag list", () => {
     const parser = FeatureParser.create();

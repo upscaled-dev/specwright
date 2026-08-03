@@ -6,6 +6,7 @@ import { CommandManager } from "../../commands/command-manager";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { JiraAccessError, searchJiraProjects } from "../../xray/jira-project-search";
 import { captureHandlers, makeContext } from "./helpers/command-manager-harness";
+import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 
 vi.mock("../../xray/jira-project-search", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../xray/jira-project-search")>();
@@ -50,6 +51,51 @@ describe("traceability grouping toggle contributions", () => {
     expect(palette.find((e) => e.command === CMD)?.when).toBe(
       "config.playwrightBddRunner.traceability.enablePanel"
     );
+  });
+});
+
+describe("toggleGrouping command handler", () => {
+  const CMD = "playwrightBddRunner.traceability.toggleGrouping";
+
+  afterEach(() => vi.restoreAllMocks());
+
+  function toggleWith(subsystem: TraceabilitySubsystem | undefined) {
+    let toggled = 0;
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const manager = CommandManager.create(makeContext());
+    if (subsystem) {
+      manager.setTraceabilitySubsystem({
+        ...subsystem,
+        toggleGrouping: () => {toggled += 1;},
+      } as unknown as TraceabilitySubsystem);
+    }
+    const commands = (manager as unknown as {
+      traceabilityCommands: { toggleGrouping: () => void };
+    }).traceabilityCommands;
+    commands.toggleGrouping();
+    return { info, toggled: () => toggled };
+  }
+
+  it("is registered under the traceability commands", () => {
+    expect(captureHandlers(makeContext()).has(CMD)).toBe(true);
+  });
+
+  it("asks for the panel when no subsystem exists", () => {
+    const { info, toggled } = toggleWith(undefined);
+    expect(toggled()).toBe(0);
+    expect(info).toHaveBeenCalledWith("Enable the Traceability panel to change how it groups.");
+  });
+
+  it("asks for the panel when the subsystem is wired but its panel is off", () => {
+    const { info, toggled } = toggleWith({ traceabilityPanelActive: false } as TraceabilitySubsystem);
+    expect(toggled()).toBe(0);
+    expect(info).toHaveBeenCalledWith("Enable the Traceability panel to change how it groups.");
+  });
+
+  it("toggles when the panel is active", () => {
+    const { info, toggled } = toggleWith({ traceabilityPanelActive: true } as TraceabilitySubsystem);
+    expect(toggled()).toBe(1);
+    expect(info).not.toHaveBeenCalled();
   });
 });
 

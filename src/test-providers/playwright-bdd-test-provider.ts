@@ -1,44 +1,41 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
-import * as fs from "node:fs";
-import { FeatureParser, isOutlineExampleRow } from "../parsers/feature-parser";
+import { isOutlineExampleRow } from "../parsers/feature-parser";
 import { groupScenariosByOutline } from "./group-scenarios";
 import { OUTLINE_ID_SEPARATOR } from "./constants";
-import { TestExecutor, RunOutputResult, ShellRunner } from "../core/test-executor";
+import type { RunOutputResult, ShellRunner } from "../core/test-executor";
 import {
   Scenario,
   TestOrganizationStrategy,
   TestGroup,
   PlaywrightBddExtensionContext,
-  TestExecutionOptions,
 } from "../types";
-import { Logger } from "../utils/logger";
 import { errMsg } from "../utils/text";
-import { ExtensionConfig } from "../core/extension-config";
-import { TestDiscoveryManager } from "../core/test-discovery-manager";
-import { TestOrganizationManager } from "../core/test-organization";
+import type { TestDiscoveryManager } from "../core/test-discovery-manager";
+import type { TestOrganizationManager } from "../core/test-organization";
 import {
-  PlaywrightJsonParser,
   ScenarioStatus,
   ScenarioResult,
   normalizePathKey,
 } from "../utils/playwright-json-parser";
-import { CommandBuilder } from "../core/command-builder";
-import { XrayAdapter } from "../xray/xray-adapter";
-import { BatchSelection } from "../traceability/contracts";
-import { ScenarioRef, scenarioRefFromScenario } from "../traceability/traceability-model";
+import type { CommandBuilder } from "../core/command-builder";
 import { isUnderExcludedDir, workspaceExcludeFragments } from "../utils/discovery-excludes";
 import {
   ensureWorkerCount,
   resolveWorkerCountDetailed,
   WorkerCountResolution,
 } from "../commands/prompt-worker-count";
-import type { RunProgressObserver, RunProgressSession } from "../core/run-progress";
+import type { RunProgressSession } from "../core/run-progress";
 import {
   beginExternalTestRun,
   LiveTestRunProgress,
 } from "./live-test-run-progress";
-import { TemporaryReport } from "../core/temporary-report";
+import type { RunIntent } from "../core/run-contracts";
+import {
+  requestedTestItems,
+  testExplorerRunIntent,
+} from "./test-explorer-run-plan";
+import { runGatewayTestRequest } from "./gateway-test-run";
 
 /**
  * Pull bddgen's "Missing step definitions" block (count + suggested snippets) out of captured
@@ -99,9 +96,7 @@ export class PlaywrightBddTestProvider {
   private testStatusCache: Map<string, RunStatus> = new Map();
   private readonly scenarioByTestId = new Map<string, Scenario>();
   /** Feature file path → its `Feature:` title, used to grep runs precisely in any org strategy. */
-  private readonly featureTitleByPath = new Map<string, string>();
   private readonly runProfiles: vscode.TestRunProfile[] = [];
-  private isTestRunning = false;
   private fileWatcher: vscode.FileSystemWatcher | undefined;
   private watchedPattern: string | undefined;
   private configChangeSubscription: vscode.Disposable | undefined;
@@ -109,7 +104,7 @@ export class PlaywrightBddTestProvider {
 
   public static create(
     testController: vscode.TestController,
-    context?: PlaywrightBddExtensionContext,
+    context: PlaywrightBddExtensionContext,
     workspaceState?: vscode.Memento
   ): PlaywrightBddTestProvider {
     return new PlaywrightBddTestProvider(testController, context, workspaceState);
@@ -117,12 +112,12 @@ export class PlaywrightBddTestProvider {
 
   constructor(
     testController: vscode.TestController,
-    context?: PlaywrightBddExtensionContext,
+    context: PlaywrightBddExtensionContext,
     workspaceState?: vscode.Memento
   ) {
     this.testController = testController;
     this.discoveredTests = new Map();
-    this.context = context ?? this.createDefaultContext();
+    this.context = context;
     this.workspaceState = workspaceState;
     // Restore the persisted organization strategy before the first discovery so the tree is
     // built with the user's last choice instead of the default.
@@ -131,22 +126,6 @@ export class PlaywrightBddTestProvider {
 
     this.discoverTests().catch(() => { /* surfaced via logger */ });
     this.setupFileWatcher();
-  }
-
-  private createDefaultContext(): PlaywrightBddExtensionContext {
-    const logger = Logger.create();
-    const config = ExtensionConfig.create();
-    return {
-      logger,
-      config,
-      testExecutor: TestExecutor.create(),
-      discoveryManager: TestDiscoveryManager.create(logger, config),
-      organizationManager: TestOrganizationManager.create(logger),
-      featureParser: FeatureParser.create(logger),
-      playwrightJsonParser: PlaywrightJsonParser.create(logger),
-      commandBuilder: CommandBuilder.create(config, logger),
-      traceabilityAdapter: new XrayAdapter(config),
-    };
   }
 
   // --- VS Code wiring ---------------------------------------------------------
@@ -195,12 +174,7 @@ export class PlaywrightBddTestProvider {
             .then(undefined, () => { /* ignore */ });
         }
 
-        this.context.testExecutor.setForceParallel(true, resolution.workers);
-        try {
-          await this.runTests(request, token);
-        } finally {
-          this.context.testExecutor.setForceParallel(false);
-        }
+        await this.runTests(request, token, resolution.workers);
       },
       false
     );
@@ -272,7 +246,6 @@ export class PlaywrightBddTestProvider {
   /** Drop every cached entry keyed to one feature file: its scenario ids, discovered item, title. */
   private pruneFileState(fsPath: string): void {
     this.discoveredTests.delete(fsPath);
-    this.featureTitleByPath.delete(fsPath);
     // scenarioByTestId ids for this file all start with `${fsPath}:`; both `${fsPath}:${line}`
     // and `${fsPath}:outline:...` (OUTLINE_ID_SEPARATOR) shapes.
     const prefix = `${fsPath}:`;
@@ -305,7 +278,6 @@ export class PlaywrightBddTestProvider {
       this.testController.items.replace([]);
       this.discoveredTests.clear();
       this.scenarioByTestId.clear();
-      this.featureTitleByPath.clear();
 
       const allScenarios: Array<{ scenario: Scenario; file: vscode.Uri }> = [];
       for (const filePath of filePaths) {
@@ -317,7 +289,6 @@ export class PlaywrightBddTestProvider {
           if (!parsed) {continue;}
           // Remember each file's Feature title so runs (in any organization strategy) can grep
           // by the exact title rather than the filename.
-          this.featureTitleByPath.set(file.fsPath, parsed.feature);
           for (const scenario of parsed.scenarios) {
             scenario.filePath = file.fsPath;
             allScenarios.push({ scenario, file });
@@ -380,7 +351,6 @@ export class PlaywrightBddTestProvider {
         return;
       }
 
-      this.featureTitleByPath.set(file.fsPath, parsed.feature);
       for (const scenario of parsed.scenarios) {
         scenario.filePath = file.fsPath;
       }
@@ -486,93 +456,64 @@ export class PlaywrightBddTestProvider {
 
   // --- Execution --------------------------------------------------------------
 
-  // The run scope both profiles share: one TestRun, one artifact batch, one AbortController wired
-  // to the Test Explorer stop button, and the finally that seals and ends exactly once.
-  private async executeRequest(
+  private async runTests(
     request: vscode.TestRunRequest,
     token: vscode.CancellationToken,
-    executeItem: (
-      test: vscode.TestItem,
-      run: vscode.TestRun,
-      signal: AbortSignal,
-      batch: number | undefined
-    ) => Promise<void>
+    maxWorkers?: number
   ): Promise<void> {
-    if (this.isTestRunning) {
-      vscode.window.showWarningMessage("A test run is already in progress.");
-      return;
-    }
-    this.isTestRunning = true;
-    const run = this.testController.createTestRun(request);
-    // Open the artifact batch and thread its handle through every executor call below, so a
-    // command-driven run firing at the shared seam mid-batch can't inject a foreign shard. The
-    // finally seals exactly one immutable artifact for the whole Test Explorer run.
-    const batch = this.context.runArtifactStore?.beginBatch(this.describeSelection(request));
-    // Cancelling the Test Explorer aborts the spawned Playwright process (see spawnCommand) on the
-    // run path and stops the live session (see debugScenario) on the debug path. Each item callback
-    // also reads the signal to skip, rather than fail, work whose process was killed mid-run.
-    const abort = new AbortController();
-    const cancelSub = token.onCancellationRequested(() => abort.abort());
-
-    try {
-      // Once the stop button is hit between items, the rest never run; mark them (and their
-      // descendants) skipped instead of leaving them queued.
-      let cancelled = false;
-      for (const test of this.requestedItems(request)) {
-        if (cancelled || token.isCancellationRequested) {
-          cancelled = true;
-          this.markSubtreeSkipped(test, run);
-          continue;
-        }
-        await executeItem(test, run, abort.signal, batch);
-      }
-    } catch (error) {
-      const msg = errMsg(error);
-      this.context.logger.error(`Error running tests: ${msg}`);
-    } finally {
-      cancelSub.dispose();
-      if (batch !== undefined) {
-        this.context.runArtifactStore?.sealBatch(batch, token.isCancellationRequested);
-      }
-      run.end();
-      this.isTestRunning = false;
-    }
+    await this.executeGatewayRequest(request, token, "run", maxWorkers);
   }
 
-  private async runTests(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
-    await this.executeRequest(request, token, async (test, run, signal, batch) => {
-      run.started(test);
-      await this.runSingleTopLevelItem(test, run, signal, batch);
+  private async executeGatewayRequest(
+    request: vscode.TestRunRequest,
+    token: vscode.CancellationToken,
+    mode: RunIntent["mode"],
+    maxWorkers?: number
+  ): Promise<void> {
+    const roots = requestedTestItems(request, this.testController);
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    const intent = testExplorerRunIntent({
+      request,
+      roots,
+      mode,
+      scenarioFor: (id) => this.scenarioByTestId.get(id),
+      scenariosInFile: (filePath) => this.scenariosInFile(filePath),
+      isFeatureFile: (id) => this.isFeatureFileTest(id),
+      ...(maxWorkers !== undefined ? { maxWorkers } : {}),
     });
-  }
-
-  // The batch-scope descriptor for a Test Explorer run: the deduplicated scenario refs the request
-  // expands to (a feature/group node walks down to its scenarios), so the sealed artifact records
-  // what actually ran. testKey threading is independent of this; it resolves from the snapshot at
-  // capture time, so a coarse-but-honest descriptor here is enough.
-  private describeSelection(request: vscode.TestRunRequest): BatchSelection {
-    const refs: ScenarioRef[] = [];
-    const seen = new Set<string>();
-    const collect = (item: vscode.TestItem): void => {
-      const scenario = this.scenarioByTestId.get(item.id);
-      if (scenario) {
-        const ref = scenarioRefFromScenario(scenario);
-        const key = `${ref.filePath}|${ref.line}|${ref.name}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          refs.push(ref);
+    // Captured output is run-wide, so only a run with one target can read it as that target's own.
+    const singleTarget = intent.targets.length === 1;
+    await runGatewayTestRequest({
+      controller: this.testController,
+      request,
+      token,
+      gateway: this.context.executionGateway,
+      intent,
+      roots,
+      parser: this.context.playwrightJsonParser,
+      workingDir: workspaceRoot,
+      logger: this.context.logger,
+      createLive: (run) => this.createLiveProgress(run, roots),
+      start: (root, run) => {
+        run.started(root);
+        this.markDescendantsStarted(root, run);
+      },
+      summarize: (run, result, targets) => {
+        // One summary per run. Scoping it to a feature only makes sense when the run had exactly
+        // one root to scope it to.
+        const only = targets.length === 1 ? targets[0] : undefined;
+        this.appendRunOutput(run, result, only, only?.uri?.fsPath);
+      },
+      apply: (root, run, live, result) => {
+        if (root.children.size > 0) {
+          this.applyResultsToChildren(root, run, result, singleTarget, root.uri?.fsPath, live);
+        } else if (root.uri) {
+          this.applyStatusToItem(root, run, result, singleTarget, root.uri.fsPath, live);
         }
-      }
-      item.children.forEach(collect);
-    };
-    for (const item of this.requestedItems(request)) {
-      collect(item);
-    }
-    const single = refs[0];
-    if (refs.length === 1 && single) {
-      return { kind: "scenario", scenario: single };
-    }
-    return { kind: "multi-select", scenarios: refs };
+      },
+      cancel: (root, run, live) =>
+        this.markSubtreeSkipped(root, run, (item) => live.hasResult(item)),
+    });
   }
 
   private markSubtreeSkipped(
@@ -611,223 +552,24 @@ export class PlaywrightBddTestProvider {
     });
   }
 
-  private settleCancelledRun(
-    signal: AbortSignal,
-    test: vscode.TestItem,
-    run: vscode.TestRun,
-    live: LiveTestRunProgress
-  ): boolean {
-    if (!signal.aborted) {return false;}
-    this.markSubtreeSkipped(test, run, (item) => live.hasResult(item));
-    return true;
-  }
-
-  private liveProgressObserver(
-    live: LiveTestRunProgress,
-    useReporterCounts = true
-  ): RunProgressObserver {
-    return {
-      onTestEnd: (result, completed, total) => live.apply(
-        result,
-        useReporterCounts ? completed : undefined,
-        useReporterCounts ? total : undefined
-      ),
-      onOutput: (stream, output) => live.appendOutput(stream, output),
-    };
-  }
-
   /**
-   * VS Code passes `include === undefined` to mean "run everything" and `exclude` to carve items
-   * out. Expand the request into the maximal non-excluded subtrees: an excluded descendant splits
-   * its ancestor into individually-run children instead of running the whole ancestor.
-   */
-  private requestedItems(request: vscode.TestRunRequest): vscode.TestItem[] {
-    const roots: vscode.TestItem[] = [];
-    if (request.include) {
-      roots.push(...request.include);
-    } else {
-      this.testController.items.forEach((item) => roots.push(item));
-    }
-    const excluded = new Set<vscode.TestItem>(request.exclude ?? []);
-    if (excluded.size === 0) {return roots;}
-
-    const expanded: vscode.TestItem[] = [];
-    const visit = (item: vscode.TestItem): void => {
-      if (excluded.has(item)) {return;}
-      if (this.hasExcludedDescendant(item, excluded)) {
-        item.children.forEach(visit);
-      } else {
-        expanded.push(item);
-      }
-    };
-    for (const root of roots) {visit(root);}
-    return expanded;
-  }
-
-  private hasExcludedDescendant(item: vscode.TestItem, excluded: Set<vscode.TestItem>): boolean {
-    let found = false;
-    item.children.forEach((child) => {
-      if (!found && (excluded.has(child) || this.hasExcludedDescendant(child, excluded))) {
-        found = true;
-      }
-    });
-    return found;
-  }
-
-  private async runSingleTopLevelItem(
-    test: vscode.TestItem,
-    run: vscode.TestRun,
-    signal: AbortSignal,
-    batch: number | undefined
-  ): Promise<void> {
-    try {
-      if (test.uri) {
-        const live = this.createLiveProgress(run, [test]);
-        const progress = this.liveProgressObserver(live);
-        const isFeatureFile = this.isFeatureFileTest(test.id);
-        const isOutline = test.id.includes(OUTLINE_ID_SEPARATOR);
-
-        if (isFeatureFile) {
-          // A feature/outline run executes every descendant with one command; mark them all
-          // started so the Explorer shows what is actually running, not just the clicked parent
-          // (which read as "one scenario running" while N results later appeared).
-          this.markDescendantsStarted(test, run);
-          const result = await this.context.testExecutor.runFeatureFileWithOutput({
-            filePath: test.uri.fsPath,
-            featureName: this.featureTitleByPath.get(test.uri.fsPath) ?? test.label,
-            signal,
-            artifactBatch: batch,
-            progress,
-          });
-          live.finishOutput();
-          if (this.settleCancelledRun(signal, test, run, live)) {return;}
-          this.appendRunOutput(run, result, test, test.uri.fsPath);
-          this.applyResultsToChildren(test, run, result, test.uri.fsPath, live);
-        } else if (isOutline) {
-          this.markDescendantsStarted(test, run);
-          const scenario = this.scenarioByTestId.get(test.id);
-          // On a lookup miss the name is unknown; omit it rather than pass "", which downstream
-          // turned into a --grep that matched the entire suite.
-          const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
-          const options: TestExecutionOptions = {
-            filePath: test.uri.fsPath,
-            signal,
-            artifactBatch: batch,
-            progress,
-            ...(outlineName ? { outlineName } : {}),
-          };
-          const result = await this.context.testExecutor.runScenarioWithOutput(options);
-          live.finishOutput();
-          if (this.settleCancelledRun(signal, test, run, live)) {return;}
-          this.appendRunOutput(run, result, test, test.uri.fsPath);
-          this.applyResultsToChildren(test, run, result, test.uri.fsPath, live);
-        } else {
-          const lineNumber = this.lineFromId(test.id);
-          const scenario = this.scenarioByTestId.get(test.id);
-          const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
-          const options: TestExecutionOptions = {
-            filePath: test.uri.fsPath,
-            signal,
-            artifactBatch: batch,
-            progress,
-            ...(lineNumber ? { lineNumber } : {}),
-            scenarioName: test.label,
-            ...(outlineName ? { outlineName } : {}),
-          };
-          const result = await this.context.testExecutor.runScenarioWithOutput(options);
-          live.finishOutput();
-          if (this.settleCancelledRun(signal, test, run, live)) {return;}
-          this.appendRunOutput(run, result, test, test.uri.fsPath);
-          this.applyStatusToItem(test, run, result, test.uri.fsPath, live);
-        }
-      } else if (test.id.startsWith("group:") || test.id.startsWith("tag:")) {
-        await this.runGroupOrTag(test, run, signal, batch);
-      }
-    } catch (error) {
-      const msg = errMsg(error);
-      this.context.logger.error(`Test execution failed for ${test.label}: ${msg}`);
-      run.failed(test, new vscode.TestMessage(`Test execution failed: ${msg}`));
-      this.testStatusCache.set(test.id, "failed");
-    }
-  }
-
-  private async runGroupOrTag(
-    test: vscode.TestItem,
-    run: vscode.TestRun,
-    signal: AbortSignal,
-    batch: number | undefined
-  ): Promise<void> {
-    const live = this.createLiveProgress(run, [test]);
-    if (test.id.startsWith("tag:")) {
-      const progress = this.liveProgressObserver(live);
-      const tag = test.id.slice("tag:".length) || test.label;
-      const result = await this.context.testExecutor.runAllTestsWithTagsOutput(tag, signal, batch, progress);
-      live.finishOutput();
-      if (this.settleCancelledRun(signal, test, run, live)) {return;}
-      this.appendRunOutput(run, result, test);
-      this.applyResultsToChildren(test, run, result, undefined, live);
-      return;
-    }
-
-    // File/scenario-type/flat group: run each unique feature file and aggregate.
-    const featureFiles = this.collectFeatureFiles(test);
-    const aggregated: Record<string, ScenarioStatus> = {};
-    const aggregatedDetails: ScenarioResult[] = [];
-    const progress = this.liveProgressObserver(live, false);
-    let success = true;
-    for (const filePath of featureFiles) {
-      const featureName = this.featureTitleByPath.get(filePath);
-      const result = await this.context.testExecutor.runFeatureFileWithOutput({
-        filePath,
-        signal,
-        artifactBatch: batch,
-        progress,
-        ...(featureName ? { featureName } : {}),
-      });
-      live.finishOutput();
-      // Killed mid-group: don't aggregate the killed file's red result, and skip the whole subtree
-      // rather than leaving the earlier files' statuses half-applied.
-      if (this.settleCancelledRun(signal, test, run, live)) {return;}
-      this.appendRunOutput(run, result, test, filePath);
-      if (!result.success) {success = false;}
-      if (result.scenarioResults) {Object.assign(aggregated, result.scenarioResults);}
-      if (result.scenarioDetails) {aggregatedDetails.push(...result.scenarioDetails);}
-    }
-    this.applyResultsToChildren(test, run, {
-      success,
-      output: "",
-      duration: 1,
-      scenarioResults: aggregated,
-      scenarioDetails: aggregatedDetails,
-    }, undefined, live);
-  }
-
-  private collectFeatureFiles(test: vscode.TestItem): Set<string> {
-    const files = new Set<string>();
-    const walk = (item: vscode.TestItem): void => {
-      if (item.uri) {files.add(item.uri.fsPath);}
-      item.children.forEach((child) => walk(child));
-    };
-    walk(test);
-    return files;
-  }
-
-  /**
-   * Write a legible run summary into the Test Explorer's "Test Results" output panel. When the
-   * JSON report parsed into per-scenario results we render those (status icons, durations, error
-   * text); otherwise we fall back to the raw stdout/stderr. VS Code's terminal renderer requires
+   * Write a legible run summary into the Test Explorer's "Test Results" output panel: the parsed
+   * per-scenario results (status icons, durations, error text) plus what the transcript alone would
+   * not tell the user. The raw stdout/stderr is not repeated here; the run's transcript reaches this
+   * same panel once already (see `projectCompletionOutput`). VS Code's terminal renderer requires
    * CRLF line endings.
    */
   private appendRunOutput(
     run: vscode.TestRun,
     result: RunOutputResult,
-    test: vscode.TestItem,
+    test?: vscode.TestItem,
     targetFeaturePath?: string
   ): void {
     if (typeof run.appendOutput !== "function") {return;}
 
+    const warning = test ? this.outOfScopeWarning(result, test, targetFeaturePath) : "";
     const parts = [
-      this.outOfScopeWarning(result, test, targetFeaturePath) + this.formatRunOutput(result, targetFeaturePath),
+      warning + this.formatRunOutput(result, targetFeaturePath),
       this.missingStepsSection(result),
     ].filter((s) => s.trim() !== "");
     const text = parts.join("\n\n");
@@ -836,22 +578,16 @@ export class PlaywrightBddTestProvider {
   }
 
   /**
-   * Re-surface bddgen's "Missing step definitions" block (with the suggested step snippets) from
-   * the captured output. With `missingSteps: "skip-scenario"` the run still exits 0, so this
-   * guidance only lives in stdout/stderr, and the formatted summary alone would otherwise drop
-   * it. Bounded by bddgen's own trailing marker so we don't pull in the Playwright reporter lines
-   * that follow.
+   * Point at bddgen's "Missing step definitions" block. With `missingSteps: "skip-scenario"` the run
+   * still exits 0, so the block and its suggested snippets only live in stdout/stderr; the summary
+   * adds the way out of it rather than printing the block the transcript already carries.
    */
   private missingStepsSection(result: RunOutputResult): string {
     const combined = [result.output, result.error]
       .filter((s): s is string => typeof s === "string")
       .join("\n");
-    const block = extractMissingStepsBlock(combined);
-    if (block === "") {return "";}
-    if (result.outputStreamed) {
-      return 'Tip: run "Playwright-BDD: Generate Missing Step Definitions" to scaffold these.';
-    }
-    return `${block}\n\nTip: run "Playwright-BDD: Generate Missing Step Definitions" to scaffold these.`;
+    if (extractMissingStepsBlock(combined) === "") {return "";}
+    return 'Tip: run "Playwright-BDD: Generate Missing Step Definitions" to scaffold these.';
   }
 
   /**
@@ -928,22 +664,15 @@ export class PlaywrightBddTestProvider {
       const scoped = details.filter((d) => normalizePathKey(d.featurePath) === target);
       if (scoped.length > 0) {details = scoped;}
     }
-    if (details.length > 0) {
-      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      // Prefer the executor's measured wall time; summing per-scenario durations double-counts
-      // multi-project/retry entries and overstates elapsed time.
-      return this.context.playwrightJsonParser.formatResults(details, workspaceRoot, result.duration);
+    if (details.length === 0) {
+      // No parsed scenarios (a pre-run hook or bddgen failure): the raw output and the failure line
+      // that say why are already in this panel, so there is no summary to add.
+      return "";
     }
-    if (result.outputStreamed) {
-      // Streaming already delivered result.output, but result.error can carry synthesized
-      // guidance that never crossed the stream (missing-binary hint, bddgen failure).
-      return typeof result.error === "string" && result.error.trim() !== "" ? result.error : "";
-    }
-    // No parsed scenarios (e.g. a pre-run hook or bddgen failure): show the raw output so the
-    // user still sees why the run produced nothing.
-    return [result.output, result.error]
-      .filter((s): s is string => typeof s === "string" && s.trim() !== "")
-      .join("\n");
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    // Prefer the executor's measured wall time; summing per-scenario durations double-counts
+    // multi-project/retry entries and overstates elapsed time.
+    return this.context.playwrightJsonParser.formatResults(details, workspaceRoot, result.duration);
   }
 
   /** Mark every descendant of a parent item as started, so a feature/outline run shows all the
@@ -959,6 +688,7 @@ export class PlaywrightBddTestProvider {
     parent: vscode.TestItem,
     run: vscode.TestRun,
     result: RunOutputResult,
+    singleTarget: boolean,
     fallbackFeaturePath?: string,
     live?: LiveTestRunProgress
   ): void {
@@ -1001,11 +731,11 @@ export class PlaywrightBddTestProvider {
     } else if (anyPassed) {
       run.passed(parent);
       this.testStatusCache.set(parent.id, "passed");
-    } else if (result.success === false && !/no tests found/i.test(`${result.output ?? ""}\n${result.error ?? ""}`)) {
-      // No child resolved a status yet the run failed: a bddgen/compile error produced no
-      // per-scenario results, so blanket-skipping the subtree would hide the failure entirely.
-      // Fail the parent (children stay skipped), but not for the deliberate "no tests found"
-      // out-of-scope case, which outOfScopeWarning already explains as skipped.
+    } else if (this.failedWithoutEvidence(result, singleTarget)) {
+      // No child resolved a status yet the run failed with nothing to show for it: a bddgen/compile
+      // error produced no per-scenario results anywhere, so blanket-skipping the subtree would hide
+      // the failure entirely. Fail the parent (children stay skipped), but not for the deliberate
+      // "no tests found" out-of-scope case, which outOfScopeWarning already explains as skipped.
       const message = result.error?.trim() ? result.error : "Test failed: see the Test Results output panel.";
       run.failed(parent, new vscode.TestMessage(message));
       this.testStatusCache.set(parent.id, "failed");
@@ -1018,6 +748,7 @@ export class PlaywrightBddTestProvider {
     item: vscode.TestItem,
     run: vscode.TestRun,
     result: RunOutputResult,
+    singleTarget: boolean,
     featurePath: string,
     live?: LiveTestRunProgress
   ): void {
@@ -1028,7 +759,7 @@ export class PlaywrightBddTestProvider {
       featurePath,
       workspaceRoot
     );
-    const status = mapped ?? live?.statusFor(item) ?? (result.success ? "passed" : "failed");
+    const status = mapped ?? live?.statusFor(item) ?? this.statusWithoutEvidence(result, singleTarget);
     const detail = this.findDetailForItem(item, result.scenarioDetails, status);
     const durationMs = detail?.durationMs;
 
@@ -1044,6 +775,22 @@ export class PlaywrightBddTestProvider {
     } else {
       if (!live || live.shouldApplyFinal(item, status, detail)) {run.skipped(item);}
     }
+  }
+
+  // A run that stopped early leaves later targets untouched: their items ran nothing, so their own
+  // outcome is unknown. Only a failure that produced no results anywhere is attributable to them.
+  private failedWithoutEvidence(result: RunOutputResult, singleTarget: boolean): boolean {
+    if (result.success !== false || (result.scenarioDetails?.length ?? 0) > 0) {return false;}
+    // "no tests found" excuses an out-of-scope feature, but the output belongs to the whole run: in a
+    // multi-target run it may be another target's, and it must not mask this one's failure.
+    const outOfScope = singleTarget &&
+      /no tests found/i.test(`${result.output ?? ""}\n${result.error ?? ""}`);
+    return !outOfScope;
+  }
+
+  private statusWithoutEvidence(result: RunOutputResult, singleTarget: boolean): ScenarioStatus {
+    if (result.success) {return "passed";}
+    return this.failedWithoutEvidence(result, singleTarget) ? "failed" : "skipped";
   }
 
   /**
@@ -1330,128 +1077,7 @@ export class PlaywrightBddTestProvider {
   }
 
   private async debugTests(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
-    await this.executeRequest(request, token, async (test, run, signal, batch) => {
-      try {
-        if (test.uri) {
-          const isFeatureFile = this.isFeatureFileTest(test.id);
-          const scenarioName = isFeatureFile ? undefined : test.label;
-          const line = this.lineFromId(test.id);
-          const scenario = this.scenarioByTestId.get(test.id);
-          const outlineName = scenario?.isScenarioOutline ? scenario.outlineName : undefined;
-          // The debugged command runs in a terminal (no stdout capture), so the only way to
-          // learn the outcome is Playwright's file-based JSON report.
-          const report = TemporaryReport.create((error) => {
-            this.context.logger.warn(`Temporary Playwright report cleanup failed: ${error.message}`);
-          });
-          try {
-            run.started(test);
-            // Debugging a feature/outline runs every descendant with one command; mark them all
-            // started so the Explorer shows what is actually running (mirrors runSingleTopLevelItem).
-            if (test.children.size > 0) {
-              this.markDescendantsStarted(test, run);
-            }
-            // The testing service considers a Debug-kind request done once the handler resolves and
-            // its TestRun ends; returning at session start made VS Code tear down the run before the
-            // debuggee attached, so feature-file breakpoints never bound from the Test Explorer.
-            await this.context.testExecutor.debugScenario({
-              filePath: test.uri.fsPath,
-              ...(line ? { lineNumber: line } : {}),
-              ...(scenarioName ? { scenarioName } : {}),
-              ...(outlineName ? { outlineName } : {}),
-              debug: true,
-              waitForSessionEnd: true,
-              jsonReportPath: report.jsonPath,
-              signal,
-            });
-            // A cancelled session writes at most a partial report; ingesting it would seal
-            // half-truths into a batch about to be marked cancelled.
-            if (signal.aborted) {
-              this.markSubtreeSkipped(test, run);
-            } else {
-              await this.applyDebugReportStatus(test, run, report.jsonPath, batch);
-            }
-          } finally {
-            report.dispose();
-          }
-        }
-      } catch (testError) {
-        const msg = errMsg(testError);
-        this.context.logger.error(`Failed to debug test ${test.label}: ${msg}`);
-        vscode.window.showErrorMessage(`Failed to debug test "${test.label}": ${msg}`);
-      }
-    });
-  }
-
-  // When the report is missing or unparseable the status is left unset; a stale icon is less
-  // wrong than marking a passing debug run skipped/failed.
-  private async applyDebugReportStatus(
-    test: vscode.TestItem,
-    run: vscode.TestRun,
-    reportPath: string,
-    batch: number | undefined
-  ): Promise<void> {
-    try {
-      await fs.promises.access(reportPath);
-    } catch {
-      this.context.logger.debug(
-        `No JSON report at ${reportPath} after the debug session; leaving the test status unset`
-      );
-      return;
-    }
-    const details = await this.context.playwrightJsonParser.parseFromFileAsync(reportPath);
-    if (details.length === 0) {
-      this.context.logger.debug(
-        `Debug JSON report at ${reportPath} contained no scenario results; leaving the test status unset`
-      );
-      return;
-    }
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    const results = this.context.playwrightJsonParser.toStatusMap(details, workspaceRoot);
-    // The debug report is deleted in the caller's finally; feed the badge store while it's parsed.
-    this.context.runResultStore?.ingest(results);
-    // Debug runs in a terminal with no captured command or exit code, so this shard is outcome-only
-    // (accepted degradation): its exit state is derived from whether any scenario failed. Relativize
-    // evidence against the folder owning the feature (multi-root aware), not blindly the first.
-    if (batch !== undefined) {
-      const shardRoot = (test.uri ? vscode.workspace.getWorkspaceFolder(test.uri)?.uri.fsPath : undefined) ?? workspaceRoot;
-      const anyFailed = details.some((detail) => detail.status === "failed");
-      this.context.runArtifactStore?.contributeShard(batch, {
-        workingDir: shardRoot,
-        command: "playwright debug run",
-        success: !anyFailed,
-        exitCode: anyFailed ? 1 : 0,
-        details,
-        workspaceRoot: shardRoot,
-      });
-    }
-    const featurePath = test.uri?.fsPath;
-
-    if (test.children.size > 0) {
-      this.applyResultsToChildren(
-        test,
-        run,
-        {
-          success: !details.some((d) => d.status === "failed"),
-          output: "",
-          duration: 1,
-          scenarioResults: results,
-          scenarioDetails: details,
-        },
-        featurePath
-      );
-      return;
-    }
-
-    const status = this.resolveStatusForItem(test, results, featurePath, workspaceRoot);
-    if (status === "passed") {
-      run.passed(test, this.findDetailForItem(test, details, status)?.durationMs);
-      this.testStatusCache.set(test.id, "passed");
-    } else if (status === "failed") {
-      run.failed(test, this.failureMessage(test, details, "Test failed"));
-      this.testStatusCache.set(test.id, "failed");
-    } else if (status === "skipped") {
-      run.skipped(test);
-    }
+    await this.executeGatewayRequest(request, token, "debug");
   }
 
   // --- Helpers ----------------------------------------------------------------
@@ -1461,6 +1087,16 @@ export class PlaywrightBddTestProvider {
     if (!match) {return undefined;}
     const n = parseInt(match[1] ?? "0", 10);
     return n > 0 ? n : undefined;
+  }
+
+  /** Every discovered scenario of one feature, however the tree happens to group them. */
+  private scenariosInFile(filePath: string): Scenario[] {
+    const file = normalizePathKey(filePath);
+    const seen = new Set<Scenario>();
+    for (const scenario of this.scenarioByTestId.values()) {
+      if (normalizePathKey(scenario.filePath) === file) {seen.add(scenario);}
+    }
+    return [...seen];
   }
 
   private isFeatureFileTest(testId: string): boolean {

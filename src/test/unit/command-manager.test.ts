@@ -7,6 +7,7 @@ import { TraceabilityCommands } from "../../commands/traceability-commands";
 import { TraceabilityLinkCommands } from "../../commands/traceability-link-commands";
 import { TraceabilityPublishCommands } from "../../commands/traceability-publish-commands";
 import { FeatureParser } from "../../parsers/feature-parser";
+import type { RunIntent } from "../../core/run-contracts";
 import { Logger } from "../../utils/logger";
 import { ExtensionConfig } from "../../core/extension-config";
 import { TestExecutor } from "../../core/test-executor";
@@ -26,6 +27,8 @@ import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { PreflightChoice } from "../../traceability/preflight-flow";
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
 import { captureHandlers, fakeDoc, makeContext, memento, writeTempFeature } from "./helpers/command-manager-harness";
+import { ExecutionAlreadyRunningError, ExecutionFailure } from "../../core/execution-gateway";
+import { runOutputFromCompletion } from "../../ui/execution-adapter";
 
 // The webview-panel stub the board opens onto: `__posted` records what the host sent, `__receive`
 // delivers an inbound message, and the reset disposes every panel between tests.
@@ -70,8 +73,37 @@ function traceabilityBoardDeps(manager: CommandManager): BoardPanelDeps {
   ).boardDeps();
 }
 
-describe("CommandManager.resolveOutlineName: cache", () => {
+describe("CommandManager scenario intents: one parse per invocation", () => {
   let tmpFiles: string[] = [];
+
+  const OUTLINE = [
+    "Feature: F",
+    "",
+    "  Scenario Outline: Adding",
+    "    Given <x>",
+    "",
+    "    Examples:",
+    "      | x |",
+    "      | 1 |",
+  ].join("\n");
+
+  interface IntentSeam {
+    runCommands: {
+      scenarioIntent: (
+        filePath: string,
+        lineNumber: number | undefined,
+        scenarioName: string | undefined,
+        outlineName: string | undefined,
+        mode: "run" | "debug",
+        initiatedBy: string
+      ) => RunIntent;
+    };
+  }
+
+  function seam(parser: FeatureParser): IntentSeam["runCommands"] {
+    const mgr = CommandManager.create(makeContext({ featureParser: parser }));
+    return (mgr as unknown as IntentSeam).runCommands;
+  }
 
   beforeEach(() => {
     tmpFiles = [];
@@ -83,86 +115,75 @@ describe("CommandManager.resolveOutlineName: cache", () => {
     }
   });
 
-  it("parses the file only once when called twice with the same (filePath, mtime)", () => {
-    const content = [
-      "Feature: F",
-      "",
-      "  Scenario Outline: Adding",
-      "    Given <x>",
-      "",
-      "    Examples:",
-      "      | x |",
-      "      | 1 |",
-    ].join("\n");
-    const filePath = writeTempFeature(content);
+  it("parses the file once for two runs of the same unchanged file", () => {
+    const filePath = writeTempFeature(OUTLINE);
     tmpFiles.push(filePath);
-
-    const logger = Logger.create();
-    const parser = FeatureParser.create(logger);
+    const parser = FeatureParser.create(Logger.create());
     const parseSpy = vi.spyOn(parser, "parseFeatureContent");
-    const mgr = CommandManager.create(makeContext({ featureParser: parser }));
+    const runCommands = seam(parser);
 
-    const callResolve = (): string | undefined =>
-      (mgr as unknown as {
-        resolveOutlineName: (f: string, l: number | undefined, n: string | undefined) => string | undefined;
-      }).resolveOutlineName(filePath, 8, "1: Adding - x: 1");
+    const first = runCommands.scenarioIntent(filePath, 8, "1: Adding - x: 1", undefined, "run", "palette");
+    const second = runCommands.scenarioIntent(filePath, 8, "1: Adding - x: 1", undefined, "run", "palette");
 
-    const first = callResolve();
-    const second = callResolve();
-
-    expect(first).toBe("Adding");
-    expect(second).toBe("Adding");
+    expect(first.selection).toEqual(second.selection);
+    expect(first.selection).toMatchObject({
+      kind: "scenario",
+      scenario: { kind: "outline", outlineName: "Adding" },
+    });
     expect(parseSpy).toHaveBeenCalledTimes(1);
   });
 
   it("re-parses when the file's mtimeMs changes", () => {
-    const initialContent = [
-      "Feature: F",
-      "",
-      "  Scenario Outline: Adding",
-      "    Given <x>",
-      "",
-      "    Examples:",
-      "      | x |",
-      "      | 1 |",
-    ].join("\n");
-    const filePath = writeTempFeature(initialContent);
+    const filePath = writeTempFeature(OUTLINE);
     tmpFiles.push(filePath);
-
-    const logger = Logger.create();
-    const parser = FeatureParser.create(logger);
+    const parser = FeatureParser.create(Logger.create());
     const parseSpy = vi.spyOn(parser, "parseFeatureContent");
-    const mgr = CommandManager.create(makeContext({ featureParser: parser }));
+    const runCommands = seam(parser);
 
-    const callResolve = (): string | undefined =>
-      (mgr as unknown as {
-        resolveOutlineName: (f: string, l: number | undefined, n: string | undefined) => string | undefined;
-      }).resolveOutlineName(filePath, 8, "1: Adding - x: 1");
-
-    callResolve();
-
+    runCommands.scenarioIntent(filePath, 8, "1: Adding - x: 1", undefined, "run", "palette");
     const futureMs = Date.now() + 5000;
     fs.utimesSync(filePath, new Date(futureMs), new Date(futureMs));
+    runCommands.scenarioIntent(filePath, 8, "1: Adding - x: 1", undefined, "run", "palette");
 
-    callResolve();
     expect(parseSpy).toHaveBeenCalledTimes(2);
   });
 
-  it("returns undefined when scenarioName is not supplied without touching the parser", () => {
+  it("keeps an example row's own line and gives an outline header no line", () => {
+    const filePath = writeTempFeature(OUTLINE);
+    tmpFiles.push(filePath);
+    const runCommands = seam(FeatureParser.create(Logger.create()));
+    const outline = { filePath, name: "Adding", kind: "outline" as const, outlineName: "Adding" };
+
+    const row = runCommands.scenarioIntent(filePath, 8, "1: Adding - x: 1", undefined, "run", "palette");
+    const header = runCommands.scenarioIntent(filePath, undefined, "Adding", "Adding", "run", "palette");
+    const declaration = runCommands.scenarioIntent(filePath, 3, "Adding", undefined, "run", "code-lens");
+
+    expect(row.targets).toEqual([{ kind: "scenario", scenario: { ...outline, line: 8 } }]);
+    expect(header.targets).toEqual([{ kind: "scenario", scenario: { ...outline, line: 0 } }]);
+    expect(declaration.targets).toEqual(header.targets);
+  });
+
+  it("drops an unverified line when the file no longer parses but the name is known", () => {
+    const runCommands = seam(FeatureParser.create(Logger.create()));
+
+    const intent = runCommands.scenarioIntent(
+      "/ws/gone.feature", 42, "Vanished", undefined, "run", "palette"
+    );
+
+    // Line 42 cannot be confirmed, and capture scoped to it would discard the run's own results.
+    expect(intent.targets).toEqual([{
+      kind: "scenario",
+      scenario: { filePath: "/ws/gone.feature", line: 0, name: "Vanished", kind: "scenario" },
+    }]);
+  });
+
+  it("refuses a nameless target the file does not contain instead of grepping the suite", () => {
     const filePath = writeTempFeature("Feature: F\n  Scenario: x\n");
     tmpFiles.push(filePath);
+    const runCommands = seam(FeatureParser.create(Logger.create()));
 
-    const logger = Logger.create();
-    const parser = FeatureParser.create(logger);
-    const parseSpy = vi.spyOn(parser, "parseFeatureContent");
-    const mgr = CommandManager.create(makeContext({ featureParser: parser }));
-
-    const result = (mgr as unknown as {
-      resolveOutlineName: (f: string, l: number | undefined, n: string | undefined) => string | undefined;
-    }).resolveOutlineName(filePath, 2, undefined);
-
-    expect(result).toBeUndefined();
-    expect(parseSpy).not.toHaveBeenCalled();
+    expect(() => runCommands.scenarioIntent(filePath, 99, undefined, undefined, "run", "palette"))
+      .toThrow(`No scenario was found at ${filePath}:99`);
   });
 });
 
@@ -173,6 +194,7 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
       runScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
       runFeatureFile: vi.fn().mockResolvedValue(undefined),
       runFeatureFileWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
+      runPathFilterWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
     };
   }
 
@@ -180,13 +202,16 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
     runScenario: (...a: unknown[]) => Promise<void>;
     runFeature: (...a: unknown[]) => Promise<void>;
     runScenarioWithContext: (...a: unknown[]) => Promise<void>;
-    runFeatureFileWithContext: (...a: unknown[]) => Promise<void>;
+    runFeatureWithContext: (...a: unknown[]) => Promise<void>;
   };
+
+  const handlers = (manager: CommandManager): Handlers =>
+    (manager as unknown as { runCommands: Handlers }).runCommands;
 
   it("runScenario executes only the captured (WithOutput) path once, never the terminal path", async () => {
     const exec = makeExecutorSpy();
     const mgr = CommandManager.create(makeContext({ testExecutor: exec as unknown as TestExecutor }));
-    await (mgr as unknown as Handlers).runScenario("/abs/x.feature", 3, "S");
+    await handlers(mgr).runScenario("/abs/x.feature", 3, "S");
     expect(exec.runScenarioWithOutput).toHaveBeenCalledTimes(1);
     expect(exec.runScenario).not.toHaveBeenCalled();
   });
@@ -194,18 +219,189 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
   it("runFeature executes only the captured (WithOutput) path once, never the terminal path", async () => {
     const exec = makeExecutorSpy();
     const mgr = CommandManager.create(makeContext({ testExecutor: exec as unknown as TestExecutor }));
-    await (mgr as unknown as Handlers).runFeature("/abs/x.feature");
-    expect(exec.runFeatureFileWithOutput).toHaveBeenCalledTimes(1);
+    await handlers(mgr).runFeature("/abs/x.feature");
+    expect(exec.runPathFilterWithOutput).toHaveBeenCalledTimes(1);
     expect(exec.runFeatureFile).not.toHaveBeenCalled();
+  });
+
+  it("routes Run All output through the shared Specwright output log", async () => {
+    const logger = Logger.create();
+    const info = vi.spyOn(logger, "info");
+    const showOutput = vi.spyOn(logger, "showOutput");
+    const exec = {
+      ...makeExecutorSpy(),
+      runSuiteWithOutput: vi.fn().mockResolvedValue({
+        success: true,
+        output: "runner output\n",
+        duration: 1,
+        scenarioDetails: [],
+      }),
+    };
+    const registered = captureHandlers(makeContext({
+      logger,
+      testExecutor: exec as unknown as TestExecutor,
+    }));
+
+    await registered.get("playwrightBddRunner.runAllTests")!();
+
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("All tests output:\nrunner output"));
+    expect(showOutput).toHaveBeenCalledOnce();
+  });
+
+  it("projects a partial gateway completion before reporting one command failure", async () => {
+    const logger = Logger.create();
+    const info = vi.spyOn(logger, "info");
+    const showOutput = vi.spyOn(logger, "showOutput");
+    const completion = {
+      state: "partial" as const,
+      results: [{
+        scenario: { filePath: "/abs/x.feature", line: 3, name: "S", kind: "scenario" as const },
+        outcome: "passed" as const,
+        durationMs: 7,
+        attempts: 1,
+        flaky: false,
+      }],
+      output: "completed before worker teardown\n",
+      passed: 1,
+      failed: 0,
+      durationMs: 9,
+      failure: "worker teardown failed",
+    };
+    const executionGateway = {
+      execute: vi.fn(() => Promise.reject(new ExecutionFailure(completion))),
+      running: false,
+    };
+    const context = makeContext({ logger, executionGateway });
+    const manager = CommandManager.create(context);
+    const complete = vi.fn();
+    const end = vi.fn();
+    manager.setTestProvider({
+      beginExternalRun: () => ({ progress: {}, complete, end }),
+    });
+
+    await expect(handlers(manager).runFeature("/abs/x.feature"))
+      .rejects.toThrow("Test failed: worker teardown failed");
+
+    const explorerProjection = runOutputFromCompletion(
+      completion,
+      context.playwrightJsonParser,
+      "/abs"
+    );
+    expect(complete).toHaveBeenCalledWith(explorerProjection);
+    expect(end).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(expect.stringContaining(
+      "Feature output:\ncompleted before worker teardown"
+    ));
+    expect(showOutput).toHaveBeenCalledOnce();
+  });
+
+  it("logs the retained output of a cancelled run so post-abort teardown text survives", async () => {
+    const logger = Logger.create();
+    const info = vi.spyOn(logger, "info");
+    const showOutput = vi.spyOn(logger, "showOutput");
+    const executionGateway = {
+      execute: vi.fn(() => Promise.resolve({
+        state: "cancelled" as const,
+        results: [],
+        output: "teardown after stop\n",
+        passed: 0,
+        failed: 0,
+        durationMs: 4,
+      })),
+      running: false,
+    };
+    const registered = captureHandlers(makeContext({ logger, executionGateway }));
+
+    await registered.get("playwrightBddRunner.runAllTests")!();
+
+    expect(info).toHaveBeenCalledWith("All tests cancelled", { duration: 4 });
+    expect(info).toHaveBeenCalledWith(expect.stringContaining(
+      "All tests output:\nteardown after stop"
+    ));
+    expect(showOutput).toHaveBeenCalledOnce();
+  });
+
+  it("captures every populated outline row from its declaration CodeLens", async () => {
+    const content = [
+      "Feature: Calculator",
+      "",
+      "Scenario Outline: Divide",
+      "  Given <n>",
+      "",
+      "  Examples:",
+      "    | n |",
+      "    | 1 |",
+      "    | 2 |",
+    ].join("\n");
+    const filePath = writeTempFeature(content);
+    const parser = FeatureParser.create();
+    const store = new RunArtifactStore(memento(), Logger.create());
+    const details = [8, 9].map((lineNumber, index) => ({
+      featurePath: filePath,
+      lineNumber,
+      scenarioName: `Example #${index + 1}`,
+      outlineName: "Divide",
+      status: "passed" as const,
+    }));
+    const runScenarioWithOutput = vi.fn((options: { artifactBatch?: number }, target: ArtifactCaptureTarget) => {
+      store.contributeShard(options.artifactBatch!, {
+        workingDir: path.dirname(filePath),
+        command: "npx playwright test --grep Divide",
+        success: true,
+        exitCode: 0,
+        details,
+        workspaceRoot: path.dirname(filePath),
+        invocation: target.scenario,
+      });
+      return Promise.resolve({ success: true, output: "", duration: 1, scenarioDetails: details });
+    });
+    const manager = CommandManager.create(makeContext({
+      featureParser: parser,
+      runArtifactStore: store,
+      testExecutor: { runScenarioWithOutput } as unknown as TestExecutor,
+    }));
+    const lens = parser.provideScenarioCodeLenses(content, filePath)
+      .find((candidate) => candidate.command?.command === "playwrightBddRunner.runScenario" &&
+        candidate.command.arguments?.[1] === 3)!;
+
+    try {
+      await handlers(manager).runScenario(...lens.command!.arguments!);
+    } finally {
+      fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+    }
+
+    // A declaration line has no generated test behind it, so the run greps the outline title and
+    // captures every row rather than trying to target line 3.
+    expect(runScenarioWithOutput).toHaveBeenCalledWith(
+      expect.not.objectContaining({ lineNumber: expect.anything() }),
+      expect.objectContaining({
+        scenario: expect.objectContaining({ kind: "outline", name: "Divide", line: 0 }),
+        resultLines: [8, 9],
+      })
+    );
+    expect(store.latest()?.selection).toEqual({
+      kind: "scenario",
+      scenario: {
+        filePath,
+        line: 0,
+        name: "Divide",
+        kind: "outline",
+        outlineName: "Divide",
+      },
+    });
+    expect(store.latest()?.results[0]?.iterations).toEqual([
+      { name: "Example #1", outcome: "passed", durationMs: 0, attempts: 1 },
+      { name: "Example #2", outcome: "passed", durationMs: 0, attempts: 1 },
+    ]);
   });
 
   it("context-menu run commands execute only once each", async () => {
     const exec = makeExecutorSpy();
     const mgr = CommandManager.create(makeContext({ testExecutor: exec as unknown as TestExecutor }));
-    await (mgr as unknown as Handlers).runScenarioWithContext("/abs/x.feature", 3, "S");
-    await (mgr as unknown as Handlers).runFeatureFileWithContext("/abs/x.feature");
+    await handlers(mgr).runScenarioWithContext("/abs/x.feature", 3, "S");
+    await handlers(mgr).runFeatureWithContext("/abs/x.feature");
     expect(exec.runScenarioWithOutput).toHaveBeenCalledTimes(1);
-    expect(exec.runFeatureFileWithOutput).toHaveBeenCalledTimes(1);
+    expect(exec.runPathFilterWithOutput).toHaveBeenCalledTimes(1);
     expect(exec.runScenario).not.toHaveBeenCalled();
     expect(exec.runFeatureFile).not.toHaveBeenCalled();
   });
@@ -215,21 +411,26 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
     const mgr = CommandManager.create(makeContext({ testExecutor: exec as unknown as TestExecutor }));
     // VS Code invokes resource context-menu commands with a Uri (has .fsPath), not a string.
     const uri = { fsPath: "/abs/login.feature", scheme: "file" };
-    await (mgr as unknown as Handlers).runFeatureFileWithContext(uri);
-    expect(exec.runFeatureFileWithOutput).toHaveBeenCalledWith(expect.objectContaining({
-      filePath: "/abs/login.feature",
-    }));
+    await handlers(mgr).runFeatureWithContext(uri);
+    expect(exec.runPathFilterWithOutput).toHaveBeenCalledWith(
+      "/abs/login.feature",
+      expect.any(AbortSignal),
+      undefined,
+      expect.anything(),
+      undefined,
+      undefined
+    );
   });
 
   it("wires editor-run cancellation through the executor and its open TestRun session", async () => {
     const cancelled = { success: false, output: "", error: "Cancelled", duration: 1 };
-    const runFeatureFileWithOutput = vi.fn(async (options: { signal?: AbortSignal }) => {
-      await new Promise<void>((resolve) => options.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    const runPathFilterWithOutput = vi.fn(async (_target: string, signal?: AbortSignal) => {
+      await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
       return cancelled;
     });
     const exec = {
       ...makeExecutorSpy(),
-      runFeatureFileWithOutput,
+      runPathFilterWithOutput,
     };
     const complete = vi.fn();
     const end = vi.fn();
@@ -251,14 +452,14 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
     )));
 
     try {
-      await (mgr as unknown as Handlers).runFeature("/abs/x.feature");
+      await handlers(mgr).runFeature("/abs/x.feature");
     } finally {
       progressSpy.mockRestore();
     }
 
     expect(beginExternalRun).toHaveBeenCalledWith("/abs/x.feature", undefined);
-    expect(runFeatureFileWithOutput.mock.calls[0]?.[0].signal?.aborted).toBe(true);
-    expect(complete).toHaveBeenCalledWith(cancelled);
+    expect(runPathFilterWithOutput.mock.calls[0]?.[1]?.aborted).toBe(true);
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining(cancelled));
     expect(end).not.toHaveBeenCalled();
   });
 });
@@ -325,11 +526,14 @@ describe("CommandManager palette run commands", () => {
   it("resolves the active feature and cursor for zero-argument run and debug commands", async () => {
     const exec = {
       runScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
-      runFeatureFileWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
-      debugScenario: vi.fn().mockResolvedValue(undefined),
+      runPathFilterWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
+      debugScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
     };
+    // A real file on disk: the intent parses it to resolve the exact scenario the cursor is in.
+    const content = "Feature: Palette\n\nScenario: chosen\n  Given a step\n";
+    const filePath = writeTempFeature(content);
     window.activeTextEditor = {
-      document: fakeDoc("Feature: Palette\n\nScenario: chosen\n  Given a step\n"),
+      document: fakeDoc(content, filePath),
       selection: { active: { line: 3 } },
     };
     vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("@smoke");
@@ -343,16 +547,73 @@ describe("CommandManager palette run commands", () => {
 
     expect(exec.runScenarioWithOutput).toHaveBeenCalledTimes(2);
     expect(exec.runScenarioWithOutput.mock.calls.map(([options]) => options)).toEqual([
-      expect.objectContaining({ filePath: "/ws/a.feature", lineNumber: 3, scenarioName: "chosen" }),
-      expect.objectContaining({ filePath: "/ws/a.feature", lineNumber: 3, scenarioName: "chosen", tags: "@smoke" }),
+      expect.objectContaining({ filePath, lineNumber: 3, scenarioName: "chosen" }),
+      expect.objectContaining({ filePath, lineNumber: 3, scenarioName: "chosen", tags: "@smoke" }),
     ]);
-    expect(exec.debugScenario).toHaveBeenCalledWith(expect.objectContaining({
-      filePath: "/ws/a.feature", lineNumber: 3, scenarioName: "chosen",
+    expect(exec.debugScenarioWithOutput).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath, lineNumber: 3, scenarioName: "chosen" }),
+      expect.anything()
+    );
+    expect(exec.runPathFilterWithOutput.mock.calls.map(([target, _signal, _batch, _progress, tags]) => ({ target, tags }))).toEqual([
+      { target: filePath, tags: undefined },
+      { target: filePath, tags: "@smoke" },
+    ]);
+    fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+  });
+
+  it("keeps tagged scenario and feature runs intersected when routing through the gateway", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      state: "complete",
+      results: [],
+      passed: 0,
+      failed: 0,
+      durationMs: 1,
+    });
+    const exec = {
+      runScenarioWithOutput: vi.fn(),
+      runFeatureFileWithOutput: vi.fn(),
+    };
+    window.activeTextEditor = {
+      document: fakeDoc("Feature: Palette\n\nScenario: chosen\n  Given a step\n"),
+      selection: { active: { line: 3 } },
+    };
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("@smoke and not @wip");
+    const handlers = captureHandlers(makeContext({
+      testExecutor: exec as unknown as TestExecutor,
+      executionGateway: { execute } as never,
     }));
-    expect(exec.runFeatureFileWithOutput.mock.calls.map(([options]) => options)).toEqual([
-      expect.objectContaining({ filePath: "/ws/a.feature" }),
-      expect.objectContaining({ filePath: "/ws/a.feature", tags: "@smoke" }),
+
+    await handlers.get("playwrightBddRunner.runScenarioWithTags")!();
+    await handlers.get("playwrightBddRunner.runFeatureFileWithTags")!();
+
+    expect(execute.mock.calls.map(([intent]) => intent)).toEqual([
+      expect.objectContaining({
+        selection: expect.objectContaining({
+          kind: "scenario",
+          tagExpression: "@smoke and not @wip",
+        }),
+        targets: [expect.objectContaining({
+          kind: "scenario",
+          tagExpression: "@smoke and not @wip",
+        })],
+      }),
+      expect.objectContaining({
+        selection: {
+          kind: "feature",
+          filePath: "/ws/a.feature",
+          tagExpression: "@smoke and not @wip",
+        },
+        targets: [{
+          kind: "path",
+          path: "/ws/a.feature",
+          tagExpression: "@smoke and not @wip",
+        }],
+      }),
     ]);
+    expect(execute.mock.calls.flatMap(([intent]) => intent.targets))
+      .not.toContainEqual(expect.objectContaining({ kind: "tag-expression" }));
+    expect(exec.runScenarioWithOutput).not.toHaveBeenCalled();
+    expect(exec.runFeatureFileWithOutput).not.toHaveBeenCalled();
   });
 
   it("picks a discovered feature and scenario when no feature editor is active", async () => {
@@ -376,9 +637,10 @@ describe("CommandManager palette run commands", () => {
     }
 
     expect(discoveryManager.discoverTestFiles).toHaveBeenCalledOnce();
-    expect(exec.runScenarioWithOutput).toHaveBeenCalledWith(expect.objectContaining({
-      filePath, lineNumber: 3, scenarioName: "picked",
-    }));
+    expect(exec.runScenarioWithOutput).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath, lineNumber: 3, scenarioName: "picked" }),
+      expect.anything()
+    );
   });
 
   it("treats target and tag prompt cancellation as a quiet no-op", async () => {
@@ -410,7 +672,7 @@ describe("CommandManager palette run commands", () => {
   it("passes a palette outline target through to execution", async () => {
     const exec = {
       runScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
-      debugScenario: vi.fn().mockResolvedValue(undefined),
+      debugScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
     };
     window.activeTextEditor = {
       document: fakeDoc([
@@ -430,13 +692,19 @@ describe("CommandManager palette run commands", () => {
     await handlers.get("playwrightBddRunner.debugScenario")!();
     await handlers.get("playwrightBddRunner.runScenarioWithTags")!();
 
+    // An outline header greps its title and runs every row: a declaration line has no generated spec
+    // line, so passing one would only log a false drift warning.
     expect(exec.runScenarioWithOutput.mock.calls.map(([options]) => options)).toEqual([
-      expect.objectContaining({ lineNumber: 2, scenarioName: "Divide", outlineName: "Divide" }),
-      expect.objectContaining({ lineNumber: 2, scenarioName: "Divide", outlineName: "Divide", tags: "@smoke" }),
+      expect.objectContaining({ outlineName: "Divide" }),
+      expect.objectContaining({ outlineName: "Divide", tags: "@smoke" }),
     ]);
-    expect(exec.debugScenario).toHaveBeenCalledWith(expect.objectContaining({
-      lineNumber: 2, scenarioName: "Divide", outlineName: "Divide",
-    }));
+    expect(exec.runScenarioWithOutput.mock.calls.map(([options]) => options.lineNumber))
+      .toEqual([undefined, undefined]);
+    expect(exec.debugScenarioWithOutput).toHaveBeenCalledWith(
+      expect.objectContaining({ outlineName: "Divide" }),
+      expect.anything()
+    );
+    expect(exec.debugScenarioWithOutput.mock.calls[0]?.[0].lineNumber).toBeUndefined();
   });
 
   it("surfaces selected-file and empty-tag errors through the command handler", async () => {
@@ -489,7 +757,7 @@ describe("CommandManager: StepDefinitionProvider caching", () => {
 describe("command contributions ↔ handler registrations parity", () => {
   interface PackageJson {
     contributes: {
-      commands: Array<{ command: string; icon?: string }>;
+      commands: Array<{ command: string; title: string; icon?: string }>;
       menus: Record<string, Array<{ command?: string; when?: string; submenu?: string; group?: string }>>;
     };
   }
@@ -523,7 +791,7 @@ describe("command contributions ↔ handler registrations parity", () => {
       "playwrightBddRunner.exportSteps",
       "playwrightBddRunner.exportScenarios",
       "playwrightBddRunner.insertStep",
-      "playwrightBddRunner.traceability.runAndPublish",
+      "playwrightBddRunner.traceability.runAndPublishByTagExpression",
       "playwrightBddRunner.traceability.publishLastRun",
       "playwrightBddRunner.traceability.sync",
       "playwrightBddRunner.traceability.openBoard",
@@ -549,8 +817,11 @@ describe("command contributions ↔ handler registrations parity", () => {
       "playwrightBddRunner.traceability.openIssue",
       "playwrightBddRunner.traceability.copyKey",
       "playwrightBddRunner.traceability.linkScenario",
+      "playwrightBddRunner.traceability.runAndPublish",
+      "playwrightBddRunner.traceability.runAndPublishFeature",
+      "playwrightBddRunner.traceability.runAndPublishFolder",
       "playwrightBddRunner.traceability.hidePanel",
-      "playwrightBddRunner.traceability.pushScenarioText",
+      "playwrightBddRunner.traceability.runAndPublishAllMapped",
     ],
   };
 
@@ -595,26 +866,106 @@ describe("command contributions ↔ handler registrations parity", () => {
     expect(registered).toEqual(contributed);
   });
 
+  // A failure message names the registered title. A title the manifest never declares sends the user
+  // looking for a command that appears nowhere in the UI.
+  it("registers each command under the title the manifest declares", () => {
+    const mgr = CommandManager.create(makeContext());
+    try {
+      mgr.registerCommands({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+      const registered = [...mgr.registeredTitles].sort(([a], [b]) => a.localeCompare(b));
+      const manifest = pkg.contributes.commands
+        .map((c) => [c.command, c.title] as const)
+        .sort(([a], [b]) => a.localeCompare(b));
+      expect(registered).toEqual(manifest.map(([command, title]) => [command, title]));
+    } finally {
+      mgr.dispose();
+    }
+  });
+
+  function effectiveVisibleCommands(): string[] {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    return pkg.contributes.commands
+      .map((c) => c.command)
+      .filter((command) => {
+        const entries = palette.filter((entry) => entry.command === command);
+        return entries.length === 0 || entries.some((entry) => entry.when !== "false");
+      })
+      .sort();
+  }
+
   it("classifies every contributed command as palette-visible or explicitly hidden", () => {
     const palette = pkg.contributes.menus["commandPalette"]!;
     const paletteIds = palette.flatMap((entry) => entry.command === undefined ? [] : [entry.command]);
     const contributed = pkg.contributes.commands.map((c) => c.command).sort();
     const classified = [...paletteCommands.visible, ...paletteCommands.hidden].sort();
-    const effectiveVisible = contributed.filter(
-      (command) => {
-        const entries = palette.filter((entry) => entry.command === command);
-        return entries.length === 0 || entries.some((entry) => entry.when !== "false");
-      }
-    ).sort();
 
     expect(new Set(paletteIds).size).toBe(paletteIds.length);
     expect(classified).toEqual(contributed);
-    expect(effectiveVisible).toEqual([...paletteCommands.visible].sort());
+    expect(effectiveVisibleCommands()).toEqual([...paletteCommands.visible].sort());
     for (const command of paletteCommands.hidden) {
       const entries = palette.filter((entry) => entry.command === command);
       expect(entries).toHaveLength(1);
       expect(entries.every((entry) => entry.when === "false")).toBe(true);
     }
+  });
+
+  // The palette invokes with no arguments. A command that needs one belongs in the hidden list, so
+  // every visible handler is run bare: it must reach the user (a message, a prompt, a run), never
+  // fail for a missing argument and never return in silence.
+  it("gives every palette-visible command an observable effect with no arguments", async () => {
+    const logger = Logger.create();
+    const showOutput = vi.spyOn(logger, "showOutput").mockImplementation(() => {});
+    const execute = vi.fn().mockResolvedValue({
+      state: "complete", results: [], output: "", passed: 0, failed: 0, durationMs: 1,
+    });
+    const errors = vi.spyOn(vscode.window, "showErrorMessage");
+    const surfaced = [
+      errors,
+      vi.spyOn(vscode.window, "showInformationMessage"),
+      vi.spyOn(vscode.window, "showWarningMessage"),
+      vi.spyOn(vscode.window, "showQuickPick"),
+      vi.spyOn(vscode.window, "showInputBox"),
+    ];
+    // The palette gates a few commands on an open .feature file; run the sweep in the context that
+    // makes every visible command reachable.
+    const editorHost = vscode.window as unknown as { activeTextEditor: unknown };
+    editorHost.activeTextEditor = {
+      document: fakeDoc("Feature: Palette\n\nScenario: chosen\n  Given a step\n"),
+      selection: { active: { line: 2 } },
+    };
+    const handlers = captureHandlers(makeContext({
+      logger,
+      executionGateway: { execute } as never,
+      testExecutor: { discoverFeatureFiles: vi.fn().mockResolvedValue([]) } as never,
+    }));
+
+    try {
+      for (const command of effectiveVisibleCommands()) {
+        const handler = handlers.get(command);
+        expect(handler, `${command} has no registered handler`).toBeDefined();
+        for (const spy of [...surfaced, execute, showOutput]) {spy.mockClear();}
+
+        await handler!();
+
+        const observed = [...surfaced, execute, showOutput].some((spy) => spy.mock.calls.length > 0);
+        expect(observed, `${command} did nothing observable when invoked with no arguments`).toBe(true);
+        expect(errors.mock.calls.map(([message]) => String(message)))
+          .not.toContainEqual(expect.stringMatching(/is required/i));
+      }
+    } finally {
+      // A failed assertion must not leak this editor into every later test in the file.
+      editorHost.activeTextEditor = undefined;
+    }
+  });
+
+  it("places run-and-publish on feature files and folders in the Explorer", () => {
+    const explorer = pkg.contributes.menus["explorer/context"]!;
+    expect(explorer.find((entry) =>
+      entry.command === "playwrightBddRunner.traceability.runAndPublishFeature"
+    )?.when).toContain("resourceExtname == .feature");
+    expect(explorer.find((entry) =>
+      entry.command === "playwrightBddRunner.traceability.runAndPublishFolder"
+    )?.when).toContain("explorerResourceIsFolder");
   });
 
   it("places the Steps panel commands in the view menus, gated on the stepsExplorer view", () => {
@@ -670,6 +1021,21 @@ describe("command contributions ↔ handler registrations parity", () => {
     }
   });
 
+  // Each of these acts on what the caller passed: a tree node, an Explorer resource. The palette
+  // passes nothing, so a bare invocation would name nothing to run and report that it ran nothing.
+  // The palette's own run-and-publish route is runAndPublishByTagExpression, which prompts;
+  // runAndPublishAllMapped is the traceability view's title-bar button and is hidden here too.
+  it("hides every argument-taking run-and-publish command from the palette", () => {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    for (const command of [
+      "playwrightBddRunner.traceability.runAndPublish",
+      "playwrightBddRunner.traceability.runAndPublishFeature",
+      "playwrightBddRunner.traceability.runAndPublishFolder",
+    ]) {
+      expect(palette.find((e) => e.command === command)?.when).toBe("false");
+    }
+  });
+
   it("leaves clear-run-history in the palette unconditionally (the stores fill with the panel off)", () => {
     const palette = pkg.contributes.menus["commandPalette"]!;
     expect(palette.find((e) => e.command === "playwrightBddRunner.traceability.clearLocalRunHistory")).toBeUndefined();
@@ -693,7 +1059,7 @@ describe("command contributions ↔ handler registrations parity", () => {
       ["playwrightBddRunner.traceability.toggleGrouping", "navigation@-1"],
       ["playwrightBddRunner.traceability.sync", "navigation@0"],
       ["playwrightBddRunner.traceability.openBoard", "navigation@1"],
-      ["playwrightBddRunner.traceability.runAndPublish", "navigation@2"],
+      ["playwrightBddRunner.traceability.runAndPublishAllMapped", "navigation@2"],
       ["playwrightBddRunner.traceability.publishLastRun", "navigation@3"],
       ["playwrightBddRunner.traceability.manageConnection", "navigation@4"],
     ]);
@@ -1456,6 +1822,40 @@ describe("traceability sync contributions", () => {
   });
 });
 
+describe("traceability run-and-publish entry points", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("maps Explorer resources and preserves the entered tag expression unchanged", async () => {
+    const manager = CommandManager.create(makeContext());
+    const commands = traceabilityCommands(manager);
+    const run = vi.spyOn(publishCommands(manager), "runAndPublishSelection")
+      .mockResolvedValue(undefined);
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(" @smoke and not @wip ");
+
+    await commands.runAndPublishFeature({ fsPath: "/ws/a.feature" });
+    await commands.runAndPublishFolder({ fsPath: "/ws/features" });
+    await commands.runAndPublishByTagExpression();
+
+    expect(run.mock.calls).toEqual([
+      [{ kind: "feature", filePath: "/ws/a.feature" }, "explorer"],
+      [{ kind: "folder", folderPath: "/ws/features" }, "explorer"],
+      [{ kind: "tag-expression", expression: " @smoke and not @wip " }, "palette"],
+    ]);
+  });
+
+  it("treats a cancelled tag prompt as a quiet no-op", async () => {
+    const manager = CommandManager.create(makeContext());
+    const commands = traceabilityCommands(manager);
+    const run = vi.spyOn(publishCommands(manager), "runAndPublishSelection")
+      .mockResolvedValue(undefined);
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined);
+
+    await commands.runAndPublishByTagExpression();
+
+    expect(run).not.toHaveBeenCalled();
+  });
+});
+
 describe("traceability runAndPublish: preflight batch flow", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -1469,25 +1869,27 @@ describe("traceability runAndPublish: preflight batch flow", () => {
     return { links, untraced: [], orphans: [], stale: false, completeProjects: ["CALC"], errors: [] };
   }
 
-  function harness(links: TraceLink[]) {
+  function harness(links: TraceLink[], scope?: ProjectScopeStore) {
     const store = new RunArtifactStore(memento(), Logger.create());
     const runScenarioWithOutput = vi.fn((_options: unknown, _target?: ArtifactCaptureTarget) =>
       Promise.resolve({ success: true, output: "", error: "", duration: 1 })
     );
-    const runGrepWithOutput = vi.fn((_names: readonly string[]) => Promise.resolve({ success: true, output: "", error: "", duration: 1 }));
-    const executor = { runScenarioWithOutput, runGrepWithOutput, runPathFilterWithOutput: vi.fn(), runAllTestsWithTagsOutput: vi.fn() };
+    const executor = { runScenarioWithOutput, runPathFilterWithOutput: vi.fn(), runAllTestsWithTagsOutput: vi.fn() };
     const config = ExtensionConfig.create();
     const mgr = CommandManager.create(makeContext({
       testExecutor: executor as unknown as TestExecutor,
       runArtifactStore: store,
+      mappedScenarios: links.map((entry) => entry.scenario),
     }));
     const subsystem = {
       getSnapshot: () => snapshot(links),
       getActiveAdapter: () => new XrayAdapter(config),
       rebuildNow: () => Promise.resolve(),
+      projectScope: () => scope ?? NO_PROJECT_SCOPE,
+      tagDerivedProjectKeys: () => [],
     } as unknown as TraceabilitySubsystem;
     mgr.setTraceabilitySubsystem(subsystem);
-    return { mgr, store, runScenarioWithOutput, runGrepWithOutput };
+    return { mgr, store, runScenarioWithOutput };
   }
 
   function pickBy(predicate: (c: PreflightChoice) => boolean): void {
@@ -1499,7 +1901,7 @@ describe("traceability runAndPublish: preflight batch flow", () => {
   }
 
   it("runs each mapped scenario in a tree multi-selection once", async () => {
-    const { mgr, store, runScenarioWithOutput, runGrepWithOutput } = harness([READY_LINK, READY_B_LINK]);
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, READY_B_LINK]);
     const first = { kind: "link", link: READY_LINK };
     const second = { kind: "link", link: READY_B_LINK };
     const untraced = {
@@ -1512,7 +1914,6 @@ describe("traceability runAndPublish: preflight batch flow", () => {
       [first, { kind: "testKey", testKey: "CALC-1" }, untraced, second, first, second]
     );
 
-    expect(runGrepWithOutput).not.toHaveBeenCalled();
     expect(runScenarioWithOutput).toHaveBeenCalledTimes(2);
     expect(runScenarioWithOutput.mock.calls.map(([options]) =>
       (options as { scenarioName?: string }).scenarioName
@@ -1524,13 +1925,25 @@ describe("traceability runAndPublish: preflight batch flow", () => {
     expect(store.latest()?.selection).toEqual({ kind: "multi-select", scenarios: [A, B] });
   });
 
+  it("reports an untraced-only tree selection without opening a run", async () => {
+    const { mgr, store, runScenarioWithOutput } = harness([]);
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const untraced = { kind: "untraced", item: { scenario: A } };
+
+    await traceabilityCommands(mgr).runAndPublish(untraced, [untraced]);
+
+    expect(runScenarioWithOutput).not.toHaveBeenCalled();
+    expect(store.latest()).toBeUndefined();
+    expect(info).toHaveBeenCalledWith("1 untraced scenario was skipped.");
+    expect(info).toHaveBeenCalledWith("No mapped scenarios were selected. Nothing was run.");
+  });
+
   it("keeps a single selected tree row on the single-scenario path", async () => {
-    const { mgr, store, runScenarioWithOutput, runGrepWithOutput } = harness([READY_LINK]);
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
     const node = { kind: "link", link: READY_LINK };
 
     await traceabilityCommands(mgr).runAndPublish(node, [node, { kind: "section" }]);
 
-    expect(runGrepWithOutput).not.toHaveBeenCalled();
     expect(runScenarioWithOutput).toHaveBeenCalledOnce();
     expect(store.latest()?.selection).toEqual({ kind: "scenario", scenario: A });
   });
@@ -1602,56 +2015,98 @@ describe("traceability runAndPublish: preflight batch flow", () => {
 
     expect(runScenarioWithOutput.mock.calls.map(([, target]) => target)).toEqual([
       { scenario: outline, resultLines: [9] },
-      { scenario: block, resultLines: [14, 15] },
+      { scenario: block, resultLines: [14] },
+      { scenario: block, resultLines: [15] },
       { scenario: siblingBlock, resultLines: [20] },
     ]);
   });
 
-  it("resolves all-mapped, classifies, and runs the whole set in one combined-grep on local-only", async () => {
-    const { mgr, store, runGrepWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
+  it("resolves all-mapped, classifies, and runs each exact ref on local-only", async () => {
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
     pickBy((c) => c.kind === "run" && c.outcome === "local-only");
-    await traceabilityCommands(mgr).runAndPublish();
-    expect(runGrepWithOutput).toHaveBeenCalledTimes(1);
-    expect(runGrepWithOutput.mock.calls[0]![0]).toEqual(["A", "B"]);
+    await publishCommands(mgr).runAndPublishSelection({ kind: "all-mapped" });
+    expect(runScenarioWithOutput.mock.calls.map(([options]) =>
+      (options as { scenarioName?: string }).scenarioName
+    )).toEqual(["A", "B"]);
     expect(store.latest()?.preflight).toEqual([
       { scenario: B, testKey: "CALC-2", state: "invalid-key", outcome: "local-only" },
     ]);
   });
 
-  it("rebuilds the grep without the flagged scenario and records its exclusion on exclude", async () => {
-    const { mgr, store, runGrepWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
+  it("drops the flagged exact invocation and records its exclusion", async () => {
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
     pickBy((c) => c.kind === "run" && c.outcome === "exclude");
-    await traceabilityCommands(mgr).runAndPublish();
-    // The combined grep runs only the ready scenario; the flagged one is surgically removed.
-    expect(runGrepWithOutput).toHaveBeenCalledTimes(1);
-    expect(runGrepWithOutput.mock.calls[0]![0]).toEqual(["A"]);
+    await publishCommands(mgr).runAndPublishSelection({ kind: "all-mapped" });
+    expect(runScenarioWithOutput).toHaveBeenCalledOnce();
+    expect((runScenarioWithOutput.mock.calls[0]![0] as { scenarioName?: string }).scenarioName)
+      .toBe("A");
     expect(store.latest()?.preflight).toEqual([
       { scenario: B, testKey: "CALC-2", state: "invalid-key", outcome: "exclude" },
     ]);
   });
 
+  // The board shows one project at a time. Running "all mapped" from its title bar has to mean all
+  // mapped in what the board is showing, or it runs (and publishes) every other project too.
+  it("runs the all-mapped button inside the board's project scope", async () => {
+    const payLink: TraceLink = {
+      testKey: "PAY-9",
+      scenario: B,
+      reqKeys: [],
+      meta: { key: "PAY-9", testType: { name: "Cucumber", kind: "Gherkin" } },
+    };
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, payLink], {
+      get: () => "CALC",
+      set: () => undefined,
+    });
+
+    await traceabilityCommands(mgr).runAndPublishAllMapped();
+
+    expect(runScenarioWithOutput).toHaveBeenCalledOnce();
+    expect((runScenarioWithOutput.mock.calls[0]![0] as { scenarioName?: string }).scenarioName)
+      .toBe("A");
+    expect(store.latest()?.selection).toEqual({ kind: "all-mapped", project: "CALC" });
+  });
+
+  it("runs every mapped project when the board is scoped to All Projects", async () => {
+    const payLink: TraceLink = {
+      testKey: "PAY-9",
+      scenario: B,
+      reqKeys: [],
+      meta: { key: "PAY-9", testType: { name: "Cucumber", kind: "Gherkin" } },
+    };
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, payLink]);
+
+    await traceabilityCommands(mgr).runAndPublishAllMapped();
+
+    expect(runScenarioWithOutput.mock.calls.map(([options]) =>
+      (options as { scenarioName?: string }).scenarioName
+    )).toEqual(["A", "B"]);
+    expect(store.latest()?.selection).toEqual({ kind: "all-mapped" });
+  });
+
   it("runs nothing and seals nothing when the preflight is cancelled", async () => {
-    const { mgr, store, runGrepWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, FLAGGED_LINK]);
     vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
     const info = vi.spyOn(vscode.window, "showInformationMessage");
-    await traceabilityCommands(mgr).runAndPublish();
-    expect(runGrepWithOutput).not.toHaveBeenCalled();
+    await publishCommands(mgr).runAndPublishSelection({ kind: "all-mapped" });
+    expect(runScenarioWithOutput).not.toHaveBeenCalled();
     expect(store.latest()).toBeUndefined();
     expect(String(info.mock.calls.at(-1)?.[0])).toContain("cancelled");
   });
 
   it("runs directly with no quick-pick when every scenario is ready", async () => {
-    const { mgr, store, runGrepWithOutput } = harness([READY_LINK]);
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
     const quickPick = vi.spyOn(vscode.window, "showQuickPick");
-    await traceabilityCommands(mgr).runAndPublish();
+    await publishCommands(mgr).runAndPublishSelection({ kind: "all-mapped" });
     expect(quickPick).not.toHaveBeenCalled();
-    expect(runGrepWithOutput).toHaveBeenCalledTimes(1);
-    expect(runGrepWithOutput.mock.calls[0]![0]).toEqual(["A"]);
+    expect(runScenarioWithOutput).toHaveBeenCalledOnce();
+    expect((runScenarioWithOutput.mock.calls[0]![0] as { scenarioName?: string }).scenarioName)
+      .toBe("A");
     expect(store.latest()?.preflight).toEqual([]);
   });
 
   it("wires the progress cancel token to the abort controller and seals cancelled", async () => {
-    const { mgr, store, runGrepWithOutput } = harness([READY_LINK]);
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
     // A cancelled progress token fires immediately; the batch must abort before dispatching and seal
     // the artifact `cancelled`.
     vi.spyOn(vscode.window, "withProgress").mockImplementation((_opts, task) =>
@@ -1660,8 +2115,8 @@ describe("traceability runAndPublish: preflight batch flow", () => {
         { isCancellationRequested: true, onCancellationRequested: (cb: () => void) => { cb(); return { dispose: () => {} }; } }
       )
     );
-    await traceabilityCommands(mgr).runAndPublish();
-    expect(runGrepWithOutput).not.toHaveBeenCalled();
+    await publishCommands(mgr).runAndPublishSelection({ kind: "all-mapped" });
+    expect(runScenarioWithOutput).not.toHaveBeenCalled();
     expect(store.latest()?.state).toBe("cancelled");
   });
 });
@@ -1794,6 +2249,47 @@ describe("traceability openBoard command handler", () => {
     openBoard(mgr);
     expect(win.__webviewPanels).toHaveLength(0);
     expect(String(info.mock.calls[0]?.[0])).toContain("Enable the Traceability panel");
+  });
+
+  it("surfaces gateway busy admission once to a board caller", async () => {
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(fakeSubsystem());
+    vi.spyOn(publishCommands(mgr), "runAndPublishSelected")
+      .mockRejectedValue(new ExecutionAlreadyRunningError());
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+
+    traceabilityBoardDeps(mgr).runSelected(["CALC-1"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(warning).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith("A test run is already in progress.");
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a sealed partial infrastructure failure once to a board caller", async () => {
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(fakeSubsystem());
+    vi.spyOn(publishCommands(mgr), "runAndPublishSelected").mockRejectedValue(new ExecutionFailure({
+      state: "partial",
+      results: [],
+      output: "worker stopped\n",
+      passed: 0,
+      failed: 0,
+      durationMs: 2,
+      artifactId: "run-partial",
+      failure: "worker stopped",
+    }));
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+
+    traceabilityBoardDeps(mgr).runSelected(["CALC-1"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(error).toHaveBeenCalledOnce();
+    expect(String(error.mock.calls[0]?.[0])).toContain("worker stopped");
+    expect(String(error.mock.calls[0]?.[0])).toContain("partial run was saved");
+    expect(warning).not.toHaveBeenCalled();
   });
 });
 

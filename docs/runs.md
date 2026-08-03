@@ -43,7 +43,7 @@ Use **Run with @tag** above a feature, or configure a default tag expression wit
 
 ### Run in parallel
 
-Choose **Run All Tests in Parallel** from the Testing view, or from the Command Palette with a `.feature` file open. The first run asks for a worker count and remembers it. You can also enable workers through `playwrightBddRunner.parallelExecution` and set `playwrightBddRunner.maxParallelProcesses`.
+Choose **Run All Tests in Parallel** from the Testing view or the Command Palette. The first run asks for a worker count and remembers it. You can also enable workers through `playwrightBddRunner.parallelExecution` and set `playwrightBddRunner.maxParallelProcesses`.
 
 The worker count controls concurrency that Playwright permits across files and projects. A feature normally generates one spec file, so hundreds of scenarios in that one feature do not become parallel solely because Specwright passes `--workers`. Use Playwright's `fullyParallel` configuration when you deliberately want tests within one generated file to run in parallel.
 
@@ -103,6 +103,8 @@ Use VS Code's **Stop** action in the Testing view. For a feature or scenario run
 ## Commands
 
 Palette run and debug commands use the active `.feature` file. If none is open, select a feature file; scenario commands then use the scenario at the cursor or ask you to choose one. Commands that run with tags also ask for a tag expression.
+
+**Generate Missing Step Definitions** and **Go to Step Definition** act on the file in the editor, so the palette lists them only while a `.feature` file is open. The commands in the table below are always listed.
 
 | Task | Commands |
 | --- | --- |

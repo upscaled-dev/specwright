@@ -393,13 +393,13 @@ export class TraceabilityAuthoringCommands {
   }
 
   /**
-   * Push one mapped scenario's local Gherkin to its remote test. The board's row passes its
-   * {scenario, key}; a palette invocation has neither and is pointed at the row. Nothing is written
-   * before a fresh read of the remote text agrees with the synced baseline (`runPushGherkin`), and one
-   * modal names the test before that write.
+   * Push one mapped scenario's local Gherkin to its remote test. The board's row button is the only
+   * entry point, passing its {scenario, key}; a message that arrives without them is pointed back at
+   * the row. Nothing is written before a fresh read of the remote text agrees with the synced baseline
+   * (`runPushGherkin`), and one modal names the test before that write.
    *
-   * Serialized like the bulk create: the palette entry and every row button are doors onto the same
-   * remote writes, so an invocation while one is running joins it instead of starting a second.
+   * Serialized like the bulk create: every row button is a door onto the same remote writes, so an
+   * invocation while one is running joins it instead of starting a second.
    */
   public pushScenarioText(scenario?: string, key?: string): Promise<void> {
     if (this.pushInFlight) {

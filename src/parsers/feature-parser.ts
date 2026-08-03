@@ -2,12 +2,31 @@ import * as fs from "fs";
 import * as vscode from "vscode";
 import { OutlineExampleRow, OutlineStub, ParsedFeature, RegularScenario, Scenario } from "../types/index";
 import { Logger } from "../utils/logger";
-import { SCENARIO_KEYWORDS, scenarioGherkinSlice } from "./gherkin-slice";
+import {
+  docStringFenceState,
+  docStringMask,
+  SCENARIO_KEYWORDS,
+  scenarioGherkinSlice,
+  scenarioScope,
+} from "./gherkin-slice";
 import { TAG_TOKEN_PATTERN } from "./tag-regex";
 import { substituteOutlineValues } from "./outline-values";
 
 export function isOutlineExampleRow(s: Scenario): s is OutlineExampleRow {
   return s.isScenarioOutline && "examplesBlockLineNumber" in s;
+}
+
+/** The outline a parsed scenario belongs to, for a caller holding only a line and/or a title. */
+export function outlineNameForScenario(
+  parsed: ParsedFeature | undefined,
+  lineNumber: number | undefined,
+  scenarioName: string | undefined
+): string | undefined {
+  if (!scenarioName) {return undefined;}
+  const match = parsed?.scenarios.find(
+    (scenario) => scenario.name === scenarioName && (lineNumber === undefined || scenario.lineNumber === lineNumber)
+  );
+  return match?.isScenarioOutline ? match.outlineName : undefined;
 }
 
 /**
@@ -142,7 +161,7 @@ export class FeatureParser {
 
     let pendingTags: string[] = [];
     let featureTags: string[] = [];
-    let docStringDelimiter: string | null = null;
+    let docStringDelimiter: string | undefined;
     let currentScenario: ScenarioDraft | null = null;
     let currentOutline: OutlineCollect | null = null;
     let currentExamplesBlock: ExamplesBlock | null = null;
@@ -182,15 +201,9 @@ export class FeatureParser {
       const trimmed = rawLine.trim();
 
       // Docstring content must never be parsed as steps, scenarios, or tags.
-      if (docStringDelimiter) {
-        if (trimmed.startsWith(docStringDelimiter)) {
-          docStringDelimiter = null;
-        }
-        lineNumber++;
-        continue;
-      }
-      if (trimmed.startsWith(`"""`) || trimmed.startsWith("```")) {
-        docStringDelimiter = trimmed.startsWith(`"""`) ? `"""` : "```";
+      const fence = docStringFenceState(docStringDelimiter, trimmed);
+      docStringDelimiter = fence.fence;
+      if (fence.inString) {
         lineNumber++;
         continue;
       }
@@ -458,32 +471,21 @@ export class FeatureParser {
   }
 
   /**
-   * Calculate the range for a scenario (from scenario line to next scenario or end of file)
+   * The range a scenario spans, anchored on its keyword line (where its CodeLens appears) and ending
+   * at the last line of its block.
    * @param lines - Array of file lines
    * @param scenarioLineNumber - 1-based line number of the scenario
-   * @returns Range object spanning the scenario
    */
   private getScenarioRange(
     lines: string[],
     scenarioLineNumber: number
   ): vscode.Range {
-    const startLine = scenarioLineNumber - 1; // Convert to 0-based
-    let endLine = startLine;
-
-    // Stop at the next scenario (any keyword synonym), a Rule, or the next Feature.
-    for (let i = scenarioLineNumber; i < lines.length; i++) {
-      const line = lines[i]?.trim() ?? "";
-      if (
-        SCENARIO_KEYWORDS.some((k) => line.startsWith(k)) ||
-        line.startsWith("Rule:") ||
-        line.startsWith("Feature:")
-      ) {
-        break;
-      }
-      endLine = i;
-    }
-
-    return new vscode.Range(startLine, 0, endLine, 0);
+    return new vscode.Range(
+      scenarioLineNumber - 1,
+      0,
+      scenarioScope(lines, scenarioLineNumber).end,
+      0
+    );
   }
 
   /**
@@ -508,12 +510,18 @@ export class FeatureParser {
     const scenarioOutlineExamples =
       parsedFeature?.scenarios.filter(isOutlineExampleRow) ?? [];
 
+    // A `Scenario:` inside a doc string is text, not a scenario: the parser skips it, so a lens there
+    // would offer to run something that does not exist.
+    const fenced = docStringMask(lines);
+
     for (const line of lines) {
       const trimmed = line.trim();
 
       // SCENARIO_KEYWORDS is ordered longest-prefix first, so "Scenario Outline:" wins over
       // "Scenario:" and the synonyms ("Scenario Template:", "Example:") get lenses too.
-      const scenarioKeyword = SCENARIO_KEYWORDS.find((k) => trimmed.startsWith(k));
+      const scenarioKeyword = fenced[lineNumber - 1]
+        ? undefined
+        : SCENARIO_KEYWORDS.find((k) => trimmed.startsWith(k));
       if (scenarioKeyword) {
         const isScenarioOutline =
           scenarioKeyword === "Scenario Outline:" || scenarioKeyword === "Scenario Template:";

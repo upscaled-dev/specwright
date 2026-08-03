@@ -254,7 +254,7 @@ describe("publishRunOptions", () => {
     expect(publishRunOptions(deps([artifact({ state: "cancelled" })]))).toEqual([]);
   });
 
-  it("lets the board's scope outrank the run-derived prefill, exactly as the flow does", () => {
+  it("uses the live board scope for an old artifact without historical scope", () => {
     const options = publishRunOptions({ ...deps([artifact()]), selectedProjectKey: "shop" });
     expect(options[0]!.project).toEqual({ value: "SHOP", fromDerivation: false, fromScope: true });
   });
@@ -282,11 +282,41 @@ describe("runPublishFlow: project prefill derivation", () => {
     expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "", fromDerivation: false });
   });
 
-  it("lets the board's project selection outrank the derived key, hinting the scope not a derivation", async () => {
+  it("uses the board's project selection for an old artifact without historical scope", async () => {
     const cap = captureModel({ selectedProjectKey: "SHOP", defaultProjectKey: "PAY" });
     const run = artifact({ results: [mapped("a", "CALC-1"), mapped("b", "CALC-2")] });
     await runPublishFlow(deps([run], cap.over));
     expect(cap.models[0]!.runs[0]!.project).toEqual({ value: "SHOP", fromDerivation: false, fromScope: true });
+  });
+
+  it("prefills from the project scope stored on an all-mapped run", async () => {
+    const cap = captureModel({ defaultProjectKey: "PAY" });
+    const run = artifact({
+      selection: { kind: "all-mapped", project: "CALC" },
+      results: [mapped("a", "PAY-1")],
+    });
+    await runPublishFlow(deps([run], cap.over));
+    expect(cap.models[0]!.runs[0]!.project).toEqual({
+      value: "CALC",
+      fromDerivation: false,
+      fromScope: true,
+    });
+  });
+
+  it("keeps a CALC run's historical scope after the live board moves to SHOP", async () => {
+    const cap = captureModel({ selectedProjectKey: "SHOP", defaultProjectKey: "PAY" });
+    const run = artifact({
+      selection: { kind: "all-mapped", project: "CALC" },
+      results: [mapped("a", "CALC-1")],
+    });
+
+    await runPublishFlow(deps([run], cap.over));
+
+    expect(cap.models[0]!.runs[0]!.project).toEqual({
+      value: "CALC",
+      fromDerivation: false,
+      fromScope: true,
+    });
   });
 
   it("normalizes the selection the way the dropdown does before it becomes the prefill", async () => {

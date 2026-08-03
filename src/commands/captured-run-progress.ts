@@ -5,6 +5,28 @@ import {
   type RunProgressSession,
 } from "../core/run-progress";
 import type { RunOutputResult } from "../core/test-executor";
+import type { ExecutionGateway, RunIntent } from "../core/run-contracts";
+import type { PlaywrightJsonParser } from "../utils/playwright-json-parser";
+import type { Logger } from "../utils/logger";
+import { runIntentWithObserver } from "../ui/execution-adapter";
+
+/**
+ * Send captured runner output from every non-Test Explorer entry point to Specwright's output log.
+ * These commands run the tests once through the captured executor path (no live terminal, no Test
+ * Results stream), so without this echo the user would see no output at all.
+ */
+export function logCapturedRunOutput(
+  logger: Logger,
+  label: string,
+  output: string,
+  error?: string
+): void {
+  const parts = output.trim() === "" ? [] : [output];
+  if (error && !output.includes(error)) {parts.push(error);}
+  if (parts.length === 0) {return;}
+  logger.info(`${label} output:\n${parts.join("\n")}`);
+  logger.showOutput();
+}
 
 /** Run one captured command with cancellable notification and live completion counts. */
 export async function runCapturedWithProgress(
@@ -40,4 +62,26 @@ export async function runCapturedWithProgress(
     session?.end();
     throw error;
   }
+}
+
+export function runGatewayWithProgress(
+  title: string,
+  session: RunProgressSession | undefined,
+  gateway: ExecutionGateway,
+  intent: RunIntent,
+  parser: PlaywrightJsonParser,
+  workingDir: string
+): Promise<RunOutputResult> {
+  return runCapturedWithProgress(
+    title,
+    session,
+    (signal, progress) => runIntentWithObserver(
+      gateway,
+      intent,
+      signal,
+      progress,
+      parser,
+      workingDir
+    )
+  );
 }

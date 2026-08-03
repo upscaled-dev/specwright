@@ -88,6 +88,9 @@ interface CreateTestPlanMessage {
 interface CreateTestExecutionMessage {
   type: "createTestExecution";
 }
+interface RunSelectedMessage {
+  type: "runSelected";
+}
 type BoardIncoming =
   | SearchMessage
   | ColumnSearchMessage
@@ -103,7 +106,8 @@ type BoardIncoming =
   | BulkCreateMessage
   | CreateTestSetMessage
   | CreateTestPlanMessage
-  | CreateTestExecutionMessage;
+  | CreateTestExecutionMessage
+  | RunSelectedMessage;
 
 // One handler per message type, so a new board verb is a new line rather than another branch. Exhaustive
 // by construction: a message type with no route is a compile error.
@@ -156,6 +160,7 @@ interface RenderMessage {
   testSetVerb: CreateVerb;
   testPlanVerb: CreateVerb;
   executionVerb: CreateVerb;
+  runSelectedVerb: CreateVerb;
 }
 
 // The sync progress strip above the panes. The host composes the whole line, so the webview only paints
@@ -203,6 +208,11 @@ export interface BoardSurfaceDeps {
   // The Executions tab's button: one empty remote execution in the scoped project, for a later publish to
   // append to. It reads no selection, so only the scope decides whether it can run.
   createTestExecution(): void;
+  describeRunSelected(testKeys: readonly string[]): {
+    readonly runnable: number;
+    readonly skipped: number;
+  };
+  runSelected(testKeys: readonly string[]): void;
   // The scope selector's options, read on the same beat as the model: a sync's new catalogue projects
   // appear with the snapshot that carries them. A settings edit alone does not repaint the board, so the
   // list can lag a just-changed sync scope until the next rebuild. That staleness is the price of one
@@ -310,6 +320,7 @@ export class BoardSurface {
     createTestSet: () => this.deps.createTestSet(),
     createTestPlan: () => this.deps.createTestPlan(),
     createTestExecution: () => this.deps.createTestExecution(),
+    runSelected: () => this.deps.runSelected([...this.selectedTestKeys]),
   };
 
   private handle(message: BoardIncoming): void {
@@ -469,6 +480,26 @@ export class BoardSurface {
     };
   }
 
+  private runSelectedVerb(): CreateVerb {
+    const checked = this.selectedTestKeys.size;
+    const label = "Run and publish selected";
+    if (checked === 0) {
+      return { label, enabled: false, hint: "Check mapped tests to run and publish their scenarios." };
+    }
+    const { runnable, skipped } = this.deps.describeRunSelected([...this.selectedTestKeys]);
+    const skippedText = skipped === 0
+      ? ""
+      : ` ${skipped} checked ${skipped === 1 ? "test has" : "tests have"} no mapped scenario and will be skipped.`;
+    if (runnable === 0) {
+      return { label, enabled: false, hint: `No mapped scenarios will run.${skippedText}` };
+    }
+    return {
+      label,
+      enabled: true,
+      hint: `${runnable} mapped ${runnable === 1 ? "scenario" : "scenarios"} will run and publish.${skippedText}`,
+    };
+  }
+
   // What a section's meta says beyond its page arithmetic: `total` is the count the header shows, before
   // the column search but after the header one, and the two flags are the ones the webview must not work
   // out from its own inputs.
@@ -542,6 +573,7 @@ export class BoardSurface {
       testSetVerb: this.containerVerb("Test Set", project),
       testPlanVerb: this.containerVerb("Test Plan", project),
       executionVerb: this.executionVerb(project),
+      runSelectedVerb: this.runSelectedVerb(),
     };
     this.host.post(message);
   }

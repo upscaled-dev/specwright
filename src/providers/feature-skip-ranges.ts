@@ -1,23 +1,19 @@
+import { docStringFenceState } from "../parsers/gherkin-slice";
+
 export function computeSkipRanges(text: string): Set<number> {
   const skip = new Set<number>();
   const lines = text.split("\n");
-  let docStringDelimiter: string | null = null;
+  let docStringDelimiter: string | undefined;
   let inExamplesBlock = false;
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i] ?? "";
     const trimmed = raw.trim();
 
-    if (docStringDelimiter) {
+    const fence = docStringFenceState(docStringDelimiter, trimmed);
+    docStringDelimiter = fence.fence;
+    if (fence.inString) {
       skip.add(i);
-      // A docstring closes only with the delimiter type that opened it.
-      if (trimmed.startsWith(docStringDelimiter)) {docStringDelimiter = null;}
-      continue;
-    }
-
-    if (trimmed.startsWith(`"""`) || trimmed.startsWith("```")) {
-      skip.add(i);
-      docStringDelimiter = trimmed.startsWith(`"""`) ? `"""` : "```";
       continue;
     }
 

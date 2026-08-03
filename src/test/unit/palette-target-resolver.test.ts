@@ -32,15 +32,17 @@ describe("palette target resolver", () => {
     "    | 2 |",
   ].join("\n");
 
-  it("returns an outline target for its header and body", async () => {
+  // An outline header carries no line: the declaration line has no generated spec line, so the runner
+  // greps the outline title and runs every row.
+  it("returns a line-less outline target for its header and body", async () => {
     activeFeature(outline, 2);
     await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
-      filePath: "/ws/a.feature", lineNumber: 3, scenarioName: "Divide", outlineName: "Divide",
+      filePath: "/ws/a.feature", scenarioName: "Divide", outlineName: "Divide",
     });
 
     activeFeature(outline, 3);
     await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
-      filePath: "/ws/a.feature", lineNumber: 3, scenarioName: "Divide", outlineName: "Divide",
+      filePath: "/ws/a.feature", scenarioName: "Divide", outlineName: "Divide",
     });
   });
 
@@ -52,12 +54,104 @@ describe("palette target resolver", () => {
     });
   });
 
+  it("returns the outline itself when it has no Examples rows", async () => {
+    activeFeature(["Feature: Palette", "Scenario Outline: Empty", "  Given <n>"].join("\n"), 1);
+
+    await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
+      filePath: "/ws/a.feature", scenarioName: "Empty", outlineName: "Empty",
+    });
+  });
+
   it("includes leading tags in a regular scenario scope", async () => {
     activeFeature(["Feature: Palette", "", "@fast", "Scenario: Tagged", "  Given a step"].join("\n"), 2);
 
     await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
       filePath: "/ws/a.feature", lineNumber: 4, scenarioName: "Tagged",
     });
+  });
+
+  it("resolves the scenario at the cursor in a CRLF document", async () => {
+    activeFeature([
+      "Feature: Palette",
+      "",
+      "@fast",
+      "Scenario: Tagged",
+      "  Given a step",
+      "",
+      "Scenario: Next",
+      "  Given another step",
+    ].join("\r\n"), 4);
+
+    await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
+      filePath: "/ws/a.feature", lineNumber: 4, scenarioName: "Tagged",
+    });
+  });
+
+  it("sends a cursor inside a Background block to the scenario picker", async () => {
+    activeFeature([
+      "Feature: Palette",
+      "Background:",
+      "  Given a shared step",
+      "Scenario: After",
+      "  Given a step",
+    ].join("\n"), 2);
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockImplementation((items) =>
+      Promise.resolve((items as Array<unknown>)[0] as never)
+    );
+
+    await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
+      filePath: "/ws/a.feature", lineNumber: 4, scenarioName: "After",
+    });
+    expect(quickPick).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a non-feature active editor and picks a discovered feature", async () => {
+    window.activeTextEditor = {
+      document: fakeDoc("const x = 1;\n", "/ws/a.steps.ts"),
+      selection: { active: { line: 0 } },
+    };
+    const filePath = writeTempFeature("Feature: Palette\n\nScenario: picked\n  Given a step\n");
+    const context = makeContext({
+      discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue([filePath]) } as never,
+    });
+    vi.spyOn(vscode.window, "showQuickPick").mockImplementation((items) =>
+      Promise.resolve((items as Array<unknown>)[0] as never)
+    );
+
+    try {
+      await expect(resolvePaletteScenario(context)).resolves.toEqual({
+        filePath, lineNumber: 3, scenarioName: "picked",
+      });
+    } finally {
+      fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+    }
+  });
+
+  it("tells the user when discovery found no feature files", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick");
+    const context = makeContext({
+      discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue([]) } as never,
+    });
+
+    await expect(resolvePaletteFeature(context)).resolves.toBeUndefined();
+
+    expect(String(info.mock.calls[0]?.[0])).toBe("No feature files were discovered.");
+    expect(quickPick).not.toHaveBeenCalled();
+  });
+
+  it("saves an unsaved feature buffer before resolving a target from it", async () => {
+    const save = vi.fn().mockResolvedValue(true);
+    const document = fakeDoc("Feature: Palette\nScenario: Edited\n  Given a step\n");
+    window.activeTextEditor = {
+      document: { ...document, isDirty: true, save },
+      selection: { active: { line: 2 } },
+    };
+
+    await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
+      filePath: "/ws/a.feature", lineNumber: 2, scenarioName: "Edited",
+    });
+    expect(save).toHaveBeenCalledOnce();
   });
 
   it("keeps Scenario-looking doc-string text inside its containing scenario", async () => {
@@ -74,6 +168,46 @@ describe("palette target resolver", () => {
     await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
       filePath: "/ws/a.feature", lineNumber: 2, scenarioName: "Actual",
     });
+  });
+
+  // A doc string that never closes must not let the scenario above it claim the lines below. The
+  // parser reads everything after the open fence as string content, so the scenario below is not
+  // runnable; the cursor there must reach the picker rather than silently run the one above.
+  it("stops an unterminated doc string from claiming the lines below it", async () => {
+    const feature = [
+      "Feature: Palette",
+      "Scenario: Broken",
+      "  Then the text is:",
+      "    \"\"\"",
+      "    unterminated",
+      "",
+      "Scenario: Next",
+      "  Given a step",
+    ].join("\n");
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+
+    activeFeature(feature, 4);
+    await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
+      filePath: "/ws/a.feature", lineNumber: 2, scenarioName: "Broken",
+    });
+    expect(quickPick).not.toHaveBeenCalled();
+
+    activeFeature(feature, 7);
+    await expect(resolvePaletteScenario(makeContext())).resolves.toBeUndefined();
+    expect(quickPick).toHaveBeenCalledOnce();
+  });
+
+  it("stops the run when the active buffer refuses to save", async () => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const document = fakeDoc("Feature: Palette\nScenario: Edited\n  Given a step\n");
+    window.activeTextEditor = {
+      document: { ...document, isDirty: true, save: vi.fn().mockResolvedValue(false) },
+      selection: { active: { line: 2 } },
+    };
+
+    await expect(resolvePaletteScenario(makeContext())).resolves.toBeUndefined();
+
+    expect(String(warning.mock.calls[0]?.[0])).toContain("could not be saved");
   });
 
   it("uses the scenario picker at an adjacent scenario boundary and treats cancellation as no selection", async () => {
@@ -130,11 +264,12 @@ describe("palette target resolver", () => {
     }
   });
 
-  it("trims a palette tag expression and rejects empty input", async () => {
-    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("  @smoke  ");
+  it("trims a palette tag expression and corrects blank input in the box", async () => {
+    const input = vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("  @smoke  ");
     await expect(promptPaletteTags()).resolves.toBe("@smoke");
 
-    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("   ");
-    await expect(promptPaletteTags()).rejects.toThrow("Tags are required");
+    const validate = input.mock.calls[0]?.[0]?.validateInput as (value: string) => string | undefined;
+    expect(validate("   ")).toBe("A tag expression is required.");
+    expect(validate("@smoke")).toBeUndefined();
   });
 });

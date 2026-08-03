@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { CommandBuilder } from "../../core/command-builder";
 import type { Logger } from "../../utils/logger";
+import type { TestExecutionOptions } from "../../types";
 
 function loggerStub(): Logger {
   return {
@@ -50,10 +51,16 @@ function grepRegexOf(cmd: string): RegExp {
   return new RegExp(raw);
 }
 
+// The executor runs the two halves in sequence; joining them is how the built command reads.
+function scenarioCommand(builder: CommandBuilder, options: TestExecutionOptions): string {
+  const { bddgenCommand, playwrightCommand } = builder.buildScenarioCommandParts(options);
+  return bddgenCommand ? `${bddgenCommand} && ${playwrightCommand}` : playwrightCommand;
+}
+
 describe("CommandBuilder", () => {
   it("chains bddgen and playwright test for a scenario, --grep'd by name", async () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildScenarioCommand({
+    const cmd = scenarioCommand(builder, {
       filePath: "/abs/features/a.feature",
       scenarioName: "Passing scenario",
     });
@@ -63,7 +70,7 @@ describe("CommandBuilder", () => {
 
   it("greps by outlineName verbatim when provided via TestExecutionOptions", async () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildScenarioCommand({
+    const cmd = scenarioCommand(builder, {
       filePath: "/abs/features/a.feature",
       scenarioName: "1: Test outline - input: hello, expected: world",
       outlineName: "Test outline",
@@ -73,7 +80,7 @@ describe("CommandBuilder", () => {
 
   it("greps by outlineName verbatim when the name itself contains ' - '", async () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildScenarioCommand({
+    const cmd = scenarioCommand(builder, {
       filePath: "/abs/features/a.feature",
       scenarioName: "1: Login - Happy Path - name: Alice - Smith",
       outlineName: "Login - Happy Path",
@@ -86,7 +93,7 @@ describe("CommandBuilder", () => {
     // The Test Explorer's Scenario Outline node runs with outlineName but no scenarioName.
     // Without a --grep here Playwright would run the ENTIRE suite (the "16 passed" bug).
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildScenarioCommand({
+    const cmd = scenarioCommand(builder, {
       filePath: "/abs/features/a.feature",
       outlineName: "Feature-level outline for totals",
     });
@@ -95,7 +102,7 @@ describe("CommandBuilder", () => {
 
   it("greps by scenarioName when outlineName is undefined (non-outline scenario)", async () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildScenarioCommand({
+    const cmd = scenarioCommand(builder, {
       filePath: "/abs/features/a.feature",
       scenarioName: "Some plain scenario",
     });
@@ -107,7 +114,7 @@ describe("CommandBuilder", () => {
     // so a literal `<role>` grep only matched the parent describe; `< >` are also cmd.exe/PowerShell
     // redirection operators, which broke the run on Windows ("cannot find the tests").
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildScenarioCommand({
+    const cmd = scenarioCommand(builder, {
       filePath: "/abs/features/login.feature",
       outlineName: "Login as <role> with <plan> plan",
     });
@@ -124,7 +131,7 @@ describe("CommandBuilder", () => {
     // Grep on an outline title can't isolate one example row; playwright-bdd substitutes the
     // example values into the title, so a resolved `<spec>:<pwTestLine>` target wins instead.
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildScenarioCommand({
+    const cmd = scenarioCommand(builder, {
       filePath: "/abs/features/products.feature",
       scenarioName: "1: Create a product (<name>) - name: Widget",
       outlineName: "Create a product (<name>)",
@@ -150,7 +157,7 @@ describe("CommandBuilder", () => {
 
   it("falls back to name --grep when no specLineTarget is resolved", async () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildScenarioCommand({
+    const cmd = scenarioCommand(builder, {
       filePath: "/abs/features/products.feature",
       outlineName: "Create a product (<name>)",
       lineNumber: 10,
@@ -183,6 +190,25 @@ describe("CommandBuilder", () => {
     const cmd = await builder.buildAllTestsCommand();
     expect(cmd).not.toContain("bddgen");
     expect(cmd).toMatch(/^npx playwright test/);
+  });
+
+  it("skips bddgen on every route when bddgenCommand is empty, tag expression or not", () => {
+    const builder = CommandBuilder.create(makeConfig({ bddgenCommand: "" }) as never, loggerStub());
+    const expression = "@smoke and not (@wip or @slow)";
+
+    expect(builder.buildTagCommand(expression)).toMatch(/^npx playwright test/);
+    expect(builder.buildPathFilterCommand("features/a\\.feature", expression))
+      .not.toContain("bddgen");
+    expect(builder.buildScenarioCommandParts({
+      filePath: "/abs/features/a.feature",
+      scenarioName: "A",
+      tags: expression,
+    }).bddgenCommand).toBeUndefined();
+    expect(builder.buildDebugCommandParts({
+      filePath: "/abs/features/a.feature",
+      scenarioName: "A",
+      tags: expression,
+    }).bddgenCommand).toBeUndefined();
   });
 
   it("adds --workers when parallel execution is enabled", async () => {
@@ -254,29 +280,15 @@ describe("CommandBuilder", () => {
     expect(playwrightCommand).not.toContain("--reporter");
   });
 
-  it("greps the feature basename when no scenario is targeted for debug", () => {
+  it("pins a feature-level debug to its generated spec, never a basename grep", () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
     const { playwrightCommand } = builder.buildDebugCommandParts({
       filePath: "/abs/features/login.feature",
+      specFileFilter: "\\.features-gen/features/login\\.feature\\.spec\\.js(?=[./]|$)",
     });
     expect(playwrightCommand).not.toContain("--debug");
-    expect(playwrightCommand).toContain('--grep "login"');
-  });
-
-  it("filters by feature-file basename for a feature run when no title is known", async () => {
-    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildFeatureCommand({ filePath: "/abs/features/login.feature" });
-    expect(cmd).toContain('--grep "login"');
-  });
-
-  it("greps by the Feature title when provided (not the filename, which matched other features)", async () => {
-    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = await builder.buildFeatureCommand({
-      filePath: "/abs/fixtures/sample.feature",
-      featureName: "Fixture feature",
-    });
-    expect(cmd).toContain('--grep "Fixture feature"');
-    expect(cmd).not.toContain('--grep "sample"');
+    expect(playwrightCommand).not.toContain("--grep");
+    expect(playwrightCommand).toContain(".features-gen/features/login");
   });
 
   it("adds --workers when setForceParallel(true) is set, even if parallelExecution=false", async () => {
@@ -309,19 +321,48 @@ describe("CommandBuilder", () => {
     expect(cmd).not.toContain("--grep");
   });
 
-  it("collapses several scenarios into one UNANCHORED, regex-escaped combined --grep (all-mapped)", () => {
+  it("keeps a path filter and tag expression in the same generated run", () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
-    const cmd = builder.buildGrepCommand(["Add to cart", "Checkout (guest)"]);
-    expect(cmd).toMatch(/^npx bddgen && npx playwright test --grep/);
-    // Unanchored like every grep here: Playwright's grep target is `path › describes › title › tags`
-    // joined, so a `^`/`$` would match nothing (the anchored form ran ZERO tests). Behavioral proof:
-    // reconstruct the regex from the (posix-shell-quoted) --grep argument and run it against a
-    // realistic grep target for each member scenario.
+    const cmd = builder.buildPathFilterCommand(
+      "features/login\\.feature",
+      "@smoke and not @wip"
+    );
+    expect(cmd).toContain('npx bddgen --tags "@smoke and not @wip"');
+    expect(cmd).toContain('npx playwright test "features/login');
+    expect(cmd).not.toContain("--grep");
+  });
+
+  it("scopes several titles of one file to its positional filter and one escaped --grep", () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const cmd = builder.buildPathFilterCommand(
+      "features/cart\\.feature",
+      undefined,
+      ["Add to cart", "Checkout (guest)"]
+    );
+    expect(cmd).toMatch(/^npx bddgen && npx playwright test "features\/cart/);
+    // Behavioral proof: reconstruct the regex from the (posix-shell-quoted) --grep argument and run
+    // it against a realistic grep target, which Playwright joins with spaces as
+    // `<spec path> <describes> <title> <tags>`.
     const regex = grepRegexOf(cmd);
     expect(regex.test("features/cart.feature.spec.js Cart Add to cart @TEST_APEX-1")).toBe(true);
-    expect(regex.test("features/shop.feature.spec.js Shop Checkout (guest) @TEST_APEX-2")).toBe(true);
-    expect(regex.test("features/other.feature.spec.js Shop Refund order @TEST_APEX-3")).toBe(false);
+    expect(regex.test("features/cart.feature.spec.js Cart Checkout (guest) @TEST_APEX-2")).toBe(true);
+    expect(regex.test("features/cart.feature.spec.js Cart Add to cart")).toBe(true);
+    expect(regex.test("features/cart.feature.spec.js Cart Refund order @TEST_APEX-3")).toBe(false);
     // The parens in the second name are regex-escaped, so they match literal parentheses.
     expect(regex.source).toContain("Checkout \\(guest\\)");
+  });
+
+  // A titled path target greps by title inside its file, so an unanchored pattern would run every
+  // scenario whose title merely contains a selected one, publishing results for tests nobody selected.
+  it("anchors each titled path-filter --grep so a longer title is not swept in", () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const regex = grepRegexOf(
+      builder.buildPathFilterCommand("features/cart\\.feature", undefined, ["Add to cart"])
+    );
+
+    expect(regex.test("features/cart.feature.spec.js Cart Add to cart @TEST_APEX-1")).toBe(true);
+    expect(regex.test("features/cart.feature.spec.js Cart Add to cart twice @TEST_APEX-2")).toBe(false);
+    expect(regex.test("features/cart.feature.spec.js Cart Add to cartons")).toBe(false);
+    expect(regex.test("features/cart.feature.spec.js Cart Add to cart later @slow")).toBe(false);
   });
 });

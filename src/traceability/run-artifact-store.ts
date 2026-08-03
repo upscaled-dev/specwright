@@ -268,10 +268,9 @@ export class ArtifactBuilder {
     }
   }
 
-  public seal(cancelled: boolean): RunArtifact {
-    let state: RunArtifactState = "complete";
-    if (cancelled) {state = "cancelled";}
-    else if (this.invocationFailed) {state = "partial";}
+  public seal(requestedState: RunArtifactState): RunArtifact {
+    let state: RunArtifactState = requestedState;
+    if (requestedState === "complete" && this.invocationFailed) {state = "partial";}
     return {
       id: randomUUID(),
       createdAt: Date.now(),
@@ -381,12 +380,12 @@ export class RunArtifactStore implements RunArtifactStoreContract {
     this.openBuilder?.addShard(capture);
   }
 
-  public sealBatch(handle: number, cancelled: boolean): RunArtifact | undefined {
+  public sealBatch(handle: number, state: RunArtifactState): RunArtifact | undefined {
     const builder = this.openBuilder;
     if (handle !== this.openHandle || builder === undefined) {return undefined;}
     this.openBuilder = undefined;
     this.openHandle = undefined;
-    const sealed = builder.seal(cancelled);
+    const sealed = builder.seal(state);
     this.append(sealed);
     return this.artifacts.find((artifact) => artifact.id === sealed.id);
   }

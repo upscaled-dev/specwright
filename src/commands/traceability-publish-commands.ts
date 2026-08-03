@@ -2,12 +2,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { ExtensionConfig } from "../core/extension-config";
-import { TestExecutor } from "../core/test-executor";
-import { FeatureParser, isOutlineExampleRow } from "../parsers/feature-parser";
+import type { ExecutionGateway, RunInitiator } from "../core/run-contracts";
+import { FeatureParser } from "../parsers/feature-parser";
 import {
-  artifactCaptureTarget,
   BatchInvocation,
-  batchSelectionFromScenarios,
   resolveBatchSelection,
 } from "../traceability/batch-selection";
 import { BoardPanel } from "../traceability/board-panel";
@@ -41,9 +39,7 @@ import {
 import { PublishLedger } from "../traceability/publish-ledger";
 import { RunArtifactStore } from "../traceability/run-artifact-store";
 import type { ScenarioRef } from "../traceability/scenario-ref";
-import type { TraceabilitySnapshot } from "../traceability/traceability-model";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
-import type { TestExecutionOptions } from "../types";
 import { Logger } from "../utils/logger";
 import { plural } from "../utils/text";
 import { makeFeatureStepResolver } from "../xray/feature-step-resolver";
@@ -51,7 +47,9 @@ import { XrayImportError } from "../xray/execution-importers";
 import { fetchJiraAttachmentMeta, uploadJiraAttachments } from "../xray/jira-attachments";
 import { buildAttachmentsModel } from "../xray/publish-attachment-support";
 import type { XrayCredentials, XrayJiraCredentials } from "../xray/xray-credential-store";
-import { scenarioRefFromArg } from "./traceability-link-commands";
+import { boardBatchSelection, treeBatchSelection } from "./run-publish-selection";
+import { runPublishBatch } from "./run-publish-execution";
+import { logCapturedRunOutput } from "./captured-run-progress";
 
 const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
   "ready": "ready",
@@ -64,18 +62,6 @@ const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
 };
 
 const NO_PUBLISHABLE_RUNS_MESSAGE = "No local runs to publish yet. Run mapped scenarios first.";
-
-// A multi-select tree command receives the invoked node first and the whole selection second. Keep
-// only mapped scenario rows, run the invoked row first, and dedupe it from the selected array.
-function batchSelectionFromArgs(args: readonly unknown[]): BatchSelection {
-  const nodes = [args[0], ...(Array.isArray(args[1]) ? args[1] : [])];
-  const scenarios = nodes.flatMap((node) => (
-    (node as { kind?: unknown } | undefined)?.kind === "link"
-      ? [scenarioRefFromArg(node)].filter((ref): ref is ScenarioRef => ref !== undefined)
-      : []
-  ));
-  return batchSelectionFromScenarios(scenarios);
-}
 
 function clearedHistoryMessage(runs: number, entries: number): string {
   const parts: string[] = [];
@@ -99,7 +85,7 @@ export interface TraceabilityPublishCommandDeps {
   readonly siteUrl: () => string;
   readonly idleEvent: vscode.Event<void>;
   readonly runArtifactStore: RunArtifactStore | undefined;
-  readonly testExecutor: TestExecutor;
+  readonly executionGateway: ExecutionGateway;
   readonly featureParser: FeatureParser;
 }
 
@@ -113,12 +99,58 @@ export class TraceabilityPublishCommands {
       vscode.window.showInformationMessage("Enable and sync the Traceability panel before running a batch.");
       return;
     }
-    const selection = batchSelectionFromArgs(args);
+    const resolved = treeBatchSelection(args, snapshot);
+    if (resolved.skipped > 0) {
+      vscode.window.showInformationMessage(
+        `${resolved.skipped} untraced ${plural(resolved.skipped, "scenario was", "scenarios were")} skipped.`
+      );
+    }
+    if (resolved.selection.kind === "multi-select" && resolved.selection.scenarios.length === 0) {
+      vscode.window.showInformationMessage("No mapped scenarios were selected. Nothing was run.");
+      return;
+    }
+    await this.runAndPublishSelection(resolved.selection, "traceability-tree");
+  }
+
+  public async runAndPublishSelected(selectedTestKeys: readonly string[]): Promise<void> {
+    const snapshot = this.deps.subsystem()?.getSnapshot();
+    if (!snapshot) {
+      vscode.window.showInformationMessage("Enable and sync the Traceability panel before running a batch.");
+      return;
+    }
+    const resolved = boardBatchSelection(selectedTestKeys, snapshot);
+    if (resolved.skipped > 0) {
+      vscode.window.showInformationMessage(
+        `${resolved.skipped} checked ${plural(resolved.skipped, "test has", "tests have")} no mapped scenario and will be skipped.`
+      );
+    }
+    if (resolved.selection.kind === "multi-select" && resolved.selection.scenarios.length === 0) {
+      vscode.window.showInformationMessage("No mapped scenarios were selected. Nothing was run.");
+      return;
+    }
+    await this.runAndPublishSelection(resolved.selection, "coverage-board");
+  }
+
+  public async runAndPublishSelection(
+    selection: BatchSelection,
+    initiatedBy: RunInitiator = "traceability-tree"
+  ): Promise<void> {
+    const subsystem = this.deps.subsystem();
+    const snapshot = subsystem?.getSnapshot();
+    if (!subsystem || !snapshot) {
+      vscode.window.showInformationMessage("Enable and sync the Traceability panel before running a batch.");
+      return;
+    }
     const binding = subsystem.getActiveAdapter()?.automationBinding;
+    const projectOf = subsystem.getActiveAdapter()?.keyGrammar.projectOf;
 
     let sealed: RunArtifact | undefined;
     const ran = await runPreflightFlow(selection, {
-      resolve: (selected) => resolveBatchSelection(selected, subsystem.getSnapshot() ?? snapshot),
+      resolve: (selected) => resolveBatchSelection(
+        selected,
+        subsystem.getSnapshot() ?? snapshot,
+        { projectOf }
+      ),
       snapshot: () => subsystem.getSnapshot() ?? snapshot,
       classifyBinding: binding ? (meta) => binding.classify(meta) : undefined,
       ui: {
@@ -130,7 +162,7 @@ export class TraceabilityPublishCommands {
       },
       runner: {
         run: async (selected, invocations, decisions) => {
-          sealed = await this.runResolvedBatch(selected, invocations, decisions);
+          sealed = await this.runResolvedBatch(selected, invocations, decisions, initiatedBy);
         },
       },
     });
@@ -514,74 +546,20 @@ export class TraceabilityPublishCommands {
   private async runResolvedBatch(
     selection: BatchSelection,
     invocations: readonly BatchInvocation[],
-    decisions: readonly PreflightDecision[]
+    decisions: readonly PreflightDecision[],
+    initiatedBy: RunInitiator
   ): Promise<RunArtifact | undefined> {
-    const store = this.deps.runArtifactStore;
-    const captureSnapshot = this.deps.subsystem()?.getSnapshot();
-    const handle = store?.beginBatch(selection, decisions);
-    const controller = new AbortController();
-    let sealed: RunArtifact | undefined;
-    try {
-      await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: "Running batch locally…",
-          cancellable: true,
-        },
-        async (_progress, token) => {
-          token.onCancellationRequested(() => controller.abort());
-          for (const invocation of invocations) {
-            if (controller.signal.aborted) {break;}
-            await this.dispatchInvocation(invocation, controller.signal, handle, captureSnapshot);
-          }
-        }
-      );
-    } finally {
-      if (handle !== undefined) {
-        sealed = store?.sealBatch(handle, controller.signal.aborted);
-      }
-    }
-    return sealed;
-  }
-
-  private async dispatchInvocation(
-    invocation: BatchInvocation,
-    signal: AbortSignal,
-    handle: number | undefined,
-    snapshot: TraceabilitySnapshot | undefined
-  ): Promise<void> {
-    const executor = this.deps.testExecutor;
-    if (invocation.kind === "path-filter") {
-      await executor.runPathFilterWithOutput(invocation.target, signal, handle);
-      return;
-    }
-    if (invocation.kind === "grep") {
-      await executor.runGrepWithOutput(
-        invocation.refs.map((ref) => ref.outlineName ?? ref.name),
-        signal,
-        handle
-      );
-      return;
-    }
-    if (invocation.kind === "tags") {
-      await executor.runAllTestsWithTagsOutput(invocation.expression, signal, handle);
-      return;
-    }
-    const ref = invocation.ref;
-    const options: TestExecutionOptions = {
-      filePath: ref.filePath,
-      signal,
-      ...(handle !== undefined ? { artifactBatch: handle } : {}),
-    };
-    if (ref.kind === "scenario") {
-      options.scenarioName = ref.name;
-    } else {
-      options.outlineName = ref.outlineName ?? ref.name;
-    }
-    if (ref.line > 0) {options.lineNumber = ref.line;}
-    const rows = this.deps.featureParser.parseFeatureFile(ref.filePath)?.scenarios.filter(isOutlineExampleRow) ?? [];
-    const mapped = (snapshot?.links ?? []).map((link) => link.scenario);
-    await executor.runScenarioWithOutput(options, artifactCaptureTarget(ref, rows, mapped));
+    const artifactId = await runPublishBatch(
+      this.deps.executionGateway,
+      selection,
+      invocations,
+      decisions,
+      initiatedBy,
+      (output, failure) => logCapturedRunOutput(this.logger, "Traceability batch", output, failure)
+    );
+    return artifactId === undefined
+      ? undefined
+      : this.deps.runArtifactStore?.list().find((artifact) => artifact.id === artifactId);
   }
 
   public publishDelegate(): PublishDialogDelegate {

@@ -73,7 +73,10 @@ export function workspaceFolderRootFor(
   const file = comparable(filePath, caseInsensitive);
   for (const folder of folders) {
     const root = path.normalize(folder.uri.fsPath);
-    if (file.startsWith(`${comparable(root, caseInsensitive)}${path.sep}`)) {
+    const rootComparable = comparable(root, caseInsensitive);
+    // A target that IS a workspace folder root belongs to that root, not to whichever folder
+    // happens to be listed first.
+    if (file === rootComparable || file.startsWith(`${rootComparable}${path.sep}`)) {
       return root;
     }
   }
@@ -92,31 +95,43 @@ export function workspaceFolderRootFor(
 export function toPathFilterRegex(workingDir: string, target: string): string {
   const rel = path.relative(workingDir, target);
   const base = rel === "" || rel.startsWith("..") ? target : rel;
-  return base.replaceAll("\\", "/").replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = base.replaceAll("\\", "/").replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // The filter is a search regex, so without a boundary `a.feature` also matches the sibling
+  // `a.feature2.feature` and folder `sub` also matches `subdir`. The next character after a real
+  // match is always a separator (folder), the generated `.spec.js` suffix (file), or the end.
+  return `${escaped}(?=[./]|$)`;
 }
 
 /**
- * Directory of the nearest `playwright.config.*` at or above the feature file,
- * walking up to the workspace folder root (inclusive). In a monorepo this finds
- * the package that owns the playwright-bdd setup, the right cwd for `npx` /
- * `pnpm exec` to resolve the `bddgen` and `playwright` binaries, since pnpm links
- * binaries only into the `node_modules/.bin` of the package that declares them
- * (no hoisting to the workspace root).
+ * Directory of the nearest `playwright.config.*` that owns the run target: the search starts at the
+ * target itself when it is a folder (its own config owns it) or at the file's directory, and climbs
+ * only through directories that contain the target, stopping at the workspace folder root
+ * (inclusive). In a monorepo this finds the package that owns the playwright-bdd setup, the right
+ * cwd for `npx` / `pnpm exec` to resolve the `bddgen` and `playwright` binaries, since pnpm links
+ * binaries only into the `node_modules/.bin` of the package that declares them (no hoisting to the
+ * workspace root). A target outside the workspace folder has no owning config here.
  */
 export function findNearestPlaywrightConfigDir(
-  featureFilePath: string,
+  target: string,
   stopDir: string,
   caseInsensitive: boolean = process.platform === "win32"
 ): string | undefined {
-  const stop = comparable(stopDir, caseInsensitive);
-  let dir = path.dirname(path.resolve(featureFilePath));
-  for (;;) {
+  let dir = searchStartDir(target);
+  while (isSameOrInsideDir(dir, stopDir, caseInsensitive)) {
     if (PLAYWRIGHT_CONFIG_NAMES.some((name) => fs.existsSync(path.join(dir, name)))) {
       return dir;
     }
-    if (comparable(dir, caseInsensitive) === stop) {return undefined;}
     const parent = path.dirname(dir);
     if (parent === dir) {return undefined;}
     dir = parent;
   }
+  return undefined;
+}
+
+function searchStartDir(target: string): string {
+  const resolved = path.resolve(target);
+  try {
+    if (fs.statSync(resolved).isDirectory()) {return resolved;}
+  } catch { /* a path that no longer exists is treated as a file */ }
+  return path.dirname(resolved);
 }

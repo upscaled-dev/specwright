@@ -24,6 +24,7 @@ import { XrayCredentialStore } from "./xray/xray-credential-store";
 import { singleFlight } from "./utils/single-flight";
 import { PROMPTED_STATE_KEY } from "./commands/prompt-worker-count";
 import { StatusBar } from "./ui/status-bar";
+import { ExtensionExecutionGateway } from "./core/execution-gateway";
 
 let testProvider: PlaywrightBddTestProvider | undefined;
 let commandManager: CommandManager | undefined;
@@ -177,6 +178,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   // The publishable sibling of the badge store, fed at the same seams and persisted to
   // workspaceState so the last few runs survive a reload.
   const runArtifactStore = new RunArtifactStore(context.workspaceState, logger);
+  const executionGateway = new ExtensionExecutionGateway(
+    testExecutor,
+    runArtifactStore,
+    featureParser,
+    logger,
+    () => traceabilitySubsystem?.getSnapshot()?.links.map((link) => link.scenario) ?? []
+  );
   // The publish idempotency ledger (last few publishes, current-site scoped) — persisted alongside
   // the artifacts so the "already published" banner survives a reload.
   const publishLedger = new PublishLedger(context.workspaceState, logger);
@@ -186,7 +194,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   // handshake instead of racing three of them (§12 F5 finding #3).
   const probe = singleFlight(
     (deps: XrayConnectionTestDeps, options?: XrayProbeOptions) =>
-      `${deps.site} ${options?.authOnly ? "auth" : "full"}`,
+      `${deps.site}\0${options?.authOnly ? "auth" : "full"}`,
     probeXrayConnection
   );
   const publishSupport: XrayPublishSupport = {
@@ -228,6 +236,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     logger,
     config,
     testExecutor,
+    executionGateway,
     discoveryManager: TestDiscoveryManager.create(logger, config),
     organizationManager: TestOrganizationManager.create(logger),
     featureParser,
@@ -281,7 +290,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     providerRegistry.applyCurrent();
     traceabilitySubsystem.applyCurrent();
 
-    const statusBar = StatusBar.create(testExecutor);
+    const statusBar = StatusBar.create(executionGateway);
     context.subscriptions.push(statusBar);
 
     isActivated = true;
