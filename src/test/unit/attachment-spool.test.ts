@@ -14,9 +14,14 @@ const tempRoot = (): string => {
   return root;
 };
 
-// Generic spool behavior is platform-independent. Inject a harmless, universally supported open
-// flag through the no-follow capability seam so Windows CI does not exercise production's deliberate
-// fail-closed path; the dedicated null-flag tests below own that contract.
+// Generic spool behavior is platform-independent. Inject a read-compatible open flag through the
+// no-follow capability seam so Windows CI does not exercise production's deliberate fail-closed
+// path. UV_FS_O_FILEMAP is Windows' nonzero read-capable flag; POSIX retains the real O_NOFOLLOW.
+// The dedicated null-flag tests below own the unsupported-platform contract.
+const TEST_READ_CAPABILITY_FLAG = process.platform === "win32"
+  ? fs.constants.UV_FS_O_FILEMAP
+  : fs.constants.O_NOFOLLOW;
+
 const supportedSpool = (
   storage: string,
   now: () => number = Date.now
@@ -24,7 +29,7 @@ const supportedSpool = (
   storage,
   Logger.create(undefined, LogLevel.ERROR),
   now,
-  { noFollowFlag: fs.constants.O_APPEND }
+  { noFollowFlag: TEST_READ_CAPABILITY_FLAG }
 );
 
 afterEach(() => {
