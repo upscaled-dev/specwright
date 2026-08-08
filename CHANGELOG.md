@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Privileged commands, test execution, debugging, generation, credentials, uploads, and remote mutations now share one Workspace Trust boundary. Revoking trust cancels active work and blocks later privileged steps.
+- Run entry points now share a language-neutral execution gateway, stable run intent, and one artifact path. The existing direct Playwright BDD engine remains the default.
+- Release candidates now carry a checksum, CycloneDX SBOM, and artifact-set manifest bound to the exact source commit.
+
+### Changed
+
+- Remote operations classify reads and writes explicitly. Unsafe writes are never replayed without idempotency or reconciliation, and ambiguous results retain a durable operation ID for recovery.
+- Confirmed attachments are uploaded from bounded, extension-owned snapshots so later file edits or symlink changes cannot alter retry contents.
+- Process output, JSON reports, inline attachments, persisted artifacts, and report cleanup now have explicit ownership and memory bounds.
+- Command Palette, CodeLens, editor, Explorer, Test Explorer, debug, and publish actions resolve exact targets through the same run contract.
+- Traceability adapters negotiate versions, validate runtime messages, and use bounded activation and disposal.
+- CI pins the supported VS Code and runner dependency versions. A release tag promotes the successful main candidate for the same commit without rebuilding it.
+
+### Fixed
+
+- Scenario Outline and Examples-row targeting now fails closed when generated output cannot identify the exact case.
+- Debug cancellation terminates the owned root session and contains cleanup failures without masking the run result.
+- Generated integration fixtures no longer leak into ordinary feature discovery.
+
 
 ## [0.4.45] - 2026-07-31
 ### Added

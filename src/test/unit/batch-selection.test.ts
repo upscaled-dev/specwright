@@ -248,19 +248,19 @@ describe("artifactCaptureTarget", () => {
     const split = { filePath, line: 6, name: "Divide edge cases", kind: "examplesBlock" as const };
 
     // Rows of the mapped block belong to CALC-2, so the outline's own capture must not claim them.
-    expect(artifactCaptureTarget({ ...outline, line: 3 }, rows, [split]).resultLines).toEqual([]);
+    expect(() => artifactCaptureTarget({ ...outline, line: 3 }, rows, [split]))
+      .toThrow("owns no parsed rows");
     expect(artifactCaptureTarget(split, rows, [split]).resultLines).toEqual([8, 9]);
   });
 
-  it("keeps capture open when the feature no longer parses", () => {
-    expect(artifactCaptureTarget({ ...outline, line: 3 }, [], [])).toEqual({
-      scenario: { ...outline, line: 3 },
-    });
-    expect(artifactCaptureTarget(
+  it("fails closed when the feature no longer parses", () => {
+    expect(() => artifactCaptureTarget({ ...outline, line: 3 }, [], []))
+      .toThrow("Could not resolve exact example rows");
+    expect(() => artifactCaptureTarget(
       { filePath, line: 6, name: "Divide edge cases", kind: "examplesBlock" },
       [],
       []
-    )).toEqual({ scenario: { filePath, line: 6, name: "Divide edge cases", kind: "examplesBlock" } });
+    )).toThrow("Could not resolve exact example rows");
   });
 
   it("captures every row for an outline named by declaration line or by title alone", () => {

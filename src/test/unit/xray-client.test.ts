@@ -1,8 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
-import { FetchLike, XrayAbortError, XrayClient, XrayMutationError } from "../../xray/xray-client";
+import { FetchLike, XrayAbortError, XrayAuthError, XrayClient, XrayMutationError } from "../../xray/xray-client";
 import { XrayCredentials } from "../../xray/xray-credential-store";
+import {
+  RemoteOutcomeUnknownError,
+  WorkspaceTrust,
+  WorkspaceTrustRevokedError,
+} from "../../core/workspace-trust";
 
 const JWT = `${"a".repeat(140)}.${"b".repeat(140)}.${"c".repeat(140)}`;
 const JWT2 = `${"d".repeat(140)}.${"e".repeat(140)}.${"f".repeat(140)}`;
@@ -541,7 +546,7 @@ describe("XrayClient.postJson", () => {
     expect(result).toEqual({ status: 400, ok: false, body: { error: "No execution results were provided." } });
   });
 
-  it("refreshes the JWT exactly once on a 401 and retries with the new token", async () => {
+  it("does not replay a JSON mutation after a 401", async () => {
     const authTokens: string[] = [];
     const usedBearers: string[] = [];
     let posts = 0;
@@ -559,11 +564,11 @@ describe("XrayClient.postJson", () => {
     };
     const client = makeClient({ fetchImpl });
 
-    const result = await client.postJson("/import/execution", { tests: [] });
+    await expect(client.postJson("/import/execution", { tests: [] })).rejects.toBeInstanceOf(XrayAuthError);
 
-    expect(authTokens).toEqual([JWT, JWT2]);
-    expect(usedBearers).toEqual([`Bearer ${JWT}`, `Bearer ${JWT2}`]);
-    expect(result.body).toEqual({ key: "XNP-24" });
+    expect(authTokens).toEqual([JWT]);
+    expect(usedBearers).toEqual([`Bearer ${JWT}`]);
+    expect(posts).toBe(1);
   });
 
   it("throws XrayAbortError and makes no request when the signal is already aborted", async () => {
@@ -613,7 +618,7 @@ describe("XrayClient.postMultipart", () => {
     expect(result).toEqual({ status: 200, ok: true, body: { id: "10200", key: "XNP-24", self: "https://x/10200" } });
   });
 
-  it("refreshes the JWT once on a 401 and retries the multipart POST", async () => {
+  it("does not replay a multipart mutation after a 401", async () => {
     const authTokens: string[] = [];
     const usedBearers: string[] = [];
     let posts = 0;
@@ -631,11 +636,13 @@ describe("XrayClient.postMultipart", () => {
     };
     const client = makeClient({ fetchImpl });
 
-    const result = await client.postMultipart("/import/execution/cucumber/multipart", { results: "[]", info: "{}" });
+    await expect(
+      client.postMultipart("/import/execution/cucumber/multipart", { results: "[]", info: "{}" })
+    ).rejects.toBeInstanceOf(XrayAuthError);
 
-    expect(authTokens).toEqual([JWT, JWT2]);
-    expect(usedBearers).toEqual([`Bearer ${JWT}`, `Bearer ${JWT2}`]);
-    expect(result.body).toEqual({ key: "XNP-24" });
+    expect(authTokens).toEqual([JWT]);
+    expect(usedBearers).toEqual([`Bearer ${JWT}`]);
+    expect(posts).toBe(1);
   });
 
   it("throws XrayAbortError and makes no request when the signal is already aborted", async () => {
@@ -703,6 +710,54 @@ describe("XrayClient redaction", () => {
 });
 
 describe("XrayClient.createTest", () => {
+  it("reports an unknown remote outcome when trust is revoked after the mutation starts", async () => {
+    let mutationStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {mutationStarted = resolve;});
+    const fetchImpl: FetchLike = (url, init) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(response(200, JSON.stringify(JWT)));
+      }
+      mutationStarted?.();
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    };
+    const client = makeClient({ fetchImpl });
+    const trust = new WorkspaceTrust(() => true);
+    const pending = trust.run((signal) => client.createTest(
+      { project: "CALC", summary: "S", gherkin: "Scenario: S" },
+      signal
+    ));
+
+    await started;
+    const disposal = trust.dispose();
+    await expect(pending).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
+    await disposal;
+  });
+
+  it("reports an unknown remote outcome when caller cancellation lands after dispatch", async () => {
+    const controller = new AbortController();
+    let writes = 0;
+    const fetchImpl: FetchLike = (url) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(response(200, JSON.stringify(JWT)));
+      }
+      writes += 1;
+      controller.abort();
+      return Promise.reject(new Error("aborted"));
+    };
+    const client = makeClient({ fetchImpl });
+
+    await expect(client.createTest(
+      { project: "CALC", summary: "S", gherkin: "Scenario: S" },
+      controller.signal
+    )).rejects.toMatchObject({
+      name: "RemoteOutcomeUnknownError",
+      operationId: expect.any(String),
+    });
+    expect(writes).toBe(1);
+  });
+
   it("sends a Cucumber createTest mutation with JSON-escaped gherkin/project/summary and reads key/issueId/warnings back inline", async () => {
     let captured = "";
     const client = makeClient({
@@ -762,6 +817,30 @@ describe("XrayClient.createTest", () => {
     await expect(
       client.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" })
     ).rejects.toBeInstanceOf(XrayMutationError);
+  });
+});
+
+describe("XrayClient read cancellation", () => {
+  it("keeps trust revocation classified as cancellation after a read starts", async () => {
+    let readStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {readStarted = resolve;});
+    const fetchImpl: FetchLike = (url, init) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(response(200, JSON.stringify(JWT)));
+      }
+      readStarted?.();
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    };
+    const client = makeClient({ fetchImpl });
+    const trust = new WorkspaceTrust(() => true);
+    const pending = trust.run((signal) => client.fetchTestsByKeys(["CALC-1"], signal));
+
+    await started;
+    const disposal = trust.dispose();
+    await expect(pending).rejects.toBeInstanceOf(WorkspaceTrustRevokedError);
+    await disposal;
   });
 });
 
@@ -934,5 +1013,30 @@ describe("XrayClient.updateGherkinTestDefinition", () => {
     });
 
     await expect(client.updateGherkinTestDefinition("45678", "Scenario: S")).rejects.toBeInstanceOf(XrayMutationError);
+  });
+});
+
+describe("XrayClient mutation replay safety", () => {
+  const committedThenUnavailable = (): { fetchImpl: FetchLike; writes: () => number } => {
+    let writes = 0;
+    return {
+      writes: () => writes,
+      fetchImpl: (url) => {
+        if (url.endsWith("/authenticate")) {return Promise.resolve(response(200, JSON.stringify(JWT)));}
+        writes += 1;
+        return Promise.resolve(response(503, "response lost after commit"));
+      },
+    };
+  };
+
+  it.each([
+    ["create", (client: XrayClient) => client.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" })],
+    ["update", (client: XrayClient) => client.updateGherkinTestDefinition("123", "Scenario: S")],
+    ["json import", (client: XrayClient) => client.postJson("/import/execution", { tests: [] })],
+    ["multipart import", (client: XrayClient) => client.postMultipart("/import/execution/cucumber/multipart", { results: "[]", info: "{}" })],
+  ])("does not replay %s after an ambiguous 503", async (_label, mutate) => {
+    const remote = committedThenUnavailable();
+    await expect(mutate(makeClient({ fetchImpl: remote.fetchImpl }))).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
+    expect(remote.writes()).toBe(1);
   });
 });

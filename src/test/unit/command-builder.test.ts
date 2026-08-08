@@ -136,10 +136,26 @@ describe("CommandBuilder", () => {
       scenarioName: "1: Create a product (<name>) - name: Widget",
       outlineName: "Create a product (<name>)",
       lineNumber: 10,
-      specLineTarget: ".features-gen/features/products.feature.spec.js:8",
+      specLineTargets: [".features-gen/features/products.feature.spec.js:8"],
     });
     expect(cmd).toContain('npx playwright test ".features-gen/features/products.feature.spec.js:8"');
     expect(cmd).not.toContain("--grep");
+  });
+
+  it("runs every exact generated-project target in one invocation", () => {
+    const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
+    const command = builder.buildScenarioCommandParts({
+      filePath: "/work/features/products.feature",
+      scenarioName: "buy",
+      specLineTargets: [
+        ".features-gen/api/features/products.feature.spec.js:8",
+        ".features-gen/browser/features/products.feature.spec.js:12",
+      ],
+    }).playwrightCommand;
+
+    expect(command).toContain(".features-gen/api/features/products.feature.spec.js:8");
+    expect(command).toContain(".features-gen/browser/features/products.feature.spec.js:12");
+    expect(command).not.toContain("--grep");
   });
 
   it("prefers a specLineTarget over --grep on the debug playwright half", () => {
@@ -149,7 +165,7 @@ describe("CommandBuilder", () => {
       scenarioName: "1: Create a product (<name>) - name: Widget",
       outlineName: "Create a product (<name>)",
       lineNumber: 10,
-      specLineTarget: ".features-gen/features/products.feature.spec.js:8",
+      specLineTargets: [".features-gen/features/products.feature.spec.js:8"],
     });
     expect(playwrightCommand).toContain('".features-gen/features/products.feature.spec.js:8"');
     expect(playwrightCommand).not.toContain("--grep");
@@ -234,7 +250,7 @@ describe("CommandBuilder", () => {
     });
     expect(bddgenCommand).toBe("npx bddgen");
     // The Playwright Inspector flag must NOT be present; debugging runs under VS Code's
-    // JS debugger (node-terminal), not the Inspector.
+    // VS Code's JS debugger, not the Inspector.
     expect(playwrightCommand).not.toContain("--debug");
     expect(playwrightCommand).not.toContain("bddgen");
     expect(playwrightCommand).toContain('--grep "Passing"');
@@ -284,7 +300,7 @@ describe("CommandBuilder", () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
     const { playwrightCommand } = builder.buildDebugCommandParts({
       filePath: "/abs/features/login.feature",
-      specFileFilter: "\\.features-gen/features/login\\.feature\\.spec\\.js(?=[./]|$)",
+      specFileFilters: ["\\.features-gen/features/login\\.feature\\.spec\\.js(?=[./]|$)"],
     });
     expect(playwrightCommand).not.toContain("--debug");
     expect(playwrightCommand).not.toContain("--grep");

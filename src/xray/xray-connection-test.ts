@@ -7,6 +7,14 @@ import { XrayRegion, xrayBaseUrl } from "./xray-region";
 import { JiraAccessError, JiraProject, fetchJiraIdentity, searchJiraProjects } from "./jira-project-search";
 import { describeJwt, describeShape, graphqlErrorSummaries } from "./xray-diagnostics";
 import { buildKeysJql, jqlString } from "./xray-search";
+import {
+  abortableRemoteSleep,
+  operationIdentity,
+  RetryableRemoteError,
+  retryAfterMilliseconds,
+  runRemoteOperation,
+  type RemoteOperationName,
+} from "./remote-operation";
 
 const FETCH_TIMEOUT_MS = 30_000;
 const CONNECT_COMMAND = "playwrightBddRunner.traceability.connect";
@@ -69,7 +77,8 @@ export interface XrayConnectionOutcome {
 // one wrapped instance so coincident verifies collapse onto one handshake.
 export type XrayProbe = (
   deps: XrayConnectionTestDeps,
-  options?: XrayProbeOptions
+  options?: XrayProbeOptions,
+  signal?: AbortSignal
 ) => Promise<XrayConnectionOutcome>;
 
 interface TimedResponse {
@@ -81,16 +90,55 @@ interface TimedResponse {
 
 // The body read stays inside the timed window: a server that returns headers and then stalls the
 // stream must trip the 30s abort instead of hanging the command with the timer already cleared.
-async function timedFetch(url: string, init: RequestInit): Promise<TimedResponse> {
+async function timedFetch(
+  url: string,
+  init: RequestInit,
+  signal?: AbortSignal
+): Promise<TimedResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const onAbort = (): void => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) {onAbort();}
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     const bodyText = await response.text();
     return { status: response.status, ok: response.ok, headers: response.headers, bodyText };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
+}
+
+async function classifiedFetch(
+  operation: RemoteOperationName,
+  url: string,
+  init: RequestInit,
+  logger: Logger,
+  signal?: AbortSignal
+): Promise<TimedResponse> {
+  return runRemoteOperation(async () => {
+    try {
+      const response = await timedFetch(url, init, signal);
+      if (response.status === 429 || response.status >= 500) {
+        throw new RetryableRemoteError(
+          `HTTP ${response.status}`,
+          retryAfterMilliseconds(response.headers.get("retry-after"))
+        );
+      }
+      return response;
+    } catch (error) {
+      if (signal?.aborted) {throw signal.reason ?? error;}
+      throw error instanceof RetryableRemoteError ? error : new RetryableRemoteError(scrubJwtLike(errMsg(error)));
+    }
+  }, {
+    identity: operationIdentity(operation),
+    logger,
+    signal,
+    sleep: abortableRemoteSleep,
+    random: Math.random,
+    abortError: () => signal?.reason ?? new Error("Aborted"),
+  });
 }
 
 function parseBody(bodyText: string): unknown {
@@ -142,15 +190,22 @@ interface GraphqlResult {
   errors: string[];
 }
 
-async function graphqlRequest(base: string, logger: Logger, jwt: string, label: string, query: string): Promise<GraphqlResult> {
-  const response = await timedFetch(`${base}/graphql`, {
+async function graphqlRequest(
+  base: string,
+  logger: Logger,
+  jwt: string,
+  label: string,
+  query: string,
+  signal?: AbortSignal
+): Promise<GraphqlResult> {
+  const response = await classifiedFetch("xray.graphql.read", `${base}/graphql`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${jwt}`,
     },
     body: JSON.stringify({ query }),
-  });
+  }, logger, signal);
   const body = parseBody(response.bodyText);
   logger.info(`POST /graphql (${label}) → ${response.status}; response shape:\n${stringifyShape(body)}`);
   if (!response.ok) {
@@ -227,7 +282,8 @@ async function probeProjects(
   jwt: string,
   keys: readonly string[],
   jiraKeys?: ReadonlySet<string> | undefined,
-  jiraTruncated = false
+  jiraTruncated = false,
+  signal?: AbortSignal
 ): Promise<ProjectProbeResult> {
   const projects: string[] = [];
   for (const key of keys) {
@@ -244,7 +300,14 @@ async function probeProjects(
       summaries.push({ project, totalTests: 0, existsOnSite: false });
       continue;
     }
-    const { ok, body } = await graphqlRequest(base, logger, jwt, `project ${project}`, projectCountQuery(project));
+    const { ok, body } = await graphqlRequest(
+      base,
+      logger,
+      jwt,
+      `project ${project}`,
+      projectCountQuery(project),
+      signal
+    );
     const total = extractTotal(body);
     if (!ok || total === undefined) {
       failed += 1;
@@ -260,10 +323,23 @@ async function probeProjects(
 // validation to reject an unknown field. A bad JQL clause can't be used here: Xray tolerates an
 // unknown JQL field (returns 200 with a total, no errors) and so never forces an error. Never returns
 // anything the outcome depends on; graphqlRequest already logs the response shape + scrubbed summaries.
-async function probeErrorShape(base: string, logger: Logger, jwt: string): Promise<void> {
+async function probeErrorShape(
+  base: string,
+  logger: Logger,
+  jwt: string,
+  signal?: AbortSignal
+): Promise<void> {
   try {
-    await graphqlRequest(base, logger, jwt, "invalid-field error-shape probe", errorShapeQuery());
+    await graphqlRequest(
+      base,
+      logger,
+      jwt,
+      "invalid-field error-shape probe",
+      errorShapeQuery(),
+      signal
+    );
   } catch (error) {
+    if (signal?.aborted) {throw signal.reason ?? error;}
     logger.error(`invalid-field error-shape probe request error: ${scrubJwtLike(errMsg(error))}`);
   }
 }
@@ -273,13 +349,14 @@ type AuthResult = { ok: true; jwt: string } | { ok: false; status: number };
 async function authenticate(
   base: string,
   logger: Logger,
-  credentials: { clientId: string; clientSecret: string }
+  credentials: { clientId: string; clientSecret: string },
+  signal?: AbortSignal
 ): Promise<AuthResult> {
-  const response = await timedFetch(`${base}/authenticate`, {
+  const response = await classifiedFetch("xray.authenticate", `${base}/authenticate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_id: credentials.clientId, client_secret: credentials.clientSecret }),
-  });
+  }, logger, signal);
   logger.info(`POST /authenticate → ${response.status}`);
   if (!response.ok) {
     // §5 leaves the bad-credential body undocumented and it may echo the request, so the credentials
@@ -363,17 +440,23 @@ function successMessage(
 // Identity first: a wrong token or a missing Browse permission answers /myself before the project
 // list ever runs, and the display name is the confirmation a user can act on. The first failure ends
 // the leg, since the project list would only repeat it.
-async function probeJira(site: string, credentials: XrayJiraCredentials, logger: Logger): Promise<JiraOutcome> {
+async function probeJira(
+  site: string,
+  credentials: XrayJiraCredentials,
+  logger: Logger,
+  signal?: AbortSignal
+): Promise<JiraOutcome> {
   const jira: JiraOutcome = { truncated: false };
   try {
-    jira.identity = await fetchJiraIdentity({ site, credentials, logger });
-    const result = await searchJiraProjects({ site, credentials, logger });
+    jira.identity = await fetchJiraIdentity({ site, credentials, logger, signal });
+    const result = await searchJiraProjects({ site, credentials, logger, signal });
     jira.projects = result.projects;
     jira.truncated = result.truncated;
     logger.info(
       `Jira project search returned ${result.projects.length} accessible project(s)${result.truncated ? " (list truncated at the cap)" : ""}`
     );
   } catch (error) {
+    if (signal?.aborted) {throw signal.reason ?? error;}
     jira.error = error instanceof JiraAccessError ? error.message : "Jira access unavailable.";
     logger.error(`Jira access error: ${scrubJwtLike(errMsg(error))}`);
   }
@@ -396,7 +479,8 @@ function authFailureMessage(status: number): string {
  */
 export async function probeXrayConnection(
   deps: XrayConnectionTestDeps,
-  options: XrayProbeOptions = {}
+  options: XrayProbeOptions = {},
+  signal?: AbortSignal
 ): Promise<XrayConnectionOutcome> {
   const { credentialStore, logger, knownTestKeys } = deps;
   const site = normalizeSiteUrl(deps.site);
@@ -410,8 +494,9 @@ export async function probeXrayConnection(
 
   let auth: AuthResult;
   try {
-    auth = await authenticate(base, logger, credentials);
+    auth = await authenticate(base, logger, credentials, signal);
   } catch (error) {
+    if (signal?.aborted) {throw signal.reason ?? error;}
     logger.error(`Authentication request error: ${scrubJwtLike(errMsg(error))}`);
     return {
       ok: false,
@@ -434,7 +519,7 @@ export async function probeXrayConnection(
   // still populates even on a later GraphQL-stage failure.
   const jiraCredentials = await credentialStore.getJiraCredentials(deps.site);
   const jira: JiraOutcome = jiraCredentials
-    ? await probeJira(site, jiraCredentials, logger)
+    ? await probeJira(site, jiraCredentials, logger, signal)
     : { truncated: false };
   const jiraKeys = jira.projects ? new Set(jira.projects.map((p) => p.key.toUpperCase())) : undefined;
   const finish = (partial: XrayConnectionOutcome): XrayConnectionOutcome => ({
@@ -455,7 +540,7 @@ export async function probeXrayConnection(
     });
   }
 
-  const leg = await runGraphqlLeg(base, logger, jwt, keys, jiraKeys, jira.truncated);
+  const leg = await runGraphqlLeg(base, logger, jwt, keys, jiraKeys, jira.truncated, signal);
   if (!leg.ok) {
     return finish({ ok: false, stage: leg.stage, site, message: leg.message });
   }
@@ -480,19 +565,28 @@ async function runGraphqlLeg(
   jwt: string,
   keys: string[],
   jiraKeys: Set<string> | undefined,
-  jiraTruncated: boolean
+  jiraTruncated: boolean,
+  signal?: AbortSignal
 ): Promise<GraphqlLegResult> {
   const jql = buildKeysJql(keys);
   try {
-    const probeA = await graphqlRequest(base, logger, jwt, "getTests", testsQuery(jql));
-    const probeB = await graphqlRequest(base, logger, jwt, "getTests + coverableIssues", coverageQuery(jql));
+    const probeA = await graphqlRequest(base, logger, jwt, "getTests", testsQuery(jql), signal);
+    const probeB = await graphqlRequest(
+      base,
+      logger,
+      jwt,
+      "getTests + coverableIssues",
+      coverageQuery(jql),
+      signal
+    );
     if (!probeA.ok || !probeB.ok) {
       return { ok: false, stage: "graphql", message: graphqlFailureMessage(probeA.ok ? probeB : probeA) };
     }
-    await probeErrorShape(base, logger, jwt);
-    const probed = await probeProjects(base, logger, jwt, keys, jiraKeys, jiraTruncated);
+    await probeErrorShape(base, logger, jwt, signal);
+    const probed = await probeProjects(base, logger, jwt, keys, jiraKeys, jiraTruncated, signal);
     return { ok: true, projects: probed.summaries, failed: probed.failed };
   } catch (error) {
+    if (signal?.aborted) {throw signal.reason ?? error;}
     logger.error(`GraphQL request error: ${scrubJwtLike(errMsg(error))}`);
     return { ok: false, stage: "network", message: NETWORK_FAILURE };
   }
@@ -500,7 +594,10 @@ async function runGraphqlLeg(
 
 // Command wrapper: keeps the connect-before-testing gate and the toast presentation. The panel
 // delegate calls probeXrayConnection directly so its result renders inline without a double toast.
-export async function runXrayConnectionTest(deps: XrayConnectionTestDeps): Promise<void> {
+export async function runXrayConnectionTest(
+  deps: XrayConnectionTestDeps,
+  signal?: AbortSignal
+): Promise<void> {
   const { credentialStore, logger } = deps;
   const normalizedSite = normalizeSiteUrl(deps.site);
   const credentials = normalizedSite ? await credentialStore.getCredentials(deps.site) : undefined;
@@ -516,7 +613,7 @@ export async function runXrayConnectionTest(deps: XrayConnectionTestDeps): Promi
     return;
   }
 
-  const outcome = await probeXrayConnection(deps);
+  const outcome = await probeXrayConnection(deps, {}, signal);
   if (!outcome.ok) {
     await showErrorWithOutput(logger, outcome.message);
     return;

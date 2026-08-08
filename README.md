@@ -82,12 +82,12 @@ Specwright uses your existing `playwright-bdd` and Playwright configuration. If 
 
 ## Compatibility and prerequisites
 
-- VS Code `1.99` or later. CI tests both that minimum and the current stable host.
+- VS Code declares `1.99.0` as its minimum host. CI tests that exact host and one pinned current target.
 - A project configured for `playwright-bdd` and Playwright.
 - TypeScript or JavaScript step-definition files.
 - Single-folder, multi-root, and monorepo workspaces are supported when their step paths and working directories are configured correctly.
 
-The compatibility baseline was reviewed on 2026-08-01: VS Code `1.99.0` minimum and `1.127` current stable, Playwright `1.60.x`, and legacy `playwright-bdd` `8.5.x`. Playwright JSON is a legacy compatibility boundary, not a provider protocol.
+The [compatibility record](docs/compatibility.md) names the exact VS Code, Playwright, and legacy `playwright-bdd` versions represented by current evidence. Playwright JSON is a legacy compatibility boundary, not a provider protocol.
 
 Specwright can coexist with [Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete). Overlapping authoring features default to an automatic compatibility mode to avoid duplicate suggestions and diagnostics. You can change that behavior in Settings.
 

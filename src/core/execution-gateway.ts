@@ -1,27 +1,35 @@
+import { randomUUID } from "node:crypto";
 import { DetailBudget } from "./execution-limits";
 import {
   MAX_PARALLEL_PROCESSES_MAX,
   MAX_PARALLEL_PROCESSES_MIN,
 } from "./extension-config";
-import type {
-  ExecutionCaseResult,
-  ExecutionEvent,
-  ExecutionGateway,
-  RunCompletion,
-  RunIntent,
-  RunTarget,
+import {
+  snapshotRunIntent,
+  type ExecutionCaseResult,
+  type ExecutionDiagnostic,
+  type ExecutionDiscovery,
+  type ExecutionEvent,
+  type ExecutionIdentity,
+  type ExecutionOptions,
+  type ExecutionServiceGateway,
+  type PreparedExecution,
+  type RunCompletion,
+  type RunIntent,
+  type RunTarget,
 } from "./run-contracts";
 import type { RunProgressObserver } from "./run-progress";
 import type { RunOutputResult, TestExecutor } from "./test-executor";
 import { isOutlineExampleRow, type FeatureParser } from "../parsers/feature-parser";
 import { artifactCaptureTarget } from "../traceability/batch-selection";
 import type { RunArtifactState } from "../traceability/contracts";
-import type { RunArtifactStore } from "../traceability/run-artifact-store";
 import type { OutlineExampleRow } from "../types";
 import { refIdentity, scenarioRefFromResult, type ScenarioRef } from "../traceability/scenario-ref";
-import type { Logger } from "../utils/logger";
 import type { ScenarioResult, StepResult } from "../utils/playwright-json-parser";
 import { BoundedCommandOutput } from "./bounded-command-runner";
+import { ExecutionAdmission, terminationLease } from "./execution-admission";
+import type { WorkspaceTrust } from "./workspace-trust";
+import type { LegacyDiscoveryPort } from "./legacy-discovery";
 
 type EventListener = (event: ExecutionEvent) => void;
 
@@ -228,19 +236,22 @@ function scenarioOptions(
   };
 }
 
-export class ExtensionExecutionGateway implements ExecutionGateway {
+export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
   private active = false;
-  private admissionBlocked = false;
   private readonly listeners = new Set<EventListener>();
+  private operationAbort: AbortController | undefined;
+  private operationDone: Promise<void> | undefined;
 
   constructor(
     private readonly executor: TestExecutor,
-    private readonly artifactStore: RunArtifactStore | undefined,
     private readonly featureParser: FeatureParser,
-    private readonly logger: Logger,
-    // Which scenarios the tracker maps, so artifact capture can tell a separately mapped Examples
-    // block from rows the enclosing outline owns. Run membership cannot answer that.
-    private readonly mappedScenarios: () => readonly ScenarioRef[]
+    private readonly workspaceTrust: WorkspaceTrust,
+    private readonly admission: ExecutionAdmission = new ExecutionAdmission(),
+    private readonly identity: ExecutionIdentity = Object.freeze({
+      engine: "legacy-direct",
+      schemaProfile: "legacy-v1",
+    }),
+    private readonly discovery?: LegacyDiscoveryPort
   ) {}
 
   public onEvent(listener: EventListener): { dispose(): void } {
@@ -253,35 +264,110 @@ export class ExtensionExecutionGateway implements ExecutionGateway {
     return this.active;
   }
 
+  public async diagnose(): Promise<readonly ExecutionDiagnostic[]> {
+    this.workspaceTrust.require();
+    await this.admission.ensureAvailable();
+    return [];
+  }
+
+  public discover(options?: { readonly refresh?: boolean | undefined }): Promise<ExecutionDiscovery> {
+    if (!this.discovery) {throw new Error("Legacy execution discovery is not configured.");}
+    return this.discovery.discover(options);
+  }
+
+  public prepare(intent: RunIntent): Promise<PreparedExecution> {
+    this.validate(intent);
+    return Promise.resolve(Object.freeze({
+      operationId: randomUUID(),
+      identity: this.identity,
+      intent: snapshotRunIntent(intent),
+    }));
+  }
+
+  public run(prepared: PreparedExecution, options?: ExecutionOptions): Promise<RunCompletion> {
+    return this.execute({ ...prepared.intent, mode: "run" }, options);
+  }
+
+  public debug(prepared: PreparedExecution, options?: ExecutionOptions): Promise<RunCompletion> {
+    return this.execute({ ...prepared.intent, mode: "debug" }, options);
+  }
+
+  public async cancel(_prepared?: PreparedExecution): Promise<void> {
+    this.operationAbort?.abort();
+    await this.operationDone;
+  }
+
+  public async dispose(): Promise<void> {
+    await this.cancel();
+    this.listeners.clear();
+  }
+
   /**
    * Admission for the single execution slot. Everything the run touches lives in `runIntent`, so
    * however that ends, including a dependency that throws before the first target is dispatched,
    * the slot is released.
    */
   public async execute(intent: RunIntent, options: ExecuteOptions = {}): Promise<RunCompletion> {
+    return this.executeWithArtifactBatch(intent, options);
+  }
+
+  public async executeWithArtifactBatch(
+    intent: RunIntent,
+    options: ExecuteOptions = {},
+    artifactBatch?: number,
+    artifactOwnership?: readonly ScenarioRef[]
+  ): Promise<RunCompletion> {
     this.validate(intent);
+    this.workspaceTrust.require();
     if (this.active) {throw new ExecutionAlreadyRunningError();}
     this.active = true;
+    const operationAbort = new AbortController();
+    const forwardAbort = () => operationAbort.abort();
+    options.signal?.addEventListener("abort", forwardAbort, { once: true });
+    if (options.signal?.aborted) {operationAbort.abort();}
+    this.operationAbort = operationAbort;
+    let finishOperation: (() => void) | undefined;
+    this.operationDone = new Promise<void>((resolve) => {finishOperation = resolve;});
+    let trusted: ReturnType<WorkspaceTrust["begin"]> | undefined;
     try {
-      return await this.runIntent(intent, options);
+      await this.admission.ensureAvailable();
+      if (operationAbort.signal.aborted) {
+        return await this.runIntent(
+          intent,
+          { ...options, signal: operationAbort.signal },
+          artifactBatch,
+          artifactOwnership
+        );
+      }
+      trusted = this.workspaceTrust.begin(operationAbort.signal);
+      return await this.runIntent(intent, {
+        ...options,
+        signal: trusted.signal,
+      }, artifactBatch, artifactOwnership);
     } finally {
-      if (!this.admissionBlocked) {this.active = false;}
+      trusted?.dispose();
+      options.signal?.removeEventListener("abort", forwardAbort);
+      if (this.operationAbort === operationAbort) {this.operationAbort = undefined;}
+      this.active = false;
+      finishOperation?.();
+      this.operationDone = undefined;
     }
   }
 
-  private async runIntent(intent: RunIntent, options: ExecuteOptions): Promise<RunCompletion> {
+  private async runIntent(
+    intent: RunIntent,
+    options: ExecuteOptions,
+    artifactBatch?: number,
+    artifactOwnership?: readonly ScenarioRef[]
+  ): Promise<RunCompletion> {
     const start = Date.now();
     const detailBudget = new DetailBudget();
     const runResults = new RunResultAccumulator(detailBudget);
-    // One snapshot for the whole run: a sync landing mid-run must not build one artifact against two.
-    const mapped = Object.freeze([...this.mappedScenarios()]);
     const liveSignatures = new Map<string, string>();
     const signal = options.signal;
     let finished = false;
     let failure: string | undefined;
     let state: RunArtifactState = "complete";
-    let artifactId: string | undefined;
-    let handle: number | undefined;
     const emit = (event: ExecutionEvent): void => {
       if (finished && event.kind !== "finished") {return;}
       if (event.kind === "finished") {
@@ -312,10 +398,61 @@ export class ExtensionExecutionGateway implements ExecutionGateway {
       },
       onOutput: emitOutput,
     };
+    const consumeOutput = async (output: RunOutputResult): Promise<boolean> => {
+      if (!output.outputStreamed) {
+        if (output.output !== "") {emitOutput("stdout", output.output);}
+        if (output.error && output.error !== "Cancelled") {emitOutput("stderr", output.error);}
+      }
+      const finalDetails = output.scenarioDetails ?? [];
+      for (const detail of finalDetails) {
+        const aggregate = runResults.update(detail);
+        const key = resultKey(aggregate);
+        if (liveSignatures.get(key) !== resultSignature(aggregate)) {
+          liveSignatures.set(key, resultSignature(aggregate));
+          emit({
+            kind: "case-finished",
+            result: aggregate,
+            completed: runResults.executionCount,
+            total: runResults.executionCount,
+          });
+        }
+      }
+      if (output.admissionUnsafe) {
+        const unsafeFailure = output.infrastructureFailure
+          ?? "The previous process tree could not be confirmed stopped.";
+        try {
+          await this.admission.block(output.terminationLease ?? terminationLease({
+            kind: "debug-session",
+            failure: unsafeFailure,
+          }));
+          failure = unsafeFailure;
+        } catch (error) {
+          failure = `${unsafeFailure} ${errorMessage(error)}`;
+        }
+        state = "partial";
+        return false;
+      }
+      if (signal?.aborted) {
+        state = "cancelled";
+        return false;
+      }
+      if (output.infrastructureFailure || (!output.success && finalDetails.length === 0)) {
+        failure = output.infrastructureFailure
+          ?? output.error
+          ?? "The test process failed without a complete report.";
+        state = "partial";
+        return false;
+      }
+      return true;
+    };
 
     emit({ kind: "started", targetCount: intent.targets.length });
+    const scenarioScopes = artifactOwnership ?? intent.targets.flatMap((target): readonly ScenarioRef[] => {
+      if (target.kind === "scenario") {return [target.scenario];}
+      if (target.kind === "scenarios") {return target.scenarios;}
+      return [];
+    });
     try {
-      handle = this.artifactStore?.beginBatch(intent.selection, intent.decisions ?? []);
       if (intent.maxWorkers !== undefined) {
         this.executor.setForceParallel(true, intent.maxWorkers);
       }
@@ -324,54 +461,15 @@ export class ExtensionExecutionGateway implements ExecutionGateway {
           state = "cancelled";
           break;
         }
-        const targetResults = await this.dispatch(
+        await this.dispatch(
           intent.mode,
           target,
           signal,
-          handle,
+          artifactBatch,
           progress,
-          mapped
+          scenarioScopes,
+          consumeOutput
         );
-        for (const output of targetResults) {
-          if (!output.outputStreamed) {
-            if (output.output !== "") {emitOutput("stdout", output.output);}
-            if (output.error && output.error !== "Cancelled") {
-              emitOutput("stderr", output.error);
-            }
-          }
-          const finalDetails = output.scenarioDetails ?? [];
-          for (const detail of finalDetails) {
-            const aggregate = runResults.update(detail);
-            const key = resultKey(aggregate);
-            if (liveSignatures.get(key) !== resultSignature(aggregate)) {
-              liveSignatures.set(key, resultSignature(aggregate));
-              emit({
-                kind: "case-finished",
-                result: aggregate,
-                completed: runResults.executionCount,
-                total: runResults.executionCount,
-              });
-            }
-          }
-          if (output.admissionUnsafe) {
-            this.admissionBlocked = true;
-            failure = output.infrastructureFailure
-              ?? "The previous process tree could not be confirmed stopped.";
-            state = "partial";
-            break;
-          }
-          if (signal?.aborted) {
-            state = "cancelled";
-            break;
-          }
-          if (output.infrastructureFailure || (!output.success && finalDetails.length === 0)) {
-            failure = output.infrastructureFailure
-              ?? output.error
-              ?? "The test process failed without a complete report.";
-            state = "partial";
-            break;
-          }
-        }
         if (state !== "complete") {break;}
       }
     } catch (error) {
@@ -393,17 +491,16 @@ export class ExtensionExecutionGateway implements ExecutionGateway {
         }
       }
     }
-    if (signal?.aborted && !this.admissionBlocked) {state = "cancelled";}
-    if (handle !== undefined) {artifactId = this.seal(handle, state);}
+    if (signal?.aborted && !this.admission.blocked) {state = "cancelled";}
     const results = runResults.results();
     const counts = tally(results);
     const completion: RunCompletion = Object.freeze({
+      identity: this.identity,
       state,
       results: Object.freeze([...results]),
       output: outputCapture.format(),
       ...counts,
       durationMs: Math.max(1, Date.now() - start),
-      ...(artifactId ? { artifactId } : {}),
       ...(failure ? { failure } : {}),
     });
     // What was discarded is part of the transcript, so it rides the same stream every other line
@@ -415,25 +512,6 @@ export class ExtensionExecutionGateway implements ExecutionGateway {
     emit({ kind: "finished", completion });
     if (state === "partial") {throw new ExecutionFailure(completion);}
     return completion;
-  }
-
-  // The artifact is a publish buffer, not the run's verdict: its own state and any storage failure
-  // are recorded for diagnosis and never change what the run reports.
-  private seal(handle: number, state: RunArtifactState): string | undefined {
-    try {
-      const artifact = this.artifactStore?.sealBatch(handle, state);
-      if (artifact === undefined) {return undefined;}
-      if (artifact.state !== state) {
-        this.logger.warn("The sealed run artifact disagrees with the run outcome", {
-          run: state,
-          artifact: artifact.state,
-        });
-      }
-      return artifact.id;
-    } catch (error) {
-      this.logger.warn(`Failed to seal the run artifact: ${errorMessage(error)}`);
-      return undefined;
-    }
   }
 
   private validate(intent: RunIntent): void {
@@ -456,64 +534,72 @@ export class ExtensionExecutionGateway implements ExecutionGateway {
     signal: AbortSignal | undefined,
     artifactBatch: number | undefined,
     progress: RunProgressObserver,
-    mapped: readonly ScenarioRef[]
-  ): Promise<readonly RunOutputResult[]> {
+    scenarioScopes: readonly ScenarioRef[],
+    consume: (output: RunOutputResult) => Promise<boolean>
+  ): Promise<void> {
     if (target.kind === "scenario") {
-      return this.runScenarioTarget(
+      await this.runScenarioTarget(
         mode,
         target.scenario,
         signal,
         artifactBatch,
         progress,
-        mapped,
-        target.tagExpression
+        target.tagExpression,
+        scenarioScopes,
+        consume
       );
+      return;
     }
     if (target.kind === "scenarios") {
-      const outputs: RunOutputResult[] = [];
       for (const scenario of target.scenarios) {
         if (signal?.aborted) {break;}
-        outputs.push(...await this.runScenarioTarget(
+        const shouldContinue = await this.runScenarioTarget(
           mode,
           scenario,
           signal,
           artifactBatch,
           progress,
-          mapped
-        ));
+          undefined,
+          scenarioScopes,
+          consume
+        );
+        if (!shouldContinue) {break;}
       }
-      return outputs;
+      return;
     }
     if (target.kind === "path") {
       if (mode === "debug") {
-        return [await this.executor.debugScenarioWithOutput({
+        await consume(await this.executor.debugScenarioWithOutput({
           filePath: target.path,
           ...(signal ? { signal } : {}),
           ...(artifactBatch !== undefined ? { artifactBatch } : {}),
           progress,
-        })];
+        }));
+        return;
       }
-      return [await this.executor.runPathFilterWithOutput(
+      await consume(await this.executor.runPathFilterWithOutput(
         target.path,
         signal,
         artifactBatch,
         progress,
         target.tagExpression,
         target.titles
-      )];
+      ));
+      return;
     }
     if (mode === "debug") {
       throw new Error(`Debug mode does not support the ${target.kind} target.`);
     }
     if (target.kind === "tag-expression") {
-      return [await this.executor.runAllTestsWithTagsOutput(
+      await consume(await this.executor.runAllTestsWithTagsOutput(
         target.expression,
         signal,
         artifactBatch,
         progress
-      )];
+      ));
+      return;
     }
-    return [await this.executor.runSuiteWithOutput(signal, artifactBatch, progress)];
+    await consume(await this.executor.runSuiteWithOutput(signal, artifactBatch, progress));
   }
 
   private async runScenarioTarget(
@@ -522,36 +608,32 @@ export class ExtensionExecutionGateway implements ExecutionGateway {
     signal: AbortSignal | undefined,
     artifactBatch: number | undefined,
     progress: RunProgressObserver,
-    mapped: readonly ScenarioRef[],
-    tagExpression?: string
-  ): Promise<RunOutputResult[]> {
+    tagExpression: string | undefined,
+    scenarioScopes: readonly ScenarioRef[],
+    consume: (output: RunOutputResult) => Promise<boolean>
+  ): Promise<boolean> {
     const rows = this.outlineRows(scenario.filePath);
-    const capture = artifactCaptureTarget(scenario, rows, mapped);
+    const capture = artifactCaptureTarget(scenario, rows, scenarioScopes);
     const exactLines = scenario.kind === "examplesBlock"
       ? capture.resultLines
       : scenario.kind === "outline" && scenario.line > 0 && targetLine(scenario, rows) === 0
         ? capture.resultLines
         : undefined;
     if (exactLines === undefined) {
-      return [await this.runScenario(
-        mode,
+      const options = scenarioOptions(
         scenario,
+        rows,
         signal,
         artifactBatch,
         progress,
-        mapped,
         tagExpression
-      )];
-    }
-    if (rows.length === 0) {
-      throw new Error(
-        `Could not resolve exact example rows for ${scenario.filePath}:${scenario.line}. ` +
-          "No broader outline target was executed."
       );
+      return consume(mode === "debug"
+        ? await this.executor.debugScenarioWithOutput(options, capture)
+        : await this.executor.runScenarioWithOutput(options, capture));
     }
-    const outputs: RunOutputResult[] = [];
     for (const line of exactLines) {
-      if (signal?.aborted) {break;}
+      if (signal?.aborted) {return false;}
       const row = rows.find((candidate) => candidate.lineNumber === line);
       if (!row) {
         throw new Error(
@@ -575,28 +657,12 @@ export class ExtensionExecutionGateway implements ExecutionGateway {
         tagExpression
       );
       const target = { scenario, resultLines: [line] };
-      outputs.push(mode === "debug"
+      const shouldContinue = await consume(mode === "debug"
         ? await this.executor.debugScenarioWithOutput(options, target)
         : await this.executor.runScenarioWithOutput(options, target));
+      if (!shouldContinue) {return false;}
     }
-    return outputs;
-  }
-
-  private runScenario(
-    mode: RunIntent["mode"],
-    scenario: ScenarioRef,
-    signal: AbortSignal | undefined,
-    artifactBatch: number | undefined,
-    progress: RunProgressObserver,
-    mapped: readonly ScenarioRef[],
-    tagExpression?: string
-  ): Promise<RunOutputResult> {
-    const rows = this.outlineRows(scenario.filePath);
-    const target = artifactCaptureTarget(scenario, rows, mapped);
-    const options = scenarioOptions(scenario, rows, signal, artifactBatch, progress, tagExpression);
-    return mode === "debug"
-      ? this.executor.debugScenarioWithOutput(options, target)
-      : this.executor.runScenarioWithOutput(options, target);
+    return true;
   }
 
   private outlineRows(filePath: string): OutlineExampleRow[] {

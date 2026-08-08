@@ -8,13 +8,17 @@ import { ExtensionConfig } from "../../../core/extension-config";
 import { TestDiscoveryManager } from "../../../core/test-discovery-manager";
 import { TestExecutor } from "../../../core/test-executor";
 import { TestOrganizationManager } from "../../../core/test-organization";
-import { ExtensionExecutionGateway } from "../../../core/execution-gateway";
+import { LegacyDirectExecutionGateway } from "../../../core/execution-gateway";
+import { LegacyExecutionDiscovery } from "../../../core/legacy-discovery";
 import { FeatureParser } from "../../../parsers/feature-parser";
 import type { ScenarioRef } from "../../../traceability/scenario-ref";
+import type { RunArtifactStore } from "../../../traceability/run-artifact-store";
 import type { PlaywrightBddExtensionContext } from "../../../types";
 import { Logger } from "../../../utils/logger";
 import { PlaywrightJsonParser } from "../../../utils/playwright-json-parser";
 import { XrayAdapter } from "../../../xray/xray-adapter";
+import { WorkspaceTrust } from "../../../core/workspace-trust";
+import { LegacyArtifactGateway } from "../../../ui/legacy-artifact-gateway";
 
 export function makeContext(
   overrides?: Partial<PlaywrightBddExtensionContext> & {
@@ -25,27 +29,41 @@ export function makeContext(
   const config = ExtensionConfig.create();
   const testExecutor = TestExecutor.create();
   const featureParser = FeatureParser.create(logger);
+  const discoveryManager = TestDiscoveryManager.create(logger, config);
   const base = {
     logger,
     config,
     testExecutor,
-    discoveryManager: TestDiscoveryManager.create(logger, config),
+    discoveryManager,
     organizationManager: TestOrganizationManager.create(logger),
     featureParser,
     playwrightJsonParser: PlaywrightJsonParser.create(logger),
     commandBuilder: CommandBuilder.create(config, logger),
+    workspaceTrust: new WorkspaceTrust(() => true),
+    attachmentSpoolRoot: path.join(os.tmpdir(), "specwright-command-tests"),
+    extensionUri: vscode.Uri.file("/extension"),
     traceabilityAdapter: new XrayAdapter(config),
   };
   const merged = { ...base, ...(overrides ?? {}) };
+  const legacyGateway = new LegacyDirectExecutionGateway(
+    merged.testExecutor,
+    merged.featureParser,
+    merged.workspaceTrust,
+    undefined,
+    undefined,
+    new LegacyExecutionDiscovery(merged.discoveryManager, merged.featureParser)
+  );
   return {
     ...merged,
-    executionGateway: overrides?.executionGateway ?? new ExtensionExecutionGateway(
-      merged.testExecutor,
-      merged.runArtifactStore,
-      merged.featureParser,
-      logger,
-      () => overrides?.mappedScenarios ?? []
-    ),
+    executionGateway: overrides?.executionGateway ?? (overrides?.runArtifactStore
+      ? new LegacyArtifactGateway(
+        legacyGateway,
+        overrides.runArtifactStore as RunArtifactStore,
+        merged.logger,
+        merged.testExecutor,
+        overrides.mappedScenarios ? () => overrides.mappedScenarios ?? [] : undefined
+      )
+      : legacyGateway),
   };
 }
 
@@ -77,7 +95,11 @@ export function captureHandlers(
   };
   try {
     const manager = CommandManager.create(context);
-    manager.registerCommands({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+    manager.registerCommands({
+      subscriptions: [],
+      extensionUri: vscode.Uri.file("/extension"),
+      globalStorageUri: vscode.Uri.file("/tmp/specwright-command-tests"),
+    } as unknown as vscode.ExtensionContext);
   } finally {
     commandsApi.registerCommand = original;
   }

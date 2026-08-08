@@ -19,7 +19,6 @@ import {
   normalizePathKey,
 } from "../utils/playwright-json-parser";
 import type { CommandBuilder } from "../core/command-builder";
-import { isUnderExcludedDir, workspaceExcludeFragments } from "../utils/discovery-excludes";
 import {
   ensureWorkerCount,
   resolveWorkerCountDetailed,
@@ -30,7 +29,11 @@ import {
   beginExternalTestRun,
   LiveTestRunProgress,
 } from "./live-test-run-progress";
-import type { RunIntent } from "../core/run-contracts";
+import {
+  requireExecutionAvailable,
+  type ExecutionDefinition,
+  type RunIntent,
+} from "../core/run-contracts";
 import {
   requestedTestItems,
   testExplorerRunIntent,
@@ -201,57 +204,13 @@ export class PlaywrightBddTestProvider {
     this.fileWatcher = watcher;
   }
 
-  /**
-   * Watcher create/change. In the file-rooted FeatureBased view a .feature file maps to exactly
-   * one tree root, so we re-read just that file instead of re-globbing and re-parsing the whole
-   * workspace. Every other strategy groups by content (tags, scenario type, …), where editing one
-   * file can move scenarios between groups, so those keep the full refresh. Incremental updates
-   * run on the discoveryQueue so they can't interleave with a concurrent full pass.
-   */
-  private onFeatureFileTouched(uri: vscode.Uri): Promise<void> {
-    if (!this.isFeatureBasedStrategy()) {return this.refreshTests();}
-    // The raw watcher doesn't apply discovery's excludes, so a generated copy of a feature under
-    // .features-gen/report/results could surface here; skip it (full discovery would filter it).
-    if (isUnderExcludedDir(uri.fsPath, workspaceExcludeFragments())) {return Promise.resolve();}
-    this.discoveryQueue = this.discoveryQueue.then(() => this.updateFeatureFile(uri));
-    return this.discoveryQueue;
+  /** Watcher changes always refresh through the selected engine's discovery boundary. */
+  private onFeatureFileTouched(_uri: vscode.Uri): Promise<void> {
+    return this.refreshTests();
   }
 
-  private onFeatureFileRemoved(uri: vscode.Uri): Promise<void> {
-    if (!this.isFeatureBasedStrategy()) {return this.refreshTests();}
-    if (isUnderExcludedDir(uri.fsPath, workspaceExcludeFragments())) {return Promise.resolve();}
-    this.discoveryQueue = this.discoveryQueue.then(() => { this.removeFeatureFile(uri.fsPath); });
-    return this.discoveryQueue;
-  }
-
-  private isFeatureBasedStrategy(): boolean {
-    return this.context.organizationManager.getStrategy().strategyType === "FeatureBasedOrganization";
-  }
-
-  private async updateFeatureFile(uri: vscode.Uri): Promise<void> {
-    this.pruneFileState(uri.fsPath);
-    await this.addFeatureFileToTestController(uri);
-    // addFeatureFileToTestController only warns and returns on unparsable content, so a file that
-    // stopped parsing leaves no fresh item; delete the stale tree node rather than keep it.
-    if (!this.discoveredTests.has(uri.fsPath)) {
-      this.testController.items.delete(uri.fsPath);
-    }
-  }
-
-  private removeFeatureFile(fsPath: string): void {
-    this.testController.items.delete(fsPath);
-    this.pruneFileState(fsPath);
-  }
-
-  /** Drop every cached entry keyed to one feature file: its scenario ids, discovered item, title. */
-  private pruneFileState(fsPath: string): void {
-    this.discoveredTests.delete(fsPath);
-    // scenarioByTestId ids for this file all start with `${fsPath}:`; both `${fsPath}:${line}`
-    // and `${fsPath}:outline:...` (OUTLINE_ID_SEPARATOR) shapes.
-    const prefix = `${fsPath}:`;
-    for (const id of [...this.scenarioByTestId.keys()]) {
-      if (id.startsWith(prefix)) {this.scenarioByTestId.delete(id);}
-    }
+  private onFeatureFileRemoved(_uri: vscode.Uri): Promise<void> {
+    return this.refreshTests();
   }
 
   // --- Discovery --------------------------------------------------------------
@@ -265,40 +224,17 @@ export class PlaywrightBddTestProvider {
 
   private async performDiscovery(): Promise<void> {
     try {
-      const pattern = this.context.config.testFilePattern;
-      if (!pattern || pattern.trim() === "") {
-        throw new Error("Test file pattern is empty or invalid");
-      }
-
-      const filePaths = await this.context.discoveryManager.discoverTestFiles({
-        pattern,
-        forceRefresh: true,
-      });
+      await requireExecutionAvailable(this.context.executionGateway);
+      const discovery = await this.context.executionGateway.discover({ refresh: true });
+      const definitions = discovery.cases;
+      const allScenarios = definitions.map((definition) => ({
+        scenario: this.scenarioFromDefinition(definition),
+        file: vscode.Uri.file(definition.source.path),
+      }));
 
       this.testController.items.replace([]);
       this.discoveredTests.clear();
       this.scenarioByTestId.clear();
-
-      const allScenarios: Array<{ scenario: Scenario; file: vscode.Uri }> = [];
-      for (const filePath of filePaths) {
-        try {
-          const file = vscode.Uri.file(filePath);
-          const content = await vscode.workspace.fs.readFile(file);
-          const text = new TextDecoder().decode(content);
-          const parsed = this.context.featureParser.parseFeatureContent(text);
-          if (!parsed) {continue;}
-          // Remember each file's Feature title so runs (in any organization strategy) can grep
-          // by the exact title rather than the filename.
-          for (const scenario of parsed.scenarios) {
-            scenario.filePath = file.fsPath;
-            allScenarios.push({ scenario, file });
-          }
-        } catch (fileError) {
-          this.context.logger.error(
-            `Failed to process feature file ${filePath}: ${errMsg(fileError)}`
-          );
-        }
-      }
 
       const organized = this.context.organizationManager.organizeTests(
         allScenarios.map((s) => s.scenario)
@@ -306,7 +242,7 @@ export class PlaywrightBddTestProvider {
       const strategy = this.context.organizationManager.getStrategy().strategyType;
 
       if (strategy === "FeatureBasedOrganization") {
-        await this.buildHierarchicalFeatureView(allScenarios);
+        this.buildHierarchicalFeatureView(allScenarios, definitions);
       } else {
         this.buildGroupItems(organized);
       }
@@ -315,6 +251,37 @@ export class PlaywrightBddTestProvider {
       this.context.logger.error(`Failed to discover tests: ${msg}`);
       vscode.window.showErrorMessage(`Test discovery failed: ${msg}`);
     }
+  }
+
+  private scenarioFromDefinition(definition: ExecutionDefinition): Scenario {
+    const line = definition.source.line;
+    const common = {
+      name: definition.name,
+      line,
+      lineNumber: line,
+      range: new vscode.Range(Math.max(0, line - 1), 0, Math.max(0, line - 1), 0),
+      steps: [],
+      tags: [...definition.tags],
+      filePath: definition.source.path,
+      featureLineNumber: definition.suites[0]?.source?.line,
+      ...(definition.suites[1] ? { ruleName: definition.suites[1].name } : {}),
+    };
+    const parameterized = definition.parameterized;
+    if (!parameterized) {return { ...common, isScenarioOutline: false };}
+    const outline = {
+      ...common,
+      isScenarioOutline: true as const,
+      outlineLineNumber: parameterized.groupLine,
+      outlineName: parameterized.groupName,
+    };
+    return parameterized.blockLine === undefined
+      ? outline
+      : {
+          ...outline,
+          examplesBlockLineNumber: parameterized.blockLine,
+          ...(parameterized.blockName ? { examplesBlockName: parameterized.blockName } : {}),
+          ...(parameterized.substitutedName ? { substitutedName: parameterized.substitutedName } : {}),
+        };
   }
 
   public async refreshTests(): Promise<void> {
@@ -444,13 +411,38 @@ export class PlaywrightBddTestProvider {
     }
   }
 
-  private async buildHierarchicalFeatureView(
-    scenarios: Array<{ scenario: Scenario; file: vscode.Uri }>
-  ): Promise<void> {
-    const uniqueFiles = new Set<string>();
-    for (const { file } of scenarios) {uniqueFiles.add(file.fsPath);}
-    for (const filePath of uniqueFiles) {
-      await this.addFeatureFileToTestController(vscode.Uri.file(filePath));
+  private buildHierarchicalFeatureView(
+    scenarios: Array<{ scenario: Scenario; file: vscode.Uri }>,
+    definitions: readonly ExecutionDefinition[]
+  ): void {
+    const byFile = new Map<string, Scenario[]>();
+    for (const { scenario } of scenarios) {
+      const existing = byFile.get(scenario.filePath);
+      if (existing) {existing.push(scenario);} else {byFile.set(scenario.filePath, [scenario]);}
+    }
+    for (const [filePath, fileScenarios] of byFile) {
+      const file = vscode.Uri.file(filePath);
+      const definition = definitions.find(({ source }) => source.path === filePath);
+      const suite = definition?.suites[0];
+      const featureItem = this.testController.createTestItem(filePath, suite?.name ?? path.basename(filePath), file);
+      featureItem.canResolveChildren = true;
+      if (suite?.source?.line) {
+        featureItem.range = new vscode.Range(suite.source.line - 1, 0, suite.source.line - 1, 0);
+      }
+      for (const group of groupScenariosByOutline(fileScenarios).values()) {
+        const first = group[0];
+        if (!first) {continue;}
+        featureItem.children.add(first.isScenarioOutline
+          ? this.createOutlineTestItem(
+              file,
+              first.outlineName,
+              group,
+              `${filePath}${OUTLINE_ID_SEPARATOR}${first.outlineLineNumber}:${first.outlineName}`
+            )
+          : this.createScenarioTestItem(file, first));
+      }
+      this.testController.items.add(featureItem);
+      this.discoveredTests.set(filePath, featureItem);
     }
   }
 

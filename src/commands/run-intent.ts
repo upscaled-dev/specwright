@@ -1,4 +1,9 @@
-import type { RunInitiator, RunIntent } from "../core/run-contracts";
+import type { RunIntent } from "../core/run-contracts";
+import {
+  withExecutionClientContext,
+  type ClientRunIntent,
+  type RunInitiator,
+} from "../ui/execution-client-context";
 import { outlineRef, scenarioRefFromScenario, type ScenarioRef } from "../traceability/scenario-ref";
 import type { ParsedFeature } from "../types";
 
@@ -41,17 +46,18 @@ export function scenarioRunIntent(
   mode: RunIntent["mode"],
   initiatedBy: RunInitiator,
   tagExpression?: string
-): RunIntent {
+): ClientRunIntent {
   if (lineNumber === undefined && outlineName === undefined) {
     return pathRunIntent(filePath, "feature", mode, initiatedBy, tagExpression);
   }
   const scenario = commandScenario(parsed, filePath, lineNumber, scenarioName, outlineName);
-  return {
+  return withExecutionClientContext({
     mode,
-    selection: { kind: "scenario", scenario, ...(tagExpression ? { tagExpression } : {}) },
     targets: [{ kind: "scenario", scenario, ...(tagExpression ? { tagExpression } : {}) }],
-    metadata: { initiatedBy },
-  };
+  }, {
+    selection: { kind: "scenario", scenario, ...(tagExpression ? { tagExpression } : {}) },
+    initiatedBy,
+  });
 }
 
 export function pathRunIntent(
@@ -60,27 +66,24 @@ export function pathRunIntent(
   mode: RunIntent["mode"],
   initiatedBy: RunInitiator,
   tagExpression?: string
-): RunIntent {
-  return {
+): ClientRunIntent {
+  const selection = selectionKind === "feature"
+    ? { kind: "feature" as const, filePath: target, ...(tagExpression ? { tagExpression } : {}) }
+    : { kind: "folder" as const, folderPath: target };
+  return withExecutionClientContext({
     mode,
-    selection: selectionKind === "feature"
-      ? { kind: "feature", filePath: target, ...(tagExpression ? { tagExpression } : {}) }
-      : { kind: "folder", folderPath: target },
     targets: [{ kind: "path", path: target, ...(tagExpression ? { tagExpression } : {}) }],
-    metadata: { initiatedBy },
-  };
+  }, { selection, initiatedBy });
 }
 
 export function suiteRunIntent(
   mode: RunIntent["mode"],
   initiatedBy: RunInitiator,
   maxWorkers?: number
-): RunIntent {
-  return {
+): ClientRunIntent {
+  return withExecutionClientContext({
     mode,
-    selection: { kind: "suite" },
     targets: [{ kind: "suite" }],
     ...(maxWorkers !== undefined ? { maxWorkers } : {}),
-    metadata: { initiatedBy },
-  };
+  }, { selection: { kind: "suite" }, initiatedBy });
 }

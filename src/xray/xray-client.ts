@@ -1,10 +1,20 @@
 import { Logger } from "../utils/logger";
+import { isTrustRevocation } from "../core/workspace-trust";
 import { errMsg, maskValues, scrubJwtLike, serverText } from "../utils/text";
 import { NormalizedStatus } from "../traceability/contracts";
 import { XrayCredentials } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
 import { describeJwt, graphqlErrorSummaries } from "./xray-diagnostics";
 import { buildKeysJql, jqlString } from "./xray-search";
+import {
+  operationIdentity,
+  REMOTE_OPERATION_POLICY,
+  retryAfterMilliseconds,
+  RetryableRemoteError,
+  runRemoteOperation,
+  type OperationIdentity,
+  type RemoteOperationName,
+} from "./remote-operation";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 // Proactively reuse the JWT well inside its ~24h life so an in-flight batch never trips the true
@@ -18,9 +28,6 @@ const COVERABLE_LIMIT = 20;
 // Hard ceiling on items paginated per scope (§5's documented 10 000-item budget). A server that
 // reports monotonically growing totals would otherwise page forever; stop here, marked incomplete.
 const MAX_SCOPE_ITEMS = 10_000;
-const MAX_ATTEMPTS = 4;
-const BACKOFF_BASE_MS = 300;
-const BACKOFF_CAP_MS = 8_000;
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -105,9 +112,9 @@ export class XrayMutationError extends Error {
 
 // A transient transport fault (429, 5xx, timeout, network) that backoff should retry. Exported because
 // {@link withBackoff} retries this class and nothing else, so every transport it wraps raises it.
-export class RetryableError extends Error {
-  constructor(message: string) {
-    super(message);
+export class RetryableError extends RetryableRemoteError {
+  constructor(message: string, retryAfterMs?: number) {
+    super(message, retryAfterMs);
     this.name = "RetryableError";
   }
 }
@@ -116,6 +123,7 @@ interface TimedResponse {
   status: number;
   ok: boolean;
   bodyText: string;
+  retryAfterMs?: number | undefined;
 }
 
 function parseBody(bodyText: string): unknown {
@@ -151,33 +159,20 @@ export interface BackoffDeps {
   signal?: AbortSignal | undefined;
 }
 
-function backoffDelay(attempt: number, random: () => number): number {
-  const base = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (attempt - 1));
-  return base + Math.floor(random() * BACKOFF_BASE_MS);
-}
-
 /**
- * Retries `run` up to {@link MAX_ATTEMPTS} with exponential backoff and jitter. A {@link RetryableError}
+ * Retries `run` under the shared GraphQL-read policy. A {@link RetryableError}
  * is the only error retried; every other one (an auth refusal, a cancel) comes straight back out. The
  * signal is read before each attempt and ends the delay itself, so an aborted caller starts no further
  * request.
  */
 export async function withBackoff<T>(run: () => Promise<T>, deps: BackoffDeps): Promise<T> {
-  let attempt = 0;
-  for (;;) {
-    if (deps.signal?.aborted) {
-      throw new XrayAbortError();
-    }
-    try {
-      return await run();
-    } catch (error) {
-      attempt += 1;
-      if (!(error instanceof RetryableError) || attempt >= MAX_ATTEMPTS || deps.signal?.aborted) {
-        throw error;
-      }
-      await deps.sleep(backoffDelay(attempt, deps.random), deps.signal);
-    }
-  }
+  return runRemoteOperation(() => run(), {
+    identity: operationIdentity("xray.graphql.read"),
+    sleep: deps.sleep,
+    random: deps.random,
+    signal: deps.signal,
+    abortError: () => new XrayAbortError(),
+  });
 }
 
 function dedupe(keys: readonly string[]): string[] {
@@ -402,8 +397,8 @@ function parseUpdatedGherkin(body: unknown): string | undefined {
 
 /**
  * Region-aware Xray Cloud transport. Owns the in-memory JWT (never persisted, never logged; only
- * `describeJwt` facts), batched/paginated `getTests`, flat `coverableIssues`, generic exponential
- * backoff with jitter, a 30s per-request timeout, and abort propagation on every call. All
+ * `describeJwt` facts), batched/paginated `getTests`, flat `coverableIssues`, classified retry policy,
+ * a 30s per-request timeout, and abort propagation on every call. All
  * diagnostics go through the allowlist helpers; no response value ever reaches the logger.
  */
 export class XrayClient {
@@ -515,8 +510,15 @@ export class XrayClient {
   ): Promise<TestPage | { errors: string[] }> {
     let body: unknown;
     try {
-      body = await this.graphql(testsQuery(jql, start), signal);
+      body = await this.graphql(
+        testsQuery(jql, start),
+        operationIdentity("xray.graphql.read"),
+        signal
+      );
     } catch (error) {
+      if (isTrustRevocation(signal)) {
+        throw signal?.reason ?? error;
+      }
       if (error instanceof XrayAbortError) {
         throw error;
       }
@@ -532,25 +534,26 @@ export class XrayClient {
     return parseTestPage(body);
   }
 
-  // A Bearer-authorized POST with a single refresh-on-401 retry, shared by graphql/postJson/postMultipart.
-  // The init is rebuilt per attempt so the fresh JWT rides the retry. A 401 that survives a fresh token
-  // is a real auth failure, not an empty page; surface it so the scope is recorded incomplete.
+  // Shared Bearer authorization for reads and mutations. Reads refresh once after a 401; mutations do
+  // not replay because the response alone cannot prove the first request had no remote effect.
   private async sendAuthorized(
     url: string,
     buildInit: (jwt: string) => RequestInit,
-    signal: AbortSignal | undefined
+    signal: AbortSignal | undefined,
+    identity: OperationIdentity
   ): Promise<TimedResponse> {
     let refreshed = false;
     for (;;) {
       const jwt = await this.getJwt(signal, refreshed);
-      const response = await this.sendWithRetry(url, buildInit(jwt), signal);
+      const response = await this.sendWithRetry(url, buildInit(jwt), signal, identity);
       if (response.status === 401) {
-        if (!refreshed) {
+        const policy = REMOTE_OPERATION_POLICY[identity.name];
+        if (policy.class === "read" && !refreshed) {
           this.jwt = undefined;
           refreshed = true;
           continue;
         }
-        this.deps.logger.error(`${url} → 401 with a fresh token; response body:\n${serverText(response.bodyText)}`);
+        this.deps.logger.error(`${url} → 401; response body:\n${serverText(response.bodyText)}`);
         throw new XrayAuthError("Authentication failed: check your client ID and secret.");
       }
       return response;
@@ -561,7 +564,11 @@ export class XrayClient {
   // fetch). A 200 with no readable key is NOT an error here (the create succeeded), so it returns a
   // keyless record the caller surfaces (never a silent orphan).
   public async createTest(spec: XrayCreateTestSpec, signal?: AbortSignal): Promise<XrayCreatedTest> {
-    return parseCreated(await this.mutate("createTest", createTestMutation(spec), signal), "createTest", "test");
+    return parseCreated(
+      await this.mutate("createTest", "xray.test.create", createTestMutation(spec), signal),
+      "createTest",
+      "test"
+    );
   }
 
   // Author a Test Set / Test Plan holding the given tests, addressed by their remote issue ids (never
@@ -573,7 +580,7 @@ export class XrayClient {
     testIssueIds: readonly string[],
     signal?: AbortSignal
   ): Promise<XrayCreatedTest> {
-    return this.createContainer("createTestSet", "testSet", project, summary, testIssueIds, signal);
+    return this.createContainer("createTestSet", "testSet", "xray.test-set.create", project, summary, testIssueIds, signal);
   }
 
   public createTestPlan(
@@ -582,25 +589,26 @@ export class XrayClient {
     testIssueIds: readonly string[],
     signal?: AbortSignal
   ): Promise<XrayCreatedTest> {
-    return this.createContainer("createTestPlan", "testPlan", project, summary, testIssueIds, signal);
+    return this.createContainer("createTestPlan", "testPlan", "xray.test-plan.create", project, summary, testIssueIds, signal);
   }
 
   // An EMPTY Test Execution: no members and no environments, so a later publish is what fills it. Passing
   // no `testIssueIds` at all is deliberate, since it is mutually exclusive with the `tests` argument.
   public createTestExecution(project: string, summary: string, signal?: AbortSignal): Promise<XrayCreatedTest> {
-    return this.createContainer("createTestExecution", "testExecution", project, summary, undefined, signal);
+    return this.createContainer("createTestExecution", "testExecution", "xray.execution.create", project, summary, undefined, signal);
   }
 
   private async createContainer(
     mutation: string,
     field: string,
+    operation: RemoteOperationName,
     project: string,
     summary: string,
     testIssueIds: readonly string[] | undefined,
     signal: AbortSignal | undefined
   ): Promise<XrayCreatedTest> {
     const query = createContainerMutation(mutation, field, project, summary, testIssueIds);
-    return parseCreated(await this.mutate(mutation, query, signal), mutation, field);
+    return parseCreated(await this.mutate(mutation, operation, query, signal), mutation, field);
   }
 
   // Replace an existing test's Gherkin body and read the stored text back from the SAME response. An
@@ -612,13 +620,20 @@ export class XrayClient {
     signal?: AbortSignal
   ): Promise<string | undefined> {
     const query = updateGherkinMutation(issueId, gherkin);
-    return parseUpdatedGherkin(await this.mutate("updateGherkinTestDefinition", query, signal));
+    return parseUpdatedGherkin(
+      await this.mutate("updateGherkinTestDefinition", "xray.gherkin.update", query, signal)
+    );
   }
 
   // Every mutation's shared envelope: a GraphQL `errors` array becomes an XrayMutationError, whose safe
   // reading is that the write never landed, and the raw body goes back for the caller's own parser.
-  private async mutate(name: string, query: string, signal: AbortSignal | undefined): Promise<unknown> {
-    const body = await this.graphql(query, signal);
+  private async mutate(
+    name: string,
+    operation: RemoteOperationName,
+    query: string,
+    signal: AbortSignal | undefined
+  ): Promise<unknown> {
+    const body = await this.graphql(query, operationIdentity(operation), signal);
     const summaries = graphqlErrorSummaries(body);
     if (summaries.length > 0) {
       for (const summary of summaries) {
@@ -629,7 +644,11 @@ export class XrayClient {
     return body;
   }
 
-  private async graphql(query: string, signal?: AbortSignal): Promise<unknown> {
+  private async graphql(
+    query: string,
+    identity: OperationIdentity,
+    signal?: AbortSignal
+  ): Promise<unknown> {
     const response = await this.sendAuthorized(
       `${this.base}/graphql`,
       (jwt) => ({
@@ -637,16 +656,25 @@ export class XrayClient {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
         body: JSON.stringify({ query }),
       }),
-      signal
+      signal,
+      identity
     );
+    if (!response.ok && REMOTE_OPERATION_POLICY[identity.name].class !== "read") {
+      throw new XrayMutationError(`Mutation failed (HTTP ${response.status}).`);
+    }
     return parseBody(response.bodyText);
   }
 
   // Import execution results as Xray JSON (append via top-level `testExecutionKey`, or create via `info`).
-  // A thin sibling of graphql: same bearer + refresh-once-on-401, riding the shared backoff/timeout/abort
+  // A thin sibling of graphql: same bearer, riding the shared policy/timeout/abort
   // layers. Returns `{status, ok, body}` so a non-2xx (e.g. 400 "No execution results…") reaches the
   // importer intact; the server message is never stripped here.
-  public async postJson(path: string, body: unknown, signal?: AbortSignal): Promise<{ status: number; ok: boolean; body: unknown }> {
+  public async postJson(
+    path: string,
+    body: unknown,
+    signal?: AbortSignal,
+    operationId?: string
+  ): Promise<{ status: number; ok: boolean; body: unknown }> {
     const response = await this.sendAuthorized(
       `${this.base}${path}`,
       (jwt) => ({
@@ -654,7 +682,8 @@ export class XrayClient {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
         body: JSON.stringify(body),
       }),
-      signal
+      signal,
+      operationIdentity("xray.execution.import-json", operationId)
     );
     this.logImport(path, response);
     return { status: response.status, ok: response.ok, body: parseBody(response.bodyText) };
@@ -662,7 +691,12 @@ export class XrayClient {
 
   // Import Cucumber results as multipart/form-data. `results` and `info` ride as `application/json` file
   // parts (part names verbatim per the swagger extract); fetch sets the boundary/Content-Type, never us.
-  public async postMultipart(path: string, parts: MultipartParts, signal?: AbortSignal): Promise<{ status: number; ok: boolean; body: unknown }> {
+  public async postMultipart(
+    path: string,
+    parts: MultipartParts,
+    signal?: AbortSignal,
+    operationId?: string
+  ): Promise<{ status: number; ok: boolean; body: unknown }> {
     const response = await this.sendAuthorized(
       `${this.base}${path}`,
       (jwt) => {
@@ -671,7 +705,8 @@ export class XrayClient {
         form.append("info", new Blob([parts.info], { type: "application/json" }), "info.json");
         return { method: "POST", headers: { Authorization: `Bearer ${jwt}` }, body: form };
       },
-      signal
+      signal,
+      operationIdentity("xray.execution.import-cucumber", operationId)
     );
     this.logImport(path, response);
     return { status: response.status, ok: response.ok, body: parseBody(response.bodyText) };
@@ -728,7 +763,8 @@ export class XrayClient {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ client_id: credentials.clientId, client_secret: credentials.clientSecret }),
       },
-      signal
+      signal,
+      operationIdentity("xray.authenticate")
     );
     if (!response.ok) {
       // The bad-credential body may echo the request, so the credentials just sent are masked out of
@@ -754,25 +790,42 @@ export class XrayClient {
     return jwt;
   }
 
-  private sendWithRetry(url: string, init: RequestInit, signal?: AbortSignal): Promise<TimedResponse> {
-    return withBackoff(
+  private sendWithRetry(
+    url: string,
+    init: RequestInit,
+    signal: AbortSignal | undefined,
+    identity: OperationIdentity
+  ): Promise<TimedResponse> {
+    return runRemoteOperation(
       async () => {
-        const response = await this.timedFetch(url, init, signal);
+        const response = await this.timedFetch(url, init, signal, identity);
         // A rate-limit or server fault is retryable; every other status (incl. 401/400) is handled by
-        // the caller. Backoff never depends on rate-limit headers; none appear on the wire (§5).
+        // the caller. Retry-After is folded into the shared policy delay when the service supplies it.
         if (response.status === 429 || response.status >= 500) {
-          throw new RetryableError(`HTTP ${response.status}`);
+          throw new RetryableError(`HTTP ${response.status}`, response.retryAfterMs);
         }
         return response;
       },
-      { sleep: this.sleep, random: this.random, signal }
+      {
+        identity,
+        logger: this.deps.logger,
+        sleep: this.sleep,
+        random: this.random,
+        signal,
+        abortError: () => new XrayAbortError(),
+      }
     );
   }
 
   // The body read stays inside the timed window (matches the probe): a server that returns headers
   // then stalls the stream trips the 30s abort instead of hanging. The caller's signal aborting is a
   // hard cancel (XrayAbortError); a timeout or network error is retryable transport noise.
-  private async timedFetch(url: string, init: RequestInit, signal?: AbortSignal): Promise<TimedResponse> {
+  private async timedFetch(
+    url: string,
+    init: RequestInit,
+    signal?: AbortSignal,
+    operation?: OperationIdentity
+  ): Promise<TimedResponse> {
     if (signal?.aborted) {
       throw new XrayAbortError();
     }
@@ -780,11 +833,20 @@ export class XrayClient {
     const onAbort = (): void => controller.abort();
     signal?.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let started = false;
     try {
+      started = true;
       const response = await this.fetchImpl(url, { ...init, signal: controller.signal });
       const bodyText = await response.text();
-      return { status: response.status, ok: response.ok, bodyText };
+      const retryAfterMs = retryAfterMilliseconds(response.headers?.get("retry-after") ?? null, this.now());
+      return { status: response.status, ok: response.ok, bodyText, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
     } catch (error) {
+      if (started && operation && signal?.aborted && REMOTE_OPERATION_POLICY[operation.name].class !== "read") {
+        throw new RetryableError("Request aborted after dispatch");
+      }
+      if (isTrustRevocation(signal)) {
+        throw signal?.reason ?? new XrayAbortError();
+      }
       if (signal?.aborted) {
         throw new XrayAbortError();
       }

@@ -118,7 +118,7 @@ CodeLens and menu actions continue to pass their exact target. The Testing view 
 
 ## Limits to be aware of
 
-- Specwright normally targets generated-spec lines. If a generated spec cannot be found or mapped, it falls back to matching by scenario name. Duplicate names can then run together, and an outline fallback can run all of its rows.
+- Specwright targets generated-spec lines and verifies each generated file's `Generated from` source identity. If it cannot prove that a current generated spec belongs to the requested feature, or cannot resolve its line for a targeted scenario or Examples row, it fails closed. Run `bddgen`, then check `playwrightBddRunner.featuresGenDir` and your bddgen features configuration.
 - A breakpoint on a shared Background step pauses once for every scenario that executes that step.
 - Code generation and result mapping depend on the output format emitted by your installed `playwright-bdd` and Playwright versions.
 

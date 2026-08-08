@@ -2,6 +2,11 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as vscode from "vscode";
 import type { ExtensionApi } from "../../../extension";
+import {
+  materializeGeneratedSpecForBddgen,
+  removeGeneratedSpecs,
+  SAMPLE_EXACT_TARGET,
+} from "./generated-spec-fixture";
 
 const EXTENSION_ID = "upscaled-dev.specwright";
 
@@ -13,6 +18,12 @@ async function getProvider(): Promise<TestProviderApi> {
   const api = (await ext.activate()) as ExtensionApi;
   assert.ok(api.testProvider, "testProvider not exposed by ExtensionApi");
   return api.testProvider;
+}
+
+function workspaceRoot(): string {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) {throw new Error("No workspace folder open in integration host");}
+  return root;
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs: number, description: string): Promise<void> {
@@ -63,6 +74,7 @@ suite("Run → Test Explorer status (real VS Code, canned shell)", () => {
   let target: TargetScenario;
 
   suiteSetup(async () => {
+    removeGeneratedSpecs(workspaceRoot());
     provider = await getProvider();
     await waitUntil(
       () => findScenario(provider, "Plain scenario") !== undefined,
@@ -76,10 +88,15 @@ suite("Run → Test Explorer status (real VS Code, canned shell)", () => {
 
   teardown(() => {
     provider.restoreShellRunner();
+    removeGeneratedSpecs(workspaceRoot());
   });
 
   async function runScenarioWithCannedResult(status: "passed" | "failed"): Promise<void> {
-    provider.overrideShellRunner(async (_cmd, _dir, env) => {
+    provider.overrideShellRunner(async (command, workingDir, env) => {
+      if (materializeGeneratedSpecForBddgen(command, workingDir)) {
+        return { success: true, output: "", error: "", returnCode: 0 };
+      }
+      assert.ok(command.includes(SAMPLE_EXACT_TARGET), `expected exact target, got: ${command}`);
       const reportPath = env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"];
       if (reportPath) { fs.writeFileSync(reportPath, cannedReport(target, status)); }
       return { success: status === "passed", output: "", error: "", returnCode: status === "passed" ? 0 : 1 };

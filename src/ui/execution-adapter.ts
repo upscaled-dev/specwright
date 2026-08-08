@@ -1,9 +1,10 @@
-import type {
-  ExecutionCaseResult,
-  ExecutionEvent,
-  ExecutionGateway,
-  RunCompletion,
-  RunIntent,
+import {
+  startExecution,
+  type ExecutionCaseResult,
+  type ExecutionEvent,
+  type ExecutionGateway,
+  type RunCompletion,
+  type RunIntent,
 } from "../core/run-contracts";
 import type { RunProgressObserver } from "../core/run-progress";
 import type { RunOutputResult } from "../core/test-executor";
@@ -65,7 +66,7 @@ export async function runIntentWithObserver(
 ): Promise<RunOutputResult> {
   let completion: RunCompletion;
   try {
-    completion = await gateway.execute(intent, {
+    completion = await startExecution(gateway, intent, {
       signal,
       onEvent: (event: ExecutionEvent) => {
         if (event.kind === "case-finished") {

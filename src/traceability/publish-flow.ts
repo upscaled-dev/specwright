@@ -4,8 +4,15 @@ import {
   ResultPublishingCapability,
   RunArtifact,
 } from "./contracts";
-import { LedgerEntry } from "./publish-ledger";
+import {
+  isOutcomeUnknownEntry,
+  LedgerEntry,
+  type OutcomeUnknownLedgerEntry,
+  type PendingAttachment,
+} from "./publish-ledger";
 import { normalizeProjectKeys } from "./project-scope";
+import { RemoteOutcomeUnknownError } from "../core/workspace-trust";
+import { errMsg, scrubJwtLike } from "../utils/text";
 import {
   defaultPublishSummary,
   derivePublishProject,
@@ -47,6 +54,8 @@ export interface RepublishNotice {
   readonly target: string;
   readonly publishedAt: number;
   readonly mode?: "create-new" | "append" | undefined;
+  readonly outcomeUnknown?: boolean | undefined;
+  readonly operationId?: string | undefined;
 }
 
 // The pending-attachments banner (§ point 4): the run's prior publish left files that failed to
@@ -135,10 +144,13 @@ export interface PublishFlowDeps extends PublishRunSources {
   // pending-attachments banner.
   attachFiles(
     executionKey: string,
-    files: readonly string[],
-    signal?: AbortSignal
-  ): Promise<{ readonly failed: readonly string[]; readonly cancelled: readonly string[] }>;
-  recordPublish(entry: LedgerEntry): void;
+    files: readonly PendingAttachment[],
+    signal?: AbortSignal,
+    operationId?: string
+  ): Promise<{ readonly failed: readonly PendingAttachment[]; readonly cancelled: readonly PendingAttachment[] }>;
+  sealAttachments(files: readonly string[]): Promise<readonly PendingAttachment[]> | readonly PendingAttachment[];
+  discardAttachments?(files: readonly PendingAttachment[]): void;
+  recordPublish(entry: LedgerEntry): Promise<void> | void;
   // No publishable run exists; the message/toast the caller shows instead of an empty dialog.
   reportNoRuns(): void;
   reportSuccess(outcome: PublishOutcome, request: PublishRequest, attachedCount: number): void;
@@ -149,14 +161,14 @@ export interface PublishFlowDeps extends PublishRunSources {
     outcome: PublishOutcome,
     request: PublishRequest,
     attachedCount: number,
-    failed: readonly string[],
+    failed: readonly PendingAttachment[],
     artifactId: string
   ): void;
   reportFailure(error: unknown): void;
   // `landed` is present once the import has succeeded: the execution exists on the server whatever the
   // cancel did next, and `pending` is what the upload never got to (on the ledger, replayable from the
   // banner).
-  reportCancelled(landed?: { outcome: PublishOutcome; request: PublishRequest; pending: readonly string[] }): void;
+  reportCancelled(landed?: { outcome: PublishOutcome; request: PublishRequest; pending: readonly PendingAttachment[] }): void;
   site: string;
   account: string;
   now(): number;
@@ -197,8 +209,14 @@ function buildRunOption(
       ...(planKey !== undefined && planKey !== "" ? { prefillPlanKey: planKey } : {}),
       ...(prior
         ? {
-            republish: {
-              target: executionLabel(prior.executionRef),
+            republish: isOutcomeUnknownEntry(prior) ? {
+              target: "possibly succeeded",
+              publishedAt: prior.publishedAt,
+              mode: prior.mode,
+              outcomeUnknown: true,
+              operationId: prior.operationId,
+            } : {
+              target: executionLabel(prior.executionRef ?? ""),
               publishedAt: prior.publishedAt,
               // The banner describes a prior PUBLISH, and `prior` is looked up by a run's artifact id,
               // which a standalone execution create can never carry (its id is namespaced), so the two
@@ -207,8 +225,8 @@ function buildRunOption(
             },
           }
         : {}),
-      ...(prior && prior.pendingAttachments.length > 0
-        ? { pendingAttachments: { target: executionLabel(prior.executionRef), count: prior.pendingAttachments.length } }
+      ...(prior && !isOutcomeUnknownEntry(prior) && prior.pendingAttachments.length > 0
+        ? { pendingAttachments: { target: executionLabel(prior.executionRef ?? ""), count: prior.pendingAttachments.length } }
         : {}),
     },
   };
@@ -241,6 +259,76 @@ interface ConfirmedPublish {
   readonly artifact: RunArtifact;
   readonly dialog: PublishDialogResult;
   readonly outcome: PublishOutcome;
+  readonly attachments: readonly PendingAttachment[];
+}
+
+export class LandedAttachmentPreparationError extends Error {
+  constructor(public readonly outcome: PublishOutcome, cause: unknown) {
+    super(`Results were published to ${executionLabel(outcome.ref.key)}, but local attachment sealing failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "LandedAttachmentPreparationError";
+  }
+}
+
+export class OutcomeUnknownRecoveryPersistenceError extends Error {
+  public readonly operationId: string;
+  public readonly persistenceCause: string;
+
+  constructor(
+    public readonly ambiguity: RemoteOutcomeUnknownError,
+    cause: unknown
+  ) {
+    const persistenceCause = scrubJwtLike(errMsg(cause));
+    super(
+      `Publish possibly succeeded, but its local recovery record could not be saved. `
+      + `Correlation: ${ambiguity.operationId}. Recovery error: ${persistenceCause}`
+    );
+    this.name = "OutcomeUnknownRecoveryPersistenceError";
+    this.operationId = ambiguity.operationId;
+    this.persistenceCause = persistenceCause;
+  }
+}
+
+function ledgerEntryFor(
+  deps: PublishFlowDeps,
+  artifact: RunArtifact,
+  request: PublishRequest,
+  outcome: PublishOutcome,
+  pendingAttachments: readonly PendingAttachment[]
+): LedgerEntry {
+  const summary = summarizePublishable(publishableResults(artifact));
+  return {
+    artifactId: artifact.id,
+    executionRef: outcome.ref.key,
+    site: deps.site,
+    account: deps.account,
+    publishedAt: deps.now(),
+    pendingAttachments,
+    ...(outcome.operationId !== undefined ? { operationId: outcome.operationId } : {}),
+    ...(request.mode === "create-new" ? { summary: request.summary } : {}),
+    mode: request.mode,
+    passed: summary.passed,
+    failed: summary.failed,
+    skipped: summary.skipped,
+    total: summary.total,
+  };
+}
+
+function outcomeUnknownEntryFor(
+  deps: PublishFlowDeps,
+  artifact: RunArtifact,
+  request: PublishRequest,
+  error: RemoteOutcomeUnknownError
+): OutcomeUnknownLedgerEntry {
+  return {
+    kind: "outcome-unknown",
+    artifactId: artifact.id,
+    site: deps.site,
+    account: deps.account,
+    publishedAt: deps.now(),
+    pendingAttachments: [],
+    operationId: error.operationId,
+    mode: request.mode,
+  };
 }
 
 // Present, publish, and on a failure come back to the same dialog instead of dropping the user on an idle
@@ -267,9 +355,29 @@ async function confirmAndPublish(
       deps.reportFailure(new Error("That run is no longer in this workspace's run history, so it cannot be published."));
       return undefined;
     }
+    let attachments: readonly PendingAttachment[] | undefined;
     try {
-      return { artifact, dialog, outcome: await deps.publishing.publish(artifact, dialog.request, deps.signal) };
+      attachments = await deps.sealAttachments(dialog.attachments);
+      return {
+        artifact,
+        dialog,
+        attachments,
+        outcome: await deps.publishing.publish(artifact, dialog.request, deps.signal),
+      };
     } catch (error) {
+      if (error instanceof RemoteOutcomeUnknownError) {
+        try {
+          await deps.recordPublish(outcomeUnknownEntryFor(deps, artifact, dialog.request, error));
+        } catch (persistenceError) {
+          if (attachments !== undefined) {deps.discardAttachments?.(attachments);}
+          deps.reportFailure(new OutcomeUnknownRecoveryPersistenceError(error, persistenceError));
+          return undefined;
+        }
+        if (attachments !== undefined) {deps.discardAttachments?.(attachments);}
+        deps.reportFailure(error);
+        return undefined;
+      }
+      if (attachments !== undefined) {deps.discardAttachments?.(attachments);}
       // A cancelled import rejects like any other failure; only the signal separates the two.
       if (deps.signal?.aborted) {
         deps.reportCancelled();
@@ -333,22 +441,49 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
     return;
   }
   const { artifact, dialog, outcome } = confirmed;
-  const summary = summarizePublishable(publishableResults(artifact));
 
   // Dedupe by absolute path (exact match, mirroring the dialog's own `seenPaths`) so a run-level pick
   // that also happens to be an issue-routed evidence file uploads exactly once.
-  const files = [...new Set([...dialog.attachments, ...(outcome.issueEvidenceFiles ?? [])])];
+  const evidencePaths = (outcome.issueEvidenceFiles ?? []).filter((file) => !dialog.attachments.includes(file));
+  let evidenceFiles: readonly PendingAttachment[] = [];
+  try {
+    evidenceFiles = evidencePaths.length === 0 ? [] : await deps.sealAttachments(evidencePaths);
+  } catch (error) {
+    try {
+      await deps.recordPublish(ledgerEntryFor(deps, artifact, dialog.request, outcome, confirmed.attachments));
+    } catch (persistenceError) {
+      deps.discardAttachments?.(confirmed.attachments);
+      deps.reportFailure(persistenceError);
+      return;
+    }
+    deps.reportFailure(new LandedAttachmentPreparationError(outcome, error));
+    return;
+  }
+  const files = [...confirmed.attachments, ...evidenceFiles];
   // An unnamed execution has no issue to upload to, and files recorded as pending against it could never
   // be replayed, so the upload is skipped whole rather than attempted and ledgered as unrecoverable work.
   const uploadable = hasExecutionRef(outcome.ref.key);
-  let failed: readonly string[] = [];
-  let cancelled: readonly string[] = [];
+  let failed: readonly PendingAttachment[] = [];
+  let cancelled: readonly PendingAttachment[] = [];
   if (uploadable && files.length > 0) {
     try {
-      const upload = await deps.attachFiles(outcome.ref.key, files, deps.signal);
+      const upload = outcome.operationId === undefined
+        ? await deps.attachFiles(outcome.ref.key, files, deps.signal)
+        : await deps.attachFiles(outcome.ref.key, files, deps.signal, outcome.operationId);
       failed = upload.failed;
       cancelled = upload.cancelled;
-    } catch {
+    } catch (error) {
+      if (error instanceof RemoteOutcomeUnknownError) {
+        deps.discardAttachments?.(files);
+        try {
+          await deps.recordPublish(ledgerEntryFor(deps, artifact, dialog.request, outcome, []));
+        } catch (persistenceError) {
+          deps.reportFailure(persistenceError);
+          return;
+        }
+        deps.reportFailure(error);
+        return;
+      }
       // The import already landed; an upload fault is recoverable, never a rollback. Treat every file
       // as pending so Retry/resume can replay them. A cancelled upload can surface as a throw too, and
       // only the signal separates the two.
@@ -361,21 +496,13 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
   }
   const pending = [...failed, ...cancelled];
 
-  deps.recordPublish({
-    artifactId: artifact.id,
-    executionRef: outcome.ref.key,
-    site: deps.site,
-    account: deps.account,
-    publishedAt: deps.now(),
-    // A cancelled file is pending exactly like a failed one; the banner replays both.
-    pendingAttachments: pending,
-    ...(dialog.request.mode === "create-new" ? { summary: dialog.request.summary } : {}),
-    mode: dialog.request.mode,
-    passed: summary.passed,
-    failed: summary.failed,
-    skipped: summary.skipped,
-    total: summary.total,
-  });
+  try {
+    await deps.recordPublish(ledgerEntryFor(deps, artifact, dialog.request, outcome, pending));
+  } catch (error) {
+    deps.discardAttachments?.(files);
+    deps.reportFailure(error);
+    return;
+  }
 
   const attachedCount = uploadable ? files.length - pending.length : 0;
   // A cancel that also left a failure behind is still one interrupted upload, so it reports once, over
@@ -388,6 +515,7 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
     deps.reportPartialAttachments(outcome, dialog.request, attachedCount, failed, artifact.id);
     return;
   }
+  deps.discardAttachments?.(files);
   // The skip rides the outcome's own notes channel, which is where the toast already reads its honest
   // asides from, so a publish that quietly kept the user's files cannot look like a clean one. The lead
   // has already named the missing reference, so the note only has to say what it cost.

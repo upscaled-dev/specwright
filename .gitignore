@@ -15,10 +15,6 @@ packages/
 playwright-report/
 test-results/
 .features-gen/
-# The primary integration fixture ships a committed generated spec: exact spec-line resolution
-# refuses to run without one, so the fixture must be real, not machine-local.
-!src/test/integration/fixtures/workspace/.features-gen/
-!src/test/integration/fixtures/workspace/.features-gen/**
 
 # Integration-test scratch fixtures (created/torn down per run)
 **/watcher-scratch/

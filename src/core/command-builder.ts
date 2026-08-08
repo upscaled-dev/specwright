@@ -10,6 +10,10 @@ function nonEmpty(value: string | undefined): string | undefined {
   return value !== undefined && value !== "" ? value : undefined;
 }
 
+function nonEmptyValues(values: readonly string[] | undefined): string[] {
+  return values?.filter((value) => value !== "") ?? [];
+}
+
 /**
  * Builds shell commands to drive playwright-bdd.
  *
@@ -17,9 +21,8 @@ function nonEmpty(value: string | undefined): string | undefined {
  *   1. `bddgen` reads .feature files and emits Playwright spec files under .features-gen/ (configurable).
  *   2. `playwright test` runs those generated specs.
  *
- * Newer versions can run codegen automatically via `defineBddProject` in playwright.config.ts,
- * in which case `bddgen` is unnecessary; set `playwrightBddRunner.bddgenCommand` to an empty
- * string to skip it.
+ * Targeted runs need current generated specs. Keep `bddgenCommand` configured, or arrange for
+ * `preRunCommand` to produce the specs before the targeted Playwright command runs.
  *
  * Targeting:
  *   - Tags     → `bddgen --tags "<expr>"` (filters which specs get generated)
@@ -88,9 +91,15 @@ export class CommandBuilder {
     tagExpression?: string,
     titles: readonly string[] = []
   ): string {
-    const parts: string[] = [];
-    const gen = this.buildBddgen(tagExpression);
-    if (gen) {parts.push(gen);}
+    const commands = this.buildPathFilterCommandParts(pathFilter, tagExpression, titles);
+    return [commands.bddgenCommand, commands.playwrightCommand].filter(Boolean).join(" && ");
+  }
+
+  public buildPathFilterCommandParts(
+    pathFilter: string,
+    tagExpression?: string,
+    titles: readonly string[] = []
+  ): { bddgenCommand: string | undefined; playwrightCommand: string } {
     const playwrightParts: string[] = [this.config.playwrightCommand, this.quote(pathFilter)];
     if (titles.length > 0) {
       playwrightParts.push(
@@ -103,29 +112,35 @@ export class CommandBuilder {
       parallel: this.config.parallelExecution,
       dryRun: this.config.dryRun,
     });
-    parts.push(playwrightParts.join(" "));
-    return parts.join(" && ");
+    return {
+      bddgenCommand: this.buildBddgen(tagExpression),
+      playwrightCommand: playwrightParts.join(" "),
+    };
   }
 
   public buildTagCommand(tag: string): string {
-    const parts: string[] = [];
-    const gen = this.buildBddgen(tag);
-    if (gen) {parts.push(gen);}
+    const commands = this.buildTagCommandParts(tag);
+    return [commands.bddgenCommand, commands.playwrightCommand].filter(Boolean).join(" && ");
+  }
+
+  public buildTagCommandParts(tag: string): { bddgenCommand: string | undefined; playwrightCommand: string } {
     const playwrightParts: string[] = [this.config.playwrightCommand];
     this.appendCommonFlags(playwrightParts, {
       reporter: this.config.reporter,
       parallel: this.config.parallelExecution,
       dryRun: this.config.dryRun,
     });
-    parts.push(playwrightParts.join(" "));
-    return parts.join(" && ");
+    return {
+      bddgenCommand: this.buildBddgen(tag),
+      playwrightCommand: playwrightParts.join(" "),
+    };
   }
 
   /**
    * Debug command, split into its bddgen and playwright halves. The executor runs bddgen
    * itself (so the generated specs exist before breakpoints are mirrored into them) and then
-   * launches ONLY the playwright half under VS Code's JS debugger via a `node-terminal`
-   * configuration, so breakpoints in step-definition files are hit. We do NOT add Playwright's
+   * launches ONLY the playwright half under VS Code's JS debugger via structured runtime arguments,
+   * so breakpoints in step-definition files are hit. We do NOT add Playwright's
    * `--debug` flag here; that opens the Playwright Inspector and pauses there instead of in
    * VS Code.
    */
@@ -135,15 +150,16 @@ export class CommandBuilder {
     const bddgenCommand = this.buildBddgen(options.tags);
 
     const playwrightParts: string[] = [this.config.playwrightCommand];
-    if (options.specLineTarget) {
+    const lineTargets = nonEmptyValues(options.specLineTargets);
+    if (lineTargets.length > 0) {
       // Preferred: target the exact generated test by `<spec>:<pwTestLine>`. This is the only way
       // to debug a single Scenario Outline example row (grep on the source title can't isolate one).
-      playwrightParts.push(this.quote(options.specLineTarget));
+      playwrightParts.push(...lineTargets.map((target) => this.quote(target)));
     } else {
       // A grep shape is always pinned to this feature's generated spec: an unscoped title (or,
       // worse, a basename) grep would debug matches from other features too.
-      const fileFilter = nonEmpty(options.specFileFilter);
-      if (fileFilter !== undefined) {playwrightParts.push(this.quote(fileFilter));}
+      const fileFilters = nonEmptyValues(options.specFileFilters);
+      playwrightParts.push(...fileFilters.map((filter) => this.quote(filter)));
       const grepName = nonEmpty(options.scenarioName) ?? nonEmpty(options.outlineName);
       if (grepName) {
         playwrightParts.push("--grep", this.quote(this.gripPattern(grepName, options.outlineName)));
@@ -160,17 +176,21 @@ export class CommandBuilder {
   }
 
   public buildAllTestsCommand(): string {
-    const parts: string[] = [];
-    const gen = this.buildBddgen(this.config.tags);
-    if (gen) {parts.push(gen);}
+    const commands = this.buildAllTestsCommandParts();
+    return [commands.bddgenCommand, commands.playwrightCommand].filter(Boolean).join(" && ");
+  }
+
+  public buildAllTestsCommandParts(): { bddgenCommand: string | undefined; playwrightCommand: string } {
     const playwrightParts: string[] = [this.config.playwrightCommand];
     this.appendCommonFlags(playwrightParts, {
       reporter: this.config.reporter,
       parallel: this.config.parallelExecution,
       dryRun: this.config.dryRun,
     });
-    parts.push(playwrightParts.join(" "));
-    return parts.join(" && ");
+    return {
+      bddgenCommand: this.buildBddgen(this.config.tags),
+      playwrightCommand: playwrightParts.join(" "),
+    };
   }
 
   /**
@@ -183,17 +203,15 @@ export class CommandBuilder {
     // outline node passes only `outlineName`), by the outline name, which matches every expanded
     // example row. Without this, an outline run with no scenarioName produced no `--grep` and ran
     // the entire suite.
-    if (greppedByName && options.specLineTarget) {
-      // Preferred: precise `<spec>:<pwTestLine>` target (see TestExecutionOptions.specLineTarget).
-      // Falls through to name-grep below only when no spec line could be resolved.
-      parts.push(this.quote(options.specLineTarget));
+    const lineTargets = nonEmptyValues(options.specLineTargets);
+    if (greppedByName && lineTargets.length > 0) {
+      // Precise `<spec>:<pwTestLine>` targets replace name grep when line maps are available.
+      parts.push(...lineTargets.map((target) => this.quote(target)));
     } else {
       const grepName = nonEmpty(options.scenarioName) ?? nonEmpty(options.outlineName);
-      const fileFilter = nonEmpty(options.specFileFilter);
+      const fileFilters = nonEmptyValues(options.specFileFilters);
       if (greppedByName && grepName) {
-        if (fileFilter !== undefined) {
-          parts.push(this.quote(fileFilter));
-        }
+        parts.push(...fileFilters.map((filter) => this.quote(filter)));
         parts.push("--grep", this.quote(this.gripPattern(grepName, options.outlineName)));
       }
     }

@@ -17,11 +17,24 @@ Unit tests use [Vitest](https://vitest.dev/) with a minimal stub of the `vscode`
 
 ## Releasing
 
-Release only from protected `main` and protect tags matching `v*` in the repository settings. The workflow itself uses read-only repository permissions; only the tag-only attestation job receives `id-token: write` and `attestations: write`.
+Release only from protected `main` and protect tags matching `v*` in the repository settings. The workflow cannot administer or prove those rules with its token, so verify both rules before the first release and after repository-policy changes. The workflow uses read-only repository permissions; only the tag-only promotion job receives `actions: read`, `id-token: write`, and `attestations: write`.
 
 The release script bumps `package.json` and `package-lock.json` together, updates `CHANGELOG.md`, and runs the source gates. It then creates the release commit before building so the artifact manifest can name the exact commit. After that it builds production once, validates the package inventory, packages one VSIX, runs integration tests against that bundle, installs the VSIX into a clean extension profile, discovers a fixture scenario, and verifies that the VSIX SHA-256 did not change. The tag is created only after every gate passes.
 
-The release artifact set contains the VSIX, its checksum, a CycloneDX SBOM, and a manifest with a `components` array. The current component is the VS Code extension; future Core Service and execution-provider packages can add components without changing the manifest shape. Production source maps are excluded from the VSIX and retained as a separate CI artifact for 30 days. Restrict workflow-artifact access as part of the repository's release permissions.
+The release artifact set contains the VSIX, its checksum, a CycloneDX SBOM, and a manifest with a `components` array. The manifest binds the source commit, component version, VSIX digest, and SBOM digest. The current component is the VS Code extension; future Core Service and execution-provider packages can add components without changing the manifest shape. Candidate and promoted artifact sets are retained for 90 days. Production source maps are excluded from the VSIX and retained as a separate CI artifact for 30 days. Restrict workflow-artifact access as part of the repository's release permissions.
+
+## Core execution dependency
+
+`legacy-direct` remains the execution default. An Extension Development Host may set `SPECWRIGHT_EXECUTION_ENGINE=core-client` to exercise the fail-closed preview selection. Workspace settings and workspace launch files cannot select an engine or replace its executable.
+
+The repository does not contain a Core Service executable or Client Protocol schema. Enabling a real Core client requires Polywright to supply all of the following as one versioned release contract:
+
+- a self-contained executable for each supported runtime identifier;
+- a signed manifest binding runtime identifier, executable SHA-256, Core version, Client Protocol version, and schema profile;
+- the canonical framing specification and generated TypeScript request, response, event, diagnostic, and error DTOs for that profile;
+- protocol lifecycle rules for negotiation, session identity, ordering, size limits, cancellation, shutdown, and outcome-unknown starts.
+
+Until those artifacts verify as one set, Core discovery, preparation, run, and debug fail with `execution.core-client.unavailable`. The extension does not fall back to `legacy-direct`. A TypeScript fake can later test client error containment against the supplied framing contract, but cannot satisfy Core lifecycle, provider supervision, or parity acceptance.
 
 ```bash
 npm run release            # default: patch bump
@@ -42,17 +55,26 @@ After the script completes:
 ```bash
 git show v0.1.1                         # review the release commit
 cat dist/specwright-0.1.1.vsix.sha256  # digest of the local build only
-git push && git push origin v0.1.1
+git push origin main
+# Wait for the successful main CI artifact named specwright-<release-commit>.
+git push origin v0.1.1
 ```
 
-The tag workflow repeats the quality, minimum/current-host integration, package-content, installed-VSIX smoke, and digest gates. Download the `specwright-<commit>` workflow artifact set and verify the downloaded VSIX against the `.sha256` and manifest that ship inside that same download, then publish that VSIX. The local digest printed above identifies the local build and will not match the CI build: `vsce` embeds timestamps, so each package run produces a distinct digest. Do not rebuild between download and publication.
+The main workflow creates `specwright-<commit>` only after the quality, exact-version integration, package-content, installed-VSIX smoke, and digest gates pass. Push the release tag only after that hosted candidate exists. The tag workflow fails closed unless the tag matches the package version, its commit is on `main`, and a successful main CI run retained the matching candidate. It downloads that candidate without rebuilding, verifies the manifest commit and version plus the VSIX and SBOM digests, attests the same VSIX, and retains the unchanged set as `specwright-<tag>`.
+
+Download `specwright-<tag>` and verify the VSIX against the checksum, SBOM, and manifest in that same download, then publish that VSIX. The local digest printed above identifies the local build and will not match the hosted build: `vsce` embeds timestamps, so each package run produces a distinct digest. Do not rebuild between hosted testing, tag promotion, download, and publication.
 
 ```bash
-shasum -a 256 -c specwright-0.1.1.vsix.sha256   # run inside the downloaded artifact set
+node scripts/release-artifact.mjs --verify \
+  --out specwright-0.1.1.vsix \
+  --commit "$(git rev-parse v0.1.1^{})" \
+  --version 0.1.1
 npx vsce publish --packagePath specwright-0.1.1.vsix
 ```
 
-The script refuses a dirty tree, missing commit, or existing tag. If an artifact gate fails after the release commit, no tag is created and the script removes the release commit again, so a rerun starts from the same version. Before push, delete an unwanted tag with `git tag -d v0.1.1` and remove its commit with `git reset --hard HEAD~1`. After publication, retain the previous workflow artifact and checksum, revert the faulty change, cut a new patch, and provide the previous VSIX for explicit downgrade while the correction is validated. `npm run release:dry-run` exercises the release and rollback command plan without changing Git or package files.
+The verification command checks the checksum filename and digest, manifest schema, source commit, component version and digest, and SBOM filename and digest before publication.
+
+The script refuses a dirty tree, missing commit, or existing tag. If an artifact gate fails after the release commit, no tag is created and the script removes the release commit again, so a rerun starts from the same version. Before push, delete an unwanted tag with `git tag -d v0.1.1` and remove its commit with `git reset --hard HEAD~1`. After publication, keep the previous promoted artifact set, revert the faulty change, cut a new patch, and provide the previous VSIX and checksum for explicit downgrade while the correction is validated. `npm run release:dry-run` exercises the release and rollback command plan without changing Git or package files. A real promotion, Marketplace rollback, artifact download, and protected-ref audit require authenticated repository administration and remain manual acceptance steps.
 
 The 22-file package allowlist lives in [scripts/package-contents.json](../scripts/package-contents.json). Update it deliberately when shipping a new file. Source: [scripts/release.mjs](../scripts/release.mjs) and [scripts/release-artifact.mjs](../scripts/release-artifact.mjs).
 

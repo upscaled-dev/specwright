@@ -1,5 +1,11 @@
-import type { Event } from "vscode";
 import type { ScenarioRef } from "./scenario-ref";
+
+// Structural host ports keep integration-adapter contracts usable without importing VS Code.
+export interface DisposableLike {
+  dispose(): void;
+}
+
+export type AdapterEvent<T> = (listener: (event: T) => unknown) => DisposableLike;
 
 export interface KeyGrammar {
   testPrefix: string;
@@ -243,6 +249,7 @@ export interface PublishOutcome {
   readonly imported: number;
   readonly warnings: readonly string[];
   readonly issueEvidenceFiles?: readonly string[] | undefined;
+  readonly operationId?: string | undefined;
 }
 
 export type ConnectionVerifyStatus = "ok" | "auth-failed" | "unreachable";
@@ -255,17 +262,17 @@ export interface ConnectionVerifyResult {
 // Read-side view of the provider connection. The connect/disconnect actions live in provider
 // commands + the credential store, not here; this capability only reports state.
 export interface ConnectionCapability {
-  readonly onDidChange: Event<void>;
+  readonly onDidChange: AdapterEvent<void>;
   readonly label: string;
   isConnected(): Promise<boolean>;
   // `verify` runs a live, cheap handshake against the provider; `isConnected()` stays "credentials
   // stored" and continues to gate tree visibility; the two deliberately differ so the offline tree
   // still shows when the network doesn't.
-  verify?(): Promise<ConnectionVerifyResult>;
+  verify?(signal?: AbortSignal): Promise<ConnectionVerifyResult>;
 }
 
 export interface MetadataCapability {
-  readonly onDidChange: Event<void>;
+  readonly onDidChange: AdapterEvent<void>;
   snapshot(): RemoteMetadataSnapshot;
   sync(scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress): Promise<void>;
 }
@@ -379,9 +386,9 @@ export interface ProjectDirectory {
 
 // Optional capability: enumerate the projects the current credentials can reach, so a surface can offer
 // them without the workspace having to name them first. Offline-first like `metadata`: `cached` answers
-// from the last-known list synchronously (empty before the first refresh) and kicks a background refresh
-// once it has aged out, which fires the provider's metadata change event so the surface repaints; `list`
-// is the awaited fetch. Capability-gated: an adapter that cannot enumerate projects omits it.
+// from the last-known list synchronously (empty before the first refresh), while the trust boundary owns
+// any stale background refresh through `list`. Capability-gated: an adapter that cannot enumerate
+// projects omits it.
 export interface ProjectDirectoryCapability {
   cached(): ProjectDirectory;
   list(signal?: AbortSignal): Promise<ProjectDirectory>;
@@ -426,5 +433,8 @@ export interface TraceabilityAdapter {
   readonly resultPublishing?: ResultPublishingCapability | undefined;
   readonly attachments?: AttachmentCapability | undefined;
 
-  dispose?(): void;
+  // Initialization and disposal must stay asynchronous. The registry bounds both calls and aborts
+  // initialization before an adapter can become visible to domain code.
+  initialize?(signal: AbortSignal): Promise<void>;
+  dispose?(): void | Promise<void>;
 }

@@ -963,6 +963,26 @@ describe("buildExecutionRows", () => {
     expect(buildExecutionRows([])).toEqual([]);
   });
 
+  it("renders an ambiguous publish as possibly succeeded with its correlation", () => {
+    const [row] = buildExecutionRows([{
+      kind: "outcome-unknown",
+      artifactId: "run-unknown",
+      site: "acme.atlassian.net",
+      account: "client-1",
+      publishedAt: Date.UTC(2026, 6, 22),
+      pendingAttachments: [],
+      operationId: "publish-unknown",
+      mode: "create-new",
+    }]);
+
+    expect(row).toMatchObject({
+      kind: "unknown",
+      keyLabel: "Possibly succeeded",
+      summary: "Correlation publish-unknown",
+      action: "Outcome unknown",
+    });
+  });
+
   it("orders execution parents by their newest activity", () => {
     const rows = buildExecutionRows([
       ledgerEntry({ executionRef: "OLD-1", publishedAt: 1000 }),

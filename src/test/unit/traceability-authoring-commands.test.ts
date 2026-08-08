@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as vscode from "vscode";
 import { AuthoringCommandDeps, TraceabilityAuthoringCommands } from "../../commands/traceability-authoring-commands";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
 import { scenarioDropId } from "../../traceability/board-data";
 import {
   AuthoredTest,
@@ -144,6 +145,7 @@ function rig(options: RigOptions = {}): Rig {
   } as unknown as TraceabilityAdapter;
   const logger = Logger.create();
   const deps: AuthoringCommandDeps = {
+    workspaceTrust: trustedWorkspace(),
     snapshot: () => options.snapshot ?? snapshot(),
     adapter: () => adapter,
     selectedScenarios: () => options.selected ?? [scenarioDropId(LOGIN), scenarioDropId(CHECKOUT)],
@@ -236,6 +238,7 @@ function pushRig(options: PushRigOptions = {}): PushRig {
   } as unknown as TraceabilityAdapter;
   const logger = Logger.create();
   const deps: AuthoringCommandDeps = {
+    workspaceTrust: trustedWorkspace(),
     snapshot: () => options.snapshot ?? linkSnapshot(),
     adapter: () => adapter,
     selectedScenarios: () => [],
@@ -339,6 +342,7 @@ function containerRig(options: ContainerRigOptions = {}): ContainerRig {
   } as unknown as TraceabilityAdapter;
   const logger = Logger.create();
   const deps: AuthoringCommandDeps = {
+    workspaceTrust: trustedWorkspace(),
     snapshot: () => options.snapshot ?? CONTAINER_SNAPSHOT,
     adapter: () => adapter,
     selectedScenarios: () => [],

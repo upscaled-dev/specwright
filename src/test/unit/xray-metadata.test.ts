@@ -847,15 +847,15 @@ describe("XrayMetadataCapability.search", () => {
 describe("XrayMetadataCapability project directory", () => {
   const acme: JiraProjectSearchResult = { projects: [{ key: "OPS", name: "Operations" }], truncated: false };
 
-  it("answers from the last known list and refreshes it in the background", async () => {
+  it("answers from the last known list and refreshes it when requested", async () => {
     const listProjects = vi.fn(() => Promise.resolve(acme));
     const capability = makeCapability({ client: fakeClient({}), listProjects });
 
-    // Nothing fetched yet: the first read is empty and synchronous, and it kicks the refresh.
+    // Nothing fetched yet: the cache read is pure and synchronous.
     expect(capability.cached()).toEqual({ projects: [], truncated: false });
     let fired = 0;
     capability.onDidChange(() => { fired += 1; });
-    await flush();
+    await capability.list();
 
     expect(fired).toBe(1);
     expect(capability.cached()).toEqual({ projects: [{ key: "OPS", name: "Operations" }], truncated: false });
@@ -871,24 +871,20 @@ describe("XrayMetadataCapability project directory", () => {
       listProjects,
       now: () => clock,
     });
-    capability.cached();
-    await flush();
+    await capability.list();
 
-    capability.cached();
-    await flush();
+    await capability.list();
     expect(listProjects).toHaveBeenCalledTimes(1);
 
     clock += 16 * 60_000;
-    capability.cached();
-    await flush();
+    await capability.list();
     expect(listProjects).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the list empty, without failing, when the connection has no Jira access", async () => {
     const capability = makeCapability({ client: fakeClient({}), listProjects: noProjects });
 
-    capability.cached();
-    await flush();
+    await capability.list();
 
     expect(capability.cached()).toEqual({ projects: [], truncated: false });
   });
@@ -898,19 +894,16 @@ describe("XrayMetadataCapability project directory", () => {
     let fail = false;
     const listProjects = vi.fn(() => (fail ? Promise.reject(new Error("Jira denied access")) : Promise.resolve(acme)));
     const capability = makeCapability({ client: fakeClient({}), listProjects, now: () => clock });
-    capability.cached();
-    await flush();
+    await capability.list();
 
     clock += 16 * 60_000;
     fail = true;
-    capability.cached();
-    await flush();
+    await capability.list();
     expect(listProjects).toHaveBeenCalledTimes(2);
 
     // The failure stamped the clock like a success, so a repaint inside the TTL reads the held list
     // rather than hammering a connection that just refused.
-    capability.cached();
-    await flush();
+    await capability.list();
 
     expect(listProjects).toHaveBeenCalledTimes(2);
     expect(capability.cached().projects).toEqual([{ key: "OPS", name: "Operations" }]);
@@ -924,13 +917,12 @@ describe("XrayMetadataCapability project directory", () => {
       onCredentialsChange: creds.event,
       listProjects,
     });
-    capability.cached();
-    await flush();
+    await capability.list();
 
     creds.fire();
 
     expect(capability.cached()).toEqual({ projects: [], truncated: false });
-    await flush();
+    await capability.list();
     expect(listProjects).toHaveBeenCalledTimes(2);
   });
 
@@ -942,12 +934,12 @@ describe("XrayMetadataCapability project directory", () => {
       onCredentialsChange: creds.event,
       listProjects: () => new Promise<JiraProjectSearchResult>((resolve) => { resolveList = resolve; }),
     });
-    capability.cached(); // kicks the refresh, which parks on the pending list
+    const pending = capability.list();
     await flush();
 
     creds.fire();
     resolveList(acme);
-    await flush();
+    await pending;
 
     expect(capability.cached().projects).toEqual([]);
   });

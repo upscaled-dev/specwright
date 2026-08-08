@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { KeyGrammar, SyncProgressEvent } from "./contracts";
-import type { LedgerEntry } from "./publish-ledger";
+import { isOutcomeUnknownEntry, type LedgerEntry } from "./publish-ledger";
 import { executionLabel, hasExecutionRef } from "./publish-core";
 import type { ScenarioRef } from "./scenario-ref";
 import type {
@@ -484,7 +484,7 @@ function executionSummary(entry: LedgerEntry): string {
 
 function executionActivity(entry: LedgerEntry): ExecutionActivityRow {
   return {
-    action: executionAction(entry.mode),
+    action: isOutcomeUnknownEntry(entry) ? "Outcome unknown" : executionAction(entry.mode),
     resultsImported: executionImported(entry),
     passRate: executionPassRate(entry),
     publishedAt: new Date(entry.publishedAt).toISOString().slice(0, 10),
@@ -542,13 +542,28 @@ export function buildExecutionRows(entries: readonly LedgerEntry[]): ExecutionRo
   for (const entry of ordered) {
     const activity = executionActivity(entry);
     const summary = executionSummary(entry);
-    if (!hasExecutionRef(entry.executionRef)) {
+    if (isOutcomeUnknownEntry(entry)) {
       items.push({
         kind: "unknown",
         row: {
           kind: "unknown",
           key: "",
-          keyLabel: executionLabel(entry.executionRef),
+          keyLabel: "Possibly succeeded",
+          summary: `Correlation ${entry.operationId}`,
+          activityCount: 1,
+          ...activity,
+        },
+      });
+      continue;
+    }
+    const executionRef = entry.executionRef ?? "";
+    if (!hasExecutionRef(executionRef)) {
+      items.push({
+        kind: "unknown",
+        row: {
+          kind: "unknown",
+          key: "",
+          keyLabel: executionLabel(executionRef),
           summary,
           activityCount: 1,
           ...activity,
@@ -557,7 +572,7 @@ export function buildExecutionRows(entries: readonly LedgerEntry[]): ExecutionRo
       continue;
     }
 
-    const existing = groups.get(entry.executionRef);
+    const existing = groups.get(executionRef);
     if (existing !== undefined) {
       existing.activities.push(activity);
       if (existing.summary === "" && summary !== "") {
@@ -567,13 +582,13 @@ export function buildExecutionRows(entries: readonly LedgerEntry[]): ExecutionRo
     }
 
     const group: ExecutionGroupAccumulator = {
-      key: entry.executionRef,
-      keyLabel: executionLabel(entry.executionRef),
+      key: executionRef,
+      keyLabel: executionLabel(executionRef),
       summary,
       latestPublishedAt: activity.publishedAt,
       activities: [activity],
     };
-    groups.set(entry.executionRef, group);
+    groups.set(executionRef, group);
     items.push({ kind: "group", group });
   }
 

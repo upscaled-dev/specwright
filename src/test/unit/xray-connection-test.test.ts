@@ -10,6 +10,7 @@ import {
   runXrayConnectionTest,
 } from "../../xray/xray-connection-test";
 import { XrayRegion } from "../../xray/xray-region";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
 
 describe("extractTotal", () => {
   it("returns the numeric total when present", () => {
@@ -91,7 +92,7 @@ function mapCredentialStore(): XrayCredentialStore {
       return Promise.resolve();
     },
   } as unknown as vscode.SecretStorage;
-  return new XrayCredentialStore(storage);
+  return new XrayCredentialStore(storage, trustedWorkspace());
 }
 
 function capturingLogger(): { logger: Logger; lines: string[] } {
@@ -262,7 +263,7 @@ describe("runXrayConnectionTest: secret/JWT redaction invariant", () => {
     const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
 
     const run = runXrayConnectionTest(deps);
-    await vi.advanceTimersByTimeAsync(31_000);
+    await vi.advanceTimersByTimeAsync(130_000);
     await run;
 
     expect(lines.join("\n")).toContain("Authentication request error");
@@ -293,6 +294,27 @@ describe("probeXrayConnection: structured outcome", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("aborts an in-flight authentication fetch through the caller signal", async () => {
+    const deps = await seededDeps();
+    let fetchSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      fetchSignal = init?.signal as AbortSignal | undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        fetchSignal?.addEventListener("abort", () => reject(fetchSignal?.reason), { once: true });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const revoked = new Error("trust revoked");
+    const pending = probeXrayConnection(deps, {}, controller.signal);
+    await vi.waitFor(() => expect(fetchSignal).toBeDefined());
+
+    controller.abort(revoked);
+
+    await expect(pending).rejects.toBe(revoked);
+    expect(fetchSignal?.aborted).toBe(true);
   });
 
   it("skips the GraphQL probes and returns an auth-only outcome when the workspace has no test keys", async () => {

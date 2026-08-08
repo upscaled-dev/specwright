@@ -14,6 +14,7 @@ const VIEW_TYPE = "playwrightBddRunner.xraySetup";
 const MASK = "••••••••";
 
 export interface XraySetupDelegate {
+  workspaceAvailable(): boolean;
   currentSite(): string;
   hasCredentials(site: string): Promise<boolean>;
   getCredentials(site: string): Promise<XrayCredentials | undefined>;
@@ -24,9 +25,9 @@ export interface XraySetupDelegate {
   saveJira(site: string, email: string, token: string): Promise<void>;
   clearJira(site: string): Promise<void>;
   // Full handshake + shape/project probes (Save & Test).
-  probeConnection(site: string): Promise<XrayConnectionOutcome>;
+  probeConnection(site: string, signal?: AbortSignal): Promise<XrayConnectionOutcome>;
   // Cheap auth-only handshake; drives the connection dot on open and after a plain Save.
-  verifyConnection(site: string): Promise<XrayConnectionOutcome>;
+  verifyConnection(site: string, signal?: AbortSignal): Promise<XrayConnectionOutcome>;
 }
 
 export interface XraySetupValidationErrors {
@@ -418,6 +419,7 @@ export class XraySetupPanel {
   // captures the epoch at start and only applies its result if still current, so a stale one is
   // discarded. Mirrors the connection-epoch guard in TraceabilitySubsystem.
   private verifyEpoch = 0;
+  private verifyAbort: AbortController | undefined;
   private disposed = false;
 
   private constructor(
@@ -452,6 +454,7 @@ export class XraySetupPanel {
     const normalized = normalizeSiteUrl(site);
     const hasCredentials = normalized !== "" && (await this.deps.hasCredentials(site));
     const hasJira = normalized !== "" && (await this.deps.hasJiraCredentials(site));
+    if (this.stale(this.verifyEpoch)) {return;}
     // The mask stands in for either stored pair, so it's issued for the host if either exists.
     this.maskIssuedSite = hasCredentials || hasJira ? normalized : undefined;
     this.panel.webview.html = renderHtml(site, hasCredentials, hasJira);
@@ -622,15 +625,21 @@ export class XraySetupPanel {
 
   private async startVerify(site: string, full: boolean, options: VerifyOptions): Promise<void> {
     const epoch = ++this.verifyEpoch;
+    this.verifyAbort?.abort();
+    const controller = new AbortController();
+    this.verifyAbort = controller;
     if (options.announceChecking) {
       await this.post({ type: "conn-state", state: "checking", label: "Checking connection…" });
     }
+    if (this.stale(epoch)) {return;}
     let run: Promise<XrayConnectionOutcome>;
     // A synchronous throw from the delegate (not just a rejected promise) would otherwise escape
     // handleMessage and strand the form at "Checking…" with both buttons disabled. Post the same
     // terminal pair settleVerify's async-failure path posts.
     try {
-      run = full ? this.deps.probeConnection(site) : this.deps.verifyConnection(site);
+      run = full
+        ? this.deps.probeConnection(site, controller.signal)
+        : this.deps.verifyConnection(site, controller.signal);
     } catch (error) {
       if (this.stale(epoch)) {
         return;
@@ -640,7 +649,11 @@ export class XraySetupPanel {
       await this.post({ type: "error", message: `${options.throwPrefix}: ${reason}` });
       return;
     }
-    await this.settleVerify(epoch, run, options, full);
+    try {
+      await this.settleVerify(epoch, run, options, full);
+    } finally {
+      if (this.verifyAbort === controller) {this.verifyAbort = undefined;}
+    }
   }
 
   private async settleVerify(
@@ -702,11 +715,11 @@ export class XraySetupPanel {
   }
 
   private stale(epoch: number): boolean {
-    return this.disposed || epoch !== this.verifyEpoch;
+    return this.disposed || !this.deps.workspaceAvailable() || epoch !== this.verifyEpoch;
   }
 
   private async post(message: OutgoingMessage): Promise<void> {
-    if (this.disposed) {
+    if (this.disposed || !this.deps.workspaceAvailable()) {
       return;
     }
     await this.panel.webview.postMessage(message);
@@ -714,6 +727,8 @@ export class XraySetupPanel {
 
   private dispose(): void {
     this.disposed = true;
+    this.verifyAbort?.abort();
+    this.verifyAbort = undefined;
     XraySetupPanel.current = undefined;
     while (this.disposables.length > 0) {
       this.disposables.pop()?.dispose();

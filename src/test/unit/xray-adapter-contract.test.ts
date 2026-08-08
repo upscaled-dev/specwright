@@ -8,6 +8,8 @@ import { XrayMetadataCapability } from "../../xray/xray-metadata";
 import { XrayMetadataCache } from "../../xray/xray-metadata-cache";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { TestCaseMetadata } from "../../traceability/contracts";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
+import { currentAdapterVersions } from "../../traceability/adapter-contract";
 
 const SITE = "acme.atlassian.net";
 
@@ -86,7 +88,7 @@ function harnessConfig(): ExtensionConfig {
 
 function xrayHarness(): AdapterContractHarness {
   const client = new ControllableClient();
-  const credentialStore = new XrayCredentialStore(mapSecretStorage());
+  const credentialStore = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
   const config = harnessConfig();
   const cache = new XrayMetadataCache(fakeMemento(), {
     endpoint: "xray.cloud.getxray.app",
@@ -102,14 +104,35 @@ function xrayHarness(): AdapterContractHarness {
     onCredentialsChange: credentialStore.onDidChange,
     listProjects: () => Promise.resolve(undefined),
   });
+  const targets: Array<{ id: string; label: string; ref: { key: string } }> = [];
   const adapter = new XrayAdapter(config, {
     credentialStore,
     verify: () => Promise.resolve({ status: "ok", message: "ok" }),
     metadata,
+    resultPublishing: {
+      searchTargets: (kind) => Promise.resolve(kind === "project" ? [] : [...targets]),
+      publish: (artifact, request) => {
+        const key = request.mode === "append" ? request.executionKey : `${request.project}-1`;
+        if (!targets.some((target) => target.ref.key === key)) {
+          targets.push({ id: key, label: key, ref: { key } });
+        }
+        return Promise.resolve({
+          ref: { kind: "execution" as const, key },
+          imported: artifact.results.length,
+          warnings: [],
+        });
+      },
+    },
   });
 
   return {
     adapter,
+    factory: {
+      id: "xray",
+      ...currentAdapterVersions("connection", "metadata", "automationBinding", "resultPublishing"),
+      create: () => adapter,
+    },
+    services: { config, logger: Logger.create(undefined, LogLevel.ERROR) },
     connect: () => credentialStore.setCredentials(SITE, "id", "secret"),
     disconnect: () => credentialStore.clearCredentials(SITE),
     seedCatalogue: (tests, landedProjects) => client.seed(tests, landedProjects),

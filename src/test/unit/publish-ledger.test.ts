@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import type { Memento } from "vscode";
+import * as vscode from "vscode";
 import {
   findLedgerEntry,
   LedgerEntry,
   PublishLedger,
+  PublishLedgerPersistenceError,
   STANDALONE_ARTIFACT_PREFIX,
   withLedgerEntry,
   withUpdatedPending,
@@ -11,7 +13,7 @@ import {
 import { buildExecutionRows } from "../../traceability/board-data";
 import { Logger, LogLevel } from "../../utils/logger";
 
-function entry(over: Partial<LedgerEntry> = {}): LedgerEntry {
+function entry(over: Omit<Partial<LedgerEntry>, "pendingAttachments"> & { pendingAttachments?: readonly unknown[] } = {}): LedgerEntry {
   return {
     artifactId: "run-1",
     executionRef: "XNP-1",
@@ -20,7 +22,7 @@ function entry(over: Partial<LedgerEntry> = {}): LedgerEntry {
     publishedAt: 1000,
     pendingAttachments: [],
     ...over,
-  };
+  } as LedgerEntry;
 }
 
 function fakeMemento(seed: unknown = undefined): Memento & { store: Map<string, unknown> } {
@@ -40,6 +42,29 @@ function fakeMemento(seed: unknown = undefined): Memento & { store: Map<string, 
 }
 
 const logger = Logger.create(undefined, LogLevel.ERROR);
+
+function capturingLogger(): { logger: Logger; lines: string[] } {
+  const lines: string[] = [];
+  const channel = {
+    name: "test",
+    append: () => undefined,
+    appendLine: (line: string): void => {lines.push(line);},
+    replace: () => undefined,
+    clear: () => undefined,
+    show: () => undefined,
+    hide: () => undefined,
+    dispose: () => undefined,
+  } as unknown as vscode.OutputChannel;
+  return { logger: Logger.create(channel, LogLevel.DEBUG), lines };
+}
+
+const snapshot = (name: string) => ({
+  ref: `${name.charCodeAt(0).toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`,
+  name: `${name}.zip`,
+  size: 1,
+  sha256: "a".repeat(64),
+  createdAt: 1,
+});
 
 describe("withLedgerEntry", () => {
   it("prepends the newest entry", () => {
@@ -89,7 +114,7 @@ describe("withUpdatedPending", () => {
   ];
 
   it("replaces the matching entry's pending list, leaving other-site entries untouched", () => {
-    const updated = withUpdatedPending(entries, "run-1", "acme.atlassian.net", ["/b"]);
+    const updated = withUpdatedPending(entries, "run-1", "acme.atlassian.net", ["/b"] as never);
     expect(updated[0]!.pendingAttachments).toEqual(["/b"]);
     expect(updated[1]!.pendingAttachments).toEqual(["/c"]);
   });
@@ -104,7 +129,7 @@ describe("withUpdatedPending", () => {
       entry({ artifactId: "run-1", executionRef: "XNP-2", pendingAttachments: ["/new-a", "/new-b"] }),
       entry({ artifactId: "run-1", executionRef: "XNP-1", pendingAttachments: ["/old-a"] }),
     ];
-    const updated = withUpdatedPending(republished, "run-1", "acme.atlassian.net", ["/new-b"]);
+    const updated = withUpdatedPending(republished, "run-1", "acme.atlassian.net", ["/new-b"] as never);
     expect(updated[0]!.pendingAttachments).toEqual(["/new-b"]);
     expect(updated[1]!.pendingAttachments).toEqual(["/old-a"]);
   });
@@ -123,9 +148,9 @@ function standalone(key = "XNP-7"): LedgerEntry {
 }
 
 describe("standalone execution entries", () => {
-  it("survives the store's validation and reads back whole, counts absent", () => {
+  it("survives the store's validation and reads back whole, counts absent", async () => {
     const memento = fakeMemento();
-    new PublishLedger(memento, logger).record(standalone());
+    await new PublishLedger(memento, logger).record(standalone());
 
     const reloaded = new PublishLedger(memento, logger).entriesForSite("acme.atlassian.net");
 
@@ -148,7 +173,7 @@ describe("standalone execution entries", () => {
     expect(findLedgerEntry(entries, "run-1", "acme.atlassian.net")?.executionRef).toBe("XNP-1");
     expect(findLedgerEntry(entries, "standalone:XNP-7", "acme.atlassian.net")?.mode).toBe("created-empty");
 
-    const updated = withUpdatedPending(entries, "run-1", "acme.atlassian.net", ["/b"]);
+    const updated = withUpdatedPending(entries, "run-1", "acme.atlassian.net", ["/b"] as never);
 
     expect(updated[0]).toEqual(standalone());
     expect(updated[1]!.pendingAttachments).toEqual(["/b"]);
@@ -188,13 +213,83 @@ describe("standalone execution entries", () => {
 });
 
 describe("PublishLedger", () => {
-  it("records, persists, and finds an entry", () => {
+  it("records, persists, and finds an entry", async () => {
     const memento = fakeMemento();
     const ledger = new PublishLedger(memento, logger);
-    ledger.record(entry({ artifactId: "run-1", executionRef: "XNP-5" }));
+    await ledger.record(entry({ artifactId: "run-1", executionRef: "XNP-5" }));
 
     expect(ledger.find("run-1", "acme.atlassian.net")?.executionRef).toBe("XNP-5");
     expect(Array.isArray(memento.store.get("specwright.publishLedger"))).toBe(true);
+  });
+
+  it("reloads a truthful outcome-unknown entry without inventing an execution key", async () => {
+    const memento = fakeMemento();
+    const ledger = new PublishLedger(memento, logger);
+    await ledger.record({
+      kind: "outcome-unknown",
+      artifactId: "run-unknown",
+      site: "acme.atlassian.net",
+      account: "client-1",
+      publishedAt: 1000,
+      pendingAttachments: [],
+      operationId: "publish-unknown",
+      mode: "append",
+    });
+
+    const reloaded = new PublishLedger(memento, logger).find("run-unknown", "acme.atlassian.net");
+
+    expect(reloaded).toMatchObject({
+      kind: "outcome-unknown",
+      operationId: "publish-unknown",
+      mode: "append",
+    });
+    expect(reloaded).not.toHaveProperty("executionRef");
+  });
+
+  it("does not expose or reload a record until durable persistence resolves", async () => {
+    const memento = fakeMemento();
+    let release: (() => void) | undefined;
+    memento.update = (key: string, value: unknown): Promise<void> => new Promise((resolve) => {
+      release = () => {
+        memento.store.set(key, value);
+        resolve();
+      };
+    });
+    const ledger = new PublishLedger(memento, logger);
+    const recording = ledger.record(entry({ artifactId: "deferred", operationId: "operation-7" }));
+    while (release === undefined) {await Promise.resolve();}
+
+    expect(ledger.find("deferred", "acme.atlassian.net")).toBeUndefined();
+    expect(new PublishLedger(memento, logger).find("deferred", "acme.atlassian.net")).toBeUndefined();
+    release?.();
+    await recording;
+
+    expect(ledger.find("deferred", "acme.atlassian.net")?.operationId).toBe("operation-7");
+    expect(new PublishLedger(memento, logger).find("deferred", "acme.atlassian.net")?.operationId).toBe("operation-7");
+  });
+
+  it("fails closed when persistence rejects and leaves memory and reload unchanged", async () => {
+    const memento = fakeMemento();
+    memento.update = (): Promise<void> => Promise.reject(new Error("disk full"));
+    const ledger = new PublishLedger(memento, logger);
+
+    await expect(ledger.record(entry({ artifactId: "lost" }))).rejects.toBeInstanceOf(PublishLedgerPersistenceError);
+
+    expect(ledger.find("lost", "acme.atlassian.net")).toBeUndefined();
+    expect(new PublishLedger(memento, logger).find("lost", "acme.atlassian.net")).toBeUndefined();
+  });
+
+  it("returns snapshots evicted by the fifty-entry cap for physical cleanup", async () => {
+    const seeded = Array.from({ length: 50 }, (_, index) =>
+      entry({ artifactId: `run-${index}`, pendingAttachments: [snapshot(String.fromCharCode(65 + index))] })
+    );
+    const memento = fakeMemento(seeded);
+    const ledger = new PublishLedger(memento, logger);
+
+    const evicted = await ledger.record(entry({ artifactId: "newest" }));
+
+    expect(evicted).toEqual(seeded[49]!.pendingAttachments);
+    expect(ledger.entriesForSite("acme.atlassian.net")).toHaveLength(50);
   });
 
   it("loads existing entries from the memento, dropping malformed ones", () => {
@@ -205,6 +300,27 @@ describe("PublishLedger", () => {
     const ledger = new PublishLedger(memento, logger);
     expect(ledger.find("good", "acme.atlassian.net")).toBeDefined();
     expect(ledger.find("bad", "acme.atlassian.net")).toBeUndefined();
+  });
+
+  it("durably removes legacy absolute paths before migration is complete", async () => {
+    const retained = snapshot("retained");
+    const memento = fakeMemento([
+      entry({ artifactId: "legacy", pendingAttachments: ["/ws/report.zip", retained] }),
+    ]);
+    const captured = capturingLogger();
+    const ledger = new PublishLedger(memento, captured.logger);
+
+    await ledger.ready();
+
+    const stored = memento.store.get("specwright.publishLedger") as LedgerEntry[];
+    expect(stored[0]!.pendingAttachments).toEqual([retained]);
+    expect(stored[0]!.pendingAttachments.every((item) => typeof item !== "string")).toBe(true);
+    expect(captured.lines.filter((line) => line.includes("Discarded legacy pending attachment paths"))).toHaveLength(1);
+
+    const reloaded = new PublishLedger(memento, captured.logger);
+    await reloaded.ready();
+    expect(reloaded.find("legacy", "acme.atlassian.net")?.pendingAttachments).toEqual([retained]);
+    expect(captured.lines.filter((line) => line.includes("Discarded legacy pending attachment paths"))).toHaveLength(1);
   });
 
   it("reads back a v1 entry that predates the counts, leaving them absent", () => {
@@ -225,10 +341,10 @@ describe("PublishLedger", () => {
     expect(loaded?.summary).toBeUndefined();
   });
 
-  it("records and reads back the counts, summary, mode, and total", () => {
+  it("records and reads back the counts, summary, mode, and total", async () => {
     const memento = fakeMemento();
     const ledger = new PublishLedger(memento, logger);
-    ledger.record(entry({ artifactId: "run-1", summary: "Nightly", mode: "append", passed: 4, failed: 0, skipped: 1, total: 5 }));
+    await ledger.record(entry({ artifactId: "run-1", summary: "Nightly", mode: "append", passed: 4, failed: 0, skipped: 1, total: 5 }));
 
     expect(ledger.find("run-1", "acme.atlassian.net")).toMatchObject({
       summary: "Nightly",
@@ -263,54 +379,59 @@ describe("PublishLedger", () => {
     expect(ledger.entriesForSite("acme.atlassian.net").map((e) => e.artifactId)).toEqual(["a"]);
   });
 
-  it("updates pending attachments and persists (resume/retry clears cleared files)", () => {
+  it("updates pending attachments and persists (resume/retry clears cleared files)", async () => {
     const memento = fakeMemento();
     const ledger = new PublishLedger(memento, logger);
-    ledger.record(entry({ artifactId: "run-1", pendingAttachments: ["/a", "/b"] }));
+    const a = snapshot("a");
+    const b = snapshot("b");
+    await ledger.record(entry({ artifactId: "run-1", pendingAttachments: [a, b] }));
 
-    ledger.setPendingAttachments("run-1", "acme.atlassian.net", ["/b"]);
-    expect(ledger.find("run-1", "acme.atlassian.net")?.pendingAttachments).toEqual(["/b"]);
+    await ledger.setPendingAttachments("run-1", "acme.atlassian.net", [b]);
+    expect(ledger.find("run-1", "acme.atlassian.net")?.pendingAttachments).toEqual([b]);
 
-    ledger.setPendingAttachments("run-1", "acme.atlassian.net", []);
+    await ledger.setPendingAttachments("run-1", "acme.atlassian.net", []);
     expect(ledger.find("run-1", "acme.atlassian.net")?.pendingAttachments).toEqual([]);
     const persisted = memento.store.get("specwright.publishLedger") as LedgerEntry[];
     expect(persisted[0]!.pendingAttachments).toEqual([]);
   });
 
-  it("clear drops every site's entries, persists the empty list, and reports how many went", () => {
+  it("clear drops every site's entries, persists the empty list, and reports how many went", async () => {
     const memento = fakeMemento([
       entry({ artifactId: "a", site: "acme.atlassian.net" }),
       entry({ artifactId: "b", site: "other.atlassian.net" }),
     ]);
     const ledger = new PublishLedger(memento, logger);
 
-    expect(ledger.clear()).toBe(2);
+    expect(await ledger.clear()).toMatchObject({ removed: 2 });
     expect(ledger.entriesForSite("acme.atlassian.net")).toEqual([]);
     expect(ledger.entriesForSite("other.atlassian.net")).toEqual([]);
     expect(memento.store.get("specwright.publishLedger")).toEqual([]);
     expect(new PublishLedger(memento, logger).find("a", "acme.atlassian.net")).toBeUndefined();
   });
 
-  it("clear on an empty ledger reports nothing removed", () => {
+  it("clear on an empty ledger reports nothing removed", async () => {
     const ledger = new PublishLedger(fakeMemento(), logger);
-    expect(ledger.clear()).toBe(0);
+    expect(await ledger.clear()).toMatchObject({ removed: 0 });
     expect(ledger.entriesForSite("acme.atlassian.net")).toEqual([]);
   });
 
-  it("attach-pending on a republished run leaves the earlier publish's pending record intact", () => {
+  it("attach-pending on a republished run leaves the earlier publish's pending record intact", async () => {
     const memento = fakeMemento();
     const ledger = new PublishLedger(memento, logger);
     // Publish the same run twice: two entries, newest first, each with its own pending files.
-    ledger.record(entry({ artifactId: "run-1", executionRef: "XNP-1", publishedAt: 1000, pendingAttachments: ["/old-a"] }));
-    ledger.record(entry({ artifactId: "run-1", executionRef: "XNP-2", publishedAt: 2000, pendingAttachments: ["/new-a", "/new-b"] }));
+    const oldA = snapshot("old-a");
+    const newA = snapshot("new-a");
+    const newB = snapshot("new-b");
+    await ledger.record(entry({ artifactId: "run-1", executionRef: "XNP-1", publishedAt: 1000, pendingAttachments: [oldA] }));
+    await ledger.record(entry({ artifactId: "run-1", executionRef: "XNP-2", publishedAt: 2000, pendingAttachments: [newA, newB] }));
 
     // The banner's attach-pending action replays the newest publish's files.
-    ledger.setPendingAttachments("run-1", "acme.atlassian.net", ["/new-b"]);
+    await ledger.setPendingAttachments("run-1", "acme.atlassian.net", [newB]);
 
     const bySite = ledger.entriesForSite("acme.atlassian.net");
     expect(bySite[0]!.executionRef).toBe("XNP-2");
-    expect(bySite[0]!.pendingAttachments).toEqual(["/new-b"]);
+    expect(bySite[0]!.pendingAttachments).toEqual([newB]);
     expect(bySite[1]!.executionRef).toBe("XNP-1");
-    expect(bySite[1]!.pendingAttachments).toEqual(["/old-a"]);
+    expect(bySite[1]!.pendingAttachments).toEqual([oldA]);
   });
 });

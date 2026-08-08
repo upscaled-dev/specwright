@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { normalizeSiteUrl } from "./xray-adapter";
+import type { WorkspaceTrust } from "../core/workspace-trust";
 
 export interface XrayCredentials {
   clientId: string;
@@ -38,7 +39,10 @@ export class XrayCredentialStore implements vscode.Disposable {
   // SecretStorage event for the same key would double-fire, so we consume one bridged event per key.
   private readonly selfWrittenKeys = new Set<string>();
 
-  constructor(private readonly secrets: vscode.SecretStorage) {
+  constructor(
+    private readonly secrets: vscode.SecretStorage,
+    private readonly workspaceTrust: WorkspaceTrust
+  ) {
     // Credential edits from another window arrive through SecretStorage; re-surface them as our own
     // change so every window's connection state stays in sync (own writes fire onDidChange directly).
     this.secretsSubscription = this.secrets.onDidChange?.((event) => {
@@ -64,9 +68,40 @@ export class XrayCredentialStore implements vscode.Disposable {
     }
   }
 
+  private async restore(key: string, value: string | undefined): Promise<void> {
+    if (value === undefined) {
+      await this.secrets.delete(key);
+    } else {
+      await this.secrets.store(key, value);
+    }
+  }
+
+  private async restorePair(
+    entries: ReadonlyArray<readonly [string, string | undefined]>,
+    originalError: unknown
+  ): Promise<never> {
+    const results = await Promise.allSettled(entries.map(([key, value]) =>
+      this.restore(key, value)
+    ));
+    const recoveryErrors = results.flatMap((result) => {
+      return result.status === "rejected" ? [result.reason as unknown] : [];
+    });
+    if (recoveryErrors.length > 0) {
+      throw new AggregateError(
+        [originalError, ...recoveryErrors],
+        "Credential update failed and the previous values could not be fully restored. " +
+          "Credentials may be incomplete; reconnect and re-enter or clear them."
+      );
+    }
+    throw originalError;
+  }
+
   public async getCredentials(siteUrl: string): Promise<XrayCredentials | undefined> {
+    this.workspaceTrust.require();
     const clientId = await this.secrets.get(credentialKey(siteUrl, "clientId"));
+    this.workspaceTrust.require();
     const clientSecret = await this.secrets.get(credentialKey(siteUrl, "clientSecret"));
+    this.workspaceTrust.require();
     if (!clientId || !clientSecret) {
       return undefined;
     }
@@ -74,17 +109,32 @@ export class XrayCredentialStore implements vscode.Disposable {
   }
 
   public async setCredentials(siteUrl: string, clientId: string, clientSecret: string): Promise<void> {
+    this.workspaceTrust.require();
     const idKey = credentialKey(siteUrl, "clientId");
     const secretKey = credentialKey(siteUrl, "clientSecret");
+    const previousId = await this.secrets.get(idKey);
+    this.workspaceTrust.require();
+    const previousSecret = await this.secrets.get(secretKey);
+    this.workspaceTrust.require();
     this.trackSelfWrites(idKey, secretKey);
-    await this.secrets.store(idKey, clientId);
-    await this.secrets.store(secretKey, clientSecret);
+    try {
+      await this.secrets.store(idKey, clientId);
+      this.workspaceTrust.require();
+      await this.secrets.store(secretKey, clientSecret);
+      this.workspaceTrust.require();
+    } catch (error) {
+      await this.restorePair([
+        [idKey, previousId],
+        [secretKey, previousSecret],
+      ], error);
+    }
     this._onDidChange.fire();
   }
 
   // Full teardown for a host: the Xray pair AND the optional Jira pair. Disconnect and a site switch
   // both go through here so no half of either pair is left stranded under a key no command can reach.
   public async clearCredentials(siteUrl: string): Promise<void> {
+    this.workspaceTrust.require();
     const keys = [
       credentialKey(siteUrl, "clientId"),
       credentialKey(siteUrl, "clientSecret"),
@@ -93,6 +143,7 @@ export class XrayCredentialStore implements vscode.Disposable {
     ];
     this.trackSelfWrites(...keys);
     for (const key of keys) {
+      this.workspaceTrust.require();
       await this.secrets.delete(key);
     }
     this._onDidChange.fire();
@@ -103,8 +154,11 @@ export class XrayCredentialStore implements vscode.Disposable {
   }
 
   public async getJiraCredentials(siteUrl: string): Promise<XrayJiraCredentials | undefined> {
+    this.workspaceTrust.require();
     const email = await this.secrets.get(credentialKey(siteUrl, "jiraEmail"));
+    this.workspaceTrust.require();
     const token = await this.secrets.get(credentialKey(siteUrl, "jiraToken"));
+    this.workspaceTrust.require();
     if (!email || !token) {
       return undefined;
     }
@@ -112,19 +166,35 @@ export class XrayCredentialStore implements vscode.Disposable {
   }
 
   public async setJiraCredentials(siteUrl: string, email: string, token: string): Promise<void> {
+    this.workspaceTrust.require();
     const emailKey = credentialKey(siteUrl, "jiraEmail");
     const tokenKey = credentialKey(siteUrl, "jiraToken");
+    const previousEmail = await this.secrets.get(emailKey);
+    this.workspaceTrust.require();
+    const previousToken = await this.secrets.get(tokenKey);
+    this.workspaceTrust.require();
     this.trackSelfWrites(emailKey, tokenKey);
-    await this.secrets.store(emailKey, email);
-    await this.secrets.store(tokenKey, token);
+    try {
+      await this.secrets.store(emailKey, email);
+      this.workspaceTrust.require();
+      await this.secrets.store(tokenKey, token);
+      this.workspaceTrust.require();
+    } catch (error) {
+      await this.restorePair([
+        [emailKey, previousEmail],
+        [tokenKey, previousToken],
+      ], error);
+    }
     this._onDidChange.fire();
   }
 
   public async clearJiraCredentials(siteUrl: string): Promise<void> {
+    this.workspaceTrust.require();
     const emailKey = credentialKey(siteUrl, "jiraEmail");
     const tokenKey = credentialKey(siteUrl, "jiraToken");
     this.trackSelfWrites(emailKey, tokenKey);
     await this.secrets.delete(emailKey);
+    this.workspaceTrust.require();
     await this.secrets.delete(tokenKey);
     this._onDidChange.fire();
   }

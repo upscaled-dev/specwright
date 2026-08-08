@@ -2,13 +2,14 @@ import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
 import { FetchLike } from "../../xray/jira-project-search";
-import { abortableSleep } from "../../xray/xray-client";
 import {
   attachmentUploadLimit,
   fetchJiraAttachmentMeta,
   uploadJiraAttachments,
 } from "../../xray/jira-attachments";
 import { EVIDENCE_MAX_FILE_BYTES } from "../../traceability/evidence-resolution";
+import { RemoteOutcomeUnknownError, WorkspaceTrust } from "../../core/workspace-trust";
+import { AttachmentSpool, type AttachmentSnapshot } from "../../traceability/attachment-spool";
 
 const EMAIL = "me@example.com";
 const TOKEN = "jira-api-token-must-never-be-logged";
@@ -39,18 +40,46 @@ function response(status: number, body: unknown): Response {
   } as unknown as Response;
 }
 
-const upload = (over: Partial<Parameters<typeof uploadJiraAttachments>[0]>): ReturnType<typeof uploadJiraAttachments> =>
-  uploadJiraAttachments({
+type TestUploadDeps = Omit<Partial<Parameters<typeof uploadJiraAttachments>[0]>, "files" | "spool"> & {
+  readonly files?: readonly string[];
+  readonly readSnapshot?: ((path: string) => Buffer) | undefined;
+};
+
+interface TestUploadResult {
+  readonly uploaded: readonly string[];
+  readonly failed: readonly string[];
+  readonly cancelled: readonly string[];
+}
+
+const upload = async ({ files, readSnapshot, ...over }: TestUploadDeps): Promise<TestUploadResult> => {
+  const paths = files ?? ["/ws/report.zip"];
+  const snapshots = paths.map((file, index): AttachmentSnapshot => ({
+    ref: `${index.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`,
+    name: file.split(/[\\/]/).at(-1) ?? file,
+    size: 5,
+    sha256: "a".repeat(64),
+    createdAt: 1,
+  }));
+  const pathsByRef = new Map(snapshots.map((snapshot, index) => [snapshot.ref, paths[index]!]));
+  const spool = {
+    read: (snapshot: AttachmentSnapshot): Buffer =>
+      readSnapshot?.(pathsByRef.get(snapshot.ref)!) ?? Buffer.from("bytes"),
+    discard: () => 1,
+  } as unknown as AttachmentSpool;
+  const result = await uploadJiraAttachments({
     site: SITE,
     credentials: { email: EMAIL, token: TOKEN },
     issueKey: "XNP-9",
-    files: ["/ws/report.zip"],
+    files: snapshots,
     logger: capturingLogger().logger,
-    readFile: () => Buffer.from("bytes"),
+    spool,
     sleep: () => Promise.resolve(),
     random: () => 0,
     ...over,
   });
+  const toPaths = (items: readonly AttachmentSnapshot[]): string[] => items.map((item) => pathsByRef.get(item.ref)!);
+  return { uploaded: toPaths(result.uploaded), failed: toPaths(result.failed), cancelled: toPaths(result.cancelled) };
+};
 
 describe("uploadJiraAttachments", () => {
   it("POSTs each file to the issue attachments endpoint with the no-check token + basic auth", async () => {
@@ -83,27 +112,73 @@ describe("uploadJiraAttachments", () => {
     expect(result.failed).toEqual(["/ws/bad.zip"]);
   });
 
-  it("retries a 429 and then succeeds", async () => {
+  it("emits a terminal audit record for a confirmed 4xx", async () => {
+    const { logger, lines } = capturingLogger();
+    const result = await upload({
+      fetchImpl: () => Promise.resolve(response(413, "too large")),
+      logger,
+      operationId: "publish-413",
+    });
+
+    expect(result.failed).toEqual(["/ws/report.zip"]);
+    const emitted = lines.join("\n");
+    expect(emitted).toContain("Remote operation failed");
+    expect(emitted).toContain("publish-413");
+    expect(emitted).toContain("jira.attachment.upload");
+    expect(emitted).toContain("non-idempotent-write");
+    expect(emitted).toContain('"attempt": 1');
+    expect(emitted).toContain('"outcomeCertainty": "failed"');
+  });
+
+  it("does not replay a 429 because the upload may already have committed", async () => {
     let calls = 0;
     const fetchImpl: FetchLike = () => {
       calls += 1;
       return Promise.resolve(calls === 1 ? response(429, "rate limited") : response(200, [{ id: "1" }]));
     };
-    const result = await upload({ fetchImpl });
-    expect(calls).toBe(2);
-    expect(result.uploaded).toEqual(["/ws/report.zip"]);
+    await expect(upload({ fetchImpl })).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
+    expect(calls).toBe(1);
   });
 
-  it("marks a file failed after exhausting retries on a repeated network fault", async () => {
+  it("does not replay a 503 because the upload may already have committed", async () => {
+    let calls = 0;
+    const fetchImpl: FetchLike = () => {
+      calls += 1;
+      return Promise.resolve(response(503, "unavailable"));
+    };
+    await expect(upload({ fetchImpl })).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
+    expect(calls).toBe(1);
+  });
+
+  it("does not replay after an in-flight upload times out", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const fetchImpl: FetchLike = (_url, init) => {
+        calls += 1;
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+      };
+
+      const pending = upload({ fetchImpl });
+      const rejected = expect(pending).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
+      await vi.advanceTimersByTimeAsync(61_000);
+      await rejected;
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports outcome unknown after one network fault without replay", async () => {
     let calls = 0;
     const fetchImpl: FetchLike = () => {
       calls += 1;
       return Promise.reject(new Error("ECONNRESET"));
     };
-    const result = await upload({ fetchImpl });
-    expect(result.failed).toEqual(["/ws/report.zip"]);
-    // MAX_ATTEMPTS = 4 fetches for the one file.
-    expect(calls).toBe(4);
+    await expect(upload({ fetchImpl })).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
+    expect(calls).toBe(1);
   });
 
   it("fails a file whose bytes cannot be read, without calling fetch", async () => {
@@ -114,7 +189,7 @@ describe("uploadJiraAttachments", () => {
     };
     const result = await upload({
       fetchImpl,
-      readFile: () => {
+      readSnapshot: () => {
         throw new Error("ENOENT");
       },
     });
@@ -133,6 +208,24 @@ describe("uploadJiraAttachments", () => {
 describe("uploadJiraAttachments: cancellation", () => {
   const FILES = ["/ws/a.zip", "/ws/b.zip"];
 
+  it("reports an unknown remote outcome when trust is revoked after an upload starts", async () => {
+    let requestStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {requestStarted = resolve;});
+    const fetchImpl: FetchLike = (_url, init) => {
+      requestStarted?.();
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    };
+    const trust = new WorkspaceTrust(() => true);
+    const pending = trust.run((signal) => upload({ files: FILES, fetchImpl, signal }));
+
+    await started;
+    const disposal = trust.dispose();
+    await expect(pending).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
+    await disposal;
+  });
+
   it("makes no request at all when the signal is already aborted", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -148,7 +241,7 @@ describe("uploadJiraAttachments: cancellation", () => {
     expect(result).toEqual({ uploaded: [], failed: [], cancelled: FILES });
   });
 
-  it("stops on the file the abort landed on: no retry, no next upload", async () => {
+  it("marks the dispatched file outcome unknown on caller abort: no retry, no next upload", async () => {
     const controller = new AbortController();
     let calls = 0;
     const fetchImpl: FetchLike = () => {
@@ -157,10 +250,14 @@ describe("uploadJiraAttachments: cancellation", () => {
       return Promise.reject(new Error("The operation was aborted"));
     };
 
-    const result = await upload({ files: FILES, fetchImpl, signal: controller.signal });
+    await expect(upload({
+      files: FILES,
+      fetchImpl,
+      signal: controller.signal,
+      operationId: "upload-aborted",
+    })).rejects.toMatchObject({ operationId: "upload-aborted" });
 
     expect(calls).toBe(1);
-    expect(result).toEqual({ uploaded: [], failed: [], cancelled: FILES });
   });
 
   it("stops mid-list: the uploaded file stands, the file the abort landed on and the rest are cancelled", async () => {
@@ -175,17 +272,17 @@ describe("uploadJiraAttachments: cancellation", () => {
       return Promise.resolve(response(200, [{ id: "1" }]));
     };
 
-    const result = await upload({
+    await expect(upload({
       files: ["/ws/a.zip", "/ws/b.zip", "/ws/c.zip"],
       fetchImpl,
       signal: controller.signal,
-    });
+      operationId: "upload-mid-list",
+    })).rejects.toMatchObject({ operationId: "upload-mid-list" });
 
     expect(calls).toBe(2);
-    expect(result).toEqual({ uploaded: ["/ws/a.zip"], failed: [], cancelled: ["/ws/b.zip", "/ws/c.zip"] });
   });
 
-  it("aborts during the backoff delay and never attempts again", async () => {
+  it("does not enter backoff for an ambiguous attachment response", async () => {
     const controller = new AbortController();
     let calls = 0;
     const fetchImpl: FetchLike = () => {
@@ -199,42 +296,12 @@ describe("uploadJiraAttachments: cancellation", () => {
       return Promise.resolve();
     };
 
-    const result = await upload({ files: FILES, fetchImpl, sleep, signal: controller.signal });
-
+    await expect(upload({ files: FILES, fetchImpl, sleep, signal: controller.signal }))
+      .rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
     expect(calls).toBe(1);
-    expect(sleepSignals).toEqual([controller.signal]);
-    expect(result).toEqual({ uploaded: [], failed: [], cancelled: FILES });
+    expect(sleepSignals).toEqual([]);
   });
 
-  // Fake timers are never advanced past the point the delay begins, so the upload can only settle by the
-  // abort ending that delay; a sleep that ran to term would hang here instead.
-  it("ends the real backoff delay on the abort rather than running it out", async () => {
-    vi.useFakeTimers();
-    try {
-      const controller = new AbortController();
-      let calls = 0;
-      const fetchImpl: FetchLike = () => {
-        calls += 1;
-        return Promise.resolve(response(429, "rate limited"));
-      };
-      const delays: Array<[number, AbortSignal | undefined]> = [];
-      const sleep = (ms: number, signal?: AbortSignal): Promise<void> => {
-        delays.push([ms, signal]);
-        return abortableSleep(ms, signal);
-      };
-
-      const promise = upload({ files: FILES, fetchImpl, sleep, signal: controller.signal });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(delays).toEqual([[300, controller.signal]]);
-
-      controller.abort();
-
-      expect(await promise).toEqual({ uploaded: [], failed: [], cancelled: FILES });
-      expect(calls).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
 });
 
 describe("fetchJiraAttachmentMeta", () => {

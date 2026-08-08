@@ -5,6 +5,7 @@ import { isOutlineExampleRow } from "../parsers/feature-parser";
 import { scenarioScope } from "../parsers/gherkin-slice";
 import type { OutlineExampleRow, ParsedFeature, PlaywrightBddExtensionContext } from "../types";
 import { toWorkspaceRelative } from "../utils/workspace-path";
+import { ExecutionDiagnosticError, requireExecutionAvailable } from "../core/run-contracts";
 
 interface FeatureTarget {
   filePath: string;
@@ -50,10 +51,14 @@ async function savedForRun(document: vscode.TextDocument): Promise<boolean> {
 }
 
 async function pickFeatureTarget(
-  context: Pick<PlaywrightBddExtensionContext, "discoveryManager">,
+  context: Pick<PlaywrightBddExtensionContext, "executionGateway">,
 ): Promise<FeatureTarget | undefined> {
-  const files = await context.discoveryManager.discoverTestFiles();
+  await requireExecutionAvailable(context.executionGateway);
+  const discovery = await context.executionGateway.discover();
+  const files = [...new Set(discovery.cases.map(({ source }) => source.path))];
   if (files.length === 0) {
+    const sourceFailure = discovery.diagnostics[0];
+    if (sourceFailure) {throw new ExecutionDiagnosticError(sourceFailure);}
     vscode.window.showInformationMessage("No feature files were discovered.");
     return undefined;
   }
@@ -86,7 +91,7 @@ async function parseFeatureTarget(
 }
 
 async function resolveFeatureTarget(
-  context: Pick<PlaywrightBddExtensionContext, "discoveryManager" | "featureParser">,
+  context: Pick<PlaywrightBddExtensionContext, "executionGateway" | "featureParser">,
 ): Promise<ParsedFeatureTarget | undefined> {
   const editor = activeFeatureEditor();
   if (editor) {
@@ -150,7 +155,7 @@ function scenarioAtCursor(target: ParsedFeatureTarget): PaletteScenarioTarget | 
 }
 
 export async function resolvePaletteFeature(
-  context: Pick<PlaywrightBddExtensionContext, "discoveryManager" | "featureParser">,
+  context: Pick<PlaywrightBddExtensionContext, "executionGateway" | "featureParser">,
 ): Promise<string | undefined> {
   return (await resolveFeatureTarget(context))?.filePath;
 }
@@ -166,7 +171,7 @@ export async function promptPaletteTags(): Promise<string | undefined> {
 }
 
 export async function resolvePaletteScenario(
-  context: Pick<PlaywrightBddExtensionContext, "discoveryManager" | "featureParser">,
+  context: Pick<PlaywrightBddExtensionContext, "executionGateway" | "featureParser">,
 ): Promise<PaletteScenarioTarget | undefined> {
   const target = await resolveFeatureTarget(context);
   if (!target) {return undefined;}

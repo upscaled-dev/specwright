@@ -24,15 +24,41 @@ import { XrayCredentialStore } from "./xray/xray-credential-store";
 import { singleFlight } from "./utils/single-flight";
 import { PROMPTED_STATE_KEY } from "./commands/prompt-worker-count";
 import { StatusBar } from "./ui/status-bar";
-import { ExtensionExecutionGateway } from "./core/execution-gateway";
+import { LegacyDirectExecutionGateway } from "./core/execution-gateway";
+import { ExecutionAdmission, FileAdmissionStore } from "./core/execution-admission";
+import { errMsg } from "./utils/text";
+import { WorkspaceTrust } from "./core/workspace-trust";
+import {
+  CORE_SCHEMA_PROFILE,
+  developmentHostEngine,
+  ExecutionSelectionOwner,
+  LEGACY_SCHEMA_PROFILE,
+  SelectedExecutionGateway,
+} from "./core/execution-engine";
+import { UnavailableCoreExecutionGateway } from "./core/core-client";
+import {
+  executionStorageRoot,
+  ExecutionNamespaceMigration,
+  CompatibleAdmissionStore,
+  NamespacedStateStore,
+} from "./core/execution-namespace";
+import type { ExecutionEngine, ExecutionGateway, ExecutionIdentity } from "./core/run-contracts";
+import { LegacyExecutionDiscovery } from "./core/legacy-discovery";
+import { LegacyArtifactGateway } from "./ui/legacy-artifact-gateway";
+import { SelectedArtifactCatalog } from "./ui/execution-artifacts";
+import type { TraceabilityAdapter } from "./traceability/contracts";
 
 let testProvider: PlaywrightBddTestProvider | undefined;
 let commandManager: CommandManager | undefined;
+let activeTestExecutor: TestExecutor | undefined;
 let isActivated = false;
 let testController: vscode.TestController | undefined;
 let providerRegistry: ProviderRegistry | undefined;
 let traceabilitySubsystem: TraceabilitySubsystem | undefined;
 let activationLogger: Logger | undefined;
+let workspaceTrust: WorkspaceTrust | undefined;
+let activeExecutionGateway: ExecutionGateway | undefined;
+let activeTraceabilityAdapter: TraceabilityAdapter | undefined;
 
 /**
  * Test-only API surface. Not a public contract for other extensions.
@@ -154,7 +180,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const config = ExtensionConfig.create();
   context.subscriptions.push(config);
   const featureParser = FeatureParser.create(logger);
+  const discoveryManager = TestDiscoveryManager.create(logger, config);
   const commandBuilder = CommandBuilder.create(config, logger);
+  workspaceTrust = new WorkspaceTrust(() => vscode.workspace.isTrusted);
+  context.subscriptions.push(workspaceTrust);
 
   const testExecutor = TestExecutor.create(
     undefined,
@@ -164,44 +193,120 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     logger,
     PlaywrightJsonParser.create(logger)
   );
+  activeTestExecutor = testExecutor;
   context.subscriptions.push(testExecutor);
 
   providerRegistry = new ProviderRegistry(config, featureParser, logger);
   context.subscriptions.push(providerRegistry);
 
-  const credentialStore = new XrayCredentialStore(context.secrets);
+  const credentialStore = new XrayCredentialStore(context.secrets, workspaceTrust);
   context.subscriptions.push(credentialStore);
   // One session-scoped store shared by the run seams (test executor + debug path) and the panel, so
   // Test Explorer run/debug outcomes feed live badges (§3.5).
   const runResultStore = new RunResultStore();
   context.subscriptions.push(runResultStore);
-  // The publishable sibling of the badge store, fed at the same seams and persisted to
-  // workspaceState so the last few runs survive a reload.
-  const runArtifactStore = new RunArtifactStore(context.workspaceState, logger);
-  const executionGateway = new ExtensionExecutionGateway(
-    testExecutor,
-    runArtifactStore,
-    featureParser,
-    logger,
-    () => traceabilitySubsystem?.getSnapshot()?.links.map((link) => link.scenario) ?? []
+  const legacyIdentity: ExecutionIdentity = Object.freeze({
+    engine: "legacy-direct",
+    schemaProfile: LEGACY_SCHEMA_PROFILE,
+  });
+  const coreIdentity: ExecutionIdentity = Object.freeze({
+    engine: "core-client",
+    schemaProfile: CORE_SCHEMA_PROFILE,
+  });
+  const namespaceMigration = new ExecutionNamespaceMigration(context.workspaceState, legacyIdentity);
+  await namespaceMigration.stateKeys(["specwright.runArtifacts"]);
+  // The publishable sibling of the badge store, fed at the same seams and persisted within the
+  // selected engine and schema profile so preview engines cannot consume legacy artifacts.
+  const runArtifactStore = new RunArtifactStore(
+    new NamespacedStateStore(context.workspaceState, legacyIdentity),
+    logger
   );
+  const namespacedAdmission = FileAdmissionStore.create(
+    executionStorageRoot(context.globalStorageUri.fsPath, legacyIdentity)
+  );
+  const legacyAdmission = FileAdmissionStore.create(context.globalStorageUri.fsPath);
+  const executionAdmission = new ExecutionAdmission(new CompatibleAdmissionStore(
+    namespacedAdmission,
+    legacyAdmission
+  ));
+  try {
+    await executionAdmission.recover();
+  } catch (error) {
+    logger.error(`Execution admission recovery failed: ${errMsg(error)}`);
+  }
+  const legacyGateway = new LegacyDirectExecutionGateway(
+    testExecutor,
+    featureParser,
+    workspaceTrust,
+    executionAdmission,
+    legacyIdentity,
+    new LegacyExecutionDiscovery(discoveryManager, featureParser)
+  );
+  const selectedDevelopmentEngine = (): ExecutionEngine | undefined => {
+    return developmentHostEngine(
+      context.extensionMode === vscode.ExtensionMode.Development,
+      process.env["SPECWRIGHT_EXECUTION_ENGINE"]
+    );
+  };
+  const executionSelection = new ExecutionSelectionOwner({
+    developmentHostEnvironment: selectedDevelopmentEngine,
+  });
+  const executionGateway = new SelectedExecutionGateway(
+    executionSelection,
+    {
+      "legacy-direct": new LegacyArtifactGateway(
+        legacyGateway,
+        runArtifactStore,
+        logger,
+        testExecutor,
+        () => traceabilitySubsystem?.getSnapshot()?.links.map((link) => link.scenario) ?? []
+      ),
+      "core-client": new UnavailableCoreExecutionGateway(coreIdentity),
+    }
+  );
+  const artifactCatalog = new SelectedArtifactCatalog(executionSelection, new Map([
+    [`${legacyIdentity.engine}:${legacyIdentity.schemaProfile}`, runArtifactStore],
+  ]));
+  context.subscriptions.push(artifactCatalog);
+  activeExecutionGateway = executionGateway;
+  context.subscriptions.push(executionGateway);
   // The publish idempotency ledger (last few publishes, current-site scoped) — persisted alongside
   // the artifacts so the "already published" banner survives a reload.
   const publishLedger = new PublishLedger(context.workspaceState, logger);
+  await publishLedger.ready();
   const traceabilityRegistry = new TraceabilityAdapterRegistry();
   // One credential-save event fans out into the subsystem's connection-refresh verify and the setup
-  // panel's post-save verify; keyed by (site, authOnly), coincident identical probes share a single
-  // handshake instead of racing three of them (§12 F5 finding #3).
+  // panel's post-save verify; coincident identical probes with the same cancellation owner share a
+  // single handshake instead of racing three of them (§12 F5 finding #3).
+  const probeSignalIds = new WeakMap<AbortSignal, number>();
+  let nextProbeSignalId = 0;
   const probe = singleFlight(
-    (deps: XrayConnectionTestDeps, options?: XrayProbeOptions) =>
-      `${deps.site}\0${options?.authOnly ? "auth" : "full"}`,
+    (deps: XrayConnectionTestDeps, options?: XrayProbeOptions, signal?: AbortSignal) => {
+      let signalId = "none";
+      if (signal) {
+        let id = probeSignalIds.get(signal);
+        if (id === undefined) {
+          nextProbeSignalId += 1;
+          id = nextProbeSignalId;
+          probeSignalIds.set(signal, id);
+        }
+        signalId = String(id);
+      }
+      return `${deps.site}\0${options?.authOnly ? "auth" : "full"}\0${signalId}`;
+    },
     probeXrayConnection
   );
   const publishSupport: XrayPublishSupport = {
     resolveSteps: makeFeatureStepResolver(featureParser),
     workspaceRootFor: (filePath) => vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath,
   };
-  const xrayFactory = createXrayAdapterFactory(credentialStore, probe, context.globalState, publishSupport);
+  const xrayFactory = createXrayAdapterFactory(
+    credentialStore,
+    probe,
+    context.globalState,
+    publishSupport,
+    workspaceTrust
+  );
   traceabilityRegistry.register(xrayFactory);
   // Not in the public settings enum — resolved only from a hand-typed `traceability.provider`
   // value so the contract-test adapter can be driven in a dev window.
@@ -225,9 +330,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   // The command context needs a browse-URL adapter for the active provider; construct one from the
   // registry (Xray fallback) and own its lifetime if it holds resources.
-  const traceabilityAdapter =
-    traceabilityRegistry.create(config.traceabilityProvider, { config, logger }) ??
-    xrayFactory.create({ config, logger });
+  const traceabilityAdapterId = traceabilityRegistry.has(config.traceabilityProvider)
+    ? config.traceabilityProvider
+    : "xray";
+  const traceabilityAdapter = await traceabilityRegistry.activate(
+    traceabilityAdapterId,
+    { config, logger }
+  );
+  if (!traceabilityAdapter) {
+    throw new Error(`Traceability adapter "${traceabilityAdapterId}" is not registered`);
+  }
+  activeTraceabilityAdapter = traceabilityAdapter;
   if (typeof traceabilityAdapter.dispose === "function") {
     context.subscriptions.push(traceabilityAdapter as vscode.Disposable);
   }
@@ -237,15 +350,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     config,
     testExecutor,
     executionGateway,
-    discoveryManager: TestDiscoveryManager.create(logger, config),
+    discoveryManager,
     organizationManager: TestOrganizationManager.create(logger),
     featureParser,
     playwrightJsonParser: PlaywrightJsonParser.create(logger),
     commandBuilder,
+    workspaceTrust,
+    attachmentSpoolRoot: context.globalStorageUri.fsPath,
+    extensionUri: context.extensionUri,
     bddgenDiagnostics: providerRegistry.bddgenDiagnostics,
     traceabilityAdapter,
     runResultStore,
-    runArtifactStore,
+    runArtifactStore: artifactCatalog,
   };
 
   testExecutor.setContext(sharedContext);
@@ -288,7 +404,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandManager.registerBoardSerializer(context);
 
     providerRegistry.applyCurrent();
-    traceabilitySubsystem.applyCurrent();
+    await traceabilitySubsystem.applyCurrent();
+    context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      providerRegistry?.applyCurrent();
+      traceabilitySubsystem?.applyCurrent().catch((error) => {
+        logger.warn("Traceability activation after granting workspace trust failed", {
+          error: errMsg(error),
+        });
+      });
+      testProvider?.discoverTests().catch((error) => {
+        logger.warn("Test discovery after granting workspace trust failed", {
+          error: errMsg(error),
+        });
+      });
+    }));
 
     const statusBar = StatusBar.create(executionGateway);
     context.subscriptions.push(statusBar);
@@ -306,27 +435,60 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   return buildApi(testProvider, providerRegistry, traceabilitySubsystem, context.workspaceState);
 }
 
-export function deactivate(): void {
+export async function deactivate(): Promise<void> {
   const logger = activationLogger;
-  logger?.info("👋 Specwright is deactivating");
+  const failures: Array<{ owner: string; error: string }> = [];
+  const settleCleanup = async (
+    owner: string,
+    cleanup: (() => void | Promise<void>) | undefined
+  ): Promise<void> => {
+    if (!cleanup) {return;}
+    try {
+      await cleanup();
+    } catch (error) {
+      failures.push({ owner, error: errMsg(error).slice(0, 500) });
+    }
+  };
+  try {
+    logger?.info("👋 Specwright is deactivating");
+  } catch (error) {
+    failures.push({ owner: "deactivation reporter", error: errMsg(error).slice(0, 500) });
+  }
 
   try {
-    commandManager?.dispose();
-    testProvider?.dispose();
-    testController?.dispose();
-    logger?.info("✅ Extension cleanup completed");
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    logger?.error("Error during extension deactivation", { error: errorMessage });
+    // Preserve dependency order while containing each owner independently. In particular, the
+    // execution gateway releases its leases before the executor, and the traceability subsystem
+    // releases its active adapter before the command adapter and trust owner are disposed.
+    await settleCleanup("execution gateway", () => activeExecutionGateway?.dispose());
+    await settleCleanup("command manager", () => commandManager?.dispose());
+    await settleCleanup("test provider", () => testProvider?.dispose());
+    await settleCleanup("test controller", () => testController?.dispose());
+    await settleCleanup("provider registry", () => providerRegistry?.dispose());
+    await settleCleanup("traceability subsystem", () => traceabilitySubsystem?.shutdown());
+    await settleCleanup("traceability command adapter", () => activeTraceabilityAdapter?.dispose?.());
+    await settleCleanup("workspace trust", () => workspaceTrust?.dispose());
+    await settleCleanup("test executor", () => activeTestExecutor?.dispose());
+
+    if (failures.length === 0) {
+      logger?.info("✅ Extension cleanup completed");
+    } else {
+      logger?.error("Extension deactivation completed with cleanup failures", {
+        error: failures.map(({ owner, error }) => `${owner}: ${error}`).join("; "),
+      });
+    }
   } finally {
+    // The logger must outlive every report above and is still attempted if reporting itself throws.
+    await settleCleanup("logger", () => logger?.dispose());
     isActivated = false;
     testProvider = undefined;
     commandManager = undefined;
+    activeTestExecutor = undefined;
     testController = undefined;
     providerRegistry = undefined;
     traceabilitySubsystem = undefined;
     activationLogger = undefined;
-    // The logger must outlive every log call above, so it is disposed last.
-    try { logger?.dispose(); } catch { /* already disposed */ }
+    workspaceTrust = undefined;
+    activeExecutionGateway = undefined;
+    activeTraceabilityAdapter = undefined;
   }
 }

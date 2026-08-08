@@ -7,7 +7,7 @@ import {
 import type { Scenario } from "../../types";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { pathRunIntent, scenarioRunIntent } from "../../commands/run-intent";
-import type { RunIntent } from "../../core/run-contracts";
+import type { ClientRunIntent } from "../../ui/execution-client-context";
 import { OUTLINE_ID_SEPARATOR } from "../../test-providers/constants";
 import { FakeTestController, FakeTestItem } from "./helpers/fake-test-controller";
 
@@ -30,7 +30,7 @@ type PlanOptions = Parameters<typeof testExplorerRunIntent>[0];
 function planIntent(
   options: Omit<PlanOptions, "scenariosInFile"> &
     { scenariosInFile?: PlanOptions["scenariosInFile"] }
-): RunIntent {
+): ClientRunIntent {
   return testExplorerRunIntent({ scenariosInFile: () => [], ...options });
 }
 
@@ -66,13 +66,13 @@ describe("testExplorerRunIntent", () => {
       maxWorkers: 4,
     });
 
-    expect(intent).toEqual({
+    expect({ ...intent }).toEqual({
       mode: "run",
-      selection: { kind: "suite" },
       targets: [{ kind: "suite" }],
       maxWorkers: 4,
-      metadata: { initiatedBy: "test-explorer" },
     });
+    expect(intent.selection).toEqual({ kind: "suite" });
+    expect(intent.metadata).toEqual({ initiatedBy: "test-explorer" });
   });
 
   it("keeps a debug feature request as a path target", () => {
@@ -381,7 +381,7 @@ describe("testExplorerRunIntent", () => {
       return { parser, parsed };
     }
 
-    function explorerIntent(item: FakeTestItem, scenario: Scenario): RunIntent {
+    function explorerIntent(item: FakeTestItem, scenario: Scenario): ClientRunIntent {
       return planIntent({
         request: new vscode.TestRunRequest([item as unknown as vscode.TestItem]),
         roots: [item] as unknown as vscode.TestItem[],

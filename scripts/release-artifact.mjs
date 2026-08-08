@@ -65,9 +65,9 @@ export function sha256(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
-export function artifactSet({ packageJson, commit, vsixPath, digest, sbomPath }) {
+export function artifactSet({ packageJson, commit, vsixPath, digest, sbomPath, sbomDigest }) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: {
       repository: packageJson.repository?.url ?? "",
       commit,
@@ -81,7 +81,10 @@ export function artifactSet({ packageJson, commit, vsixPath, digest, sbomPath })
           file: basename(vsixPath),
           sha256: digest,
         },
-        sbom: basename(sbomPath),
+        sbom: {
+          file: basename(sbomPath),
+          sha256: sbomDigest,
+        },
       },
     ],
   };
@@ -122,18 +125,33 @@ function releaseCommit() {
   return assertReleaseSource(status, commit);
 }
 
-export function verifyReleaseArtifact(vsixPath) {
-  const expected = readFileSync(`${vsixPath}.sha256`, "utf8").trim().split(/\s+/u)[0];
+export function verifyReleaseArtifact(vsixPath, expected = {}) {
+  const [expectedDigest, checksumFile] = readFileSync(`${vsixPath}.sha256`, "utf8").trim().split(/\s+/u);
   const actual = sha256(vsixPath);
-  if (!expected || actual !== expected) {
-    throw new Error(`VSIX checksum mismatch: expected ${expected ?? "missing"}, received ${actual}`);
+  if (!expectedDigest || checksumFile !== basename(vsixPath) || actual !== expectedDigest) {
+    throw new Error(`VSIX checksum mismatch: expected ${expectedDigest ?? "missing"}, received ${actual}`);
   }
   const stem = vsixPath.endsWith(".vsix") ? vsixPath.slice(0, -5) : vsixPath;
   const manifest = JSON.parse(readFileSync(`${stem}.artifact-set.json`, "utf8"));
-  const recorded = manifest.components?.find((component) => component.kind === "vscode-extension")
-    ?.artifact?.sha256;
-  if (recorded !== actual) {
+  if (manifest.schemaVersion !== 2) {
+    throw new Error(`Unsupported artifact-set schema: expected 2, received ${manifest.schemaVersion ?? "missing"}`);
+  }
+  const component = manifest.components?.find((entry) => entry.kind === "vscode-extension");
+  const recorded = component?.artifact?.sha256;
+  if (recorded !== actual || component?.artifact?.file !== basename(vsixPath)) {
     throw new Error(`Artifact-set manifest checksum mismatch: expected ${recorded ?? "missing"}, received ${actual}`);
+  }
+  if (expected.commit && manifest.source?.commit !== expected.commit) {
+    throw new Error(`Artifact-set commit mismatch: expected ${expected.commit}, received ${manifest.source?.commit ?? "missing"}`);
+  }
+  if (expected.version && component?.version !== expected.version) {
+    throw new Error(`Artifact-set version mismatch: expected ${expected.version}, received ${component?.version ?? "missing"}`);
+  }
+  const sbomFile = component?.sbom?.file;
+  const sbomPath = resolve(dirname(vsixPath), sbomFile ?? "");
+  const sbomDigest = component?.sbom?.sha256;
+  if (!sbomFile || sbomFile !== basename(sbomFile) || !sbomDigest || sha256(sbomPath) !== sbomDigest) {
+    throw new Error("Artifact-set SBOM checksum mismatch");
   }
   return actual;
 }
@@ -163,6 +181,7 @@ export function createReleaseArtifact(requestedPath) {
       "dev",
     ]));
     writeFileSync(paths.sbomPath, `${JSON.stringify(sbom, null, 2)}\n`);
+    const sbomDigest = sha256(paths.sbomPath);
     writeFileSync(paths.checksumPath, `${digest}  ${basename(paths.vsixPath)}\n`);
     writeFileSync(
       paths.manifestPath,
@@ -172,6 +191,7 @@ export function createReleaseArtifact(requestedPath) {
         vsixPath: paths.vsixPath,
         digest,
         sbomPath: paths.sbomPath,
+        sbomDigest,
       }), null, 2)}\n`
     );
     console.log(`sha256: ${digest}`);
@@ -196,7 +216,10 @@ async function main() {
   const packageJson = JSON.parse(readFileSync(PACKAGE_PATH, "utf8"));
   const { vsixPath } = pathsFor(packageJson.version, requestedPath);
   if (process.argv.includes("--verify")) {
-    console.log(`verified sha256: ${verifyReleaseArtifact(vsixPath)}`);
+    console.log(`verified sha256: ${verifyReleaseArtifact(vsixPath, {
+      commit: argumentValue("--commit"),
+      version: argumentValue("--version"),
+    })}`);
     return;
   }
   createReleaseArtifact(requestedPath);

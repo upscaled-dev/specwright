@@ -9,6 +9,10 @@ import {
   type ScenarioRef,
 } from "../traceability/scenario-ref";
 import type { Scenario } from "../types";
+import {
+  withExecutionClientContext,
+  type ClientRunIntent,
+} from "../ui/execution-client-context";
 import { OUTLINE_ID_SEPARATOR } from "./constants";
 
 function hasExcludedDescendant(
@@ -160,7 +164,7 @@ function runTargets(options: RunPlanOptions): RunTarget[] {
   ];
 }
 
-export function testExplorerRunIntent(options: RunPlanOptions): RunIntent {
+export function testExplorerRunIntent(options: RunPlanOptions): ClientRunIntent {
   const wholeSuite = options.mode === "run" &&
     options.request.include === undefined &&
     (options.request.exclude?.length ?? 0) === 0;
@@ -171,9 +175,9 @@ export function testExplorerRunIntent(options: RunPlanOptions): RunIntent {
       ? debugTargets(options, only)
       : runTargets(options);
   const seen = new Set<string>();
-  return {
+  const selection = selectionFor(options, wholeSuite, only);
+  return withExecutionClientContext({
     mode: options.mode,
-    selection: selectionFor(options, wholeSuite, only),
     targets: targets.filter((target) => {
       const key = targetKey(target);
       if (seen.has(key)) {return false;}
@@ -181,6 +185,5 @@ export function testExplorerRunIntent(options: RunPlanOptions): RunIntent {
       return true;
     }),
     ...(options.maxWorkers !== undefined ? { maxWorkers: options.maxWorkers } : {}),
-    metadata: { initiatedBy: "test-explorer" },
-  };
+  }, { selection, initiatedBy: "test-explorer" });
 }

@@ -4,11 +4,20 @@ import {
   ExecutionAlreadyRunningError,
   ExecutionFailure,
 } from "../core/execution-gateway";
-import type { ExecutionGateway, RunCompletion, RunIntent } from "../core/run-contracts";
+import { ExecutionAdmissionBlockedError } from "../core/execution-admission";
+import {
+  ExecutionDiagnosticError,
+  requireExecutionAvailable,
+  startExecution,
+  type ExecutionGateway,
+  type RunCompletion,
+  type RunIntent,
+} from "../core/run-contracts";
 import type { PlaywrightJsonParser } from "../utils/playwright-json-parser";
 import { runOutputFromCompletion, scenarioResultFromExecution } from "../ui/execution-adapter";
 import type { Logger } from "../utils/logger";
 import { errMsg } from "../utils/text";
+import { explainWorkspaceTrust } from "../ui/workspace-trust";
 import type { LiveTestRunProgress } from "./live-test-run-progress";
 
 // The transcript needs no replay: every byte the run retained was emitted as an output event first,
@@ -54,6 +63,20 @@ export async function runGatewayTestRequest(options: {
     vscode.window.showWarningMessage(EXECUTION_ALREADY_RUNNING);
     return;
   }
+  try {
+    await requireExecutionAvailable(options.gateway);
+  } catch (error) {
+    if (error instanceof ExecutionDiagnosticError) {
+      await vscode.window.showErrorMessage(`${error.diagnostic.code}: ${error.message}`);
+      return;
+    }
+    if (error instanceof ExecutionAdmissionBlockedError) {
+      await vscode.window.showErrorMessage(`${error.message} ${error.recovery}`);
+      return;
+    }
+    if (await explainWorkspaceTrust(error)) {return;}
+    throw error;
+  }
   const run = options.controller.createTestRun(options.request);
   const live = options.createLive(run);
   const abort = new AbortController();
@@ -63,7 +86,7 @@ export async function runGatewayTestRequest(options: {
   let completion: RunCompletion | undefined;
   let unrecoverable: string | undefined;
   try {
-    completion = await options.gateway.execute(options.intent, {
+    completion = await startExecution(options.gateway, options.intent, {
       signal: abort.signal,
       onEvent: (event) => {
         if (event.kind === "case-finished") {
@@ -78,6 +101,10 @@ export async function runGatewayTestRequest(options: {
       completion = error.completion;
     } else if (error instanceof ExecutionAlreadyRunningError) {
       vscode.window.showWarningMessage(error.message);
+    } else if (error instanceof ExecutionAdmissionBlockedError) {
+      vscode.window.showErrorMessage(`${error.message} ${error.recovery}`);
+    } else if (await explainWorkspaceTrust(error)) {
+      // The actionable trust message is the whole failure surface.
     } else {
       unrecoverable = errMsg(error);
       options.logger.error("Test execution failed", { error: unrecoverable });

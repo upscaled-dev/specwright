@@ -2,13 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ExecutionAlreadyRunningError,
   ExecutionFailure,
-  ExtensionExecutionGateway,
+  LegacyDirectExecutionGateway,
 } from "../../core/execution-gateway";
+import { LegacyArtifactGateway } from "../../ui/legacy-artifact-gateway";
+import { withExecutionClientContext } from "../../ui/execution-client-context";
 import type {
   ExecutionCaseResult,
   ExecutionEvent,
-  RunCompletion,
   RunIntent,
+  RunCompletion,
 } from "../../core/run-contracts";
 import type { RunProgressObserver } from "../../core/run-progress";
 import type { TestExecutor, RunOutputResult } from "../../core/test-executor";
@@ -20,6 +22,8 @@ import { EXECUTION_LIMITS } from "../../core/execution-limits";
 import { runBoundedCommand } from "../../core/bounded-command-runner";
 import { Logger } from "../../utils/logger";
 import { shellQuote } from "../../utils/shell";
+import { ExecutionAdmissionBlockedError } from "../../core/execution-admission";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
 
 const A = { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" as const };
 const B = { filePath: "/ws/b.feature", line: 7, name: "B", kind: "scenario" as const };
@@ -53,16 +57,26 @@ function output(
   };
 }
 
-function intent(): RunIntent {
-  return {
+function intent(overrides: Partial<RunIntent> = {}) {
+  return withExecutionClientContext({
     mode: "run",
-    selection: { kind: "multi-select", scenarios: [A, B] },
     targets: [
       { kind: "scenario", scenario: A },
       { kind: "scenario", scenario: B },
     ],
-    metadata: { initiatedBy: "test-explorer" },
-  };
+    ...overrides,
+  }, { selection: { kind: "multi-select", scenarios: [A, B] }, initiatedBy: "test-explorer" });
+}
+
+function selectedIntent(
+  targets: RunIntent["targets"],
+  selection: Parameters<typeof withExecutionClientContext>[1]["selection"],
+  artifactOwnership?: Parameters<typeof withExecutionClientContext>[1]["artifactOwnership"]
+) {
+  return withExecutionClientContext(
+    { mode: "run", targets },
+    { selection, ...(artifactOwnership ? { artifactOwnership } : {}) }
+  );
 }
 
 function loggerStub() {
@@ -80,7 +94,7 @@ function nodeCommand(script: string): string {
 
 function rig(
   runScenario: ReturnType<typeof vi.fn> = vi.fn(() => Promise.resolve(output([detail("A")]))),
-  mapped: readonly ScenarioRef[] = []
+  _mapped: readonly ScenarioRef[] = []
 ) {
   const executor = {
     runScenarioWithOutput: runScenario,
@@ -89,6 +103,7 @@ function rig(
     runSuiteWithOutput: vi.fn(() => Promise.resolve(output([]))),
     debugScenarioWithOutput: vi.fn(),
     setForceParallel: vi.fn(),
+    registerArtifactSink: vi.fn(() => ({ dispose: () => undefined })),
   } as unknown as TestExecutor;
   const store = {
     beginBatch: vi.fn(() => 11),
@@ -102,7 +117,11 @@ function rig(
   } as unknown as FeatureParser;
   const logger = loggerStub();
   return {
-    gateway: new ExtensionExecutionGateway(executor, store, parser, logger, () => mapped),
+    gateway: new LegacyArtifactGateway(new LegacyDirectExecutionGateway(
+      executor,
+      parser,
+      trustedWorkspace()
+    ), store, logger, executor),
     executor,
     store,
     parser,
@@ -110,7 +129,7 @@ function rig(
   };
 }
 
-describe("ExtensionExecutionGateway", () => {
+describe("LegacyDirectExecutionGateway", () => {
   it("dispatches targets sequentially and emits one ordered terminal event", async () => {
     let running = false;
     const calls: string[] = [];
@@ -142,13 +161,32 @@ describe("ExtensionExecutionGateway", () => {
     ])));
     const { gateway } = rig(run);
 
-    const completion = await gateway.execute({
-      ...intent(),
+    const completion = await gateway.execute(intent({
       targets: [{ kind: "scenarios", scenarios: [A, B] }],
-    });
+    }));
 
     expect(completion).toMatchObject({ state: "complete", passed: 2 });
     expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not dispatch a second scenarios member after an unsafe output", async () => {
+    const failure = "termination unconfirmed";
+    const run = vi.fn(() => Promise.resolve({
+      ...output([], false, failure, failure),
+      admissionUnsafe: true,
+      terminationLease: {
+        kind: "debug-session" as const,
+        failure,
+        systemUptime: Number.MAX_SAFE_INTEGER,
+      },
+    }));
+    const { gateway } = rig(run);
+
+    await expect(gateway.execute(intent({
+      targets: [{ kind: "scenarios", scenarios: [A, B] }],
+    }))).rejects.toBeInstanceOf(ExecutionFailure);
+
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it("lets cancellation dominate a killed-process failure and skips later targets", async () => {
@@ -201,10 +239,9 @@ describe("ExtensionExecutionGateway", () => {
       "Playwright reported a global error: worker stopped"
     ))));
 
-    await expect(gateway.execute({
-      ...intent(),
+    await expect(gateway.execute(intent({
       targets: [{ kind: "scenario", scenario: A }],
-    })).rejects.toMatchObject({
+    }))).rejects.toMatchObject({
       completion: {
         state: "partial",
         passed: 1,
@@ -223,7 +260,7 @@ describe("ExtensionExecutionGateway", () => {
     const events: ExecutionEvent[] = [];
 
     const completion = await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       { onEvent: (event) => events.push(event) }
     );
 
@@ -237,29 +274,34 @@ describe("ExtensionExecutionGateway", () => {
   });
 
   it("reports the same terminal state with and without an artifact store", async () => {
-    const withStore = await rig().gateway.execute({
-      ...intent(),
+    const withStore = await rig().gateway.execute(intent({
       targets: [{ kind: "scenario", scenario: A }],
-    });
-    const { executor, parser, logger } = rig();
-    const storeless = new ExtensionExecutionGateway(executor, undefined, parser, logger, () => []);
+    }));
+    const { executor, parser } = rig();
+    const storeless = new LegacyDirectExecutionGateway(
+      executor,
+      parser,
+      trustedWorkspace()
+    );
 
-    const withoutStore = await storeless.execute({
-      ...intent(),
+    const withoutStore = await storeless.execute(intent({
       targets: [{ kind: "scenario", scenario: A }],
-    });
+    }));
 
     expect(withoutStore.state).toBe(withStore.state);
     expect(withoutStore.failure).toBe(withStore.failure);
   });
 
   it("preserves successful zero-result behavior when no artifact store exists", async () => {
-    const { executor, parser, logger } = rig();
-    const gateway = new ExtensionExecutionGateway(executor, undefined, parser, logger, () => []);
+    const { executor, parser } = rig();
+    const gateway = new LegacyDirectExecutionGateway(
+      executor,
+      parser,
+      trustedWorkspace()
+    );
 
     await expect(gateway.execute({
       mode: "run",
-      selection: { kind: "suite" },
       targets: [{ kind: "suite" }],
     })).resolves.toMatchObject({ state: "complete", results: [] });
   });
@@ -271,7 +313,7 @@ describe("ExtensionExecutionGateway", () => {
       await parked;
       return output([detail("A")]);
     }));
-    const first = gateway.execute({ ...intent(), targets: [{ kind: "scenario", scenario: A }] });
+    const first = gateway.execute(intent({ targets: [{ kind: "scenario", scenario: A }] }));
 
     await expect(gateway.execute(intent())).rejects.toBeInstanceOf(ExecutionAlreadyRunningError);
     release?.();
@@ -280,18 +322,20 @@ describe("ExtensionExecutionGateway", () => {
 
   it("keeps admission closed after an unconfirmed process-tree termination", async () => {
     const failure = "Process-group termination could not be confirmed.";
-    const { gateway } = rig(vi.fn(() => Promise.resolve({
+    const { gateway, executor, store } = rig(vi.fn(() => Promise.resolve({
       ...output([], false, failure, failure),
       admissionUnsafe: true,
     })));
 
-    await expect(gateway.execute({
-      ...intent(),
+    await expect(gateway.execute(intent({
       targets: [{ kind: "scenario", scenario: A }],
-    })).rejects.toMatchObject({ completion: { state: "partial", failure } });
+    }))).rejects.toMatchObject({ completion: { state: "partial", failure } });
 
-    expect(gateway.running).toBe(true);
-    await expect(gateway.execute(intent())).rejects.toBeInstanceOf(ExecutionAlreadyRunningError);
+    expect(gateway.running).toBe(false);
+    await expect(gateway.execute(intent())).rejects.toBeInstanceOf(ExecutionAdmissionBlockedError);
+    expect(executor.runScenarioWithOutput).toHaveBeenCalledOnce();
+    expect(store.beginBatch).toHaveBeenCalledTimes(2);
+    expect(store.sealBatch).toHaveBeenLastCalledWith(11, "partial");
   });
 
   it("seals a pre-launch cancellation without dispatching", async () => {
@@ -348,7 +392,7 @@ describe("ExtensionExecutionGateway", () => {
     const { gateway } = rig(run);
     const events: ExecutionEvent[] = [];
     await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       { onEvent: (event) => events.push(event) }
     );
     const count = events.length;
@@ -361,14 +405,60 @@ describe("ExtensionExecutionGateway", () => {
 
   it("rejects invalid worker counts before opening an artifact", async () => {
     const { gateway, store } = rig();
-    await expect(gateway.execute({ ...intent(), maxWorkers: 17 })).rejects.toThrow(/maxWorkers/);
+    await expect(gateway.execute(intent({ maxWorkers: 17 }))).rejects.toThrow(/maxWorkers/);
     expect(store.beginBatch).not.toHaveBeenCalled();
+  });
+
+  it("runs the exact deep target snapshot after the caller mutates its input", async () => {
+    const { executor, parser } = rig();
+    const direct = new LegacyDirectExecutionGateway(executor, parser, trustedWorkspace());
+    const scenario = { ...A };
+    const grouped = [{ ...B }];
+    const titles = ["A"];
+    const mutable: RunIntent = {
+      mode: "run",
+      targets: [
+        { kind: "scenario", scenario },
+        { kind: "scenarios", scenarios: grouped },
+        { kind: "path", path: A.filePath, titles },
+      ],
+    };
+    const prepared = await direct.prepare(mutable);
+
+    scenario.name = "mutated";
+    grouped[0]!.filePath = "/ws/mutated.feature";
+    grouped.push({ ...A, name: "late" });
+    titles[0] = "mutated";
+    titles.push("late");
+
+    await direct.run(prepared);
+
+    expect(executor.runScenarioWithOutput).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ filePath: A.filePath, scenarioName: A.name }),
+      expect.objectContaining({ scenario: A })
+    );
+    expect(executor.runScenarioWithOutput).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ filePath: B.filePath, scenarioName: B.name }),
+      expect.objectContaining({ scenario: B })
+    );
+    expect(executor.runPathFilterWithOutput).toHaveBeenCalledWith(
+      A.filePath,
+      expect.any(AbortSignal),
+      undefined,
+      expect.anything(),
+      undefined,
+      ["A"]
+    );
+    expect(Object.isFrozen(prepared.intent.targets[0])).toBe(true);
+    expect(Object.isFrozen((prepared.intent.targets[1] as { scenarios: readonly unknown[] }).scenarios)).toBe(true);
   });
 
   it("exposes the partial completion on infrastructure errors", async () => {
     const { gateway } = rig(vi.fn(() => Promise.reject(new Error("launch failed"))));
     try {
-      await gateway.execute({ ...intent(), targets: [{ kind: "scenario", scenario: A }] });
+      await gateway.execute(intent({ targets: [{ kind: "scenario", scenario: A }] }));
       expect.unreachable();
     } catch (error) {
       expect(error).toBeInstanceOf(ExecutionFailure);
@@ -378,11 +468,10 @@ describe("ExtensionExecutionGateway", () => {
 
   it("dispatches a tagged scenario as one intersected scenario run", async () => {
     const { gateway, executor, store } = rig();
-    const runIntent: RunIntent = {
+    const runIntent = withExecutionClientContext({
       mode: "run",
-      selection: { kind: "scenario", scenario: A, tagExpression: "@smoke" },
       targets: [{ kind: "scenario", scenario: A, tagExpression: "@smoke" }],
-    };
+    }, { selection: { kind: "scenario", scenario: A, tagExpression: "@smoke" } });
     await gateway.execute(runIntent);
 
     expect(executor.runScenarioWithOutput).toHaveBeenCalledWith(
@@ -395,16 +484,15 @@ describe("ExtensionExecutionGateway", () => {
 
   it("dispatches a tagged feature as one intersected path run", async () => {
     const { gateway, executor, store } = rig();
-    const runIntent: RunIntent = {
+    const runIntent = withExecutionClientContext({
       mode: "run",
-      selection: { kind: "feature", filePath: A.filePath, tagExpression: "@smoke" },
       targets: [{ kind: "path", path: A.filePath, tagExpression: "@smoke" }],
-    };
+    }, { selection: { kind: "feature", filePath: A.filePath, tagExpression: "@smoke" } });
     await gateway.execute(runIntent);
 
     expect(executor.runPathFilterWithOutput).toHaveBeenCalledWith(
       A.filePath,
-      undefined,
+      expect.anything(),
       11,
       expect.anything(),
       "@smoke",
@@ -417,17 +505,16 @@ describe("ExtensionExecutionGateway", () => {
   it("records a tag-expression selection while dispatching the same expression", async () => {
     const { gateway, executor, store } = rig();
     vi.mocked(executor.runAllTestsWithTagsOutput).mockResolvedValue(output([]));
-    const runIntent: RunIntent = {
+    const runIntent = withExecutionClientContext({
       mode: "run",
-      selection: { kind: "tag-expression", expression: "@smoke and not @wip" },
       targets: [{ kind: "tag-expression", expression: "@smoke and not @wip" }],
-    };
+    }, { selection: { kind: "tag-expression", expression: "@smoke and not @wip" } });
 
     await gateway.execute(runIntent);
 
     expect(executor.runAllTestsWithTagsOutput).toHaveBeenCalledWith(
       "@smoke and not @wip",
-      undefined,
+      expect.anything(),
       11,
       expect.anything()
     );
@@ -444,7 +531,7 @@ describe("ExtensionExecutionGateway", () => {
     const events: ExecutionEvent[] = [];
 
     const completion = await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       { onEvent: (event) => events.push(event) }
     );
 
@@ -468,7 +555,7 @@ describe("ExtensionExecutionGateway", () => {
     const streamed = { stdout: 0, stderr: 0 };
 
     const completion = await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       {
         signal: abort.signal,
         onEvent: (event) => {
@@ -511,7 +598,7 @@ describe("ExtensionExecutionGateway", () => {
     const events: ExecutionEvent[] = [];
 
     const completion = await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       { onEvent: (event) => events.push(event) }
     );
 
@@ -549,7 +636,7 @@ describe("ExtensionExecutionGateway", () => {
     const events: ExecutionEvent[] = [];
 
     await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       { onEvent: (event) => events.push(event) }
     );
 
@@ -594,11 +681,14 @@ describe("ExtensionExecutionGateway", () => {
         setForceParallel: vi.fn(),
       } as unknown as TestExecutor;
       const parser = { parseFeatureFile: vi.fn() } as unknown as FeatureParser;
-      const gateway = new ExtensionExecutionGateway(executor, undefined, parser, loggerStub(), () => []);
+      const gateway = new LegacyDirectExecutionGateway(
+        executor,
+        parser,
+        trustedWorkspace()
+      );
       const abort = new AbortController();
       const pending = gateway.execute({
         mode: "run",
-        selection: { kind: "suite" },
         targets: [{ kind: "suite" }],
       }, { signal: abort.signal });
       if (abortDelay !== undefined) {setTimeout(() => abort.abort(), abortDelay);}
@@ -653,11 +743,10 @@ describe("ExtensionExecutionGateway", () => {
     const { gateway, executor, parser, store } = rig(vi.fn(() => Promise.resolve(output(details))));
     vi.mocked(parser.parseFeatureFile).mockReturnValue({ scenarios: rows } as never);
 
-    const completion = await gateway.execute({
-      mode: "run",
-      selection: { kind: "scenario", scenario: outline },
-      targets: [{ kind: "scenario", scenario: outline }],
-    });
+    const completion = await gateway.execute(selectedIntent(
+      [{ kind: "scenario", scenario: outline }],
+      { kind: "scenario", scenario: outline }
+    ));
 
     expect(completion.results).toHaveLength(2);
     expect(executor.runScenarioWithOutput).toHaveBeenCalledTimes(2);
@@ -674,7 +763,7 @@ describe("ExtensionExecutionGateway", () => {
     );
   });
 
-  it("scopes capture with the mapped set the tracker knows, not the run's own targets", async () => {
+  it("excludes every separately mapped Examples block from an enclosing outline capture", async () => {
     const outline = {
       filePath: A.filePath,
       line: 4,
@@ -682,11 +771,71 @@ describe("ExtensionExecutionGateway", () => {
       kind: "outline" as const,
       outlineName: "Divide",
     };
-    const splitBlock = {
+    const mappedBlock = {
       filePath: A.filePath,
-      line: 7,
+      line: 11,
       name: "Divide edge cases",
       kind: "examplesBlock" as const,
+      outlineName: "Divide",
+    };
+    const rows = [
+      { lineNumber: 9, examplesBlockLineNumber: 7 },
+      { lineNumber: 13, examplesBlockLineNumber: 11 },
+    ].map(({ lineNumber, examplesBlockLineNumber }) => ({
+      filePath: A.filePath,
+      name: `Example #${lineNumber}`,
+      line: lineNumber,
+      lineNumber,
+      range: {} as never,
+      steps: [],
+      isScenarioOutline: true as const,
+      outlineLineNumber: 4,
+      outlineName: "Divide",
+      examplesBlockLineNumber,
+    }));
+    const { gateway, executor, parser } = rig(vi.fn(() => Promise.resolve(output([]))));
+    vi.mocked(parser.parseFeatureFile).mockReturnValue({ scenarios: rows } as never);
+
+    await gateway.execute(selectedIntent(
+      [{ kind: "scenario", scenario: outline }],
+      { kind: "scenario", scenario: outline },
+      [outline, mappedBlock]
+    ));
+
+    expect(executor.runScenarioWithOutput).toHaveBeenCalledOnce();
+    expect(executor.runScenarioWithOutput).toHaveBeenCalledWith(
+      expect.objectContaining({ lineNumber: 9 }),
+      { scenario: outline, resultLines: [9] }
+    );
+  });
+
+  it("fails a parse-none outline before invoking the runner", async () => {
+    const outline = {
+      filePath: A.filePath,
+      line: 4,
+      name: "Divide",
+      kind: "outline" as const,
+      outlineName: "Divide",
+    };
+    const { gateway, executor } = rig();
+
+    await expect(gateway.execute(selectedIntent(
+      [{ kind: "scenario", scenario: outline }],
+      { kind: "scenario", scenario: outline }
+    ))).rejects.toMatchObject({
+      completion: { state: "partial", failure: expect.stringContaining("Could not resolve exact example rows") },
+    });
+
+    expect(executor.runScenarioWithOutput).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch a second outline row after an unsafe output", async () => {
+    const outline = {
+      filePath: A.filePath,
+      line: 4,
+      name: "Divide",
+      kind: "outline" as const,
+      outlineName: "Divide",
     };
     const rows = [9, 10].map((lineNumber) => ({
       filePath: A.filePath,
@@ -698,47 +847,27 @@ describe("ExtensionExecutionGateway", () => {
       isScenarioOutline: true as const,
       outlineLineNumber: 4,
       outlineName: "Divide",
-      examplesBlockLineNumber: lineNumber === 9 ? 7 : 8,
+      examplesBlockLineNumber: 7,
     }));
-    // The split block is mapped to its own key but is not part of this run.
-    const { gateway, executor, parser } = rig(vi.fn(() => Promise.resolve(output([]))), [splitBlock]);
+    const failure = "row process remained alive";
+    const run = vi.fn(() => Promise.resolve({
+      ...output([], false, failure, failure),
+      admissionUnsafe: true,
+      terminationLease: {
+        kind: "debug-session" as const,
+        failure,
+        systemUptime: Number.MAX_SAFE_INTEGER,
+      },
+    }));
+    const { gateway, executor, parser } = rig(run);
     vi.mocked(parser.parseFeatureFile).mockReturnValue({ scenarios: rows } as never);
 
-    await gateway.execute({
-      mode: "run",
-      selection: { kind: "scenario", scenario: outline },
-      targets: [{ kind: "scenario", scenario: outline }],
-    });
+    await expect(gateway.execute(selectedIntent(
+      [{ kind: "scenario", scenario: outline }],
+      { kind: "scenario", scenario: outline }
+    ))).rejects.toBeInstanceOf(ExecutionFailure);
 
-    expect(executor.runScenarioWithOutput).toHaveBeenCalledWith(
-      expect.objectContaining({ lineNumber: 10 }),
-      { scenario: outline, resultLines: [10] }
-    );
-  });
-
-  it("reads the mapped set once for the whole run", async () => {
-    const mapped = vi.fn(() => []);
-    const { executor, parser, logger } = rig();
-    const gateway = new ExtensionExecutionGateway(executor, undefined, parser, logger, mapped);
-
-    await gateway.execute(intent());
-
-    expect(mapped).toHaveBeenCalledTimes(1);
-  });
-
-  // Admission is taken before the run's dependencies are read. A throwing one must not leave the
-  // slot held, or every later run in the session is refused.
-  it("releases the execution slot when a dependency throws before any target is dispatched", async () => {
-    const { executor, parser, logger } = rig();
-    const gateway = new ExtensionExecutionGateway(executor, undefined, parser, logger, () => {
-      throw new Error("snapshot unavailable");
-    });
-
-    await expect(gateway.execute(intent())).rejects.toThrow("snapshot unavailable");
-
-    expect(gateway.running).toBe(false);
-    // The next run reaches the same failure, rather than being refused as a second concurrent run.
-    await expect(gateway.execute(intent())).rejects.toThrow("snapshot unavailable");
+    expect(executor.runScenarioWithOutput).toHaveBeenCalledTimes(1);
   });
 
   it("runs each Examples-block row by its exact generated-test source line", async () => {
@@ -764,11 +893,10 @@ describe("ExtensionExecutionGateway", () => {
     const { gateway, executor, parser } = rig(vi.fn(() => Promise.resolve(output([]))));
     vi.mocked(parser.parseFeatureFile).mockReturnValue({ scenarios: rows } as never);
 
-    await gateway.execute({
-      mode: "run",
-      selection: { kind: "scenario", scenario: block },
-      targets: [{ kind: "scenario", scenario: block }],
-    });
+    await gateway.execute(selectedIntent(
+      [{ kind: "scenario", scenario: block }],
+      { kind: "scenario", scenario: block }
+    ));
 
     expect(vi.mocked(executor.runScenarioWithOutput).mock.calls.map(([options, target]) => ({
       line: (options as { lineNumber?: number }).lineNumber,
@@ -787,7 +915,7 @@ describe("ExtensionExecutionGateway", () => {
     const events: ExecutionEvent[] = [];
 
     const completion = await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       { onEvent: (event) => events.push(event) }
     );
 
@@ -797,7 +925,7 @@ describe("ExtensionExecutionGateway", () => {
     const finished = events.find((event) => event.kind === "finished");
     expect(finished?.kind === "finished" && Object.isFrozen(finished.completion)).toBe(true);
     expect(finished?.kind === "finished" && Object.isFrozen(finished.completion.results)).toBe(true);
-    await expect(gateway.execute({ ...intent(), targets: [] })).resolves.toMatchObject({
+    await expect(gateway.execute(intent({ targets: [] }))).resolves.toMatchObject({
       state: "complete",
     });
   });
@@ -820,7 +948,7 @@ describe("ExtensionExecutionGateway", () => {
     const events: ExecutionEvent[] = [];
 
     const completion = await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       { signal: abort.signal, onEvent: (event) => events.push(event) }
     );
 
@@ -845,7 +973,7 @@ describe("ExtensionExecutionGateway", () => {
     const events: ExecutionEvent[] = [];
 
     await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       { onEvent: (event) => events.push(event) }
     );
 
@@ -879,7 +1007,7 @@ describe("ExtensionExecutionGateway", () => {
     const emitted: ExecutionCaseResult[] = [];
 
     const completion = await gateway.execute(
-      { ...intent(), targets: [{ kind: "scenario", scenario: A }] },
+      intent({ targets: [{ kind: "scenario", scenario: A }] }),
       {
         onEvent: (event) => {
           if (event.kind === "case-finished") {emitted.push(event.result);}

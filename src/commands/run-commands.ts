@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { EXECUTION_ALREADY_RUNNING } from "../core/execution-gateway";
-import type { RunInitiator, RunIntent } from "../core/run-contracts";
+import type { RunIntent } from "../core/run-contracts";
 import type { RunProgressSession } from "../core/run-progress";
 import type { RunOutputResult } from "../core/test-executor";
 import type {
@@ -14,6 +14,7 @@ import { outlineNameForScenario } from "../parsers/feature-parser";
 import { promptPaletteTags, resolvePaletteFeature, resolvePaletteScenario } from "./palette-target-resolver";
 import { logCapturedRunOutput, runGatewayWithProgress } from "./captured-run-progress";
 import { pathRunIntent, scenarioRunIntent, suiteRunIntent } from "./run-intent";
+import type { ClientRunIntent, RunInitiator } from "../ui/execution-client-context";
 import { resolveWorkerCount } from "./prompt-worker-count";
 
 /**
@@ -149,8 +150,8 @@ export class RunCommands {
 
   public async runAllTestsParallel(): Promise<void> {
     this.context.logger.info("Running all playwright-bdd tests in parallel");
-    const files = await this.context.testExecutor.discoverFeatureFiles();
-    if (files.length === 0) {
+    const discovery = await this.context.executionGateway.discover();
+    if (discovery.cases.length === 0) {
       await vscode.window.showWarningMessage("No feature files found to run");
       return;
     }
@@ -286,7 +287,7 @@ export class RunCommands {
     mode: RunIntent["mode"],
     initiatedBy: RunInitiator,
     tagExpression?: string
-  ): RunIntent {
+  ): ClientRunIntent {
     if (lineNumber === undefined && outlineName === undefined) {
       return pathRunIntent(filePath, "feature", mode, initiatedBy, tagExpression);
     }

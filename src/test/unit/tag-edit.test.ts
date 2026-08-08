@@ -4,6 +4,8 @@ import { applyTagInsert, applyTagRemove } from "../../traceability/tag-edit";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
+import { WorkspaceTrust, WorkspaceTrustRequiredError } from "../../core/workspace-trust";
 
 const GRAMMAR = new InMemoryTraceabilityAdapter().keyGrammar;
 const UNTAGGED = "Feature: F\n\nScenario: A\n  Given x\n";
@@ -51,7 +53,8 @@ describe("tag-edit", () => {
     const doc = stubDocument(UNTAGGED);
     const edits = captureEdits();
 
-    await expect(applyTagInsert(scenarioAt(3), "5", GRAMMAR)).resolves.toBe("inserted");
+    await expect(applyTagInsert(scenarioAt(3), "5", GRAMMAR, trustedWorkspace()))
+      .resolves.toBe("inserted");
     expect(edits).toHaveLength(1);
     expect(applyWsEdit(UNTAGGED, edits[0]!)).toBe("Feature: F\n\n@TC-5\nScenario: A\n  Given x\n");
     expect(doc.saves).toBe(1);
@@ -62,7 +65,8 @@ describe("tag-edit", () => {
     stubDocument(feature);
     const edits = captureEdits();
 
-    await expect(applyTagInsert(scenarioAt(3), "5", GRAMMAR)).resolves.toBe("inserted");
+    await expect(applyTagInsert(scenarioAt(3), "5", GRAMMAR, trustedWorkspace()))
+      .resolves.toBe("inserted");
     expect(edits[0]![0]).toMatchObject({ op: "insert", text: "@TC-5\r\n" });
     const result = applyWsEdit(feature, edits[0]!);
     expect(result).toBe("Feature: F\r\n\r\n@TC-5\r\nScenario: A\r\n  Given x\r\n");
@@ -73,7 +77,8 @@ describe("tag-edit", () => {
     const doc = stubDocument(TAGGED);
     const edits = captureEdits();
 
-    await expect(applyTagRemove(scenarioAt(4), "9", GRAMMAR)).resolves.toBe("removed");
+    await expect(applyTagRemove(scenarioAt(4), "9", GRAMMAR, trustedWorkspace()))
+      .resolves.toBe("removed");
     expect(edits[0]![0]!.op).toBe("delete");
     expect(applyWsEdit(TAGGED, edits[0]!)).toBe("Feature: F\n\nScenario: A\n  Given x\n");
     expect(doc.saves).toBe(1);
@@ -84,7 +89,8 @@ describe("tag-edit", () => {
     stubDocument(feature);
     const edits = captureEdits();
 
-    await expect(applyTagRemove(scenarioAt(4), "9", GRAMMAR)).resolves.toBe("removed");
+    await expect(applyTagRemove(scenarioAt(4), "9", GRAMMAR, trustedWorkspace()))
+      .resolves.toBe("removed");
     expect(edits[0]![0]!.op).toBe("replace");
     const result = applyWsEdit(feature, edits[0]!);
     expect(result).toBe("Feature: F\r\n\r\n@smoke\r\nScenario: A\r\n  Given x\r\n");
@@ -95,7 +101,8 @@ describe("tag-edit", () => {
     const doc = stubDocument(TAGGED);
     const edits = captureEdits();
 
-    await expect(applyTagInsert(scenarioAt(4), "9", GRAMMAR)).resolves.toBe("unchanged");
+    await expect(applyTagInsert(scenarioAt(4), "9", GRAMMAR, trustedWorkspace()))
+      .resolves.toBe("unchanged");
     expect(edits).toHaveLength(0);
     expect(doc.saves).toBe(0);
   });
@@ -104,7 +111,8 @@ describe("tag-edit", () => {
     const doc = stubDocument(TAGGED);
     const edits = captureEdits();
 
-    await expect(applyTagRemove(scenarioAt(4), "5", GRAMMAR)).resolves.toBe("unchanged");
+    await expect(applyTagRemove(scenarioAt(4), "5", GRAMMAR, trustedWorkspace()))
+      .resolves.toBe("unchanged");
     expect(edits).toHaveLength(0);
     expect(doc.saves).toBe(0);
   });
@@ -113,7 +121,30 @@ describe("tag-edit", () => {
     const doc = stubDocument(UNTAGGED);
     captureEdits(false);
 
-    await expect(applyTagInsert(scenarioAt(3), "5", GRAMMAR)).resolves.toBe("rejected");
+    await expect(applyTagInsert(scenarioAt(3), "5", GRAMMAR, trustedWorkspace()))
+      .resolves.toBe("rejected");
+    expect(doc.saves).toBe(0);
+  });
+
+  it("does not start saving when trust is revoked while the workspace edit is pending", async () => {
+    let trusted = true;
+    let resolveEdit: ((applied: boolean) => void) | undefined;
+    const doc = stubDocument(UNTAGGED);
+    vi.spyOn(vscode.workspace, "applyEdit").mockImplementation(() =>
+      new Promise<boolean>((resolve) => {resolveEdit = resolve;})
+    );
+    const pending = applyTagInsert(
+      scenarioAt(3),
+      "5",
+      GRAMMAR,
+      new WorkspaceTrust(() => trusted)
+    );
+    await vi.waitFor(() => expect(resolveEdit).toBeDefined());
+
+    trusted = false;
+    resolveEdit?.(true);
+
+    await expect(pending).rejects.toBeInstanceOf(WorkspaceTrustRequiredError);
     expect(doc.saves).toBe(0);
   });
 
@@ -121,7 +152,8 @@ describe("tag-edit", () => {
     stubDocument(TAGGED, { save: () => Promise.resolve(false) });
     const edits = captureEdits();
 
-    await expect(applyTagRemove(scenarioAt(4), "9", GRAMMAR)).resolves.toBe("rejected");
+    await expect(applyTagRemove(scenarioAt(4), "9", GRAMMAR, trustedWorkspace()))
+      .resolves.toBe("rejected");
     expect(edits).toHaveLength(1);
   });
 
@@ -129,7 +161,8 @@ describe("tag-edit", () => {
     const doc = stubDocument(UNTAGGED, { isDirty: false, save: () => Promise.resolve(false) });
     captureEdits();
 
-    await expect(applyTagInsert(scenarioAt(3), "5", GRAMMAR)).resolves.toBe("inserted");
+    await expect(applyTagInsert(scenarioAt(3), "5", GRAMMAR, trustedWorkspace()))
+      .resolves.toBe("inserted");
     expect(doc.saves).toBe(0);
   });
 });

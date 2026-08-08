@@ -4,6 +4,8 @@ import {
   PublishDialogModel,
   PublishDialogResult,
   PublishFlowDeps,
+  LandedAttachmentPreparationError,
+  OutcomeUnknownRecoveryPersistenceError,
   publishRunOptions,
   runPublishFlow,
 } from "../../traceability/publish-flow";
@@ -21,6 +23,7 @@ import {
 import { ScenarioRef } from "../../traceability/scenario-ref";
 import { UNKNOWN_EXECUTION } from "../../traceability/publish-core";
 import { projectFromKey } from "../../xray/xray-adapter";
+import { RemoteOutcomeUnknownError } from "../../core/workspace-trust";
 
 const CREATED_AT = Date.UTC(2026, 6, 22, 9, 0, 0);
 
@@ -78,8 +81,8 @@ const ATTACHMENTS_MODEL: PublishAttachmentsModel = {
 };
 
 // What the attach routine hands back: uploaded is implied by whatever is in neither list.
-function uploadResult(failed: string[] = [], cancelled: string[] = []): { failed: string[]; cancelled: string[] } {
-  return { failed, cancelled };
+function uploadResult(failed: string[] = [], cancelled: string[] = []): { failed: never[]; cancelled: never[] } {
+  return { failed: failed as never[], cancelled: cancelled as never[] };
 }
 
 // Wrap a bare request as the dialog's confirmed result (no run-level attachments picked by default,
@@ -107,6 +110,7 @@ function deps(runs: readonly RunArtifact[], over: Partial<PublishFlowDeps> = {})
       Promise.resolve(undefined)
     ),
     attachFiles: vi.fn(() => Promise.resolve(uploadResult())),
+    sealAttachments: (files) => files as never,
     recordPublish: vi.fn(),
     reportNoRuns: vi.fn(),
     reportSuccess: vi.fn(),
@@ -371,8 +375,34 @@ describe("runPublishFlow: banners", () => {
     expect(cap.models[0]!.runs[0]!.republish).toEqual({ target: "XNP-9", publishedAt: 1_699_000_000_000, mode: "append" });
   });
 
+  it("surfaces an ambiguous prior publish with its durable correlation and no pending replay", async () => {
+    const cap = captureModel({
+      priorEntryFor: () => ({
+        kind: "outcome-unknown",
+        artifactId: "run-1",
+        site: "acme.atlassian.net",
+        account: "client-1",
+        publishedAt: 1_699_000_000_000,
+        pendingAttachments: [],
+        operationId: "publish-unknown",
+        mode: "create-new",
+      }),
+    });
+
+    await runPublishFlow(deps([artifact()], cap.over));
+
+    expect(cap.models[0]!.runs[0]!.republish).toEqual({
+      target: "possibly succeeded",
+      publishedAt: 1_699_000_000_000,
+      mode: "create-new",
+      outcomeUnknown: true,
+      operationId: "publish-unknown",
+    });
+    expect(cap.models[0]!.runs[0]!.pendingAttachments).toBeUndefined();
+  });
+
   it("surfaces the pending-attachments banner only when files are pending", async () => {
-    const cap = captureModel({ priorEntryFor: () => ({ ...priorEntry, pendingAttachments: ["/ws/a.zip", "/ws/b.zip"] }) });
+    const cap = captureModel({ priorEntryFor: () => ({ ...priorEntry, pendingAttachments: ["/ws/a.zip", "/ws/b.zip"] as never }) });
     await runPublishFlow(deps([artifact()], cap.over));
     expect(cap.models[0]!.runs[0]!.pendingAttachments).toEqual({ target: "XNP-9", count: 2 });
   });
@@ -380,7 +410,7 @@ describe("runPublishFlow: banners", () => {
   // Both banners speak for a ledger entry, so an entry the import response never named prints the one
   // phrase for a missing reference rather than an empty target.
   it("names a missing reference on both banners of an entry the response never named", async () => {
-    const blank = { ...priorEntry, executionRef: "", pendingAttachments: ["/ws/a.zip"] };
+    const blank = { ...priorEntry, executionRef: "", pendingAttachments: ["/ws/a.zip"] as never };
     const cap = captureModel({ priorEntryFor: () => blank });
 
     await runPublishFlow(deps([artifact()], cap.over));
@@ -652,6 +682,95 @@ describe("runPublishFlow: publish", () => {
 });
 
 describe("runPublishFlow: attachments", () => {
+  it("seals confirmed files before import and carries the operation id through upload and ledger", async () => {
+    const events: string[] = [];
+    const sealed = {
+      ref: "00000001-0000-4000-8000-000000000000",
+      name: "report.zip",
+      size: 5,
+      sha256: "a".repeat(64),
+      createdAt: 1,
+    };
+    const outcome = { ...OUTCOME, operationId: "publish-1" };
+    const publish = vi.fn(() => {events.push("publish"); return Promise.resolve(outcome);});
+    const attachFiles = vi.fn(() => Promise.resolve(uploadResult()));
+    const d = deps([artifact()], {
+      publishing: { publish, searchTargets: vi.fn(() => Promise.resolve([])) },
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
+      sealAttachments: vi.fn(() => {events.push("seal"); return [sealed];}),
+      attachFiles,
+    });
+
+    await runPublishFlow(d);
+
+    expect(events).toEqual(["seal", "publish"]);
+    expect(attachFiles).toHaveBeenCalledWith("XNP-100", [sealed], undefined, "publish-1");
+    expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ operationId: "publish-1" }));
+  });
+
+  it("preserves landed import proof and confirmed snapshots when post-import evidence sealing fails", async () => {
+    const confirmed = {
+      ref: "00000001-0000-4000-8000-000000000000",
+      name: "report.zip",
+      size: 5,
+      sha256: "a".repeat(64),
+      createdAt: 1,
+    };
+    const outcome: PublishOutcome = {
+      ...OUTCOME,
+      operationId: "publish-1",
+      issueEvidenceFiles: ["/ws/evidence.png"],
+    };
+    const sealAttachments = vi.fn()
+      .mockReturnValueOnce([confirmed])
+      .mockImplementationOnce(() => {throw new Error("evidence changed");});
+    const discardAttachments = vi.fn();
+    const d = deps([artifact()], {
+      publishing: spyPublishing(outcome).capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
+      sealAttachments,
+      discardAttachments,
+    });
+
+    await runPublishFlow(d);
+
+    expect(d.attachFiles).not.toHaveBeenCalled();
+    expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({
+      executionRef: "XNP-100",
+      operationId: "publish-1",
+      pendingAttachments: [confirmed],
+    }));
+    expect(discardAttachments).not.toHaveBeenCalled();
+    expect(d.reportFailure).toHaveBeenCalledWith(expect.any(LandedAttachmentPreparationError));
+    expect(d.presentRetry).not.toHaveBeenCalled();
+  });
+
+  it("discards confirmed snapshots if landed recovery state cannot be persisted", async () => {
+    const confirmed = {
+      ref: "00000001-0000-4000-8000-000000000000",
+      name: "report.zip",
+      size: 5,
+      sha256: "a".repeat(64),
+      createdAt: 1,
+    };
+    const persistenceError = new Error("disk full");
+    const discardAttachments = vi.fn();
+    const d = deps([artifact()], {
+      publishing: spyPublishing({ ...OUTCOME, issueEvidenceFiles: ["/ws/evidence.png"] }).capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
+      sealAttachments: vi.fn()
+        .mockReturnValueOnce([confirmed])
+        .mockImplementationOnce(() => {throw new Error("evidence changed");}),
+      recordPublish: vi.fn(() => Promise.reject(persistenceError)),
+      discardAttachments,
+    });
+
+    await runPublishFlow(d);
+
+    expect(discardAttachments).toHaveBeenCalledWith([confirmed]);
+    expect(d.reportFailure).toHaveBeenCalledWith(persistenceError);
+  });
+
   it("uploads run-level picks after a successful import and reports the attached count", async () => {
     const publishing = spyPublishing();
     const attachFiles = vi.fn(() => Promise.resolve(uploadResult()));
@@ -741,6 +860,31 @@ describe("runPublishFlow: attachments", () => {
     expect(d.reportSuccess).toHaveBeenCalledWith(outcome, CREATE_REQUEST, 0);
   });
 
+  it("discards every sealed file when an unnamed execution cannot be persisted", async () => {
+    const sealed = {
+      ref: "00000001-0000-4000-8000-000000000000",
+      name: "report.zip",
+      size: 5,
+      sha256: "a".repeat(64),
+      createdAt: 1,
+    };
+    const outcome: PublishOutcome = { ref: { kind: "execution", key: "" }, imported: 1, warnings: [] };
+    const persistenceError = new Error("disk full");
+    const discardAttachments = vi.fn();
+    const d = deps([artifact()], {
+      publishing: spyPublishing(outcome).capability,
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
+      sealAttachments: vi.fn(() => [sealed]),
+      recordPublish: vi.fn(() => Promise.reject(persistenceError)),
+      discardAttachments,
+    });
+
+    await runPublishFlow(d);
+
+    expect(discardAttachments).toHaveBeenCalledWith([sealed]);
+    expect(d.reportFailure).toHaveBeenCalledWith(persistenceError);
+  });
+
   it("records failed uploads as pendingAttachments and reports a partial (never rolls back the import)", async () => {
     const publishing = spyPublishing();
     const attachFiles = vi.fn(() => Promise.resolve(uploadResult(["/ws/report.zip"])));
@@ -789,6 +933,89 @@ describe("runPublishFlow: attachments", () => {
 });
 
 describe("runPublishFlow: cancellation", () => {
+  it("does not offer retry when a publish mutation has an unknown remote outcome", async () => {
+    const unknown = new RemoteOutcomeUnknownError("Publishing results", "publish-unknown");
+    const publish = vi.fn(() => Promise.reject(unknown));
+    const d = deps([artifact()], {
+      publishing: { publish, searchTargets: vi.fn(() => Promise.resolve([])) },
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST))),
+    });
+
+    await runPublishFlow(d);
+
+    expect(d.reportFailure).toHaveBeenCalledWith(unknown);
+    expect(d.presentRetry).not.toHaveBeenCalled();
+    expect(d.recordPublish).toHaveBeenCalledWith({
+      kind: "outcome-unknown",
+      artifactId: "run-1",
+      site: "acme.atlassian.net",
+      account: "client-1",
+      publishedAt: 1_700_000_000_000,
+      pendingAttachments: [],
+      operationId: "publish-unknown",
+      mode: "create-new",
+    });
+  });
+
+  it("reports persistence failure instead of losing an ambiguous publish record", async () => {
+    const unknown = new RemoteOutcomeUnknownError("Publishing results", "publish-unknown");
+    const secret = `${"a".repeat(40)}.${"b".repeat(40)}.${"c".repeat(40)}`;
+    const persistenceError = new Error(`disk full ${secret}`);
+    const sealed = {
+      ref: "00000001-0000-4000-8000-000000000000",
+      name: "report.zip",
+      size: 5,
+      sha256: "a".repeat(64),
+      createdAt: 1,
+    };
+    const discardAttachments = vi.fn();
+    const recoveryState: LedgerEntry[] = [];
+    const d = deps([artifact()], {
+      publishing: {
+        publish: vi.fn(() => Promise.reject(unknown)),
+        searchTargets: vi.fn(() => Promise.resolve([])),
+      },
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
+      sealAttachments: vi.fn(() => [sealed]),
+      recordPublish: vi.fn(async (record) => {
+        await Promise.reject(persistenceError);
+        recoveryState.push(record);
+      }),
+      discardAttachments,
+    });
+
+    await runPublishFlow(d);
+
+    expect(discardAttachments).toHaveBeenCalledWith([sealed]);
+    const reported = (d.reportFailure as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(reported).toBeInstanceOf(OutcomeUnknownRecoveryPersistenceError);
+    expect(reported).toMatchObject({
+      operationId: "publish-unknown",
+      ambiguity: unknown,
+    });
+    expect(reported.persistenceCause).toContain("disk full");
+    expect(reported.persistenceCause).not.toContain(secret);
+    expect(recoveryState).toEqual([]);
+    expect(d.reportFailure).not.toHaveBeenCalledWith(unknown);
+    expect(d.presentRetry).not.toHaveBeenCalled();
+  });
+
+  it("does not ledger an attachment for automatic retry when its remote outcome is unknown", async () => {
+    const unknown = new RemoteOutcomeUnknownError("Uploading attachment", "upload-unknown");
+    const d = deps([artifact()], {
+      presentDialog: vi.fn(() => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"]))),
+      attachFiles: vi.fn(() => Promise.reject(unknown)),
+    });
+
+    await runPublishFlow(d);
+
+    expect(d.reportFailure).toHaveBeenCalledWith(unknown);
+    expect(d.recordPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ pendingAttachments: [] })
+    );
+    expect(d.reportPartialAttachments).not.toHaveBeenCalled();
+  });
+
   it("hands the caller's signal to both the import and the attachment upload", async () => {
     const controller = new AbortController();
     const publishing = spyPublishing();

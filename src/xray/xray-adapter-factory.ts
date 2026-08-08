@@ -11,6 +11,9 @@ import { XrayCredentialStore } from "./xray-credential-store";
 import type { XrayConnectionOutcome, XrayProbe } from "./xray-connection-test";
 import { StepResolver } from "./execution-importers";
 import { createXrayResultPublishing } from "./xray-result-publishing";
+import type { WorkspaceTrust } from "../core/workspace-trust";
+import { trustedAdapter } from "../traceability/trusted-adapter";
+import { currentAdapterVersions } from "../traceability/adapter-contract";
 
 // The extension-side wiring the publish capability's create path needs: resolve a scenario's current
 // step text (FeatureParser) and the owning workspace root for the cucumber `uri` relativization.
@@ -41,13 +44,23 @@ export function createXrayAdapterFactory(
   credentialStore: XrayCredentialStore,
   probe: XrayProbe,
   memento: Memento,
-  publishSupport: XrayPublishSupport
+  publishSupport: XrayPublishSupport,
+  workspaceTrust: WorkspaceTrust
 ): TraceabilityAdapterFactory {
   return {
     id: "xray",
+    ...currentAdapterVersions(
+      "connection",
+      "metadata",
+      "automationBinding",
+      "remoteSearch",
+      "projectDirectory",
+      "testAuthoring",
+      "resultPublishing"
+    ),
     create: (ctx) => {
       const region = parseXrayRegion(ctx.config.xrayApiRegion);
-      const verify = (): Promise<ConnectionVerifyResult> =>
+      const verify = (signal?: AbortSignal): Promise<ConnectionVerifyResult> =>
         probe(
           {
             site: ctx.config.xraySiteUrl,
@@ -56,7 +69,8 @@ export function createXrayAdapterFactory(
             logger: ctx.logger,
             knownTestKeys: () => [],
           },
-          { authOnly: true }
+          { authOnly: true },
+          signal
         ).then(toVerifyResult);
       const client = new XrayClient({
         region,
@@ -117,7 +131,7 @@ export function createXrayAdapterFactory(
       // client/state, so it fills all three adapter slots. The linkScenario picker's remote-search
       // section is thereby gated on the live (synced) adapter, never the browse-only instance.
       // Authoring rides the same live client, so the "create a new test" entry is gated the same way.
-      return new XrayAdapter(ctx.config, {
+      const adapter = new XrayAdapter(ctx.config, {
         credentialStore,
         verify,
         metadata,
@@ -126,6 +140,7 @@ export function createXrayAdapterFactory(
         testAuthoring,
         projectDirectory: metadata,
       });
+      return trustedAdapter(adapter, workspaceTrust);
     },
   };
 }

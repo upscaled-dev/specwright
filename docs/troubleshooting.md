@@ -3,6 +3,14 @@
 Use this guide when Specwright does not work with your existing
 `playwright-bdd` project as expected.
 
+## A command says the workspace must be trusted
+
+Specwright keeps passive Gherkin editing, diagnostics, and navigation available in Restricted Mode. It blocks test processes, debug, generation, integration credentials, sync, publishing, attachments, and remote changes until the workspace is trusted.
+
+- Review the repository first, then use **Manage Workspace Trust** in the warning or run **Workspaces: Manage Workspace Trust** from the Command Palette.
+- Re-run the action after VS Code reloads the trusted workspace.
+- If trust was revoked during an operation, check the remote system before retrying a create, publish, or upload. Its outcome may be unknown even though local cancellation completed.
+
 ## Start with the evidence
 
 Before changing settings, collect the error from the surface that has it:
@@ -69,9 +77,9 @@ manager.
   `playwrightBddRunner.bddgenCommand` to the equivalent commands for your
   package manager. For pnpm, for example, use `pnpm exec playwright test` and
   `pnpm exec bddgen`.
-- If your config uses `defineBddProject` to generate specs during `playwright
-  test`, set `playwrightBddRunner.bddgenCommand` to an empty string rather than
-  pointing it at a command your project does not use.
+- Keep `playwrightBddRunner.bddgenCommand` configured for targeted runs. If a
+  separate command generates specs before every targeted run, set it as
+  `playwrightBddRunner.preRunCommand` and leave `bddgenCommand` empty.
 
 For more on package roots and all-suite runs, see
 [Getting started: package managers and monorepos](getting-started.md#package-managers-and-monorepos).
@@ -88,8 +96,9 @@ or a mismatch between your `playwright-bdd` configuration and the workspace.
 - If the output lists missing step definitions, use **Specwright: Generate
   Missing Step Definitions** or the **Create step definition** quick fix, then
   review the generated stub before committing it.
-- If `bddgen` already runs through `defineBddProject`, clear
-  `playwrightBddRunner.bddgenCommand` to avoid running it twice.
+- If another command already generates current specs before every targeted
+  run, set it as `playwrightBddRunner.preRunCommand` and leave
+  `playwrightBddRunner.bddgenCommand` empty.
 
 See [step-definition generation](features.md#generate-step-definitions) for
 what the generator infers and where it needs a manual edit.
@@ -116,10 +125,9 @@ Specwright supplies the JSON file location through
 still run but the extension may have no report to map into Test Explorer.
 
 If only a targeted Scenario Outline row runs too broadly, inspect Test Output.
-Specwright prefers a generated-spec line target and falls back to name matching
-only when it cannot resolve that generated mapping. Re-run code generation,
-check `playwrightBddRunner.featuresGenDir`, and avoid duplicate scenario names
-when a fallback would be ambiguous.
+Specwright fails a targeted Scenario Outline row closed when it cannot resolve
+its current generated-spec mapping. Re-run code generation and check
+`playwrightBddRunner.featuresGenDir` and your bddgen features configuration.
 
 ## Feature-file breakpoints do not stop
 
@@ -187,6 +195,32 @@ exit stops the test run by design.
 - Open **Specwright: Show Test Output** and fix the command's own error.
 - Check that the command is valid from the same working directory as Playwright.
 - Clear `preRunCommand` if that setup step is no longer required.
+
+## Test execution remains blocked by admission storage
+
+Specwright keeps an `execution-admission` directory in its extension
+`globalStorage` so an unconfirmed Playwright process or debug session cannot be
+silently forgotten across a VS Code restart. An unreadable or corrupt record,
+an interrupted temporary write, or too many or oversized records blocks a run
+without assigning a test outcome.
+
+For a POSIX process-group block, terminate and confirm every leftover
+Playwright or debug process before retrying. If termination cannot be
+confirmed, use the reboot-first storage repair below.
+
+A Windows process-tree or debug-session block cannot be cleared merely by
+closing a process after its termination was already unconfirmed. If its record
+has a boot identity, restart the computer and retry.
+
+For unconfirmed POSIX termination, an absent or unreadable boot identity, or a
+message that identifies admission storage, use **Developer: Open User Data
+Folder** and note the location of
+`User/globalStorage/upscaled-dev.specwright/execution-admission`. Restart the
+computer first so no leftover Playwright or debug process can survive. Then,
+before reopening VS Code, move that `execution-admission` directory to a backup
+location. Reopen VS Code and retry only after the restart and move are both
+complete. Keeping the backup makes the repair reversible and preserves the
+records for diagnosis.
 
 ## Still blocked?
 

@@ -1,3 +1,5 @@
+import * as path from "node:path";
+
 /**
  * Minimal stub of the `vscode` module so unit tests can `import * as vscode from "vscode"`
  * without launching VS Code. Anything not stubbed here will be `undefined` at access time;
@@ -62,6 +64,10 @@ const Uri = {
     scheme: value.split(":")[0] ?? "",
     toString: () => value,
   }),
+  joinPath: (base: { fsPath: string }, ...segments: string[]) => {
+    const fsPath = path.join(base.fsPath, ...segments);
+    return { fsPath, scheme: "file", toString: () => `file://${fsPath}` };
+  },
 };
 
 export const env = {
@@ -386,8 +392,10 @@ export function __resetFileWatchers(): void {
 }
 
 export const workspace = {
+  isTrusted: true,
   getConfiguration: (..._args: unknown[]) => defaultConfiguration,
   onDidChangeConfiguration: () => ({ dispose: () => {} }),
+  onDidGrantWorkspaceTrust: () => ({ dispose: () => {} }),
   findFiles: () => Promise.resolve([]),
   createFileSystemWatcher: (): StubFileWatcher => createStubFileWatcher(),
   workspaceFolders: undefined as ReadonlyArray<unknown> | undefined,

@@ -13,6 +13,9 @@ import { PlaywrightBddExtensionContext } from "../../types";
 import { BddgenDiagnosticsProvider } from "../../providers/bddgen-diagnostics-provider";
 import { LIVE_REPORT_FILE_ENV } from "../../core/live-reporter-protocol";
 import { EXECUTION_LIMITS } from "../../core/execution-limits";
+import { generatedSpecPaths } from "../../core/generated-test-target";
+import { WorkspaceTrust } from "../../core/workspace-trust";
+import { parseExecutableCommand } from "../../core/bounded-command-runner";
 
 interface ShellCall {
   command: string;
@@ -106,7 +109,8 @@ interface FakeDebug {
 
 function makeFakeDebug(
   onStart?: () => void,
-  start?: () => Promise<boolean>
+  start?: () => Promise<boolean>,
+  stop?: () => Promise<void>
 ): FakeDebug {
   const startCalls: Array<{ folder: unknown; config: Record<string, unknown> }> = [];
   const stopCalls: unknown[] = [];
@@ -140,6 +144,8 @@ function makeFakeDebug(
     },
     stopDebugging: (session: unknown): Promise<void> => {
       stopCalls.push(session);
+      if (stop) {return stop();}
+      for (const listener of terminateListeners) {listener(session);}
       return Promise.resolve();
     },
   } as unknown as typeof vscode.debug;
@@ -163,7 +169,6 @@ interface ExecutorDeps {
   debug?: typeof vscode.debug;
   bddgenDiagnostics?: BddgenDiagnosticsProvider;
   mirror?: BreakpointMirror;
-  runArtifactStore?: NonNullable<PlaywrightBddExtensionContext["runArtifactStore"]>;
 }
 
 function makeExecutor(
@@ -180,7 +185,8 @@ function makeExecutor(
     logger,
     PlaywrightJsonParser.create(logger),
     shellRunner,
-    deps.mirror
+    deps.mirror,
+    parseExecutableCommand
   );
   const commandBuilder = CommandBuilder.create(config, logger);
   const context: PlaywrightBddExtensionContext = {
@@ -193,11 +199,24 @@ function makeExecutor(
     featureParser: {} as PlaywrightBddExtensionContext["featureParser"],
     playwrightJsonParser: PlaywrightJsonParser.create(logger),
     commandBuilder,
+    workspaceTrust: new WorkspaceTrust(() => true),
     traceabilityAdapter: {} as PlaywrightBddExtensionContext["traceabilityAdapter"],
     ...(deps.bddgenDiagnostics ? { bddgenDiagnostics: deps.bddgenDiagnostics } : {}),
-    ...(deps.runArtifactStore ? { runArtifactStore: deps.runArtifactStore } : {}),
   };
   executor.setContext(context);
+  // Most debug lifecycle tests use stable virtual `/abs` and `/work` paths. Their assertions are
+  // about session ownership rather than bddgen output, so make the generated target explicit.
+  // Real temporary-workspace tests retain filesystem discovery below.
+  const debugFixture = executor as unknown as {
+    resolveSpecPaths(workingDir: string, filePath: string): string[];
+  };
+  debugFixture.resolveSpecPaths = (workingDir, filePath) => {
+    const discovered = generatedSpecPaths(workingDir, config.featuresGenDir, filePath);
+    if (discovered.length > 0 || (workingDir !== "/abs" && workingDir !== "/work")) {
+      return discovered;
+    }
+    return [nodePath.join(workingDir, ".features-gen", "features/a.feature.spec.js")];
+  };
   return { executor, commandBuilder };
 }
 
@@ -384,16 +403,16 @@ describe("TestExecutor preRunCommand", () => {
       return { success: true, output: "{}", error: "", returnCode: 0 };
     };
     const contributeShard = vi.fn();
-    const runArtifactStore = { contributeShard } as unknown as NonNullable<
-      PlaywrightBddExtensionContext["runArtifactStore"]
-    >;
-    const { executor } = makeExecutor(config, failingShell, { runArtifactStore });
+    const runArtifactStore: Parameters<TestExecutor["registerArtifactSink"]>[1] = { contributeShard };
+    const { executor } = makeExecutor(config, failingShell);
+    const sink = executor.registerArtifactSink(5, runArtifactStore);
     const scenario = { filePath: "/tmp/x.feature", line: 1, name: "S", kind: "scenario" as const };
 
     const result = await executor.runScenarioWithOutput(
       { filePath: "/tmp/x.feature", lineNumber: 1, artifactBatch: 5 },
       { scenario, resultLines: [1] }
     );
+    sink.dispose();
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.command).toBe("false");
@@ -453,12 +472,9 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
       return { success: true, output: "{}", error: "", returnCode: 0 };
     };
     const contributeShard = vi.fn();
-    const runArtifactStore = { contributeShard } as unknown as NonNullable<
-      PlaywrightBddExtensionContext["runArtifactStore"]
-    >;
-    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), failingBddgen, {
-      runArtifactStore,
-    });
+    const runArtifactStore: Parameters<TestExecutor["registerArtifactSink"]>[1] = { contributeShard };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), failingBddgen);
+    const sink = executor.registerArtifactSink(7, runArtifactStore);
     const target = {
       scenario: { filePath: "/tmp/x.feature", line: 5, name: "S", kind: "scenario" as const },
       resultLines: [5],
@@ -468,6 +484,7 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
       { filePath: "/tmp/x.feature", lineNumber: 5, artifactBatch: 7 },
       target
     );
+    sink.dispose();
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.command).toBe("npx bddgen");
@@ -481,7 +498,7 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
     }));
   });
 
-  it("skips the separate bddgen step when bddgenCommand is empty (defineBddProject auto-gen)", async () => {
+  it("skips code generation when the run does not need an exact generated target", async () => {
     const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), recordingShell);
 
     await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 5 });
@@ -490,7 +507,7 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
     expect(calls[0]!.command).toContain("--reporter=list,json");
   });
 
-  it("does not widen a tagged scenario when delegated generation has no exact line map", async () => {
+  it("does not widen a tagged scenario when no generator has produced an exact line map", async () => {
     const expression = "@smoke and not (@wip or @slow)";
     const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), recordingShell);
 
@@ -521,13 +538,23 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
   });
 
   it("keeps a whole-outline run on its title grep, scoped to its own generated spec", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "delegated-outline-"));
+    const featurePath = nodePath.join(root, "x.feature");
+    const specPath = nodePath.join(root, ".features-gen", "x.feature.spec.js");
+    const calls: ShellCall[] = [];
+    fs.mkdirSync(nodePath.dirname(specPath), { recursive: true });
+    fs.writeFileSync(specPath, "// Generated from: x.feature");
+    const shell: ShellRunner = async (command, workingDir) => {
+      calls.push({ command, workingDir });
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
     const { executor } = makeExecutor(
-      makeConfig({ bddgenCommand: "", workingDirectory: "/tmp" }),
-      recordingShell
+      makeConfig({ bddgenCommand: "", workingDirectory: root }),
+      shell
     );
 
     await executor.runScenarioWithOutput({
-      filePath: "/tmp/x.feature",
+      filePath: featurePath,
       outlineName: "Divide",
     });
 
@@ -537,6 +564,7 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
     expect(calls[0]!.command).toContain("--grep");
     expect(calls[0]!.command).toContain(".features-gen");
     expect(calls[0]!.command).toContain("(?=[./]");
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   it("refuses a whole-outline run whose feature cannot map to a generated spec", async () => {
@@ -553,11 +581,40 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
     expect(calls).toHaveLength(0);
     expect(result.infrastructureFailure).toContain("No broader target was executed");
   });
+
+  it("uses the missing-generation diagnosis when bddgen produces no whole-outline spec", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "outline-empty-bddgen-"));
+    const featurePath = nodePath.join(root, "features/a.feature");
+    const shell: ShellRunner = async () => ({
+      success: true,
+      output: "",
+      error: "",
+      returnCode: 0,
+    });
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "npx bddgen", workingDirectory: root }),
+      shell
+    );
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: featurePath,
+      outlineName: "Divide",
+    });
+
+    expect(result.infrastructureFailure).toContain(`Could not find generated specs for ${featurePath} after bddgen`);
+    expect(result.infrastructureFailure).toContain("featuresGenDir");
+    expect(result.infrastructureFailure).toContain("No broader target was executed");
+    fs.rmSync(root, { recursive: true, force: true });
+  });
 });
 
 describe("TestExecutor traceability artifact scope", () => {
   it("filters the artifact to the selected Examples block without filtering the run result", async () => {
-    const filePath = nodePath.join(process.cwd(), "features/calc.feature");
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "artifact-outline-"));
+    const filePath = nodePath.join(root, "features/calc.feature");
+    const specPath = nodePath.join(root, ".features-gen/features/calc.feature.spec.js");
+    fs.mkdirSync(nodePath.dirname(specPath), { recursive: true });
+    fs.writeFileSync(specPath, "// Generated from: features/calc.feature");
     const selectedFile = "features/calc.feature";
     const report = JSON.stringify({
       suites: [{
@@ -581,14 +638,12 @@ describe("TestExecutor traceability artifact scope", () => {
       }],
     });
     const contributeShard = vi.fn();
-    const runArtifactStore = { contributeShard } as unknown as NonNullable<
-      PlaywrightBddExtensionContext["runArtifactStore"]
-    >;
+    const runArtifactStore: Parameters<TestExecutor["registerArtifactSink"]>[1] = { contributeShard };
     const { executor } = makeExecutor(
-      makeConfig({ bddgenCommand: "" }),
-      async () => ({ success: true, output: report, error: "", returnCode: 0 }),
-      { runArtifactStore }
+      makeConfig({ bddgenCommand: "", workingDirectory: root }),
+      async () => ({ success: true, output: report, error: "", returnCode: 0 })
     );
+    const sink = executor.registerArtifactSink(4, runArtifactStore);
     const block = {
       filePath,
       line: 12,
@@ -602,6 +657,7 @@ describe("TestExecutor traceability artifact scope", () => {
       { filePath, outlineName: "Divide", artifactBatch: 4 },
       { scenario: block, resultLines: [14, 15] }
     );
+    sink.dispose();
 
     expect(result.scenarioDetails?.map((detail) => detail.lineNumber)).toEqual([9, 14, 15, 14]);
     expect(contributeShard).toHaveBeenCalledOnce();
@@ -615,26 +671,25 @@ describe("TestExecutor traceability artifact scope", () => {
       normalizePathKey(filePath),
     ]);
     expect(capture.invocation).toEqual(block);
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   it("contributes one failed shard when the Playwright process cannot spawn", async () => {
     const contributeShard = vi.fn();
-    const runArtifactStore = { contributeShard } as unknown as NonNullable<
-      PlaywrightBddExtensionContext["runArtifactStore"]
-    >;
+    const runArtifactStore: Parameters<TestExecutor["registerArtifactSink"]>[1] = { contributeShard };
     const { executor } = makeExecutor(
       makeConfig({ bddgenCommand: "", workingDirectory: "/abs" }),
-      async () => {throw new Error("spawn failed");},
-      { runArtifactStore }
+      async () => {throw new Error("spawn failed");}
     );
+    const sink = executor.registerArtifactSink(6, runArtifactStore);
     const scenario = { filePath: "/abs/a.feature", line: 3, name: "A", kind: "scenario" as const };
 
-    // Outline-titled options reach the spawn without an exact spec line; a line-less plain
-    // scenario now refuses to run before spawning anything.
+    // A no-selection run reaches the spawn without requiring a generated spec.
     const result = await executor.runScenarioWithOutput(
-      { filePath: scenario.filePath, outlineName: scenario.name, artifactBatch: 6 },
+      { filePath: scenario.filePath, artifactBatch: 6 },
       { scenario, resultLines: [3] }
     );
+    sink.dispose();
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("spawn failed");
@@ -883,8 +938,8 @@ describe("TestExecutor bddgen diagnostics from the playwright result", () => {
   }
 
   it("publishes bddgen diagnostics when the playwright run fails with bddgen-style errors", async () => {
-    // With bddgenCommand empty, bddgen runs inside `playwright test` (defineBddProject auto-gen), so
-    // its errors surface on the playwright result, which must reach the Problems panel via publish.
+    // Even without a separately configured bddgen command, generator-style errors surfaced by
+    // Playwright must reach the Problems panel via publish.
     const spy = makeSpy();
     const shell: ShellRunner = async () => ({
       success: false,
@@ -952,12 +1007,14 @@ describe("TestExecutor debugScenario", () => {
 
     expect(fakeDebug.startCalls).toHaveLength(1);
     const config = fakeDebug.startCalls[0]!.config;
-    const command = config["command"] as string;
-    expect(command).toMatch(/^npx playwright test/);
+    expect(config["runtimeExecutable"]).toBe("npx");
+    const command = (config["runtimeArgs"] as string[]).join(" ");
+    expect(command).toMatch(/^--no-install playwright test/);
     expect(command).not.toContain("bddgen");
     // The whole-outline debug greps its title, pinned to this feature's generated spec.
     expect(command).toContain(".features-gen");
-    expect(command).toContain('--grep "Passing"');
+    expect(config["runtimeArgs"]).toContain("--grep");
+    expect(config["runtimeArgs"]).toContain("Passing");
     // The session key is stamped even when nothing mirrors, so session-end tracking always works.
     expect(typeof config[BreakpointMirror.SESSION_KEY]).toBe("string");
   });
@@ -981,6 +1038,24 @@ describe("TestExecutor debugScenario", () => {
     expect(fakeDebug.startCalls).toHaveLength(0);
     expect(fakeWindow.errorMessages).toHaveLength(1);
     expect(fakeWindow.errorMessages[0]).toContain("Parse error in feature file");
+  });
+
+  it("fails closed when bddgen succeeds without generating a spec", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "debug-empty-bddgen-"));
+    const feature = nodePath.join(root, "features/a.feature");
+    const fakeDebug = makeFakeDebug();
+    const fakeWindow = makeFakeWindow();
+    const { executor } = makeExecutor(
+      makeConfig({ workingDirectory: root }),
+      okShell,
+      { debug: fakeDebug.debug, window: fakeWindow.window }
+    );
+
+    await executor.debugScenario({ filePath: feature, outlineName: "Passing" });
+
+    expect(fakeDebug.startCalls).toHaveLength(0);
+    expect(fakeWindow.errorMessages[0]).toContain("featuresGenDir");
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   const FEATURE_PATH = "/work/features/background.feature";
@@ -1039,7 +1114,7 @@ describe("TestExecutor debugScenario", () => {
 
     await executor.debugScenario({ filePath: "/abs/features/a.feature" });
 
-    const command = fakeDebug.startCalls[0]!.config["command"] as string;
+    const command = (fakeDebug.startCalls[0]!.config["runtimeArgs"] as string[]).join(" ");
     expect(command).toContain(".features-gen");
     expect(command).not.toContain("--grep");
   });
@@ -1132,7 +1207,9 @@ describe("TestExecutor debugScenario", () => {
     expect(resolved).toBe(false);
 
     const id = fakeDebug.startCalls[0]!.config[BreakpointMirror.SESSION_KEY];
-    fakeDebug.fireTerminate({ configuration: { [BreakpointMirror.SESSION_KEY]: id } });
+    const root = { id: "root", configuration: { [BreakpointMirror.SESSION_KEY]: id } };
+    fakeDebug.fireStart(root);
+    fakeDebug.fireTerminate(root);
     await pending;
     expect(resolved).toBe(true);
   });
@@ -1252,7 +1329,7 @@ describe("TestExecutor debugScenario", () => {
     });
 
     expect(fakeDebug.startCalls).toHaveLength(0);
-    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(0);
     expect(specBreakpointLines(fakeDebug)).toEqual([]);
   });
 
@@ -1274,6 +1351,7 @@ describe("TestExecutor debugScenario", () => {
     const id = fakeDebug.startCalls[0]!.config[BreakpointMirror.SESSION_KEY];
     const root = { id: "root", configuration: { [BreakpointMirror.SESSION_KEY]: id } };
     const child = { id: "child", configuration: { type: "pwa-node" }, parentSession: root };
+    fakeDebug.fireStart(root);
     fakeDebug.fireStart(child);
     fakeDebug.fireTerminate(child);
 
@@ -1336,7 +1414,7 @@ describe("TestExecutor debugScenario", () => {
     expect(fakeDebug.startCalls[0]!.config["env"]).toBeUndefined();
   });
 
-  it("skips the shell call and goes straight to debugging when bddgenCommand is empty", async () => {
+  it("refuses debug before dispatch when no generator is configured and the spec is missing", async () => {
     const calls: string[] = [];
     const shell: ShellRunner = async (command) => {
       calls.push(command);
@@ -1351,8 +1429,62 @@ describe("TestExecutor debugScenario", () => {
 
     await executor.debugScenario({ filePath: "/abs/features/a.feature", outlineName: "Passing" });
 
-    expect(calls).toHaveLength(0);
+    expect(calls).toEqual([]);
+    expect(fakeDebug.startCalls).toHaveLength(0);
+  });
+
+  it("runs the pre-run generator before resolving a debug target", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "debug-pre-run-"));
+    const feature = nodePath.join(root, "features/a.feature");
+    const spec = nodePath.join(root, ".features-gen/features/a.feature.spec.js");
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      if (command === "prepare specs") {
+        fs.mkdirSync(nodePath.dirname(spec), { recursive: true });
+        fs.writeFileSync(spec, "// Generated from: features/a.feature");
+      }
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const fakeDebug = makeFakeDebug();
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "", preRunCommand: "prepare specs", workingDirectory: root }),
+      shell,
+      { debug: fakeDebug.debug }
+    );
+
+    await executor.debugScenario({ filePath: feature, outlineName: "Passing" });
+
+    expect(calls).toEqual(["prepare specs"]);
     expect(fakeDebug.startCalls).toHaveLength(1);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("debugs exact targets from every generated project", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "debug-projects-"));
+    const feature = nodePath.join(root, "features/a.feature");
+    for (const relative of ["features/a.feature.spec.js", "browser/a.feature.spec.js"]) {
+      const spec = nodePath.join(root, ".features-gen", relative);
+      fs.mkdirSync(nodePath.dirname(spec), { recursive: true });
+      fs.writeFileSync(spec, `// Generated from: features/a.feature
+const bddFileData = [ // bdd-data-start
+  {"pwTestLine":7,"pickleLine":3},
+]; // bdd-data-end`);
+    }
+    const fakeDebug = makeFakeDebug();
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "", workingDirectory: root }),
+      okShell,
+      { debug: fakeDebug.debug }
+    );
+
+    await executor.debugScenario({ filePath: feature, scenarioName: "Passing", lineNumber: 3 });
+
+    expect(fakeDebug.startCalls).toHaveLength(1);
+    const command = (fakeDebug.startCalls[0]!.config["runtimeArgs"] as string[]).join(" ");
+    expect(command).toContain("features/a.feature.spec.js:7");
+    expect(command).toContain("browser/a.feature.spec.js:7");
+    fs.rmSync(root, { recursive: true, force: true });
   });
 });
 
@@ -1382,6 +1514,141 @@ describe("TestExecutor spawn settles when a grandchild holds the stdio pipes", (
 
 describe("TestExecutor debugScenarioWithOutput cancellation", () => {
   const okShell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+
+  async function naturalStopResult(
+    stop: () => Promise<void>
+  ): Promise<Awaited<ReturnType<TestExecutor["debugScenarioWithOutput"]>>> {
+    const fakeDebug = makeFakeDebug(undefined, async () => {
+      const config = fakeDebug.startCalls.at(-1)!.config;
+      const root = { id: "root", configuration: config };
+      const child = { id: "child", configuration: { type: "pwa-node" }, parentSession: root };
+      setTimeout(() => {
+        fakeDebug.fireStart(root);
+        fakeDebug.fireStart(child);
+        fakeDebug.fireTerminate(child);
+      }, 0);
+      return true;
+    }, stop);
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => undefined);
+    const { executor } = makeExecutor(
+      makeConfig({ workingDirectory: "/abs" }),
+      okShell,
+      { debug: fakeDebug.debug, mirror }
+    );
+    return executor.debugScenarioWithOutput({
+      filePath: "/abs/features/a.feature",
+      outlineName: "A",
+    });
+  }
+
+  it("returns unsafe partial evidence when natural debug teardown rejects", async () => {
+    const result = await naturalStopResult(() => Promise.reject(new Error("debug host busy")));
+
+    expect(result).toMatchObject({
+      success: false,
+      admissionUnsafe: true,
+      terminationLease: { kind: "debug-session" },
+    });
+    expect(result.infrastructureFailure).toContain("debug host busy");
+  });
+
+  it("preserves an unsafe bddgen termination as debug infrastructure failure", async () => {
+    const failure = "bddgen process group remained alive";
+    const shell: ShellRunner = async () => ({
+      success: false,
+      output: "",
+      error: failure,
+      returnCode: 1,
+      terminationFailure: failure,
+      terminationLease: {
+        kind: "posix-group",
+        pgid: 42,
+        failure,
+        systemUptime: 100,
+      },
+    });
+    const { executor } = makeExecutor(
+      makeConfig({ workingDirectory: "/abs" }),
+      shell
+    );
+
+    const result = await executor.debugScenarioWithOutput({
+      filePath: "/abs/features/a.feature",
+      outlineName: "A",
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      infrastructureFailure: failure,
+      admissionUnsafe: true,
+      terminationLease: { kind: "posix-group", pgid: 42 },
+    });
+  });
+
+  it("marks debug admission unsafe when no tracked root can be stopped", async () => {
+    const fakeDebug: FakeDebug = makeFakeDebug(undefined, async () => {
+      const config = fakeDebug.startCalls.at(-1)!.config;
+      const reportPath = (config["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
+      fs.writeFileSync(reportPath, "{}");
+      return true;
+    });
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => undefined);
+    const { executor } = makeExecutor(
+      makeConfig({ workingDirectory: "/abs" }),
+      okShell,
+      { debug: fakeDebug.debug, mirror }
+    );
+    executor.debugWatchdogPollMs = 5;
+    executor.debugWatchdogGraceMs = 5;
+
+    const result = await executor.debugScenarioWithOutput({
+      filePath: "/abs/features/a.feature",
+      outlineName: "A",
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      admissionUnsafe: true,
+      terminationLease: { kind: "debug-session" },
+    });
+    expect(result.infrastructureFailure).toContain("no tracked root session");
+  });
+
+  it("stops report polling after an aborted debug run has no tracked root", async () => {
+    const controller = new AbortController();
+    const fakeDebug = makeFakeDebug(undefined, async () => {
+      controller.abort();
+      return true;
+    });
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => undefined);
+    const { executor } = makeExecutor(
+      makeConfig({ workingDirectory: "/abs" }),
+      okShell,
+      { debug: fakeDebug.debug, mirror }
+    );
+    executor.debugWatchdogPollMs = 5;
+    executor.debugWatchdogGraceMs = 5;
+    const access = vi.spyOn(fs.promises, "access");
+
+    const result = await executor.debugScenarioWithOutput({
+      filePath: "/abs/features/a.feature",
+      outlineName: "A",
+      signal: controller.signal,
+    });
+    const callsAtReturn = access.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(result).toMatchObject({
+      success: false,
+      admissionUnsafe: true,
+      terminationLease: { kind: "debug-session" },
+    });
+    expect(result.infrastructureFailure).toContain("no tracked root session");
+    expect(callsAtReturn).toBeGreaterThan(0);
+    expect(access).toHaveBeenCalledTimes(callsAtReturn);
+    expect(fakeDebug.stopCalls).toEqual([]);
+    access.mockRestore();
+  });
 
   it("reports the results the stopped debug session already wrote", async () => {
     const controller = new AbortController();
@@ -1450,6 +1717,9 @@ describe("TestExecutor debug watchdog (pnpm session teardown wedge)", () => {
     const reportPath = nodePath.join(tmpDir, "report.json");
     // Report already written = tests finished; the session chain just never tears down.
     fs.writeFileSync(reportPath, "{}");
+    const generatedSpec = nodePath.join(tmpDir, ".features-gen/x.feature.spec.js");
+    fs.mkdirSync(nodePath.dirname(generatedSpec), { recursive: true });
+    fs.writeFileSync(generatedSpec, "// generated");
 
     // Root session starts (carrying the mirror key) but NO child ever attaches,
     // so last-child-terminated teardown can never fire.
@@ -1651,7 +1921,7 @@ describe("TestExecutor working-directory inference (monorepo)", () => {
       workspace: makeWorkspace(),
     });
 
-    await executor.runScenarioWithOutput({ filePath: feature, outlineName: "s" });
+    await executor.runScenarioWithOutput({ filePath: feature });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.workingDir).toBe(nodePath.join(tmpDir, "packages", "e2e"));
@@ -1696,7 +1966,7 @@ describe("TestExecutor working-directory inference (monorepo)", () => {
   });
 });
 
-describe("TestExecutor spec-line target no-tests retry", () => {
+describe("TestExecutor exact-target generation", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -1724,11 +1994,117 @@ describe("TestExecutor spec-line target no-tests retry", () => {
   function writeSpec(): void {
     write(
       ".features-gen/features/a.feature.spec.js",
-      `const bddFileData = [ // bdd-data-start
+      `// Generated from: features/a.feature
+const bddFileData = [ // bdd-data-start
   {"pwTestLine":7,"pickleLine":3,"steps":[]},
 ]; // bdd-data-end`
     );
   }
+
+  it("fails closed when no generator is configured and an exact target has no generated spec", async () => {
+    const feature = write("features/a.feature", "Feature: F");
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      workspace: makeWorkspace(),
+    });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+    });
+
+    expect(calls).toEqual([]);
+    expect(result.infrastructureFailure).toContain("bddgenCommand");
+    expect(result.infrastructureFailure).toContain("preRunCommand");
+  });
+
+  it("does not cross-target a same-basename spec owned by another feature", async () => {
+    const feature = write("features/a.feature", "Feature: F");
+    write(
+      ".features-gen/a.feature.spec.js",
+      `// Generated from: other/a.feature
+const bddFileData = [ // bdd-data-start
+  {"pwTestLine":7,"pickleLine":3,"steps":[]},
+]; // bdd-data-end`
+    );
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      workspace: makeWorkspace(),
+    });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+    });
+
+    expect(calls).toEqual([]);
+    expect(result.infrastructureFailure).toContain(`belongs to ${nodePath.join(tmpDir, "other/a.feature")}`);
+    expect(result.infrastructureFailure).toContain("No broader target was executed");
+  });
+
+  it("uses generated specs prepared by the pre-run command", async () => {
+    const feature = write("features/a.feature", "Feature: F");
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      if (command === "prepare specs") {writeSpec();}
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "", preRunCommand: "prepare specs" }), shell, {
+      workspace: makeWorkspace(),
+    });
+
+    await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toBe("prepare specs");
+    expect(calls[1]).toContain(".features-gen/features/a.feature.spec.js:7");
+    expect(calls[1]).not.toContain("--grep");
+  });
+
+  it("runs the exact source line in every generated BDD project", async () => {
+    const feature = write("features/a.feature", "Feature: F");
+    const data = (line: number): string => [
+      "// Generated from: features/a.feature",
+      "const bddFileData = [ // bdd-data-start",
+      `  {"pwTestLine":${line},"pickleLine":3,"steps":[]},`,
+      "]; // bdd-data-end",
+    ].join("\n");
+    write(".features-gen/features/a.feature.spec.js", data(9));
+    write(".features-gen/browser/a.feature.spec.js", data(13));
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      workspace: makeWorkspace(),
+    });
+
+    await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain(".features-gen/features/a.feature.spec.js:9");
+    expect(calls[0]).toContain(".features-gen/browser/a.feature.spec.js:13");
+  });
 
   it("regenerates and re-resolves a drifted generated line without grepping sibling rows", async () => {
     writeSpec();
@@ -1759,7 +2135,8 @@ describe("TestExecutor spec-line target no-tests retry", () => {
         if (generations === 2) {
           write(
             ".features-gen/features/a.feature.spec.js",
-            `const bddFileData = [ // bdd-data-start
+            `// Generated from: features/a.feature
+const bddFileData = [ // bdd-data-start
   {"pwTestLine":11,"pickleLine":3,"steps":[]},
 ]; // bdd-data-end`
           );
@@ -1772,13 +2149,11 @@ describe("TestExecutor spec-line target no-tests retry", () => {
       return { success: true, output: retryReport, error: "", returnCode: 0 };
     };
     const contributeShard = vi.fn();
-    const runArtifactStore = { contributeShard } as unknown as NonNullable<
-      PlaywrightBddExtensionContext["runArtifactStore"]
-    >;
+    const runArtifactStore: Parameters<TestExecutor["registerArtifactSink"]>[1] = { contributeShard };
     const { executor } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), shell, {
       workspace: makeWorkspace(),
-      runArtifactStore,
     });
+    const sink = executor.registerArtifactSink(9, runArtifactStore);
     const scenario = { filePath: feature, line: 3, name: "S", kind: "scenario" as const };
 
     const result = await executor.runScenarioWithOutput({
@@ -1787,6 +2162,7 @@ describe("TestExecutor spec-line target no-tests retry", () => {
       scenarioName: "S",
       artifactBatch: 9,
     }, { scenario, resultLines: [3] });
+    sink.dispose();
 
     expect(calls).toHaveLength(4);
     // The target must use forward slashes; Playwright treats CLI file filters as regexes, so
@@ -1837,7 +2213,8 @@ describe("TestExecutor spec-line target no-tests retry", () => {
     expect(result.success).toBe(false);
   });
 
-  it("returns an explicit exact-target failure instead of widening when no line map exists", async () => {
+  it("does not invent a generation command when an exact target goes stale", async () => {
+    writeSpec();
     const feature = write("features/a.feature", "Feature: F");
     const calls: string[] = [];
     const shell: ShellRunner = async (command) => {
@@ -1854,8 +2231,44 @@ describe("TestExecutor spec-line target no-tests retry", () => {
       scenarioName: "S",
     });
 
-    expect(calls).toHaveLength(0);
-    expect(result.success).toBe(false);
-    expect(result.infrastructureFailure).toContain("No broader target was executed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toContain("--list");
+    expect(result.infrastructureFailure).toContain("bddgenCommand");
   });
+
+  it("does not refresh an exact target after an unsafe no-tests result", async () => {
+    writeSpec();
+    const feature = write("features/a.feature", "Feature: F");
+    const failure = "target process remained alive";
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      return {
+        success: false,
+        output: "Error: no tests found",
+        error: failure,
+        returnCode: 1,
+        terminationFailure: failure,
+        terminationLease: {
+          kind: "posix-group",
+          pgid: 81,
+          failure,
+          systemUptime: 100,
+        },
+      };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      workspace: makeWorkspace(),
+    });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.admissionUnsafe).toBe(true);
+  });
+
 });

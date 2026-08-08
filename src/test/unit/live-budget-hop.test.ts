@@ -53,6 +53,7 @@ describe("live detail budget hop", () => {
     await executor.runScenarioWithOutput({
       filePath: "/tmp/x.feature",
       outlineName: "Divide",
+      specLineTargets: [".features-gen/x.feature.spec.js:6"],
       progress: { detailBudget } as RunProgressObserver,
     });
 

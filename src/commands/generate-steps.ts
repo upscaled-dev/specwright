@@ -14,6 +14,7 @@ import {
   inferParameters,
 } from "../generators/step-stub-generator";
 import { errMsg, plural } from "../utils/text";
+import type { WorkspaceTrust } from "../core/workspace-trust";
 
 const DEFAULT_BASE_DIR = "features/steps";
 const DEFAULT_NEW_FILE_NAME = "generated.steps.ts";
@@ -106,7 +107,12 @@ export class GenerateStepsCommand {
   private readonly config: ExtensionConfig;
   private readonly logger: Logger;
 
-  constructor(resolver: StepResolver, config: ExtensionConfig, logger: Logger) {
+  constructor(
+    resolver: StepResolver,
+    config: ExtensionConfig,
+    logger: Logger,
+    private readonly workspaceTrust: WorkspaceTrust
+  ) {
     this.resolver = resolver;
     this.config = config;
     this.logger = logger;
@@ -156,6 +162,7 @@ export class GenerateStepsCommand {
     let existingDefs: { regex: RegExp }[];
 
     if (isNewFile) {
+      this.workspaceTrust.require();
       await this.createFileWithHeader(destPath);
       existingDefs = extractStepDefsFromSource(buildFileHeader());
     } else {
@@ -177,12 +184,14 @@ export class GenerateStepsCommand {
 
     const edit = new vscode.WorkspaceEdit();
     edit.insert(destUri, endPos, insertText);
+    this.workspaceTrust.require();
     const applied = await vscode.workspace.applyEdit(edit);
     if (!applied) {
       this.logger.warn("Generate Steps: workspace edit was rejected", { destPath });
       return;
     }
 
+    this.workspaceTrust.require();
     try {
       await destDoc.save();
     } catch (error) {
@@ -284,6 +293,7 @@ export class GenerateStepsCommand {
   private async createFileWithHeader(destPath: string): Promise<void> {
     await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(destPath)));
     try {
+      this.workspaceTrust.require();
       await fs.promises.writeFile(destPath, buildFileHeader(), { flag: "wx" });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;

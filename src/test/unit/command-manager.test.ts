@@ -7,7 +7,13 @@ import { TraceabilityCommands } from "../../commands/traceability-commands";
 import { TraceabilityLinkCommands } from "../../commands/traceability-link-commands";
 import { TraceabilityPublishCommands } from "../../commands/traceability-publish-commands";
 import { FeatureParser } from "../../parsers/feature-parser";
-import type { RunIntent } from "../../core/run-contracts";
+import type {
+  ExecutionGateway,
+  ExecutionOptions,
+  RunCompletion,
+  RunIntent,
+} from "../../core/run-contracts";
+import type { ClientRunIntent } from "../../ui/execution-client-context";
 import { Logger } from "../../utils/logger";
 import { ExtensionConfig } from "../../core/extension-config";
 import { TestExecutor } from "../../core/test-executor";
@@ -19,16 +25,49 @@ import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { NO_MAPPING_PAGE_SIZE } from "../../traceability/mapping-page-size";
 import { NO_PROJECT_SCOPE, ProjectScopeStore, projectScopeStore } from "../../traceability/project-scope";
-import { ArtifactCaptureTarget, RunArtifactStore } from "../../traceability/run-artifact-store";
+import {
+  ArtifactCaptureTarget,
+  RunArtifactStore,
+  scopeArtifactDetails,
+} from "../../traceability/run-artifact-store";
 import { PublishLedger } from "../../traceability/publish-ledger";
 import { BoardViewModel, scenarioDropId } from "../../traceability/board-data";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { PreflightChoice } from "../../traceability/preflight-flow";
+import { OutcomeUnknownRecoveryPersistenceError } from "../../traceability/publish-flow";
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
 import { captureHandlers, fakeDoc, makeContext, memento, writeTempFeature } from "./helpers/command-manager-harness";
-import { ExecutionAlreadyRunningError, ExecutionFailure } from "../../core/execution-gateway";
+import {
+  ExecutionAlreadyRunningError,
+  ExecutionFailure,
+  LegacyDirectExecutionGateway,
+} from "../../core/execution-gateway";
 import { runOutputFromCompletion } from "../../ui/execution-adapter";
+import { ExecutionAdmission, ExecutionAdmissionBlockedError } from "../../core/execution-admission";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
+import { RemoteOutcomeUnknownError, WorkspaceTrust } from "../../core/workspace-trust";
+
+const EXECUTION_IDENTITY = { engine: "legacy-direct", schemaProfile: "legacy.v1" } as const;
+
+function testGateway(
+  execute: (intent: RunIntent, options?: ExecutionOptions) => Promise<RunCompletion>
+): ExecutionGateway {
+  return {
+    running: false,
+    diagnose: vi.fn(() => Promise.resolve([])),
+    discover: vi.fn(() => Promise.resolve({ cases: [], diagnostics: [] })),
+    prepare: vi.fn(async (intent) => ({
+      operationId: "command-manager-test",
+      identity: EXECUTION_IDENTITY,
+      intent,
+    })),
+    run: vi.fn((prepared, options) => execute(prepared.intent, options)),
+    debug: vi.fn((prepared, options) => execute(prepared.intent, options)),
+    cancel: vi.fn(() => Promise.resolve()),
+    dispose: vi.fn(),
+  };
+}
 
 // The webview-panel stub the board opens onto: `__posted` records what the host sent, `__receive`
 // delivers an inbound message, and the reset disposes every panel between tests.
@@ -96,7 +135,7 @@ describe("CommandManager scenario intents: one parse per invocation", () => {
         outlineName: string | undefined,
         mode: "run" | "debug",
         initiatedBy: string
-      ) => RunIntent;
+      ) => ClientRunIntent;
     };
   }
 
@@ -253,6 +292,7 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
     const info = vi.spyOn(logger, "info");
     const showOutput = vi.spyOn(logger, "showOutput");
     const completion = {
+      identity: EXECUTION_IDENTITY,
       state: "partial" as const,
       results: [{
         scenario: { filePath: "/abs/x.feature", line: 3, name: "S", kind: "scenario" as const },
@@ -267,10 +307,9 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
       durationMs: 9,
       failure: "worker teardown failed",
     };
-    const executionGateway = {
-      execute: vi.fn(() => Promise.reject(new ExecutionFailure(completion))),
-      running: false,
-    };
+    const executionGateway = testGateway(
+      vi.fn(() => Promise.reject(new ExecutionFailure(completion)))
+    );
     const context = makeContext({ logger, executionGateway });
     const manager = CommandManager.create(context);
     const complete = vi.fn();
@@ -299,17 +338,15 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
     const logger = Logger.create();
     const info = vi.spyOn(logger, "info");
     const showOutput = vi.spyOn(logger, "showOutput");
-    const executionGateway = {
-      execute: vi.fn(() => Promise.resolve({
+    const executionGateway = testGateway(vi.fn(() => Promise.resolve({
+        identity: EXECUTION_IDENTITY,
         state: "cancelled" as const,
         results: [],
         output: "teardown after stop\n",
         passed: 0,
         failed: 0,
         durationMs: 4,
-      })),
-      running: false,
-    };
+      })));
     const registered = captureHandlers(makeContext({ logger, executionGateway }));
 
     await registered.get("playwrightBddRunner.runAllTests")!();
@@ -349,16 +386,17 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
         command: "npx playwright test --grep Divide",
         success: true,
         exitCode: 0,
-        details,
+        details: scopeArtifactDetails(details, target, path.dirname(filePath)),
         workspaceRoot: path.dirname(filePath),
         invocation: target.scenario,
       });
       return Promise.resolve({ success: true, output: "", duration: 1, scenarioDetails: details });
     });
+    const registerArtifactSink = vi.fn(() => ({ dispose: () => undefined }));
     const manager = CommandManager.create(makeContext({
       featureParser: parser,
       runArtifactStore: store,
-      testExecutor: { runScenarioWithOutput } as unknown as TestExecutor,
+      testExecutor: { runScenarioWithOutput, registerArtifactSink } as unknown as TestExecutor,
     }));
     const lens = parser.provideScenarioCodeLenses(content, filePath)
       .find((candidate) => candidate.command?.command === "playwrightBddRunner.runScenario" &&
@@ -392,6 +430,80 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
     expect(store.latest()?.results[0]?.iterations).toEqual([
       { name: "Example #1", outcome: "passed", durationMs: 0, attempts: 1 },
       { name: "Example #2", outcome: "passed", durationMs: 0, attempts: 1 },
+    ]);
+  });
+
+  it("keeps an ordinary CodeLens outline run out of a separately mapped Examples block", async () => {
+    const content = [
+      "Feature: Calculator",
+      "",
+      "Scenario Outline: Divide",
+      "  Given <n>",
+      "",
+      "  Examples: common",
+      "    | n |",
+      "    | 1 |",
+      "",
+      "  Examples: edge",
+      "    | n |",
+      "    | 0 |",
+    ].join("\n");
+    const filePath = writeTempFeature(content);
+    const parser = FeatureParser.create();
+    const store = new RunArtifactStore(memento(), Logger.create());
+    const mappedBlock: ScenarioRef = {
+      filePath,
+      line: 10,
+      name: "Divide · edge",
+      kind: "examplesBlock",
+      outlineName: "Divide",
+      examplesBlockName: "edge",
+    };
+    const details = [8, 12].map((lineNumber) => ({
+      featurePath: filePath,
+      lineNumber,
+      scenarioName: `Example #${lineNumber}`,
+      outlineName: "Divide",
+      status: "passed" as const,
+    }));
+    const runScenarioWithOutput = vi.fn((options: { artifactBatch?: number }, target: ArtifactCaptureTarget) => {
+      store.contributeShard(options.artifactBatch!, {
+        workingDir: path.dirname(filePath),
+        command: "npx playwright test --grep Divide",
+        success: true,
+        exitCode: 0,
+        details: scopeArtifactDetails(details, target, path.dirname(filePath)),
+        workspaceRoot: path.dirname(filePath),
+        invocation: target.scenario,
+      });
+      return Promise.resolve({ success: true, output: "", duration: 1, scenarioDetails: details });
+    });
+    const manager = CommandManager.create(makeContext({
+      featureParser: parser,
+      runArtifactStore: store,
+      mappedScenarios: [mappedBlock],
+      testExecutor: {
+        runScenarioWithOutput,
+        registerArtifactSink: vi.fn(() => ({ dispose: () => undefined })),
+      } as unknown as TestExecutor,
+    }));
+    const lens = parser.provideScenarioCodeLenses(content, filePath)
+      .find((candidate) => candidate.command?.command === "playwrightBddRunner.runScenario" &&
+        candidate.command.arguments?.[1] === 3)!;
+
+    try {
+      await handlers(manager).runScenario(...lens.command!.arguments!);
+    } finally {
+      fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+    }
+
+    expect(runScenarioWithOutput).toHaveBeenCalledOnce();
+    expect(runScenarioWithOutput).toHaveBeenCalledWith(
+      expect.objectContaining({ outlineName: "Divide" }),
+      expect.objectContaining({ resultLines: [8] })
+    );
+    expect(store.latest()?.results[0]?.iterations).toEqual([
+      { name: "Example #8", outcome: "passed", durationMs: 0, attempts: 1 },
     ]);
   });
 
@@ -458,7 +570,7 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
     }
 
     expect(beginExternalRun).toHaveBeenCalledWith("/abs/x.feature", undefined);
-    expect(runPathFilterWithOutput.mock.calls[0]?.[1]?.aborted).toBe(true);
+    expect(runPathFilterWithOutput).not.toHaveBeenCalled();
     expect(complete).toHaveBeenCalledWith(expect.objectContaining(cancelled));
     expect(end).not.toHaveBeenCalled();
   });
@@ -563,6 +675,7 @@ describe("CommandManager palette run commands", () => {
 
   it("keeps tagged scenario and feature runs intersected when routing through the gateway", async () => {
     const execute = vi.fn().mockResolvedValue({
+      identity: EXECUTION_IDENTITY,
       state: "complete",
       results: [],
       passed: 0,
@@ -580,7 +693,7 @@ describe("CommandManager palette run commands", () => {
     vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("@smoke and not @wip");
     const handlers = captureHandlers(makeContext({
       testExecutor: exec as unknown as TestExecutor,
-      executionGateway: { execute } as never,
+      executionGateway: testGateway(execute),
     }));
 
     await handlers.get("playwrightBddRunner.runScenarioWithTags")!();
@@ -616,6 +729,33 @@ describe("CommandManager palette run commands", () => {
     expect(exec.runFeatureFileWithOutput).not.toHaveBeenCalled();
   });
 
+  it("preserves admission recovery through a registered run command", async () => {
+    const admission = new ExecutionAdmission();
+    await admission.block({
+      kind: "debug-session",
+      failure: "the previous debug session did not terminate",
+    });
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const context = makeContext();
+    const execute = vi.spyOn(context.testExecutor, "runSuiteWithOutput");
+    context.executionGateway = new LegacyDirectExecutionGateway(
+      context.testExecutor,
+      context.featureParser,
+      context.workspaceTrust,
+      admission
+    );
+    const handlers = captureHandlers(context);
+
+    await handlers.get("playwrightBddRunner.runAllTests")!();
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledOnce();
+    const message = String(error.mock.calls[0]?.[0]);
+    expect(message).toContain("the previous debug session did not terminate");
+    expect(message).toContain("Restart the computer");
+    expect(message).not.toContain("Failed to execute Run All Tests");
+  });
+
   it("picks a discovered feature and scenario when no feature editor is active", async () => {
     const filePath = writeTempFeature("Feature: Palette\n\nScenario: picked\n  Given a step\n");
     const exec = {
@@ -644,6 +784,7 @@ describe("CommandManager palette run commands", () => {
   });
 
   it("treats target and tag prompt cancellation as a quiet no-op", async () => {
+    const filePath = writeTempFeature("Feature: Palette\n\nScenario: picked\n  Given a step\n");
     const exec = {
       runScenarioWithOutput: vi.fn(),
       runFeatureFileWithOutput: vi.fn(),
@@ -651,18 +792,22 @@ describe("CommandManager palette run commands", () => {
     const errors = vi.spyOn(vscode.window, "showErrorMessage");
     vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
     const handlers = captureHandlers(makeContext({
-      discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue(["/ws/a.feature"]) } as never,
+      discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue([filePath]) } as never,
       testExecutor: exec as unknown as TestExecutor,
     }));
 
-    await handlers.get("playwrightBddRunner.runScenario")!();
+    try {
+      await handlers.get("playwrightBddRunner.runScenario")!();
 
-    window.activeTextEditor = {
-      document: fakeDoc("Feature: Palette\n\nScenario: chosen\n  Given a step\n"),
-      selection: { active: { line: 3 } },
-    };
-    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined);
-    await handlers.get("playwrightBddRunner.runFeatureFileWithTags")!();
+      window.activeTextEditor = {
+        document: fakeDoc("Feature: Palette\n\nScenario: chosen\n  Given a step\n"),
+        selection: { active: { line: 3 } },
+      };
+      vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined);
+      await handlers.get("playwrightBddRunner.runFeatureFileWithTags")!();
+    } finally {
+      fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+    }
 
     expect(exec.runScenarioWithOutput).not.toHaveBeenCalled();
     expect(exec.runFeatureFileWithOutput).not.toHaveBeenCalled();
@@ -674,15 +819,16 @@ describe("CommandManager palette run commands", () => {
       runScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
       debugScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
     };
+    const feature = writeTempFeature([
+      "Feature: Palette",
+      "Scenario Outline: Divide",
+      "  Given <n>",
+      "  Examples:",
+      "    | n |",
+      "    | 1 |",
+    ].join("\n"));
     window.activeTextEditor = {
-      document: fakeDoc([
-        "Feature: Palette",
-        "Scenario Outline: Divide",
-        "  Given <n>",
-        "  Examples:",
-        "    | n |",
-        "    | 1 |",
-      ].join("\n")),
+      document: fakeDoc(fs.readFileSync(feature, "utf8"), feature),
       selection: { active: { line: 2 } },
     };
     vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("@smoke");
@@ -692,8 +838,7 @@ describe("CommandManager palette run commands", () => {
     await handlers.get("playwrightBddRunner.debugScenario")!();
     await handlers.get("playwrightBddRunner.runScenarioWithTags")!();
 
-    // An outline header greps its title and runs every row: a declaration line has no generated spec
-    // line, so passing one would only log a false drift warning.
+    // Palette commands pass the outline declaration through to the shared execution boundary.
     expect(exec.runScenarioWithOutput.mock.calls.map(([options]) => options)).toEqual([
       expect.objectContaining({ outlineName: "Divide" }),
       expect.objectContaining({ outlineName: "Divide", tags: "@smoke" }),
@@ -705,6 +850,7 @@ describe("CommandManager palette run commands", () => {
       expect.anything()
     );
     expect(exec.debugScenarioWithOutput.mock.calls[0]?.[0].lineNumber).toBeUndefined();
+    fs.rmSync(path.dirname(feature), { recursive: true, force: true });
   });
 
   it("surfaces selected-file and empty-tag errors through the command handler", async () => {
@@ -729,7 +875,7 @@ describe("CommandManager palette run commands", () => {
 
     expect(exec.runFeatureFileWithOutput).not.toHaveBeenCalled();
     expect(errors.mock.calls.map(([message]) => String(message))).toEqual([
-      expect.stringContaining("Unable to read feature file: /ws/missing.feature"),
+      expect.stringContaining("Could not parse /ws/missing.feature"),
       expect.stringContaining("Tags are required"),
     ]);
   });
@@ -1209,8 +1355,8 @@ describe("traceability panel connection UX contributions", () => {
     const welcomes = pkg.contributes.viewsWelcome.filter(
       (w) => w.view === "playwrightBddRunner.traceability"
     );
-    const setup = welcomes.find((w) => w.when === "!playwrightBddRunner.traceability.connected");
-    const connected = welcomes.find((w) => w.when === "playwrightBddRunner.traceability.connected");
+    const setup = welcomes.find((w) => w.when === "isWorkspaceTrusted && !playwrightBddRunner.traceability.connected");
+    const connected = welcomes.find((w) => w.when === "isWorkspaceTrusted && playwrightBddRunner.traceability.connected");
     expect(setup).toBeDefined();
     expect(connected).toBeDefined();
     expect(setup!.contents).toContain("command:playwrightBddRunner.traceability.connect");
@@ -1837,9 +1983,9 @@ describe("traceability run-and-publish entry points", () => {
     await commands.runAndPublishByTagExpression();
 
     expect(run.mock.calls).toEqual([
-      [{ kind: "feature", filePath: "/ws/a.feature" }, "explorer"],
-      [{ kind: "folder", folderPath: "/ws/features" }, "explorer"],
-      [{ kind: "tag-expression", expression: " @smoke and not @wip " }, "palette"],
+      [{ kind: "feature", filePath: "/ws/a.feature" }, "explorer", expect.anything()],
+      [{ kind: "folder", folderPath: "/ws/features" }, "explorer", expect.anything()],
+      [{ kind: "tag-expression", expression: " @smoke and not @wip " }, "palette", expect.anything()],
     ]);
   });
 
@@ -1869,17 +2015,27 @@ describe("traceability runAndPublish: preflight batch flow", () => {
     return { links, untraced: [], orphans: [], stale: false, completeProjects: ["CALC"], errors: [] };
   }
 
-  function harness(links: TraceLink[], scope?: ProjectScopeStore) {
+  function harness(
+    links: TraceLink[],
+    scope?: ProjectScopeStore,
+    executionGateway?: ExecutionGateway
+  ) {
     const store = new RunArtifactStore(memento(), Logger.create());
     const runScenarioWithOutput = vi.fn((_options: unknown, _target?: ArtifactCaptureTarget) =>
       Promise.resolve({ success: true, output: "", error: "", duration: 1 })
     );
-    const executor = { runScenarioWithOutput, runPathFilterWithOutput: vi.fn(), runAllTestsWithTagsOutput: vi.fn() };
+    const executor = {
+      runScenarioWithOutput,
+      runPathFilterWithOutput: vi.fn(),
+      runAllTestsWithTagsOutput: vi.fn(),
+      registerArtifactSink: vi.fn(() => ({ dispose: () => undefined })),
+    };
     const config = ExtensionConfig.create();
     const mgr = CommandManager.create(makeContext({
       testExecutor: executor as unknown as TestExecutor,
       runArtifactStore: store,
       mappedScenarios: links.map((entry) => entry.scenario),
+      ...(executionGateway ? { executionGateway } : {}),
     }));
     const subsystem = {
       getSnapshot: () => snapshot(links),
@@ -2105,6 +2261,29 @@ describe("traceability runAndPublish: preflight batch flow", () => {
     expect(store.latest()?.preflight).toEqual([]);
   });
 
+  it("creates no artifact or publish when Coverage Board admission is blocked", async () => {
+    const blocked = new ExecutionAdmissionBlockedError({
+      kind: "debug-session",
+      failure: "debug teardown was not confirmed",
+    });
+    const execute = vi.fn(() => Promise.reject(blocked));
+    const executionGateway = testGateway(execute);
+    const { mgr, store, runScenarioWithOutput } = harness(
+      [READY_LINK],
+      undefined,
+      executionGateway
+    );
+    const publish = vi.spyOn(publishCommands(mgr), "runPublish");
+
+    await expect(publishCommands(mgr).runAndPublishSelected(["CALC-1"]))
+      .rejects.toBe(blocked);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(runScenarioWithOutput).not.toHaveBeenCalled();
+    expect(store.latest()).toBeUndefined();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it("wires the progress cancel token to the abort controller and seals cancelled", async () => {
     const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
     // A cancelled progress token fires immediately; the batch must abort before dispatching and seal
@@ -2267,10 +2446,35 @@ describe("traceability openBoard command handler", () => {
     expect(error).not.toHaveBeenCalled();
   });
 
+  it("surfaces a durable execution-admission block to a board caller", async () => {
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(fakeSubsystem());
+    vi.spyOn(publishCommands(mgr), "runAndPublishSelected").mockRejectedValue(
+      new ExecutionAdmissionBlockedError({
+        kind: "debug-session",
+        failure: "debug teardown was not confirmed",
+        systemUptime: 100,
+      })
+    );
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+
+    traceabilityBoardDeps(mgr).runSelected(["CALC-1"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(error).toHaveBeenCalledOnce();
+    const message = String(error.mock.calls[0]?.[0]);
+    expect(message).toContain("debug teardown was not confirmed");
+    expect(message).toContain("Restart the computer to terminate any leftover Playwright or debug processes");
+    expect(message).toContain("while every VS Code window is closed");
+    expect(message).toContain("move the execution-admission directory");
+    expect(message).not.toContain("Terminate and confirm");
+  });
+
   it("surfaces a sealed partial infrastructure failure once to a board caller", async () => {
     const mgr = CommandManager.create(makeContext());
     mgr.setTraceabilitySubsystem(fakeSubsystem());
     vi.spyOn(publishCommands(mgr), "runAndPublishSelected").mockRejectedValue(new ExecutionFailure({
+      identity: EXECUTION_IDENTITY,
       state: "partial",
       results: [],
       output: "worker stopped\n",
@@ -2502,6 +2706,7 @@ describe("traceability publishLastRun: Publish tab", () => {
     await panel.__receive({ type: "ready" });
     for (const reply of replies) {
       await panel.__receive({ surface: "publish", ...reply });
+      await flush();
     }
     await expect(promise).resolves.toBeUndefined();
     return { tabs: panel.webview.__posted.filter((m) => m.type === "activate").map((m) => m.tab), rebuilds };
@@ -2519,7 +2724,10 @@ describe("traceability publishLastRun: Publish tab", () => {
   // A partial upload still landed the import, so the row is real and the board must carry it. The tab
   // stays put: the warning toast owns the retry.
   it("rebuilds the board but stays off the Executions tab when attachments partly fail", async () => {
-    const { tabs, rebuilds } = await publishOnce([{ ...CONFIRM, attachments: ["/ws/evidence.png"] }]);
+    const evidence = path.join("/tmp/specwright-command-tests", "evidence.png");
+    fs.mkdirSync(path.dirname(evidence), { recursive: true });
+    fs.writeFileSync(evidence, "evidence");
+    const { tabs, rebuilds } = await publishOnce([{ ...CONFIRM, attachments: [evidence] }]);
 
     expect(rebuilds).toBe(1);
     expect(tabs).not.toContain("executions");
@@ -2550,6 +2758,47 @@ describe("traceability publishLastRun: Publish tab", () => {
     expect(attempts).toBe(2);
     expect(rebuilds).toBe(1);
     expect(tabs.at(-1)).toBe("executions");
+  });
+
+  it("reports an ambiguous mutation as outcome unknown, never as publish failed", async () => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+
+    await publishOnce([CONFIRM], {
+      publish: () => Promise.reject(new RemoteOutcomeUnknownError("Publishing results", "publish-unknown")),
+    });
+
+    expect(String(warning.mock.calls.at(-1)?.[0])).toContain("Publish outcome unknown");
+    expect(error.mock.calls.flat().map(String).join("\n")).not.toContain("Publish failed");
+  });
+
+  it("keeps a recovery persistence failure visibly outcome unknown", () => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    const mgr = CommandManager.create(makeContext({ logger }));
+    const combined = new OutcomeUnknownRecoveryPersistenceError(
+      new RemoteOutcomeUnknownError("Publishing results", "publish-unknown"),
+      new Error("disk full")
+    );
+
+    (
+      publishCommands(mgr) as unknown as {
+        reportPublishFailure(error: unknown): void;
+      }
+    ).reportPublishFailure(combined);
+
+    const message = String(warning.mock.calls.at(-1)?.[0]);
+    expect(message).toContain("Publish outcome unknown");
+    expect(message).toContain("possibly succeeded");
+    expect(message).toContain("publish-unknown");
+    expect(message).toContain("local recovery record could not be saved");
+    expect(warn).toHaveBeenCalledWith(
+      "Publish outcome unknown; local recovery record was not saved",
+      { operationId: "publish-unknown", persistenceCause: "disk full" }
+    );
+    expect(error).not.toHaveBeenCalled();
   });
 
   it("neither rebuilds nor switches tabs on cancel, routing back to the Mapping tab", async () => {
@@ -2875,11 +3124,16 @@ describe("traceability bulkCreateTests wiring", () => {
     const mgr = CommandManager.create(makeContext());
     mgr.setTraceabilitySubsystem(subsystemWithAuthoring());
     // The real store throws on a site that normalizes empty, which is exactly the default config here.
-    mgr.setCredentialStore(new XrayCredentialStore({
-      get: () => Promise.resolve(undefined),
-      store: () => Promise.resolve(),
-      delete: () => Promise.resolve(),
-    } as unknown as vscode.SecretStorage));
+    mgr.setCredentialStore(
+      new XrayCredentialStore(
+        {
+          get: () => Promise.resolve(undefined),
+          store: () => Promise.resolve(),
+          delete: () => Promise.resolve(),
+        } as unknown as vscode.SecretStorage,
+        trustedWorkspace()
+      )
+    );
     await selectOnBoard(mgr);
 
     const run = (
@@ -3020,14 +3274,14 @@ describe("traceability clearLocalRunHistory", () => {
 
   const SITE = "acme.atlassian.net";
 
-  function harness(runs = 2, ledgerEntries = 1) {
+  async function harness(runs = 2, ledgerEntries = 1) {
     const store = new RunArtifactStore(memento(), Logger.create());
     for (let i = 0; i < runs; i += 1) {
       store.append({ id: `run-${i}`, createdAt: i, results: [], shards: [], selection: { kind: "all-mapped" }, preflight: [], state: "complete" });
     }
     const ledger = new PublishLedger(memento(), Logger.create());
     for (let i = 0; i < ledgerEntries; i += 1) {
-      ledger.record({ artifactId: `run-${i}`, executionRef: `XNP-${i}`, site: SITE, account: "id", publishedAt: i, pendingAttachments: [] });
+      await ledger.record({ artifactId: `run-${i}`, executionRef: `XNP-${i}`, site: SITE, account: "id", publishedAt: i, pendingAttachments: [] });
     }
     const rebuildNow = vi.fn(() => Promise.resolve());
     const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
@@ -3040,7 +3294,7 @@ describe("traceability clearLocalRunHistory", () => {
     publishCommands(mgr).clearLocalRunHistory();
 
   it("clears nothing when the confirm is dismissed", async () => {
-    const { mgr, store, ledger } = harness();
+    const { mgr, store, ledger } = await harness();
     vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
     await clear(mgr);
     expect(store.list()).toHaveLength(2);
@@ -3048,7 +3302,7 @@ describe("traceability clearLocalRunHistory", () => {
   });
 
   it("asks once, with the consequences in the modal detail and both clear actions", async () => {
-    const { mgr } = harness();
+    const { mgr } = await harness();
     const warn = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
     await clear(mgr);
     expect(warn).toHaveBeenCalledWith(
@@ -3063,7 +3317,7 @@ describe("traceability clearLocalRunHistory", () => {
   });
 
   it("wipes the runs only on Clear runs, keeping the ledger's republish warnings", async () => {
-    const { mgr, store, ledger, rebuildNow } = harness();
+    const { mgr, store, ledger, rebuildNow } = await harness();
     vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Clear runs" as never);
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     await clear(mgr);
@@ -3075,7 +3329,7 @@ describe("traceability clearLocalRunHistory", () => {
   });
 
   it("wipes both stores on Clear runs and ledger", async () => {
-    const { mgr, store, ledger } = harness();
+    const { mgr, store, ledger } = await harness();
     vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Clear runs and ledger" as never);
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     await clear(mgr);
@@ -3085,7 +3339,7 @@ describe("traceability clearLocalRunHistory", () => {
   });
 
   it("names the ledger alone when there were no local runs to clear", async () => {
-    const { mgr, ledger, rebuildNow } = harness(0, 1);
+    const { mgr, ledger, rebuildNow } = await harness(0, 1);
     vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Clear runs and ledger" as never);
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     await clear(mgr);
@@ -3095,7 +3349,7 @@ describe("traceability clearLocalRunHistory", () => {
   });
 
   it("reports an already-empty history and skips the board refresh", async () => {
-    const { mgr, rebuildNow } = harness(0, 0);
+    const { mgr, rebuildNow } = await harness(0, 0);
     vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Clear runs and ledger" as never);
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     await clear(mgr);
@@ -3104,7 +3358,7 @@ describe("traceability clearLocalRunHistory", () => {
   });
 
   it("reports the clear even when the board refresh fails", async () => {
-    const { mgr, store } = harness();
+    const { mgr, store } = await harness();
     mgr.setTraceabilitySubsystem({
       rebuildNow: () => Promise.reject(new Error("discovery down")),
     } as unknown as TraceabilitySubsystem);
@@ -3124,15 +3378,15 @@ describe("traceability pending attachments against a reference the response neve
 
   const SITE = "acme.atlassian.net";
 
-  function harness(): { mgr: CommandManager; ledger: PublishLedger } {
+  async function harness(): Promise<{ mgr: CommandManager; ledger: PublishLedger }> {
     const ledger = new PublishLedger(memento(), Logger.create());
-    ledger.record({
+    await ledger.record({
       artifactId: "run-1",
       executionRef: "",
       site: SITE,
       account: "id",
       publishedAt: 1,
-      pendingAttachments: ["/ws/report.zip"],
+      pendingAttachments: ["/ws/report.zip"] as never,
     });
     const mgr = CommandManager.create(makeContext());
     mgr.setPublishLedger(ledger);
@@ -3140,7 +3394,7 @@ describe("traceability pending attachments against a reference the response neve
   }
 
   it("leaves the banner's files pending and warns instead of uploading", async () => {
-    const { mgr, ledger } = harness();
+    const { mgr, ledger } = await harness();
     const warn = vi.spyOn(vscode.window, "showWarningMessage");
 
     const result = await (
@@ -3155,7 +3409,7 @@ describe("traceability pending attachments against a reference the response neve
   });
 
   it("refuses the toast Retry the same way, leaving the ledger untouched", async () => {
-    const { mgr, ledger } = harness();
+    const { mgr, ledger } = await harness();
     const warn = vi.spyOn(vscode.window, "showWarningMessage");
 
     await (
@@ -3166,5 +3420,31 @@ describe("traceability pending attachments against a reference the response neve
 
     expect(String(warn.mock.calls.at(-1)?.[0])).toContain("an execution with no key");
     expect(ledger.find("run-1", SITE)?.pendingAttachments).toEqual(["/ws/report.zip"]);
+  });
+
+  it("offers the trust action when a pending-attachment webview retry is blocked", async () => {
+    const site = "";
+    const ledger = new PublishLedger(memento(), Logger.create());
+    await ledger.record({
+      artifactId: "run-1",
+      executionRef: "XNP-9",
+      site,
+      account: "id",
+      publishedAt: 1,
+      pendingAttachments: ["/ws/report.zip"] as never,
+    });
+    const mgr = CommandManager.create(makeContext({
+      workspaceTrust: new WorkspaceTrust(() => false),
+    }));
+    mgr.setPublishLedger(ledger);
+    vi.spyOn(vscode.window, "showWarningMessage")
+      .mockResolvedValue("Manage Workspace Trust" as never);
+    const manage = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+
+    const result = await publishCommands(mgr).publishDelegate().attachPending("run-1");
+
+    expect(result).toEqual({ remaining: 1 });
+    expect(manage).toHaveBeenCalledWith("workbench.trust.manage");
+    expect(ledger.find("run-1", site)?.pendingAttachments).toEqual(["/ws/report.zip"]);
   });
 });

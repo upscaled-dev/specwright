@@ -16,12 +16,14 @@ import {
 } from "../traceability/contracts";
 import { PushGherkinOutcome, runPushGherkin } from "../traceability/push-gherkin";
 import type { ScenarioRef } from "../traceability/scenario-ref";
+import type { WorkspaceTrust } from "../core/workspace-trust";
 import { applyTagInsert } from "../traceability/tag-edit";
 import type { TraceabilitySnapshot } from "../traceability/traceability-model";
 
 // Everything here is read at call time: the subsystem is wired and the board opened long after the
 // CommandManager builds this.
 export interface AuthoringCommandDeps {
+  readonly workspaceTrust: WorkspaceTrust;
   snapshot(): TraceabilitySnapshot | undefined;
   adapter(): TraceabilityAdapter | undefined;
   // The board's Mapping tab selections (scenario drop ids, test keys) and its project scope. The palette
@@ -625,7 +627,12 @@ export class TraceabilityAuthoringCommands {
           {
             locationHolds: (scenario) => this.locationHolds(scenario),
             createTest: (spec, signal) => authoring.createTest(spec, signal),
-            insertTag: (scenario, key) => applyTagInsert(scenario.ref, key, adapter.keyGrammar),
+            insertTag: (scenario, key) => applyTagInsert(
+              scenario.ref,
+              key,
+              adapter.keyGrammar,
+              this.deps.workspaceTrust
+            ),
             merge: (key) => this.deps.merge(key),
             report: (scenario, index) => {
               progress.report({

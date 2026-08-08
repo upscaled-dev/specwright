@@ -17,7 +17,8 @@ import {
   resolveSyncProjectKeys,
 } from "../traceability/project-scope";
 import { PublishLedger, STANDALONE_ARTIFACT_PREFIX } from "../traceability/publish-ledger";
-import { RunArtifactStore } from "../traceability/run-artifact-store";
+import { AttachmentSpool } from "../traceability/attachment-spool";
+import type { ExecutionArtifactCatalog } from "../ui/execution-artifacts";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
 import { runTraceabilitySync } from "../traceability/traceability-sync";
 import { Logger } from "../utils/logger";
@@ -38,6 +39,9 @@ import { boardBatchSelection } from "./run-publish-selection";
 import { commandArgFsPath } from "./run-commands";
 import type { ExecutionGateway } from "../core/run-contracts";
 import { ExecutionAlreadyRunningError, ExecutionFailure } from "../core/execution-gateway";
+import { ExecutionAdmissionBlockedError } from "../core/execution-admission";
+import type { WorkspaceTrust } from "../core/workspace-trust";
+import { explainWorkspaceTrust } from "../ui/workspace-trust";
 
 interface SyncRequest {
   readonly announce: boolean;
@@ -52,9 +56,11 @@ export interface TraceabilityCommandDeps {
   readonly subsystem: () => TraceabilitySubsystem | undefined;
   readonly publishLedger: () => PublishLedger | undefined;
   readonly extensionUri: () => vscode.Uri | undefined;
-  readonly runArtifactStore: RunArtifactStore | undefined;
+  readonly attachmentSpoolRoot: () => string | undefined;
+  readonly runArtifactStore: ExecutionArtifactCatalog | undefined;
   readonly executionGateway: ExecutionGateway;
   readonly featureParser: FeatureParser;
+  readonly workspaceTrust: WorkspaceTrust;
 }
 
 export class TraceabilityCommands {
@@ -95,37 +101,39 @@ export class TraceabilityCommands {
     return this.getLinkCommands().copyIssueKey(...args);
   }
   public linkScenario(...args: unknown[]): Promise<void> {
-    return this.getLinkCommands().linkScenario(...args);
+    return this.privileged(() => this.getLinkCommands().linkScenario(...args));
   }
   public runAndPublish(...args: unknown[]): Promise<void> {
-    return this.getPublishCommands().runAndPublish(...args);
+    return this.privileged((signal) => this.getPublishCommands().runAndPublishTrusted(signal, ...args));
   }
   // The view-title button's own command: it names the whole mapped set, which the node command must
   // never infer from an empty argument list. "Whole" means whole within the board's project scope,
   // the same scope the board shows and the sync fetches.
   public runAndPublishAllMapped(): Promise<void> {
     const project = this.selectedProject();
-    return this.getPublishCommands().runAndPublishSelection({
+    return this.privileged((signal) => this.getPublishCommands().runAndPublishSelection({
       kind: "all-mapped",
       ...(project ? { project } : {}),
-    });
+    }, "traceability-tree", signal));
   }
   public runAndPublishFeature(arg?: unknown): Promise<void> {
     const filePath = commandArgFsPath(arg);
     return filePath
-      ? this.getPublishCommands().runAndPublishSelection(
+      ? this.privileged((signal) => this.getPublishCommands().runAndPublishSelection(
           { kind: "feature", filePath },
-          "explorer"
-        )
+          "explorer",
+          signal
+        ))
       : Promise.resolve();
   }
   public runAndPublishFolder(arg?: unknown): Promise<void> {
     const folderPath = commandArgFsPath(arg);
     return folderPath
-      ? this.getPublishCommands().runAndPublishSelection(
+      ? this.privileged((signal) => this.getPublishCommands().runAndPublishSelection(
           { kind: "folder", folderPath },
-          "explorer"
-        )
+          "explorer",
+          signal
+        ))
       : Promise.resolve();
   }
   public async runAndPublishByTagExpression(): Promise<void> {
@@ -136,23 +144,40 @@ export class TraceabilityCommands {
       validateInput: (value) => (value.trim() === "" ? "A tag expression is required." : undefined),
     });
     if (expression === undefined) {return;}
-    await this.getPublishCommands().runAndPublishSelection(
+    await this.privileged((signal) => this.getPublishCommands().runAndPublishSelection(
       { kind: "tag-expression", expression },
-      "palette"
-    );
+      "palette",
+      signal
+    ));
   }
-  public publishLastRun(): Promise<void> {return this.getPublishCommands().publishLastRun();}
+  public publishLastRun(): Promise<void> {
+    return this.privileged((signal) => this.getPublishCommands().publishLastRun(signal));
+  }
   public clearLocalRunHistory(): Promise<void> {
     return this.getPublishCommands().clearLocalRunHistory();
   }
-  public manageConnection(): Promise<void> {return this.getConnectionCommands().manageConnection();}
-  public connect(): Promise<void> {return this.getConnectionCommands().connect();}
-  public disconnect(): Promise<void> {return this.getConnectionCommands().disconnect();}
-  public testConnection(): Promise<void> {return this.getConnectionCommands().testConnection();}
-  public bulkCreateTests(): Promise<void> {return this.getAuthoringCommands().bulkCreateTests();}
-  public createTestSet(): Promise<void> {return this.getAuthoringCommands().createTestSet();}
-  public createTestPlan(): Promise<void> {return this.getAuthoringCommands().createTestPlan();}
-  public createTestExecution(): Promise<void> {return this.getAuthoringCommands().createTestExecution();}
+  public manageConnection(): Promise<void> {return this.privileged(() => this.getConnectionCommands().manageConnection());}
+  public connect(): Promise<void> {return this.privileged(() => this.getConnectionCommands().connect());}
+  public disconnect(): Promise<void> {return this.privileged(() => this.getConnectionCommands().disconnect());}
+  public testConnection(): Promise<void> {
+    return this.privileged((signal) => this.getConnectionCommands().testConnection(signal));
+  }
+  public bulkCreateTests(): Promise<void> {return this.privileged(() => this.getAuthoringCommands().bulkCreateTests());}
+  public createTestSet(): Promise<void> {return this.privileged(() => this.getAuthoringCommands().createTestSet());}
+  public createTestPlan(): Promise<void> {return this.privileged(() => this.getAuthoringCommands().createTestPlan());}
+  public createTestExecution(): Promise<void> {return this.privileged(() => this.getAuthoringCommands().createTestExecution());}
+
+  private async privileged(run: (signal: AbortSignal) => Promise<void>): Promise<void> {
+    await this.deps.workspaceTrust.run(run);
+  }
+
+  private async boardPrivileged(run: (signal: AbortSignal) => Promise<void>): Promise<void> {
+    try {
+      await this.privileged(run);
+    } catch (error) {
+      if (!(await explainWorkspaceTrust(error))) {throw error;}
+    }
+  }
 
   public openBoard(): void {
     const subsystem = this.deps.subsystem();
@@ -240,19 +265,18 @@ export class TraceabilityCommands {
         ),
       onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,
       applyDrop: (scenario, key) =>
-        this.getLinkCommands().applyBoardDrop(scenario, key),
+        this.boardPrivileged(() => this.getLinkCommands().applyBoardDrop(scenario, key)),
       applyUnlink: (scenario, key) =>
-        this.getLinkCommands().applyBoardUnlink(scenario, key),
+        this.boardPrivileged(() => this.getLinkCommands().applyBoardUnlink(scenario, key)),
       pushText: (scenario, key) => {
-        this.getAuthoringCommands()
-          .pushScenarioText(scenario, key)
+        this.boardPrivileged(() => this.getAuthoringCommands().pushScenarioText(scenario, key))
           .catch((error) => {
             this.logger.warn("Push scenario text from the board failed", {
               error: errMsg(error),
             });
           });
       },
-      runSync: () => this.syncTraceability(),
+      runSync: () => this.boardPrivileged(() => this.syncTraceability()),
       autoSync: (projectKey) => this.autoSyncProject(projectKey),
       openExecution: (key) => {
         const adapter =
@@ -266,8 +290,7 @@ export class TraceabilityCommands {
           });
       },
       bulkCreate: () => {
-        this.getAuthoringCommands()
-          .bulkCreateTests()
+        this.boardPrivileged(() => this.getAuthoringCommands().bulkCreateTests())
           .catch((error) => {
             this.logger.warn("Bulk create from the board failed", {
               error: errMsg(error),
@@ -275,8 +298,7 @@ export class TraceabilityCommands {
           });
       },
       createTestSet: () => {
-        this.getAuthoringCommands()
-          .createTestSet()
+        this.boardPrivileged(() => this.getAuthoringCommands().createTestSet())
           .catch((error) => {
             this.logger.warn("Creating a test set from the board failed", {
               error: errMsg(error),
@@ -284,8 +306,7 @@ export class TraceabilityCommands {
           });
       },
       createTestPlan: () => {
-        this.getAuthoringCommands()
-          .createTestPlan()
+        this.boardPrivileged(() => this.getAuthoringCommands().createTestPlan())
           .catch((error) => {
             this.logger.warn("Creating a test plan from the board failed", {
               error: errMsg(error),
@@ -293,8 +314,7 @@ export class TraceabilityCommands {
           });
       },
       createTestExecution: () => {
-        this.getAuthoringCommands()
-          .createTestExecution()
+        this.boardPrivileged(() => this.getAuthoringCommands().createTestExecution())
           .catch((error) => {
             this.logger.warn("Creating a test execution from the board failed", {
               error: errMsg(error),
@@ -313,12 +333,13 @@ export class TraceabilityCommands {
         return { runnable, skipped: resolved.skipped };
       },
       runSelected: (testKeys) => {
-        this.getPublishCommands()
-          .runAndPublishSelected(testKeys)
+        this.boardPrivileged((signal) => this.getPublishCommands().runAndPublishSelected(testKeys, signal))
           .catch((error) => {
             this.logger.warn("Running selected board tests failed", { error: errMsg(error) });
             if (error instanceof ExecutionAlreadyRunningError) {
               vscode.window.showWarningMessage(error.message);
+            } else if (error instanceof ExecutionAdmissionBlockedError) {
+              vscode.window.showErrorMessage(`${error.message} ${error.recovery}`);
             } else if (error instanceof ExecutionFailure) {
               const saved = error.completion.artifactId ? " The partial run was saved." : "";
               vscode.window.showErrorMessage(
@@ -329,8 +350,7 @@ export class TraceabilityCommands {
       },
       publishDelegate: this.getPublishCommands().publishDelegate(),
       startPublish: () => {
-        this.getPublishCommands()
-          .runPublish()
+        this.boardPrivileged((signal) => this.getPublishCommands().runPublish(undefined, signal))
           .catch((error) => {
             this.logger.warn("Publish from the board tab failed", {
               error: errMsg(error),
@@ -379,7 +399,7 @@ export class TraceabilityCommands {
 
   private async recordCreatedExecution(key: string, summary: string): Promise<void> {
     const credentials = await this.credentials();
-    this.deps.publishLedger()?.record({
+    const evicted = await this.deps.publishLedger()?.record({
       artifactId: `${STANDALONE_ARTIFACT_PREFIX}${key}`,
       executionRef: key,
       site: this.siteUrl(),
@@ -388,11 +408,14 @@ export class TraceabilityCommands {
       pendingAttachments: [],
       summary,
       mode: "created-empty",
-    });
+    }) ?? [];
+    const spoolRoot = this.deps.attachmentSpoolRoot();
+    if (spoolRoot !== undefined) {new AttachmentSpool(spoolRoot, this.logger).discard(evicted);}
     await this.refreshBoard("creating an execution");
   }
 
   public syncTraceability(request: SyncRequest = { announce: true }): Promise<void> {
+    this.deps.workspaceTrust.require();
     if (this.syncInFlight) {
       if (request.explicitKey !== undefined) {
         this.pendingLoad = request.explicitKey;
@@ -498,11 +521,15 @@ export class TraceabilityCommands {
     subsystem.toggleGrouping();
   }
 
-  public async switchDefaultProject(): Promise<void> {
+  public switchDefaultProject(): Promise<void> {
+    return this.deps.workspaceTrust.run((signal) => this.switchDefaultProjectTrusted(signal));
+  }
+
+  private async switchDefaultProjectTrusted(signal: AbortSignal): Promise<void> {
     const current = this.deps.config.xrayDefaultProjectKey;
     const jiraCredentials = await this.jiraCredentials();
     const chosen = jiraCredentials
-      ? await this.pickDefaultProjectFromJira(this.siteUrl(), jiraCredentials, current)
+      ? await this.pickDefaultProjectFromJira(this.siteUrl(), jiraCredentials, current, signal)
       : await this.promptDefaultProjectKey(current);
     if (chosen === undefined) {return;}
     const normalized = chosen.toUpperCase();
@@ -515,7 +542,8 @@ export class TraceabilityCommands {
   private async pickDefaultProjectFromJira(
     site: string,
     credentials: XrayJiraCredentials,
-    current: string
+    current: string,
+    signal: AbortSignal
   ): Promise<string | undefined> {
     if (site === "") {return this.promptDefaultProjectKey(current);}
     let projects: JiraProject[];
@@ -525,9 +553,10 @@ export class TraceabilityCommands {
           location: vscode.ProgressLocation.Notification,
           title: "Loading Jira projects…",
         },
-        () => searchJiraProjects({ site, credentials, logger: this.logger })
+        () => searchJiraProjects({ site, credentials, logger: this.logger, signal })
       ).then((result) => result.projects);
     } catch (error) {
+      if (signal.aborted) {throw signal.reason ?? error;}
       const message = error instanceof JiraAccessError ? error.message : errMsg(error);
       vscode.window.showWarningMessage(`Could not list Jira projects: ${message}`);
       return this.promptDefaultProjectKey(current);
@@ -597,7 +626,8 @@ export class TraceabilityCommands {
       credentialStore,
       this.logger,
       () => this.deps.subsystem()?.knownTestKeys() ?? [],
-      probe
+      probe,
+      this.deps.workspaceTrust
     );
     return this.connectionCommands;
   }
@@ -610,6 +640,7 @@ export class TraceabilityCommands {
       snapshot: () => this.deps.subsystem()?.getSnapshot(),
       board: () => this.board(),
       siteUrl: () => this.siteUrl(),
+      workspaceTrust: this.deps.workspaceTrust,
     });
     return this.linkCommands;
   }
@@ -633,12 +664,15 @@ export class TraceabilityCommands {
       runArtifactStore: this.deps.runArtifactStore,
       executionGateway: this.deps.executionGateway,
       featureParser: this.deps.featureParser,
+      workspaceTrust: this.deps.workspaceTrust,
+      attachmentSpoolRoot: this.deps.attachmentSpoolRoot,
     });
     return this.publishCommands;
   }
 
   private getAuthoringCommands(): TraceabilityAuthoringCommands {
     this.authoringCommands ??= new TraceabilityAuthoringCommands(this.logger, {
+      workspaceTrust: this.deps.workspaceTrust,
       snapshot: () => this.deps.subsystem()?.getSnapshot(),
       adapter: () => this.deps.subsystem()?.getActiveAdapter(),
       selectedScenarios: () => BoardPanel.selectedScenarios(),

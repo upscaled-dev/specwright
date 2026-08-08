@@ -28,6 +28,7 @@ import {
   StepResolver,
   XrayJsonImporter,
 } from "./execution-importers";
+import { randomUUID } from "node:crypto";
 import { JiraIssueKind, searchJiraIssues, JiraIssueSearchResult } from "./jira-issue-search";
 import { IssueTypeResolution, resolveExecutionIssueType } from "./jira-issue-types";
 import { JiraProjectSearchResult, searchJiraProjects } from "./jira-project-search";
@@ -245,7 +246,8 @@ async function publishCreate(
   results: readonly PublishableResult[],
   request: Extract<PublishRequest, { mode: "create-new" }>,
   signal: AbortSignal | undefined,
-  credentials: XrayJiraCredentials | undefined
+  credentials: XrayJiraCredentials | undefined,
+  operationId: string
 ): Promise<PublishOutcome> {
   if (request.summary.trim() === "") {
     throw new Error("Enter a summary for the new execution before publishing.");
@@ -280,7 +282,7 @@ async function publishCreate(
     evidenceFor: plan.evidenceFor,
     issueTypeName,
   });
-  const response = await cucumberImporter.import(deps.transport, payload, signal);
+  const response = await cucumberImporter.import(deps.transport, payload, signal, operationId);
   const ref: ExecutionRef = { kind: "execution", key: executionKeyOf(response, request) };
   const warnings: string[] = [];
   if (!hasExecutionRef(ref.key)) {
@@ -295,7 +297,7 @@ async function publishCreate(
     warnings.push(`${payload.droppedChangedCount} scenario(s) changed since the run and were not published.`);
   }
   warnings.push(...plan.notes);
-  return { ref, imported: results.length - payload.droppedChangedCount, warnings, issueEvidenceFiles: plan.issueFiles };
+  return { ref, imported: results.length - payload.droppedChangedCount, warnings, issueEvidenceFiles: plan.issueFiles, operationId };
 }
 
 async function publishAppend(
@@ -304,16 +306,18 @@ async function publishAppend(
   results: readonly PublishableResult[],
   request: Extract<PublishRequest, { mode: "append" }>,
   signal: AbortSignal | undefined,
-  jiraAvailable: boolean
+  jiraAvailable: boolean,
+  operationId: string
 ): Promise<PublishOutcome> {
   const plan = planEvidence(artifact, results, deps, jiraAvailable);
   const payload = xrayJsonImporter.buildPayload({ results, request, evidenceFor: plan.evidenceFor });
-  const response = await xrayJsonImporter.import(deps.transport, payload, signal);
+  const response = await xrayJsonImporter.import(deps.transport, payload, signal, operationId);
   return {
     ref: { kind: "execution", key: executionKeyOf(response, request) },
     imported: results.length,
     warnings: [...plan.notes],
     issueEvidenceFiles: plan.issueFiles,
+    operationId,
   };
 }
 
@@ -360,14 +364,15 @@ export function createXrayResultPublishing(deps: XrayResultPublishingDeps): Resu
       return result.issues.map(toPublishTarget);
     },
     async publish(artifact, request, signal): Promise<PublishOutcome> {
+      const operationId = randomUUID();
       const results = publishableResults(artifact).publishable;
       // Jira creds are both the issue-attachment destination's only key AND the createmeta resolver's
       // credential, so the object itself (not just its presence) flows into the create path. `planEvidence`
       // still only needs presence, to fall the issue stream back to payload embedding (never a lost blob).
       const credentials = await deps.jiraCredentials();
       return request.mode === "create-new"
-        ? publishCreate(deps, resolveIssueType, artifact, results, request, signal, credentials)
-        : publishAppend(deps, artifact, results, request, signal, credentials !== undefined);
+        ? publishCreate(deps, resolveIssueType, artifact, results, request, signal, credentials, operationId)
+        : publishAppend(deps, artifact, results, request, signal, credentials !== undefined, operationId);
     },
   };
 }

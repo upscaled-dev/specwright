@@ -27,6 +27,7 @@ import {
 } from "../traceability/tag-edit";
 import { Logger } from "../utils/logger";
 import { errMsg } from "../utils/text";
+import type { WorkspaceTrust } from "../core/workspace-trust";
 
 const REJECTED_WRITE = "the feature file edit was not applied";
 
@@ -41,6 +42,7 @@ export interface TraceabilityLinkCommandDeps {
   readonly snapshot: () => TraceabilitySnapshot | undefined;
   readonly board: () => BoardPanel;
   readonly siteUrl: () => string;
+  readonly workspaceTrust: WorkspaceTrust;
 }
 
 function issueKeyFromArg(arg: unknown): string | undefined {
@@ -199,7 +201,8 @@ export class TraceabilityLinkCommands {
     key: string,
     grammar: KeyGrammar
   ): Promise<TagWrite<"inserted">> {
-    return insertTag(scenario, key, grammar);
+    this.deps.workspaceTrust.require();
+    return insertTag(scenario, key, grammar, this.deps.workspaceTrust);
   }
 
   private applyTagRemove(
@@ -207,7 +210,8 @@ export class TraceabilityLinkCommands {
     key: string,
     grammar: KeyGrammar
   ): Promise<TagWrite<"removed">> {
-    return removeTag(scenario, key, grammar);
+    this.deps.workspaceTrust.require();
+    return removeTag(scenario, key, grammar, this.deps.workspaceTrust);
   }
 
   private async createTestFromScenario(

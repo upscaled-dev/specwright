@@ -13,6 +13,7 @@ import {
   TraceabilityAdapterFactory,
   TraceabilityAdapterRegistry,
 } from "../../traceability/adapter-registry";
+import { currentAdapterVersions } from "../../traceability/adapter-contract";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { RunResultStore } from "../../traceability/run-result-store";
 import { ConnectionCapability, RunArtifact, TraceabilityAdapter } from "../../traceability/contracts";
@@ -32,8 +33,15 @@ const fakeMemento = {
 
 function inMemoryHarness(): AdapterContractHarness {
   const adapter = new InMemoryTraceabilityAdapter({ label: "in-memory-fixture" });
+  const factory: TraceabilityAdapterFactory = {
+    id: "in-memory",
+    ...currentAdapterVersions("connection", "metadata", "resultPublishing"),
+    create: () => adapter,
+  };
   return {
     adapter,
+    factory,
+    services: { config: {} as ExtensionConfig, logger: Logger.create() },
     connect: () => { adapter.setConnected(true); return Promise.resolve(); },
     disconnect: () => { adapter.setConnected(false); return Promise.resolve(); },
     seedCatalogue: (tests, landedProjects) => adapter.seedCatalogue(tests, landedProjects),
@@ -66,7 +74,7 @@ function inMemoryHarness(): AdapterContractHarness {
 runAdapterContractTests(inMemoryHarness);
 
 describe("InMemoryTraceabilityAdapter specifics", () => {
-  it("uses a non-Jira grammar: numeric keys, no project derivation, leading-zero canonicalization", () => {
+  it("uses a non-Jira grammar: numeric keys, no project derivation, leading-zero canonicalization", async () => {
     const adapter = new InMemoryTraceabilityAdapter();
     expect(adapter.keyGrammar.projectOf).toBeUndefined();
     expect(adapter.keyGrammar.canonicalizeKey("007")).toBe("7");
@@ -170,29 +178,47 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
 const ctx: AdapterContext = { config: {} as ExtensionConfig, logger: Logger.create() };
 
 describe("TraceabilityAdapterRegistry", () => {
-  it("registers a factory and creates its adapter by id", () => {
+  it("registers a factory and activates its adapter by id", async () => {
     const registry = new TraceabilityAdapterRegistry();
     registry.register(createInMemoryAdapterFactory());
     expect(registry.has("in-memory")).toBe(true);
-    expect(registry.create("in-memory", ctx)?.id).toBe("in-memory");
+    expect((await registry.activate("in-memory", ctx))?.id).toBe("in-memory");
   });
 
-  it("returns undefined for an unregistered id", () => {
+  it("returns undefined for an unregistered id", async () => {
     const registry = new TraceabilityAdapterRegistry();
     expect(registry.has("nope")).toBe(false);
-    expect(registry.create("nope", ctx)).toBeUndefined();
+    expect(await registry.activate("nope", ctx)).toBeUndefined();
   });
 
-  it("lists registered ids and lets the last registration win for a duplicate id", () => {
+  it("rejects a duplicate id without replacing the first registration", async () => {
     const registry = new TraceabilityAdapterRegistry();
-    const first: TraceabilityAdapterFactory = { id: "dup", create: () => new InMemoryTraceabilityAdapter({ label: "first" }) };
-    const second: TraceabilityAdapterFactory = { id: "dup", create: () => new InMemoryTraceabilityAdapter({ label: "second" }) };
+    const first: TraceabilityAdapterFactory = {
+      id: "dup",
+      ...currentAdapterVersions("connection", "metadata", "resultPublishing"),
+      create: () => {
+        const adapter = new InMemoryTraceabilityAdapter({ label: "first" });
+        Object.defineProperty(adapter, "id", { value: "dup" });
+        return adapter;
+      },
+    };
+    const second: TraceabilityAdapterFactory = {
+      id: "dup",
+      ...currentAdapterVersions("connection", "metadata", "resultPublishing"),
+      create: () => {
+        const adapter = new InMemoryTraceabilityAdapter({ label: "second" });
+        Object.defineProperty(adapter, "id", { value: "dup" });
+        return adapter;
+      },
+    };
     registry.register(first);
-    registry.register(second);
+    expect(() => registry.register(second)).toThrowError(
+      'Integration adapter "dup" registration was rejected because the ID is already registered.'
+    );
     registry.register(createInMemoryAdapterFactory());
 
-    expect(registry.ids().sort()).toEqual(["dup", "in-memory"]);
-    expect(registry.create("dup", ctx)?.connection?.label).toBe("second");
+    expect(registry.ids()).toEqual(["dup", "in-memory"]);
+    expect((await registry.activate("dup", ctx))?.connection?.label).toBe("first");
   });
 });
 
@@ -301,6 +327,7 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     const created: InMemoryTraceabilityAdapter[] = [];
     const memFactory: TraceabilityAdapterFactory = {
       id: "in-memory",
+      ...currentAdapterVersions("connection", "metadata", "resultPublishing"),
       create: () => {
         const adapter = new InMemoryTraceabilityAdapter({ connected: true, label: "mem" });
         vi.spyOn(adapter, "dispose");
@@ -310,7 +337,11 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     };
     const registry = new TraceabilityAdapterRegistry();
     registry.register(memFactory);
-    registry.register({ id: "xray", create: () => xrayFake(fixedConnection("xray-site")) });
+    registry.register({
+      id: "xray",
+      ...currentAdapterVersions("connection"),
+      create: () => xrayFake(fixedConnection("xray-site")),
+    });
     mockWatchers();
 
     const { config, setProvider, fireChange } = makeConfig();
@@ -327,7 +358,7 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     );
     subsystem.rebuildDebounceMs = 0;
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await settle();
     expect(created).toHaveLength(1);
     // Seed catalogue state on the first adapter so a bleed would be observable after swap-back.
@@ -336,6 +367,7 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
 
     setProvider("xray");
     fireChange();
+    await subsystem.applyCurrent();
     await settle();
     expect(created[0]!.dispose).toHaveBeenCalledTimes(1);
     expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
@@ -344,6 +376,7 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     // Swap back: a fresh in-memory adapter with no state bleed from the disposed one.
     setProvider("in-memory");
     fireChange();
+    await subsystem.applyCurrent();
     await settle();
     expect(created).toHaveLength(2);
     expect(created[1]).not.toBe(created[0]);
@@ -351,15 +384,69 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     expect(snap.tests.size).toBe(0);
     expect(snap.completeProjects).toEqual([]);
 
-    subsystem.dispose();
+    await subsystem.shutdown();
     expect(created[1]!.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("awaits outgoing disposal before constructing the replacement adapter", async () => {
+    let finishDisposal: (() => void) | undefined;
+    const disposal = new Promise<void>((resolve) => { finishDisposal = resolve; });
+    const outgoing = controllableAdapter("in-memory");
+    outgoing.adapter.dispose = vi.fn(() => disposal);
+    const createIncoming = vi.fn(() => xrayFake(fixedConnection("xray-site")));
+    const registry = new TraceabilityAdapterRegistry();
+    registry.register({
+      id: "in-memory",
+      ...currentAdapterVersions("connection", "metadata"),
+      create: () => outgoing.adapter,
+    });
+    registry.register({
+      id: "xray",
+      ...currentAdapterVersions("connection"),
+      create: createIncoming,
+    });
+    mockWatchers();
+    const { config, setProvider } = makeConfig();
+    const logger = Logger.create();
+    const subsystem = new TraceabilitySubsystem(
+      config,
+      registry,
+      FeatureParser.create(logger),
+      TestDiscoveryManager.create(logger, config),
+      PlaywrightJsonParser.create(logger),
+      new RunResultStore(),
+      logger,
+      fakeMemento
+    );
+
+    await subsystem.applyCurrent();
+    setProvider("xray");
+    const swap = subsystem.applyCurrent();
+    await flush();
+
+    expect(outgoing.adapter.dispose).toHaveBeenCalledOnce();
+    expect(createIncoming).not.toHaveBeenCalled();
+
+    finishDisposal?.();
+    await swap;
+
+    expect(createIncoming).toHaveBeenCalledOnce();
+    await subsystem.shutdown();
   });
 
   it("drops its connection and metadata subscriptions to the outgoing adapter on swap", async () => {
     const outgoing = controllableAdapter("in-memory");
     const registry = new TraceabilityAdapterRegistry();
-    registry.register({ id: "in-memory", create: () => outgoing.adapter });
-    registry.register({ id: "xray", create: () => xrayFake(fixedConnection("xray-site")) });
+    registry.register({
+      id: "in-memory",
+      ...currentAdapterVersions("connection", "metadata"),
+      create: () => outgoing.adapter,
+    });
+    registry.register({
+      id: "xray",
+      ...currentAdapterVersions("connection"),
+      create: () => xrayFake(fixedConnection("xray-site")),
+    });
     mockWatchers();
     const exec = vi.spyOn(vscode.commands, "executeCommand");
 
@@ -379,11 +466,12 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     );
     subsystem.rebuildDebounceMs = 0;
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await settle();
 
     setProvider("xray");
     fireChange();
+    await subsystem.applyCurrent();
     await settle();
     expect(outgoing.dispose).toHaveBeenCalledTimes(1);
 
@@ -400,6 +488,6 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     expect(setContextStates(exec)).toHaveLength(0);
     expect(discoverSpy).not.toHaveBeenCalled();
 
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 });

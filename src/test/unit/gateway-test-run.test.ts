@@ -5,20 +5,28 @@ import { LiveTestRunProgress } from "../../test-providers/live-test-run-progress
 import {
   ExecutionAlreadyRunningError,
   ExecutionFailure,
+  LegacyDirectExecutionGateway,
 } from "../../core/execution-gateway";
+import { ExecutionAdmission, ExecutionAdmissionBlockedError } from "../../core/execution-admission";
+import { WorkspaceTrust, WorkspaceTrustRequiredError } from "../../core/workspace-trust";
 import type {
   ExecutionCaseResult,
-  ExecutionEvent,
+  ExecutionDiagnostic,
   ExecutionGateway,
+  ExecutionOptions,
   RunCompletion,
   RunIntent,
 } from "../../core/run-contracts";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { Logger } from "../../utils/logger";
+import { FeatureParser } from "../../parsers/feature-parser";
+import type { TestExecutor } from "../../core/test-executor";
 import { FakeTestController, FakeTestItem, type FakeTestRun } from "./helpers/fake-test-controller";
 
 const FILE_A = "/ws/a.feature";
 const FILE_B = "/ws/b.feature";
+const IDENTITY = { engine: "legacy-direct", schemaProfile: "legacy.v1" } as const;
+let operationId = 0;
 
 function leaf(filePath: string, line: number, label: string): FakeTestItem {
   const item = new FakeTestItem(`${filePath}:${line}`, label, { fsPath: filePath });
@@ -38,6 +46,7 @@ function caseResult(filePath: string, line: number, name: string): ExecutionCase
 
 function completion(over: Partial<RunCompletion> = {}): RunCompletion {
   return {
+    identity: IDENTITY,
     state: "complete",
     results: [],
     output: "",
@@ -51,9 +60,30 @@ function completion(over: Partial<RunCompletion> = {}): RunCompletion {
 function intent(): RunIntent {
   return {
     mode: "run",
-    selection: { kind: "multi-select", scenarios: [] },
     targets: [],
-    metadata: { initiatedBy: "test-explorer" },
+  };
+}
+
+function gateway(
+  execute: (intent: RunIntent, options?: ExecutionOptions) => Promise<RunCompletion>,
+  options: {
+    readonly running?: boolean;
+    readonly diagnostics?: readonly ExecutionDiagnostic[];
+  } = {}
+): ExecutionGateway {
+  return {
+    running: options.running ?? false,
+    diagnose: vi.fn(() => Promise.resolve(options.diagnostics ?? [])),
+    discover: vi.fn(() => Promise.resolve({ cases: [], diagnostics: [] })),
+    prepare: vi.fn(async (runIntent) => Object.freeze({
+      operationId: `test-${++operationId}`,
+      identity: IDENTITY,
+      intent: runIntent,
+    })),
+    run: vi.fn((prepared, runOptions) => execute(prepared.intent, runOptions)),
+    debug: vi.fn((prepared, runOptions) => execute(prepared.intent, runOptions)),
+    cancel: vi.fn(() => Promise.resolve()),
+    dispose: vi.fn(),
   };
 }
 
@@ -98,20 +128,15 @@ describe("runGatewayTestRequest", () => {
   // Text that lands while the runner tears down is streamed like any other line, so the terminal
   // shows it once and the roots still end up cancelled.
   it("shows a cancelled run's teardown output once", async () => {
-    const gateway: ExecutionGateway = {
-      running: false,
-      execute: vi.fn((_intent: RunIntent, options?: {
-        readonly onEvent?: ((event: ExecutionEvent) => void) | undefined;
-      }) => {
+    const executionGateway = gateway(vi.fn((_intent: RunIntent, options?: ExecutionOptions) => {
         options?.onEvent?.({ kind: "output", stream: "stdout", text: "teardown after stop\n" });
         return Promise.resolve(completion({
           state: "cancelled",
           output: "teardown after stop\n",
         }));
-      }),
-    };
+      }));
     const root = leaf(FILE_A, 3, "A");
-    const { run, cancelled } = rig({ roots: [root], gateway });
+    const { run, cancelled } = rig({ roots: [root], gateway: executionGateway });
 
     const testRun = await run();
 
@@ -123,20 +148,15 @@ describe("runGatewayTestRequest", () => {
   // the runner's error as the run's output and then reports the same string as the failure.
   it("prints a failure the runner already printed only once", async () => {
     const failure = "The debug run produced no readable JSON report.";
-    const gateway: ExecutionGateway = {
-      running: false,
-      execute: vi.fn((_intent: RunIntent, options?: {
-        readonly onEvent?: ((event: ExecutionEvent) => void) | undefined;
-      }) => {
+    const executionGateway = gateway(vi.fn((_intent: RunIntent, options?: ExecutionOptions) => {
         options?.onEvent?.({ kind: "output", stream: "stderr", text: failure });
         return Promise.reject(new ExecutionFailure(completion({
           state: "partial",
           output: failure,
           failure,
         })));
-      }),
-    };
-    const { run } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway });
+      }));
+    const { run } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway: executionGateway });
 
     const testRun = await run();
 
@@ -148,20 +168,15 @@ describe("runGatewayTestRequest", () => {
   // streamed run would print both the notice and the run's whole tail a second time.
   it("prints a streamed run's output and its truncation notice exactly once", async () => {
     const notice = "[Specwright truncated stdout: retained 8 bytes, discarded 4 bytes.]";
-    const gateway: ExecutionGateway = {
-      running: false,
-      execute: vi.fn((_intent: RunIntent, options?: {
-        readonly onEvent?: ((event: ExecutionEvent) => void) | undefined;
-      }) => {
+    const executionGateway = gateway(vi.fn((_intent: RunIntent, options?: ExecutionOptions) => {
         options?.onEvent?.({ kind: "output", stream: "stdout", text: "streamed\n" });
         options?.onEvent?.({ kind: "output", stream: "stdout", text: `${notice}\n` });
         return Promise.resolve(completion({
           state: "cancelled",
           output: `${notice}\nstreamed\n`,
         }));
-      }),
-    };
-    const { run } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway });
+      }));
+    const { run } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway: executionGateway });
 
     const testRun = await run();
 
@@ -172,16 +187,13 @@ describe("runGatewayTestRequest", () => {
 
   it("summarizes a multi-root run once and never flips a root failed on a partial run", async () => {
     const roots = [leaf(FILE_A, 3, "A"), leaf(FILE_B, 7, "B")];
-    const gateway: ExecutionGateway = {
-      running: false,
-      execute: vi.fn(() => Promise.reject(new ExecutionFailure(completion({
+    const executionGateway = gateway(vi.fn(() => Promise.reject(new ExecutionFailure(completion({
         state: "partial",
         results: [caseResult(FILE_A, 3, "A")],
         passed: 1,
         failure: "the worker stopped",
-      })))),
-    };
-    const { run, summaries, applied } = rig({ roots, gateway });
+      })))));
+    const { run, summaries, applied } = rig({ roots, gateway: executionGateway });
 
     const testRun = await run();
 
@@ -196,7 +208,7 @@ describe("runGatewayTestRequest", () => {
     const warn = vi.spyOn(vscode.window, "showWarningMessage");
     const { controller, run, cancelled } = rig({
       roots: [leaf(FILE_A, 3, "A")],
-      gateway: { running: true, execute },
+      gateway: gateway(execute, { running: true }),
     });
 
     await run();
@@ -208,11 +220,8 @@ describe("runGatewayTestRequest", () => {
   });
 
   it("leaves the tree untouched when admission is lost in a race", async () => {
-    const gateway: ExecutionGateway = {
-      running: false,
-      execute: vi.fn(() => Promise.reject(new ExecutionAlreadyRunningError())),
-    };
-    const { run, cancelled, applied } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway });
+    const executionGateway = gateway(vi.fn(() => Promise.reject(new ExecutionAlreadyRunningError())));
+    const { run, cancelled, applied } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway: executionGateway });
 
     const testRun = await run();
 
@@ -222,18 +231,146 @@ describe("runGatewayTestRequest", () => {
     expect(testRun?.outcome.ended).toBe(true);
   });
 
+  it("offers the workspace trust action when Test Explorer loses trust admission", async () => {
+    const executionGateway = gateway(vi.fn(() => Promise.reject(new WorkspaceTrustRequiredError())));
+    vi.spyOn(vscode.window, "showWarningMessage")
+      .mockResolvedValue("Manage Workspace Trust" as never);
+    const manage = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    const { run, applied, cancelled } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway: executionGateway });
+
+    const testRun = await run();
+
+    expect(manage).toHaveBeenCalledWith("workbench.trust.manage");
+    expect(applied).toEqual([]);
+    expect(cancelled).toEqual([]);
+    expect(testRun?.outcome.failed).toEqual([]);
+    expect(testRun?.outcome.ended).toBe(true);
+  });
+
+  it("leaves the tree untouched and gives recovery guidance when a termination lease blocks it", async () => {
+    const executionGateway = gateway(vi.fn(() => Promise.reject(new ExecutionAdmissionBlockedError({
+        kind: "debug-session",
+        failure: "the previous debug session did not terminate",
+        bootId: "win32:4182",
+      }))));
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const { run, cancelled, applied } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway: executionGateway });
+
+    const testRun = await run();
+
+    expect(cancelled).toEqual([]);
+    expect(applied).toEqual([]);
+    expect(testRun?.outcome.failed).toEqual([]);
+    expect(testRun?.outcome.skipped).toEqual([]);
+    expect(testRun?.outcome.ended).toBe(true);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining(
+      "Restart the computer to terminate any leftover Playwright or debug processes"
+    ));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining(
+      "If execution remains blocked after restarting, close every VS Code window"
+    ));
+    expect(error).not.toHaveBeenCalledWith(expect.stringContaining("Terminate and confirm"));
+  });
+
+  it("leaves the tree without an outcome when admission storage is unreadable", async () => {
+    const executionGateway = gateway(vi.fn(() => Promise.reject(new ExecutionAdmissionBlockedError(
+        "its storage could not be read; execution remains blocked"
+      ))));
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const { run, cancelled, applied } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway: executionGateway });
+
+    const testRun = await run();
+
+    expect(cancelled).toEqual([]);
+    expect(applied).toEqual([]);
+    expect(testRun?.outcome.failed).toEqual([]);
+    expect(testRun?.outcome.skipped).toEqual([]);
+    expect(testRun?.outcome.ended).toBe(true);
+    const message = String(error.mock.calls[0]?.[0]);
+    expect(message).toContain("Restart the computer to terminate any leftover Playwright or debug processes");
+    expect(message).toContain("while every VS Code window is closed");
+    expect(message).toContain(
+      "move the execution-admission directory out of this extension's globalStorage directory"
+    );
+    expect(message.indexOf("Restart the computer")).toBeLessThan(message.indexOf("move the execution-admission"));
+  });
+
   it("fails the run on an unknown error instead of skipping the subtree", async () => {
-    const gateway: ExecutionGateway = {
-      running: false,
-      execute: vi.fn(() => Promise.reject(new Error("spawn refused"))),
-    };
+    const executionGateway = gateway(vi.fn(() => Promise.reject(new Error("spawn refused"))));
     const root = leaf(FILE_A, 3, "A");
-    const { run, cancelled } = rig({ roots: [root], gateway });
+    const { run, cancelled } = rig({ roots: [root], gateway: executionGateway });
 
     const testRun = await run();
 
     expect(testRun?.outcome.failed).toEqual([{ id: root.id, message: "spawn refused" }]);
     expect(testRun?.outcome.skipped).toEqual([]);
     expect(cancelled).toEqual([]);
+  });
+
+  it("does not open a run when the selected engine is unavailable", async () => {
+    const execute = vi.fn(() => Promise.resolve(completion()));
+    const executionGateway = gateway(execute, {
+      diagnostics: [{
+        severity: "error",
+        code: "execution.core-client.unavailable",
+        message: "Core execution is unavailable.",
+        identity: { engine: "core-client", schemaProfile: "core.v1" },
+      }],
+    });
+    const root = leaf(FILE_A, 3, "A");
+    const { controller, run, applied, cancelled } = rig({ roots: [root], gateway: executionGateway });
+
+    await run();
+
+    expect(controller.runs).toHaveLength(0);
+    expect(execute).not.toHaveBeenCalled();
+    expect(applied).toEqual([]);
+    expect(cancelled).toEqual([]);
+  });
+
+  it("offers Manage Workspace Trust from the real legacy diagnose path before opening a run", async () => {
+    const execute = vi.fn();
+    const executionGateway = new LegacyDirectExecutionGateway(
+      { runScenarioWithOutput: execute } as unknown as TestExecutor,
+      FeatureParser.create(),
+      new WorkspaceTrust(() => false)
+    );
+    vi.spyOn(vscode.window, "showWarningMessage")
+      .mockResolvedValue("Manage Workspace Trust" as never);
+    const manage = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    const root = leaf(FILE_A, 3, "A");
+    const { controller, run } = rig({ roots: [root], gateway: executionGateway });
+
+    await run();
+
+    expect(controller.runs).toHaveLength(0);
+    expect(execute).not.toHaveBeenCalled();
+    expect(manage).toHaveBeenCalledWith("workbench.trust.manage");
+  });
+
+  it("shows admission recovery from the real legacy diagnose path before opening a run", async () => {
+    const admission = new ExecutionAdmission();
+    await admission.block({
+      kind: "debug-session",
+      failure: "the previous debug session did not terminate",
+    });
+    const execute = vi.fn();
+    const executionGateway = new LegacyDirectExecutionGateway(
+      { runScenarioWithOutput: execute } as unknown as TestExecutor,
+      FeatureParser.create(),
+      new WorkspaceTrust(() => true),
+      admission
+    );
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const root = leaf(FILE_A, 3, "A");
+    const { controller, run } = rig({ roots: [root], gateway: executionGateway });
+
+    await run();
+
+    expect(controller.runs).toHaveLength(0);
+    expect(execute).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining(
+      "Restart the computer to terminate any leftover Playwright or debug processes"
+    ));
   });
 });

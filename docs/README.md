@@ -7,6 +7,7 @@ Use these guides to author Gherkin, run `playwright-bdd` tests, and configure Sp
 | Goal | Guide |
 | --- | --- |
 | Set up an existing `playwright-bdd` workspace and run your first scenario | [Getting started](getting-started.md) |
+| Check the exact versions represented by compatibility evidence | [Compatibility](compatibility.md) |
 | Run, debug, filter, stop, or understand a test result | [Run and debug tests](runs.md) |
 | Write feature files, navigate steps, fix diagnostics, and manage a step library | [Language features and Steps panel](features.md) |
 | Connect scenarios to Xray Cloud and understand the effect of remote actions | [Xray traceability](traceability.md) |

@@ -150,9 +150,9 @@ function directSubdirsOf(dir: string): string[] {
 }
 
 // Assumes playwright-bdd resolves outputDir relative to the config file's directory (we
-// approximate that with workingDirectory). Callers invoke this right after bddgen, so the
-// freshly generated spec exists on disk; that lets us probe the actual layout rather than
-// assume it. Two bddgen conventions bend the naive `<genDir>/<feature-relative-path>.spec.js`
+// approximate that with workingDirectory). Probing the generated files lets callers use the
+// actual layout rather than assume it. Two bddgen conventions bend the naive
+// `<genDir>/<feature-relative-path>.spec.js`
 // shape:
 //   - A named BDD project (`defineBddProject(..., 'browser')`) nests its output one level
 //     deeper: `.features-gen/browser/...`. We therefore probe the gen dir's direct
@@ -162,61 +162,39 @@ function directSubdirsOf(dir: string): string[] {
 //     `.features-gen/ui/x.feature.spec.js`). We therefore retry with leading segments
 //     stripped, most-specific (longest) suffix first.
 // The extension can't read the user's Playwright config, so probing beats a setting the user
-// would have to keep in sync. Several roots matching at the same specificity (multiple named
-// projects generating the same feature) tie-break by newest mtime. When nothing exists, fall
-// back to the exact-path .js candidate so callers still name a concrete path in their
-// "no generated spec at <path>" diagnostics.
-export function resolveGeneratedSpecPath(
+// would have to keep in sync. Every root matching at the first specificity is returned because
+// each one is an applicable BDD project and omitting one silently skips its test execution.
+export function resolveGeneratedSpecPaths(
   workingDir: string,
   featuresGenDir: string,
-  featureFsPath: string,
-  onDuplicates?: (chosen: string, candidates: string[]) => void
-): string | undefined {
+  featureFsPath: string
+): string[] {
   const relative = path.relative(workingDir, featureFsPath);
   // `..` prefix alone would false-positive on a child directory literally named `..foo`;
   // an absolute result covers the Windows cross-drive case.
   const escapesWorkingDir =
     relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
   if (escapesWorkingDir) {
-    return undefined;
+    return [];
   }
   const genRoot = path.resolve(workingDir, featuresGenDir);
-  const roots = [genRoot, ...directSubdirsOf(genRoot)];
+  const roots = [genRoot, ...directSubdirsOf(genRoot).sort()];
   const segments = relative.split(path.sep);
-  for (let i = 0; i < segments.length; i++) {
-    const match = probeRootsForSuffix(roots, segments.slice(i).join(path.sep));
-    if (!match) {
-      continue;
-    }
-    // Several named projects generating the same feature is a real ambiguity, targeting
-    // one spec runs the scenario in only that project. Surface it instead of hiding it.
-    if (match.hits.length > 1) {
-      onDuplicates?.(
-        match.newest.specPath,
-        match.hits.map((h) => h.specPath)
-      );
-    }
-    return match.newest.specPath;
-  }
-  return path.join(genRoot, `${relative}.spec.js`);
-}
-
-/** All roots holding a generated spec for `suffix`, plus the newest of them. */
-function probeRootsForSuffix(
-  roots: string[],
-  suffix: string
-): { newest: SpecCandidate; hits: SpecCandidate[] } | undefined {
-  const hits: SpecCandidate[] = [];
-  let newest: SpecCandidate | undefined;
+  const matches: string[] = [];
+  const seen = new Set<string>();
   for (const root of roots) {
-    const found = existingSpecFor(path.join(root, suffix));
-    if (!found) {
-      continue;
-    }
-    hits.push(found);
-    if (!newest || found.mtimeMs > newest.mtimeMs) {
-      newest = found;
+    for (let i = 0; i < segments.length; i++) {
+      const match = existingSpecFor(path.join(root, segments.slice(i).join(path.sep)));
+      if (!match) {continue;}
+      const identity = process.platform === "win32"
+        ? match.specPath.toLowerCase()
+        : match.specPath;
+      if (!seen.has(identity)) {
+        seen.add(identity);
+        matches.push(match.specPath);
+      }
+      break;
     }
   }
-  return newest ? { newest, hits } : undefined;
+  return matches;
 }

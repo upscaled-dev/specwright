@@ -22,14 +22,45 @@ import { Logger } from "../../utils/logger";
 import { PlaywrightBddExtensionContext } from "../../types";
 import { BreakpointMirror } from "../../core/breakpoint-mirror";
 import { RunArtifactStore } from "../../traceability/run-artifact-store";
-import type { ExecutionEvent, ExecutionGateway } from "../../core/run-contracts";
-import { ExtensionExecutionGateway } from "../../core/execution-gateway";
+import type { ScenarioRef } from "../../traceability/scenario-ref";
+import type {
+  ExecutionEvent,
+  ExecutionDefinition,
+  ExecutionGateway,
+  ExecutionOptions,
+  RunCompletion,
+  RunIntent,
+} from "../../core/run-contracts";
+import { LegacyDirectExecutionGateway } from "../../core/execution-gateway";
+import { LegacyExecutionDiscovery } from "../../core/legacy-discovery";
+import { LegacyArtifactGateway } from "../../ui/legacy-artifact-gateway";
+import { executionClientContext } from "../../ui/execution-client-context";
+import { WorkspaceTrust } from "../../core/workspace-trust";
 import { FakeTestController, FakeTestItem } from "./helpers/fake-test-controller";
+import { parseExecutableCommand } from "../../core/bounded-command-runner";
 import {
   LIVE_REPORT_FILE_ENV,
   type LiveRunBeginRecord,
   type LiveTestEndRecord,
 } from "../../core/live-reporter-protocol";
+
+const EXECUTION_IDENTITY = { engine: "legacy-direct", schemaProfile: "legacy.v1" } as const;
+
+function testGateway(
+  execute: (intent: RunIntent, options?: ExecutionOptions) => Promise<RunCompletion>,
+  cases: readonly ExecutionDefinition[] = []
+): ExecutionGateway {
+  return {
+    running: false,
+    diagnose: vi.fn(() => Promise.resolve([])),
+    discover: vi.fn(() => Promise.resolve({ cases, diagnostics: [] })),
+    prepare: vi.fn(async (intent) => ({ operationId: "provider-test", identity: EXECUTION_IDENTITY, intent })),
+    run: vi.fn((prepared, options) => execute(prepared.intent, options)),
+    debug: vi.fn((prepared, options) => execute(prepared.intent, options)),
+    cancel: vi.fn(() => Promise.resolve()),
+    dispose: vi.fn(),
+  };
+}
 
 function fakeMemento(): import("vscode").Memento {
   const store = new Map<string, unknown>();
@@ -137,6 +168,12 @@ function passingLiveRecords(fixture: Fixture, total = 3): string {
   return `${JSON.stringify(begin)}\n${JSON.stringify(result)}\n`;
 }
 
+function finishDebugSession(config: Record<string, unknown>): void {
+  const session = { id: "debug-root", configuration: config };
+  vscode.debug.__fireStart(session);
+  vscode.debug.__fireTerminate(session);
+}
+
 describe("PlaywrightBddTestProvider: discover → run → status (integration)", () => {
   let fixture: Fixture;
   let origReadFile: typeof vscode.workspace.fs.readFile;
@@ -160,7 +197,12 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     try { fs.rmSync(fixture.root, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  function buildProvider(shell: ShellRunner, executionGateway?: ExecutionGateway): {
+  function buildProvider(
+    shell: ShellRunner,
+    executionGateway?: ExecutionGateway,
+    runBddgen = false,
+    artifactOwnership: readonly ScenarioRef[] = []
+  ): {
     provider: PlaywrightBddTestProvider;
     controller: FakeTestController;
     executor: TestExecutor;
@@ -169,7 +211,11 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     discoveryManager: { discoverTestFiles: ReturnType<typeof vi.fn>; clearCache: ReturnType<typeof vi.fn> };
   } {
     const logger = Logger.create();
-    const config = ExtensionConfig.create();
+    const config = ExtensionConfig.create({
+      get: <T>(key: string, defaultValue?: T): T | undefined =>
+        key === "bddgenCommand" && !runBddgen ? "" as T : defaultValue,
+      update: (): Promise<void> => Promise.resolve(),
+    } as unknown as import("vscode").WorkspaceConfiguration, false);
     const parser = PlaywrightJsonParser.create(logger);
     const commandBuilder = CommandBuilder.create(config, logger);
     const executor = TestExecutor.create(
@@ -179,7 +225,9 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       config,
       logger,
       parser,
-      shell
+      shell,
+      undefined,
+      parseExecutableCommand
     );
     const discoveryManager = {
       discoverTestFiles: vi.fn().mockResolvedValue([fixture.featurePath]),
@@ -187,12 +235,20 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     };
     const artifactStore = new RunArtifactStore(fakeMemento(), logger);
     const featureParser = FeatureParser.create(logger);
-    const gateway = executionGateway ?? new ExtensionExecutionGateway(
-      executor,
+    const workspaceTrust = new WorkspaceTrust(() => true);
+    const gateway = executionGateway ?? new LegacyArtifactGateway(
+      new LegacyDirectExecutionGateway(
+        executor,
+        featureParser,
+        workspaceTrust,
+        undefined,
+        undefined,
+        new LegacyExecutionDiscovery(discoveryManager as never, featureParser)
+      ),
       artifactStore,
-      featureParser,
       logger,
-      () => []
+      executor,
+      () => artifactOwnership
     );
     const context: PlaywrightBddExtensionContext = {
       logger,
@@ -204,6 +260,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       featureParser,
       playwrightJsonParser: parser,
       commandBuilder,
+      workspaceTrust,
       traceabilityAdapter: {} as PlaywrightBddExtensionContext["traceabilityAdapter"],
       runArtifactStore: artifactStore,
     };
@@ -263,7 +320,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
   });
 
   it("routes a Test Explorer scenario through the gateway and projects its live result", async () => {
-    const execute = vi.fn<ExecutionGateway["execute"]>(async (_intent, options) => {
+    const execute = vi.fn(async (_intent: RunIntent, options?: ExecutionOptions) => {
       const result = {
         scenario: {
           filePath: fixture.featurePath,
@@ -279,7 +336,8 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       };
       options?.onEvent?.({ kind: "case-finished", result, completed: 1, total: 1 });
       return {
-        state: "complete",
+        identity: EXECUTION_IDENTITY,
+        state: "complete" as const,
         results: [result],
         passed: 1,
         failed: 0,
@@ -287,7 +345,14 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
         output: "",
       };
     });
-    const gateway = { execute, running: false };
+    const discoveryCases = [{
+      id: `${fixture.featurePath}:4`,
+      name: "Passing scenario",
+      source: { path: fixture.featurePath, line: 4 },
+      suites: [{ name: "Sample feature", source: { path: fixture.featurePath, line: 1 } }],
+      tags: [],
+    }];
+    const gateway = testGateway(execute, discoveryCases);
     const shell: ShellRunner = async () => ({
       success: true,
       output: "",
@@ -300,13 +365,17 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
     await runItem(controller, leaf);
 
+    const preparedIntent = vi.mocked(gateway.prepare).mock.calls[0]![0];
+    expect(preparedIntent).toEqual(expect.objectContaining({
+      mode: "run",
+      targets: [expect.objectContaining({ kind: "scenario" })],
+    }));
+    expect(executionClientContext(preparedIntent)).toEqual(expect.objectContaining({
+      selection: expect.objectContaining({ kind: "scenario" }),
+      initiatedBy: "test-explorer",
+    }));
     expect(execute).toHaveBeenCalledWith(
-      expect.objectContaining({
-        mode: "run",
-        selection: expect.objectContaining({ kind: "scenario" }),
-        targets: [expect.objectContaining({ kind: "scenario" })],
-        metadata: { initiatedBy: "test-explorer" },
-      }),
+      preparedIntent,
       expect.objectContaining({ signal: expect.any(AbortSignal) })
     );
     expect(controller.runs.at(-1)!.outcome.passed).toContain(`${fixture.featurePath}:4`);
@@ -366,7 +435,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     };
     const { provider, controller, artifactStore, gateway } = buildProvider(shell);
     const events: ExecutionEvent[] = [];
-    const subscription = gateway instanceof ExtensionExecutionGateway
+    const subscription = gateway instanceof LegacyArtifactGateway
       ? gateway.onEvent((event) => events.push(event))
       : undefined;
     await provider.discoverTests();
@@ -499,7 +568,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     });
     const { provider, controller, artifactStore, gateway } = buildProvider(shell);
     const events: ExecutionEvent[] = [];
-    const subscription = gateway instanceof ExtensionExecutionGateway
+    const subscription = gateway instanceof LegacyArtifactGateway
       ? gateway.onEvent((event) => events.push(event))
       : undefined;
     await provider.discoverTests();
@@ -507,6 +576,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const feature = controller.find(fixture.featurePath)!;
     const runProfile = controller.profile("Run")!;
     const pending = runProfile.runHandler(new vscode.TestRunRequest([feature]), source.token);
+    await vi.waitFor(() => expect(controller.runs).toHaveLength(1));
     const run = controller.runs.at(-1)!;
     await vi.waitFor(() =>
       expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`)
@@ -764,6 +834,32 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       expect(commands.at(-1)).not.toContain("test.feature.spec.js:");
       expect(warn.mock.calls.map(String).join("\n")).not.toContain("Could not target example row");
     });
+
+    it("excludes a separately mapped Examples block from an ordinary Test Explorer outline run", async () => {
+      const commands: string[] = [];
+      const mappedBlock: ScenarioRef = {
+        filePath: fixture.featurePath,
+        line: 10,
+        name: "Math examples",
+        kind: "examplesBlock",
+        outlineName: "Math",
+      };
+      const { provider, controller, artifactStore } = buildProvider(
+        recordingShell(commands),
+        undefined,
+        false,
+        [mappedBlock]
+      );
+      await provider.discoverTests();
+      const outline = controller.find(`${fixture.featurePath}${OUTLINE_ID_SEPARATOR}7:Math`)!;
+
+      await runItem(controller, outline);
+
+      expect(commands).toEqual([]);
+      expect(artifactStore.latest()).toMatchObject({ state: "partial", results: [] });
+      expect(controller.runs.at(-1)?.outcome.output.join(""))
+        .toContain("owns no parsed rows");
+    });
   });
 
   it("maps outline examples by their .feature line (Example #N → passed/failed)", async () => {
@@ -808,7 +904,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], JSON.stringify({ suites: [] }));
       return { success: false, output: "", error: "Error: No tests found", returnCode: 1 };
     };
-    const { provider, controller } = buildProvider(shell);
+    const { provider, controller } = buildProvider(shell, undefined, true);
     await provider.discoverTests();
 
     const leaf = controller.find(`${fixture.featurePath}:4`);
@@ -844,9 +940,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       reportPath,
       reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "passed" }])
     );
-    vscode.debug.__fireTerminate({
-      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
-    });
+    finishDebugSession(config);
 
     await pending;
     const run = controller.runs.at(-1)!;
@@ -877,9 +971,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     ) as Record<string, unknown>;
     report["errors"] = [{ message: "worker teardown failed" }];
     fs.writeFileSync(reportPath, JSON.stringify(report));
-    vscode.debug.__fireTerminate({
-      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
-    });
+    finishDebugSession(config);
 
     await pending;
 
@@ -910,9 +1002,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
     const config = vscode.debug.__startDebuggingCalls[0]!.config;
     const reportPath = (config["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
-    vscode.debug.__fireTerminate({
-      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
-    });
+    finishDebugSession(config);
 
     await pending;
     const run = controller.runs.at(-1)!;
@@ -966,9 +1056,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const config = vscode.debug.__startDebuggingCalls[0]!.config;
     const reportPath = (config["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
     fs.writeFileSync(reportPath, "{broken");
-    vscode.debug.__fireTerminate({
-      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
-    });
+    finishDebugSession(config);
 
     await pending;
     expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
@@ -1000,9 +1088,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
         { title: "Example #2", line: 24, status: "failed" },
       ])
     );
-    vscode.debug.__fireTerminate({
-      configuration: { [BreakpointMirror.SESSION_KEY]: config[BreakpointMirror.SESSION_KEY] },
-    });
+    finishDebugSession(config);
 
     await pending;
     const run = controller.runs.at(-1)!;
@@ -1037,21 +1123,17 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(run.outcome.ended).toBe(false);
     expect(handlerDone).toBe(false);
 
-    const sessionKey =
-      vscode.debug.__startDebuggingCalls[0]!.config[BreakpointMirror.SESSION_KEY];
-    expect(typeof sessionKey).toBe("string");
-    vscode.debug.__fireTerminate({
-      configuration: { [BreakpointMirror.SESSION_KEY]: sessionKey },
-    });
+    const config = vscode.debug.__startDebuggingCalls[0]!.config;
+    expect(typeof config[BreakpointMirror.SESSION_KEY]).toBe("string");
+    finishDebugSession(config);
 
     await pending;
     expect(handlerDone).toBe(true);
     expect(run.outcome.ended).toBe(true);
   });
 
-  it("cancelling a debug run ends it without waiting for the session, skips the items, and seals the batch cancelled", async () => {
-    // No terminate event is ever fired: the stop button alone has to bring the session down and
-    // settle the run, otherwise the handler waits forever and blocks every later run.
+  it("fails closed when debug cancellation cannot confirm session termination", async () => {
+    // No terminate event is ever fired, so cancellation cannot claim the debug process stopped.
     const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
     const { provider, controller, artifactStore } = buildProvider(shell);
     await provider.discoverTests();
@@ -1075,13 +1157,15 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
     const run = controller.runs.at(-1)!;
     expect(run.outcome.ended).toBe(true);
-    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:4`);
-    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:12`);
-    expect(run.outcome.failed).toEqual([]);
+    expect(run.outcome.skipped).toEqual([]);
+    expect(run.outcome.failed).toEqual([
+      { id: `${fixture.featurePath}:4`, message: expect.stringContaining("termination was not confirmed") },
+      { id: `${fixture.featurePath}:12`, message: expect.stringContaining("termination was not confirmed") },
+    ]);
     // The second item never launches a session of its own.
     expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
     expect(vscode.debug.__stopDebuggingCalls).toEqual([root]);
-    expect(artifactStore.latest()?.state).toBe("cancelled");
+    expect(artifactStore.latest()?.state).toBe("partial");
     expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
   });
 
@@ -1221,11 +1305,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(run.outcome.started).toContain(`${fixture.featurePath}:12`);
     expect(run.outcome.started).toContain(`${fixture.featurePath}:13`);
 
-    const sessionKey =
-      vscode.debug.__startDebuggingCalls[0]!.config[BreakpointMirror.SESSION_KEY];
-    vscode.debug.__fireTerminate({
-      configuration: { [BreakpointMirror.SESSION_KEY]: sessionKey },
-    });
+    finishDebugSession(vscode.debug.__startDebuggingCalls[0]!.config);
     await pending;
   });
 
@@ -1247,8 +1327,21 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     ].join("\n");
 
     beforeEach(() => {
+      fs.writeFileSync(fixture.featurePath, SUBSTITUTED_FEATURE);
       (vscode.workspace.fs as { readFile: unknown }).readFile = async (): Promise<Uint8Array> =>
         new TextEncoder().encode(SUBSTITUTED_FEATURE);
+      // The run target is resolved from the generated file before the report parser exercises its
+      // own path and substituted-title fallbacks. Keep this map aligned with the feature above.
+      fs.writeFileSync(
+        fixture.genSpecPath,
+        [
+          "// Generated from: features/test.feature",
+          "const bddFileData = [ // bdd-data-start",
+          '  {"pwTestLine":14,"pickleLine":8},',
+          '  {"pwTestLine":20,"pickleLine":9},',
+          "]; // bdd-data-end",
+        ].join("\n")
+      );
     });
 
     function substitutedReport(rootDir: string): string {
@@ -1313,16 +1406,6 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     });
 
     it("still maps by .feature line when the generated spec is resolvable (substituted-name lookups don't interfere)", async () => {
-      fs.writeFileSync(
-        fixture.genSpecPath,
-        [
-          "// Generated from: features/test.feature",
-          "const bddFileData = [ // bdd-data-start",
-          '  {"pwTestLine":14,"pickleLine":8},',
-          '  {"pwTestLine":20,"pickleLine":9},',
-          "];",
-        ].join("\n")
-      );
       const { provider, controller } = buildProvider(
         substitutedShell(path.join(fixture.root, ".features-gen"))
       );
@@ -1337,10 +1420,10 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     });
   });
 
-  describe("incremental rediscovery on watcher events (FeatureBased)", () => {
+  describe("selected-gateway rediscovery on watcher events (FeatureBased)", () => {
     const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
 
-    it("re-parses only the changed file, without re-globbing the workspace", async () => {
+    it("refreshes the selected gateway and replaces the changed file", async () => {
       const { provider, controller, discoveryManager } = buildProvider(shell);
       await provider.discoverTests();
       expect(controller.find(`${fixture.featurePath}:12`), "outline example seeded").toBeTruthy();
@@ -1358,8 +1441,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
         "  Scenario: Brand new scenario", // line 7
         "    Given something new",
       ].join("\n");
-      (vscode.workspace.fs as { readFile: unknown }).readFile = async (): Promise<Uint8Array> =>
-        new TextEncoder().encode(changed);
+      fs.writeFileSync(fixture.featurePath, changed);
 
       await vscode.__fireFileWatcher("change", vscode.Uri.file(fixture.featurePath));
 
@@ -1367,8 +1449,8 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       // The old outline example rows are gone from both the tree and the id→scenario map.
       expect(controller.find(`${fixture.featurePath}:12`)).toBeUndefined();
       expect(provider.testIdToScenarioMap.has(`${fixture.featurePath}:12`)).toBe(false);
-      // No discovery sweep, the whole point of the incremental path.
-      expect(discoveryManager.discoverTestFiles).not.toHaveBeenCalled();
+      expect(discoveryManager.discoverTestFiles).toHaveBeenCalledOnce();
+      expect(discoveryManager.discoverTestFiles).toHaveBeenCalledWith({ forceRefresh: true });
     });
 
     it("removes the node and its state when a file is deleted", async () => {
@@ -1376,13 +1458,14 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       await provider.discoverTests();
       expect(controller.find(fixture.featurePath)).toBeTruthy();
       discoveryManager.discoverTestFiles.mockClear();
+      discoveryManager.discoverTestFiles.mockResolvedValue([]);
 
       await vscode.__fireFileWatcher("delete", vscode.Uri.file(fixture.featurePath));
 
       expect(controller.find(fixture.featurePath)).toBeUndefined();
       expect(controller.find(`${fixture.featurePath}:4`)).toBeUndefined();
       expect(provider.testIdToScenarioMap.has(`${fixture.featurePath}:4`)).toBe(false);
-      expect(discoveryManager.discoverTestFiles).not.toHaveBeenCalled();
+      expect(discoveryManager.discoverTestFiles).toHaveBeenCalledWith({ forceRefresh: true });
     });
 
     it("removes the node when a changed file no longer parses", async () => {
@@ -1390,8 +1473,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       await provider.discoverTests();
       expect(controller.find(fixture.featurePath)).toBeTruthy();
 
-      (vscode.workspace.fs as { readFile: unknown }).readFile = async (): Promise<Uint8Array> =>
-        new TextEncoder().encode("this text has no Feature keyword");
+      fs.writeFileSync(fixture.featurePath, "this text has no Feature keyword");
 
       await vscode.__fireFileWatcher("change", vscode.Uri.file(fixture.featurePath));
 
@@ -1409,7 +1491,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
       expect(controller.find(genCopy)).toBeUndefined();
       expect(controller.find(fixture.featurePath), "source node untouched").toBeTruthy();
-      expect(discoveryManager.discoverTestFiles).not.toHaveBeenCalled();
+      expect(discoveryManager.discoverTestFiles).toHaveBeenCalledWith({ forceRefresh: true });
     });
 
     it("falls back to a full refresh under a non-FeatureBased strategy", async () => {

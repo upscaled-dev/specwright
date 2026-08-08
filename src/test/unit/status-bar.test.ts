@@ -32,6 +32,7 @@ class FakeGateway {
 
 function completion(over: Partial<RunCompletion> = {}): RunCompletion {
   return {
+    identity: { engine: "legacy-direct", schemaProfile: "legacy.v1" },
     state: "complete",
     results: [],
     output: "",

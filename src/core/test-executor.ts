@@ -24,7 +24,6 @@ import {
   workspaceFolderRootFor,
 } from "../utils/working-dir";
 import { BreakpointMirror } from "./breakpoint-mirror";
-import { parseBddFileData, resolveGeneratedSpecPath } from "../parsers/bdd-file-data-parser";
 import {
   scopeArtifactDetails,
   type ArtifactCaptureTarget,
@@ -33,10 +32,17 @@ import { openLiveRunSession, type LiveRunHandle } from "./live-run-session";
 import type { RunProgressObserver } from "./run-progress";
 import { TemporaryReport } from "./temporary-report";
 import {
+  resolveExecutableCommand,
   runBoundedCommand,
   type BoundedCommandResult,
   type CommandOutputHandler,
 } from "./bounded-command-runner";
+import { terminationLease, type TerminationLease } from "./execution-admission";
+import {
+  exactGeneratedTargets,
+  needsGeneratedSpecs,
+  verifiedGeneratedSpecPaths,
+} from "./generated-test-target";
 
 /**
  * A test run result enriched with the per-scenario outcomes parsed from Playwright's JSON
@@ -52,6 +58,8 @@ export type RunOutputResult = TestRunResult & {
   outputStreamed?: boolean;
   /** The executor could not prove its process tree ended; execution admission must stay closed. */
   admissionUnsafe?: boolean;
+  /** Durable recovery evidence for an unsafe termination. */
+  terminationLease?: TerminationLease;
 };
 
 function infrastructureResult(
@@ -59,7 +67,8 @@ function infrastructureResult(
   failure: string,
   output = "",
   outputStreamed = false,
-  admissionUnsafe = false
+  admissionUnsafe = false,
+  lease?: TerminationLease
 ): RunOutputResult {
   return {
     success: false,
@@ -69,7 +78,20 @@ function infrastructureResult(
     infrastructureFailure: failure,
     ...(outputStreamed ? { outputStreamed: true } : {}),
     ...(admissionUnsafe ? { admissionUnsafe: true } : {}),
+    ...(lease ? { terminationLease: lease } : {}),
   };
+}
+
+function generationRequiredFailure(): string {
+  return "An exact test target needs current generated specs, but " +
+    "'playwrightBddRunner.bddgenCommand' is empty. Configure it to run bddgen, or ensure " +
+    "'playwrightBddRunner.preRunCommand' produces current specs. No broader target was executed.";
+}
+
+function missingGeneratedSpecsFailure(filePath: string, action: "executed" | "launched"): string {
+  return `Could not find generated specs for ${filePath} after bddgen. Check ` +
+    "'playwrightBddRunner.featuresGenDir' and the bddgen features configuration. " +
+    `No broader target was ${action}.`;
 }
 
 interface ScenarioPlaywrightAttempt {
@@ -107,11 +129,14 @@ export type ShellRunner = (
   workingDir: string,
   extraEnv?: NodeJS.ProcessEnv,
   signal?: AbortSignal,
-  onOutput?: CommandOutputHandler
+  onOutput?: CommandOutputHandler,
+  shell?: boolean
 ) => Promise<CommandResult>;
 
+export type ExecutableCommandResolver = typeof resolveExecutableCommand;
+
 /**
- * Drives playwright-bdd via captured shell commands and parses the JSON report so scenario
+ * Drives playwright-bdd via captured executable arguments and parses the JSON report so scenario
  * status can be projected consistently to every UI surface.
  *
  * The final JSON reporter remains authoritative. A lightweight additional reporter writes
@@ -128,6 +153,9 @@ export class TestExecutor {
   private readonly defaultShellRunner: ShellRunner;
   private shellRunner: ShellRunner;
   private readonly mirror: BreakpointMirror;
+  private readonly artifactSinks = new Map<number, {
+    contributeShard(handle: number, capture: import("../traceability/run-artifact-store").ShardCapture): void;
+  }>();
 
   public static create(
     workspace?: typeof vscode.workspace,
@@ -137,9 +165,20 @@ export class TestExecutor {
     logger?: Logger,
     playwrightJsonParser?: PlaywrightJsonParser,
     shellRunner?: ShellRunner,
-    mirror?: BreakpointMirror
+    mirror?: BreakpointMirror,
+    commandResolver?: ExecutableCommandResolver
   ): TestExecutor {
-    return new TestExecutor(workspace, window, _debug, config, logger, playwrightJsonParser, shellRunner, mirror);
+    return new TestExecutor(
+      workspace,
+      window,
+      _debug,
+      config,
+      logger,
+      playwrightJsonParser,
+      shellRunner,
+      mirror,
+      commandResolver
+    );
   }
 
   constructor(
@@ -150,7 +189,8 @@ export class TestExecutor {
     logger?: Logger,
     playwrightJsonParser?: PlaywrightJsonParser,
     shellRunner?: ShellRunner,
-    mirror?: BreakpointMirror
+    mirror?: BreakpointMirror,
+    private readonly commandResolver: ExecutableCommandResolver = resolveExecutableCommand
   ) {
     this.workspace = workspace;
     this.window = window;
@@ -158,8 +198,8 @@ export class TestExecutor {
     this.config = config ?? ExtensionConfig.create();
     this.logger = logger ?? Logger.create();
     this.playwrightJsonParser = playwrightJsonParser ?? PlaywrightJsonParser.create(this.logger);
-    this.defaultShellRunner = (command, workingDir, extraEnv, signal, onOutput) =>
-      this.spawnCommand(command, workingDir, extraEnv, signal, onOutput);
+    this.defaultShellRunner = (command, workingDir, extraEnv, signal, onOutput, shell) =>
+      this.spawnCommand(command, workingDir, extraEnv, signal, onOutput, shell);
     this.shellRunner = shellRunner ?? this.defaultShellRunner;
     // Eager, not lazy: constructing the mirror subscribes to onDidChangeBreakpoints, which
     // forces VS Code to initialize its lazily-populated `debug.breakpoints` before first use.
@@ -183,6 +223,15 @@ export class TestExecutor {
     this.shellRunner = this.defaultShellRunner;
   }
 
+  public registerArtifactSink(
+    handle: number,
+    sink: { contributeShard(handle: number, capture: import("../traceability/run-artifact-store").ShardCapture): void }
+  ): { dispose(): void } {
+    if (this.artifactSinks.has(handle)) {throw new Error(`Artifact batch ${handle} is already registered.`);}
+    this.artifactSinks.set(handle, sink);
+    return { dispose: () => {this.artifactSinks.delete(handle);} };
+  }
+
   public setForceParallel(value: boolean, workers?: number): void {
     this.commandBuilder().setForceParallel(value, workers);
   }
@@ -193,7 +242,8 @@ export class TestExecutor {
 
   public async debugScenario(options: TestExecutionOptions): Promise<void> {
     try {
-      await this.launchDebugScenario(options);
+      const lease = await this.launchDebugScenario(options);
+      if (lease) {throw new Error(lease.failure);}
     } catch (error) {
       const msg = errMsg(error);
       this.logger.error(`Failed to start debug session: ${msg}`, {
@@ -205,18 +255,29 @@ export class TestExecutor {
     }
   }
 
-  private async launchDebugScenario(options: TestExecutionOptions): Promise<void> {
+  private async launchDebugScenario(options: TestExecutionOptions): Promise<TerminationLease | undefined> {
     let mirrorId: string | undefined;
     try {
-      // Run the targeted playwright command under VS Code's JS debugger via a `node-terminal`
-      // configuration. js-debug runs the shell command in a terminal and auto-attaches to the
-      // spawned node processes, so breakpoints in the user's step-definition .ts files are
-      // actually hit. We deliberately avoid Playwright's `--debug` (Inspector) flag here: that
-      // pauses in the Inspector, not in VS Code.
+      // Run the targeted playwright command under VS Code's JS debugger with a structured runtime
+      // executable and arguments. Child-process auto-attach reaches Playwright's worker processes,
+      // so breakpoints in the user's step-definition .ts files are actually hit. We deliberately
+      // avoid Playwright's `--debug` (Inspector) flag here: that pauses in the Inspector, not VS Code.
       //
       // bddgen runs separately FIRST (not chained into the debugged command) so the generated
       // specs exist before we mirror feature-file breakpoints into them.
       const workingDir = this.getWorkingDirectory(options.filePath);
+      const preRunFailure = await this.runPreRunHook(workingDir, options.signal, options.progress);
+      if (preRunFailure) {
+        if (preRunFailure.terminationFailure) {
+          return preRunFailure.terminationLease ?? terminationLease({
+            kind: "debug-session",
+            failure: preRunFailure.terminationFailure,
+          });
+        }
+        if (options.signal?.aborted) {return undefined;}
+        throw new Error(preRunFailure.failure);
+      }
+      if (options.signal?.aborted) {return undefined;}
       const { bddgenCommand } = this.commandBuilder().buildDebugCommandParts(options);
 
       if (bddgenCommand !== undefined) {
@@ -228,30 +289,36 @@ export class TestExecutor {
           options.progress?.onOutput
         );
         // A cancelled bddgen reports failure like any other non-zero exit; stopping is not an error.
-        if (options.signal?.aborted) { return; }
+        if (result.terminationFailure) {
+          return result.terminationLease ?? terminationLease({
+            kind: "debug-session",
+            failure: result.terminationFailure,
+          });
+        }
+        if (options.signal?.aborted) {return undefined;}
         if (!result.success) {
           const detail = result.error.trim() === "" ? result.output : result.error;
           throw new Error(`bddgen failed (exit code ${result.returnCode}): ${detail}`);
         }
       }
-
-      const specPath = this.resolveSpecPath(workingDir, options.filePath);
-      if (specPath === undefined) {
-        throw new Error(
-          `Could not map ${options.filePath} into the working directory ${workingDir}. ` +
-            "No broader debug target was launched."
-        );
+      if (bddgenCommand === undefined && this.needsFreshGeneratedSpecs(options, workingDir)) {
+        throw new Error(generationRequiredFailure());
       }
-      mirrorId = this.mirror.mirrorBreakpoints(options.filePath, specPath);
+
+      const specPaths = this.resolveSpecPaths(workingDir, options.filePath);
+      if (specPaths.length === 0) {
+        throw new Error(missingGeneratedSpecsFailure(options.filePath, "launched"));
+      }
+      mirrorId = this.mirror.mirrorBreakpoints(options.filePath, specPaths);
 
       // Resolve the precise spec target from the freshly generated spec (bddgen just ran), so a
       // single Scenario Outline row debugs exactly one test instead of grepping its title. The
       // same exact-target contract as a run: a plain scenario whose line cannot be recovered
       // refuses instead of debugging every title match, and every grep shape (whole outline,
       // whole feature) is scoped to this feature's generated spec by positional filter.
-      const enriched = this.withSpecLineTarget(options, specPath);
+      const enriched = this.withSpecLineTargets(options, specPaths);
       if (
-        enriched.specLineTarget === undefined &&
+        enriched.specLineTargets === undefined &&
         options.scenarioName !== undefined &&
         options.outlineName === undefined
       ) {
@@ -262,9 +329,10 @@ export class TestExecutor {
         );
       }
       const { playwrightCommand } = this.commandBuilder().buildDebugCommandParts(
-        enriched.specLineTarget !== undefined
+        enriched.specLineTargets !== undefined
           ? enriched
-          : { ...enriched, specFileFilter: toPathFilterRegex(workingDir, specPath) }
+          : { ...enriched, specFileFilters: specPaths.map((specPath) =>
+            toPathFilterRegex(workingDir, specPath)) }
       );
 
       const folder =
@@ -274,14 +342,18 @@ export class TestExecutor {
       // Cancelled before launch: nothing will ever terminate, so release the mirror here.
       if (options.signal?.aborted) {
         this.mirror.release(mirrorId);
-        return;
+        return undefined;
       }
 
+      const debugCommand = this.commandResolver(playwrightCommand, workingDir);
       const started = await this.debug.startDebugging(folder, {
-        type: "node-terminal",
+        type: "node",
         request: "launch",
         name: "Debug Playwright-BDD Scenario",
-        command: playwrightCommand,
+        runtimeExecutable: debugCommand.executable,
+        runtimeArgs: [...debugCommand.args],
+        console: "integratedTerminal",
+        autoAttachChildProcesses: true,
         cwd: workingDir,
         ...(options.jsonReportPath
           ? { env: { PLAYWRIGHT_JSON_OUTPUT_NAME: options.jsonReportPath } }
@@ -296,22 +368,13 @@ export class TestExecutor {
       if (options.waitForSessionEnd) {
         // The testing service treats a Debug-kind run as finished when its handler resolves;
         // resolving at session start tears the run down before the debuggee attaches.
-        const id = mirrorId;
-        const onAbort = (): void => {
-          this.mirror.forceStop(id).catch(() => { /* the mirror releases either way */ });
-        };
-        options.signal?.addEventListener("abort", onAbort, { once: true });
-        // An abort that landed while startDebugging was awaited never reaches a listener added
-        // after the fact, and the wait would hang forever.
-        if (options.signal?.aborted) { onAbort(); }
-        try {
-          await this.waitForDebugCompletion(mirrorId, options.jsonReportPath);
-        } finally {
-          // One signal covers every item of a Test Explorer run, so listeners pile up per item
-          // unless each one is taken back off.
-          options.signal?.removeEventListener("abort", onAbort);
-        }
+        return await this.waitForDebugCompletion(
+          mirrorId,
+          options.jsonReportPath,
+          options.signal
+        );
       }
+      return undefined;
     } catch (error) {
       // No session will ever terminate for a failed launch, so the mirror must be released
       // here or the mirrored breakpoints leak until deactivation.
@@ -329,8 +392,6 @@ export class TestExecutor {
     const start = Date.now();
     const workingDir = this.getWorkingDirectory(options.filePath);
     const signal = options.signal;
-
-
     const preRunFailure = await this.runPreRunHook(workingDir, signal, options.progress);
     if (preRunFailure) {
       if (signal?.aborted) {
@@ -340,7 +401,8 @@ export class TestExecutor {
           [],
           "",
           false,
-          preRunFailure.terminationFailure
+          preRunFailure.terminationFailure,
+          preRunFailure.terminationLease
         );
       }
       this.contributeArtifactShard(
@@ -357,7 +419,8 @@ export class TestExecutor {
         preRunFailure.failure,
         "",
         false,
-        preRunFailure.terminationFailure !== undefined
+        preRunFailure.terminationFailure !== undefined,
+        preRunFailure.terminationLease
       );
     }
 
@@ -383,7 +446,8 @@ export class TestExecutor {
             [],
             gen.output,
             gen.outputStreamed,
-            gen.terminationFailure
+            gen.terminationFailure,
+            gen.terminationLease
           );
         }
         this.publishBddgenDiagnostics(gen, workingDir);
@@ -403,7 +467,8 @@ export class TestExecutor {
             `bddgen failed (exit code ${gen.returnCode}): ${detail}`,
             gen.output,
             gen.outputStreamed,
-            gen.terminationFailure !== undefined
+            gen.terminationFailure !== undefined,
+            gen.terminationLease
           );
         }
       } catch (error) {
@@ -420,17 +485,29 @@ export class TestExecutor {
         return infrastructureResult(start, errMsg(error));
       }
     }
+    if (bddgenCommand === undefined && this.needsFreshGeneratedSpecs(options, workingDir)) {
+      this.contributeArtifactShard(
+        options.artifactBatch,
+        workingDir,
+        "exact scenario target resolution",
+        false,
+        1,
+        [],
+        artifactTarget
+      );
+      return infrastructureResult(start, generationRequiredFailure());
+    }
 
     let enriched: TestExecutionOptions;
     try {
-      enriched = this.withSpecLineTarget(options);
+      enriched = this.withSpecLineTargets(options);
       // A run may proceed without an exact spec line only as a whole outline (title, no line),
       // whose grep intentionally covers every row. A plain scenario names one exact test even when
       // its line is stale or missing (the parse-miss line-0 shape), and its name grep would search
       // the whole suite; no exact identity, no execution. Debug keeps its own name fallback:
       // buildDebugCommandParts narrows by title under the debugger the user is driving.
       if (
-        enriched.specLineTarget === undefined &&
+        enriched.specLineTargets === undefined &&
         options.scenarioName !== undefined &&
         options.outlineName === undefined
       ) {
@@ -443,16 +520,15 @@ export class TestExecutor {
       // The whole-outline title grep intentionally covers every row of THIS outline, but unscoped
       // it also runs a same-titled outline in another feature file. The generated spec positional
       // pins it to its own feature; a feature that cannot map to a spec has no runnable identity.
-      if (enriched.specLineTarget === undefined && options.outlineName !== undefined) {
-        const specPath = this.resolveSpecPath(workingDir, options.filePath);
-        if (specPath === undefined) {
-          throw new Error(
-            `Could not scope the outline "${options.outlineName}" to its generated spec: ` +
-              `${options.filePath} is outside the working directory ${workingDir}. ` +
-              "No broader target was executed."
-          );
+      if (enriched.specLineTargets === undefined && options.outlineName !== undefined) {
+        const specPaths = this.resolveSpecPaths(workingDir, options.filePath);
+        if (specPaths.length === 0) {
+          throw new Error(missingGeneratedSpecsFailure(options.filePath, "executed"));
         }
-        enriched = { ...enriched, specFileFilter: toPathFilterRegex(workingDir, specPath) };
+        enriched = {
+          ...enriched,
+          specFileFilters: specPaths.map((specPath) => toPathFilterRegex(workingDir, specPath)),
+        };
       }
     } catch (error) {
       const failure = errMsg(error);
@@ -474,60 +550,78 @@ export class TestExecutor {
     // is not a safe fallback: for an outline row it runs every sibling, and for a plain scenario it
     // can match a joined Feature/Rule/title chain the executor cannot prove unique.
     const specLineTargetWasAdded =
-      enriched.specLineTarget !== undefined && options.specLineTarget === undefined;
-    if (specLineTargetWasAdded && !signal?.aborted && foundNoTests(attempt.result)) {
+      enriched.specLineTargets !== undefined && options.specLineTargets === undefined;
+    if (specLineTargetWasAdded && !signal?.aborted && !attempt.result.admissionUnsafe && foundNoTests(attempt.result)) {
+      if (bddgenCommand === undefined) {
+        this.contributeArtifactShard(
+          options.artifactBatch,
+          workingDir,
+          attempt.command,
+          false,
+          attempt.exitCode,
+          [],
+          artifactTarget
+        );
+        return infrastructureResult(
+          start,
+          generationRequiredFailure(),
+          attempt.result.output,
+          attempt.result.outputStreamed
+        );
+      }
       this.logger.warn(
-        `Playwright found no tests for the spec-line target ${enriched.specLineTarget}; ` +
+        `Playwright found no tests for the spec-line targets ${enriched.specLineTargets?.join(", ")}; ` +
           "regenerating and re-resolving the same source row."
       );
-      if (bddgenCommand !== undefined) {
-        const refreshed = this.withBinaryHint(
-          await this.shellRunner(
-            bddgenCommand,
-            workingDir,
-            undefined,
-            signal,
-            options.progress?.onOutput
-          ),
-          bddgenCommand
+      const refreshCommand = bddgenCommand;
+      const refreshed = this.withBinaryHint(
+        await this.shellRunner(
+          refreshCommand,
+          workingDir,
+          undefined,
+          signal,
+          options.progress?.onOutput
+        ),
+        refreshCommand
+      );
+      if (signal?.aborted) {
+        return this.cancelledResult(
+          start,
+          undefined,
+          [],
+          refreshed.output,
+          refreshed.outputStreamed,
+          refreshed.terminationFailure,
+          refreshed.terminationLease
         );
-        if (signal?.aborted) {
-          return this.cancelledResult(
-            start,
-            undefined,
-            [],
-            refreshed.output,
-            refreshed.outputStreamed,
-            refreshed.terminationFailure
-          );
-        }
-        this.publishBddgenDiagnostics(refreshed, workingDir);
-        if (!refreshed.success) {
-          const detail = refreshed.error.trim() === "" ? refreshed.output : refreshed.error;
-          this.contributeArtifactShard(
-            options.artifactBatch,
-            workingDir,
-            bddgenCommand,
-            false,
-            refreshed.returnCode,
-            [],
-            artifactTarget
-          );
-          return infrastructureResult(
-            start,
-            `bddgen failed while refreshing the exact target (exit code ${refreshed.returnCode}): ${detail}`,
-            refreshed.output,
-            refreshed.outputStreamed,
-            refreshed.terminationFailure !== undefined
-          );
-        }
+      }
+      this.publishBddgenDiagnostics(refreshed, workingDir);
+      if (!refreshed.success) {
+        const detail = refreshed.error.trim() === "" ? refreshed.output : refreshed.error;
+        this.contributeArtifactShard(
+          options.artifactBatch,
+          workingDir,
+          refreshCommand,
+          false,
+          refreshed.returnCode,
+          [],
+          artifactTarget
+        );
+        return infrastructureResult(
+          start,
+          `bddgen failed while refreshing the exact target (exit code ${refreshed.returnCode}): ${detail}`,
+          refreshed.output,
+          refreshed.outputStreamed,
+          refreshed.terminationFailure !== undefined,
+          refreshed.terminationLease
+        );
       }
       let refreshedTarget: TestExecutionOptions;
       try {
-        refreshedTarget = this.withSpecLineTarget(options);
+        refreshedTarget = this.withSpecLineTargets(options);
       } catch (error) {
         const failure =
-          `Playwright found no tests for ${enriched.specLineTarget}, and the exact source row ` +
+          `Playwright found no tests for ${enriched.specLineTargets?.join(", ")}, and the exact source row ` +
           `could not be re-resolved: ${errMsg(error)}`;
         this.contributeArtifactShard(
           options.artifactBatch,
@@ -606,7 +700,8 @@ export class TestExecutor {
             live?.recoverResults([]),
             result.output,
             result.outputStreamed,
-            result.terminationFailure
+            result.terminationFailure,
+            result.terminationLease
           ),
           command,
           exitCode: result.returnCode,
@@ -652,7 +747,7 @@ export class TestExecutor {
     progress?: RunProgressObserver
   ): Promise<RunOutputResult> {
     return this.runWithJsonReport(
-      () => this.commandBuilder().buildTagCommand(tag),
+      () => this.commandBuilder().buildTagCommandParts(tag),
       undefined,
       signal,
       artifactBatch,
@@ -676,7 +771,7 @@ export class TestExecutor {
   ): Promise<RunOutputResult> {
     const pathFilter = toPathFilterRegex(this.resolveWorkingDirectory(target), target);
     return this.runWithJsonReport(
-      () => this.commandBuilder().buildPathFilterCommand(pathFilter, tagExpression, titles),
+      () => this.commandBuilder().buildPathFilterCommandParts(pathFilter, tagExpression, titles),
       target,
       signal,
       artifactBatch,
@@ -690,7 +785,7 @@ export class TestExecutor {
     progress?: RunProgressObserver
   ): Promise<RunOutputResult> {
     return this.runWithJsonReport(
-      () => this.commandBuilder().buildAllTestsCommand(),
+      () => this.commandBuilder().buildAllTestsCommandParts(),
       undefined,
       signal,
       artifactBatch,
@@ -706,11 +801,23 @@ export class TestExecutor {
     const workingDir = this.getWorkingDirectory(options.filePath);
     const report = this.createTemporaryReport();
     try {
-      await this.launchDebugScenario({
+      const termination = await this.launchDebugScenario({
         ...options,
         waitForSessionEnd: true,
         jsonReportPath: report.jsonPath,
       });
+      if (termination) {
+        this.contributeArtifactShard(
+          options.artifactBatch,
+          workingDir,
+          "playwright debug run",
+          false,
+          1,
+          [],
+          artifactTarget
+        );
+        return infrastructureResult(start, termination.failure, "", false, true, termination);
+      }
       if (options.signal?.aborted) {
         return await this.cancelledDebugResult(start, workingDir, report.jsonPath);
       }
@@ -782,24 +889,13 @@ export class TestExecutor {
     return this.cancelledResult(start, workingDir, details);
   }
 
-  public async discoverFeatureFiles(): Promise<string[]> {
-    try {
-      const pattern = this.config.testFilePattern;
-      if (!pattern || pattern.trim() === "") {
-        throw new Error("Test file pattern is empty or invalid");
+  public async dispose(): Promise<void> {
+    const results = await this.mirror.shutdown();
+    for (const result of results) {
+      if (!result.confirmed) {
+        this.logger.error(result.failure);
       }
-      const files = await this.workspace.findFiles(pattern, "**/node_modules/**");
-      return files?.map((f) => f.fsPath) ?? [];
-    } catch (error) {
-      const msg = errMsg(error);
-      this.logger.error(`Failed to discover feature files: ${msg}`);
-      await this.window.showErrorMessage(`Test discovery failed: ${msg}`);
-      return [];
     }
-  }
-
-  public dispose(): void {
-    this.mirror.dispose();
   }
 
   /**
@@ -807,16 +903,16 @@ export class TestExecutor {
    * line intentionally keeps the command builder's name path (for example, a whole outline). A
    * line-bearing target must never widen to that path when exact resolution fails.
    */
-  private withSpecLineTarget(
+  private withSpecLineTargets(
     options: TestExecutionOptions,
-    specPath?: string
+    specPaths?: readonly string[]
   ): TestExecutionOptions {
-    if (options.specLineTarget !== undefined) {
+    if (options.specLineTargets !== undefined) {
       return options;
     }
-    const resolution = this.resolveSpecLineTarget(options.filePath, options.lineNumber, specPath);
-    if ("target" in resolution) {
-      return { ...options, specLineTarget: resolution.target };
+    const resolution = this.resolveSpecLineTargets(options.filePath, options.lineNumber, specPaths);
+    if ("targets" in resolution) {
+      return { ...options, specLineTargets: resolution.targets };
     }
     if (
       options.lineNumber !== undefined &&
@@ -831,77 +927,53 @@ export class TestExecutor {
     return options;
   }
 
-  /**
-   * Resolve `<generatedSpec>:<pwTestLine>` for a single scenario/outline row by reading the
-   * generated spec's `bddFileData` (pickleLine→pwTestLine). This is the only reliable way to target
-   * one Scenario Outline example row, since playwright-bdd substitutes example values into the test
-   * title (so no grep on the source title can isolate a row). Returns a `reason` (caller falls
-   * back to name-grep) when there's no line, the spec can't be located/read, or the line isn't
-   * mapped.
-   */
-  /**
-   * Locate the generated spec for a feature, logging when several BDD projects generated it
-   * (the run/debug then covers only the targeted project, which the user should know about).
-   */
-  private resolveSpecPath(workingDir: string, filePath: string): string | undefined {
-    return resolveGeneratedSpecPath(
+  private resolveSpecPaths(workingDir: string, filePath: string): string[] {
+    const resolution = verifiedGeneratedSpecPaths(
       workingDir,
       this.config.featuresGenDir,
-      filePath,
-      (chosen, candidates) => {
-        this.logger.warn(
-          `Multiple generated specs match ${filePath}: ${candidates.join(", ")}. ` +
-            `Targeting the newest, ${chosen}; the scenario runs only in that BDD project. ` +
-            `To always target one project, point 'playwrightBddRunner.featuresGenDir' at its ` +
-            `output dir (e.g. ".features-gen/browser").`
-        );
-      }
+      filePath
+    );
+    if ("reason" in resolution) {
+      throw new Error(
+        `Could not use generated specs for ${filePath}: ${resolution.reason}. ` +
+          "No broader target was executed."
+      );
+    }
+    return resolution.paths;
+  }
+
+  private needsFreshGeneratedSpecs(
+    options: TestExecutionOptions,
+    workingDir: string
+  ): boolean {
+    return needsGeneratedSpecs(
+      workingDir,
+      this.config.featuresGenDir,
+      options.filePath,
+      options.lineNumber,
+      options.outlineName,
+      options.scenarioName,
+      options.specLineTargets !== undefined
     );
   }
 
-  private resolveSpecLineTarget(
+  private resolveSpecLineTargets(
     filePath: string,
     lineNumber?: number,
-    specPathArg?: string
-  ): { target: string } | { reason: string } {
-    if (lineNumber === undefined || lineNumber <= 0) {
-      return { reason: "the test item has no line number" };
-    }
+    specPathArgs?: readonly string[]
+  ): { targets: string[] } | { reason: string } {
     const workingDir = this.getWorkingDirectory(filePath);
-    const specPath = specPathArg ?? this.resolveSpecPath(workingDir, filePath);
-    if (!specPath) {
-      return { reason: `the feature is outside the working directory ${workingDir}` };
-    }
-    let content: string;
-    try {
-      content = fs.readFileSync(specPath, "utf8");
-    } catch {
-      return {
-        reason:
-          `no generated spec at ${specPath}; ` +
-          "check that 'playwrightBddRunner.featuresGenDir' matches your bddgen outputDir",
-      };
-    }
-    const pwTestLine = parseBddFileData(content)?.testLines.get(lineNumber);
-    if (pwTestLine === undefined) {
-      return {
-        reason: `line ${lineNumber} has no bddFileData mapping in ${specPath} (stale spec or feature/spec drift)`,
-      };
-    }
-    // A cwd-relative spec path keeps the Playwright filter short and dodges the Windows drive-colon
-    // (`C:\…`) clashing with the trailing `:line`. Fall back to the absolute path when the spec sits
-    // outside the working dir (a `..` chain would be brittle).
-    const rel = path.relative(workingDir, specPath);
-    const specArg = rel === "" || rel.startsWith("..") || path.isAbsolute(rel) ? specPath : rel;
-    // Playwright treats CLI file filters as regular expressions. A Windows-separator path is
-    // regex poison there; `.features-gen\browser` reads as "gen" + word-boundary + "rowser",
-    // which matches nothing, and Playwright reports "no tests found". Forward slashes are
-    // literal in a regex and Playwright accepts them on every platform.
-    return { target: `${specArg.split(path.sep).join("/")}:${pwTestLine}` };
+    return exactGeneratedTargets(
+      workingDir,
+      this.config.featuresGenDir,
+      filePath,
+      lineNumber,
+      specPathArgs === undefined ? undefined : [...specPathArgs]
+    );
   }
 
   private async runWithJsonReport(
-    buildCommand: () => string,
+    buildCommand: () => { bddgenCommand: string | undefined; playwrightCommand: string },
     forFile?: string,
     signal?: AbortSignal,
     artifactBatch?: number,
@@ -920,7 +992,8 @@ export class TestExecutor {
           [],
           "",
           false,
-          preRunFailure.terminationFailure
+          preRunFailure.terminationFailure,
+          preRunFailure.terminationLease
         );
       }
       this.contributeArtifactShard(
@@ -936,11 +1009,48 @@ export class TestExecutor {
         preRunFailure.failure,
         "",
         false,
-        preRunFailure.terminationFailure !== undefined
+        preRunFailure.terminationFailure !== undefined,
+        preRunFailure.terminationLease
       );
     }
 
-    const baseCommand = buildCommand();
+    const commands = buildCommand();
+    if (commands.bddgenCommand !== undefined) {
+      const generation = this.withBinaryHint(
+        await this.shellRunner(
+          commands.bddgenCommand,
+          workingDir,
+          undefined,
+          signal,
+          progress?.onOutput
+        ),
+        commands.bddgenCommand
+      );
+      this.publishBddgenDiagnostics(generation, workingDir);
+      if (!generation.success) {
+        if (signal?.aborted) {
+          return this.cancelledResult(
+            start,
+            workingDir,
+            [],
+            generation.output,
+            generation.outputStreamed,
+            generation.terminationFailure,
+            generation.terminationLease
+          );
+        }
+        const failure = generation.error.trim() === "" ? generation.output : generation.error;
+        return infrastructureResult(
+          start,
+          failure,
+          generation.output,
+          generation.outputStreamed,
+          generation.terminationFailure !== undefined,
+          generation.terminationLease
+        );
+      }
+    }
+    const baseCommand = commands.playwrightCommand;
     // Normally we force `--reporter=json` for result mapping. With useConfigReporters the user's
     // config owns the reporter list (so a custom reporter survives); a `--reporter` here would
     // override it. We still set PLAYWRIGHT_JSON_OUTPUT_NAME below, which steers a bare `['json']`
@@ -973,7 +1083,8 @@ export class TestExecutor {
           live?.recoverResults([]),
           result.output,
           result.outputStreamed,
-          result.terminationFailure
+          result.terminationFailure,
+          result.terminationLease
         );
         this.contributeArtifactShard(
           artifactBatch,
@@ -1045,7 +1156,8 @@ export class TestExecutor {
     scenarioDetails: ScenarioResult[] = [],
     output = "",
     outputStreamed = false,
-    terminationFailure?: string
+    terminationFailure?: string,
+    lease?: TerminationLease
   ): RunOutputResult {
     return {
       success: false,
@@ -1061,13 +1173,14 @@ export class TestExecutor {
         infrastructureFailure: terminationFailure,
         admissionUnsafe: true,
       } : {}),
+      ...(lease ? { terminationLease: lease } : {}),
     };
   }
 
   /**
-   * With `shell: true` a missing npx/playwright/bddgen binary surfaces only as raw shell noise
-   * (exit 127 + "command not found" on POSIX, "'npx' is not recognized" on Windows). Detect that
-   * shape and return an actionable hint naming the attempted binary; undefined otherwise.
+   * A missing npx/playwright/bddgen binary differs by platform (ENOENT, exit 127, or a package
+   * manager diagnostic). Detect those shapes and return an actionable hint naming the attempted
+   * binary; undefined otherwise.
    */
   private missingBinaryHint(result: CommandResult, command: string): string | undefined {
     if (result.success) { return undefined; }
@@ -1117,7 +1230,7 @@ export class TestExecutor {
   ): void {
     if (artifactBatch === undefined) { return; }
     const workspaceRoot = this.workspaceRootFor(workingDir);
-    this.context?.runArtifactStore?.contributeShard(artifactBatch, {
+    this.artifactSinks.get(artifactBatch)?.contributeShard(artifactBatch, {
       workingDir,
       command: this.commandSummary(command, workspaceRoot),
       success,
@@ -1196,6 +1309,7 @@ export class TestExecutor {
       ...(infrastructureFailure ? { infrastructureFailure } : {}),
       ...(result.outputStreamed ? { outputStreamed: true } : {}),
       ...(result.terminationFailure ? { admissionUnsafe: true } : {}),
+      ...(result.terminationLease ? { terminationLease: result.terminationLease } : {}),
     };
   }
 
@@ -1253,14 +1367,41 @@ export class TestExecutor {
    */
   private async waitForDebugCompletion(
     mirrorId: string,
-    reportPath: string | undefined
-  ): Promise<void> {
-    let settled = false;
-    const isSettled = (): boolean => settled;
-    const released = this.mirror.waitForRelease(mirrorId).then(() => { settled = true; });
+    reportPath: string | undefined,
+    signal?: AbortSignal
+  ): Promise<TerminationLease | undefined> {
+    let finished = false;
+    const toLease = (result: Awaited<ReturnType<BreakpointMirror["forceStop"]>>): TerminationLease | undefined => (
+      result.confirmed
+        ? undefined
+        : terminationLease({ kind: "debug-session", failure: result.failure })
+    );
+    const released = this.mirror.waitForRelease(mirrorId).then((result) => {
+      finished = true;
+      return toLease(result);
+    });
+    let force: Promise<TerminationLease | undefined> | undefined;
+    const forceStop = (): Promise<TerminationLease | undefined> => {
+      force ??= this.mirror.forceStop(mirrorId).then(toLease);
+      return force;
+    };
+    let resolveAbort: (() => void) | undefined;
+    const aborted = new Promise<TerminationLease | undefined>((resolve) => {
+      resolveAbort = () => {
+        forceStop().then(resolve, (error) => resolve(terminationLease({
+          kind: "debug-session",
+          failure: `Debug-session termination failed: ${errMsg(error)}`,
+        })));
+      };
+      signal?.addEventListener("abort", resolveAbort, { once: true });
+      if (signal?.aborted) {resolveAbort();}
+    });
     if (!reportPath) {
-      await released;
-      return;
+      try {return await Promise.race([released, aborted]);}
+      finally {
+        finished = true;
+        if (resolveAbort) {signal?.removeEventListener("abort", resolveAbort);}
+      }
     }
 
     const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -1272,29 +1413,39 @@ export class TestExecutor {
         return false;
       }
     };
-    const watchdog = (async (): Promise<void> => {
-      while (!isSettled() && !(await reportExists())) {
+    const watchdog = (async (): Promise<TerminationLease | undefined> => {
+      while (true) {
+        if (finished) {return undefined;}
+        if (await reportExists()) {break;}
+        if (finished) {return undefined;}
         await delay(this.debugWatchdogPollMs);
       }
-      if (isSettled()) {return;}
+      if (finished) {return undefined;}
       await delay(this.debugWatchdogGraceMs);
-      if (isSettled()) {return;}
+      if (finished) {return undefined;}
       this.logger.info(
         "Debug session did not settle after the JSON report was written; forcing teardown",
         { mirrorId, reportPath }
       );
-      await this.mirror.forceStop(mirrorId);
+      return forceStop();
     })();
-    watchdog.catch(() => { /* logged in forceStop path; never block completion */ });
-
-    await released;
+    try {
+      return await Promise.race([released, aborted, watchdog]);
+    } finally {
+      finished = true;
+      if (resolveAbort) {signal?.removeEventListener("abort", resolveAbort);}
+    }
   }
 
   private async runPreRunHook(
     workingDir: string,
     signal?: AbortSignal,
     progress?: RunProgressObserver
-  ): Promise<{ failure: string; terminationFailure?: string | undefined } | undefined> {
+  ): Promise<{
+    failure: string;
+    terminationFailure?: string | undefined;
+    terminationLease?: TerminationLease | undefined;
+  } | undefined> {
     const command = this.config.preRunCommand.trim();
     if (command === "") { return undefined; }
 
@@ -1304,7 +1455,8 @@ export class TestExecutor {
       workingDir,
       undefined,
       signal,
-      progress?.onOutput
+      progress?.onOutput,
+      true
     );
     if (result.success) { return undefined; }
 
@@ -1317,6 +1469,7 @@ export class TestExecutor {
     return {
       failure: result.terminationFailure ?? message,
       ...(result.terminationFailure ? { terminationFailure: result.terminationFailure } : {}),
+      ...(result.terminationLease ? { terminationLease: result.terminationLease } : {}),
     };
   }
 
@@ -1332,7 +1485,8 @@ export class TestExecutor {
     workingDir: string,
     extraEnv?: NodeJS.ProcessEnv,
     signal?: AbortSignal,
-    onOutput?: CommandOutputHandler
+    onOutput?: CommandOutputHandler,
+    shell = false
   ): Promise<CommandResult> {
     return runBoundedCommand({
       command,
@@ -1341,6 +1495,7 @@ export class TestExecutor {
       ...(extraEnv ? { extraEnv } : {}),
       ...(signal ? { signal } : {}),
       ...(onOutput ? { onOutput } : {}),
+      ...(shell ? { shell: true } : {}),
     });
   }
 

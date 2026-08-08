@@ -9,7 +9,7 @@ commands already installed for that project; it does not replace your
 
 Open the folder that contains your project in VS Code. You need:
 
-- VS Code 1.99 or later.
+- A VS Code host listed in the [exact compatibility record](compatibility.md). The declared minimum is 1.99.0.
 - A Node project with `@playwright/test` and `playwright-bdd` installed.
 - At least one `.feature` file covered by your `playwright-bdd` configuration.
 - Playwright browsers installed when your project requires them.
@@ -19,9 +19,9 @@ the package directory that owns the feature and its `playwright.config.*` file.
 If your setup invokes code generation separately, run that command too. This
 establishes that the project itself can run before VS Code adds its integration.
 
-If your Playwright configuration generates specs through `defineBddProject`,
-set `playwrightBddRunner.bddgenCommand` to an empty string. That tells
-Specwright not to run a second, separate `bddgen` command.
+Keep `playwrightBddRunner.bddgenCommand` configured for targeted runs. If
+another command produces current generated specs before each targeted run, set
+it as `playwrightBddRunner.preRunCommand` and leave `bddgenCommand` empty.
 
 ## Run one scenario
 
@@ -64,7 +64,7 @@ settings in `.vscode/settings.json`.
 | Your project differs because… | Start with |
 | --- | --- |
 | It uses pnpm, Yarn, or custom package scripts | `playwrightBddRunner.playwrightCommand` and `playwrightBddRunner.bddgenCommand` |
-| Code generation is built into `playwright.config.*` | Set `playwrightBddRunner.bddgenCommand` to `""` |
+| Another command produces current generated specs before each targeted run | Set `playwrightBddRunner.bddgenCommand` to `""` and configure it as `playwrightBddRunner.preRunCommand` |
 | Generated specs use a custom `outputDir` | `playwrightBddRunner.featuresGenDir` |
 | Features are outside the default `**/*.feature` pattern | `playwrightBddRunner.testFilePattern` |
 | Step definitions live outside the default step folders | `playwrightBddRunner.stepDefinitionPaths` |

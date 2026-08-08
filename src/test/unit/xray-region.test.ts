@@ -4,6 +4,7 @@ import { parseXrayRegion, xrayBaseUrl } from "../../xray/xray-region";
 import { Logger, LogLevel } from "../../utils/logger";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { probeXrayConnection } from "../../xray/xray-connection-test";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
 
 describe("parseXrayRegion", () => {
   it("passes through the four known regions", () => {
@@ -42,7 +43,7 @@ function mapCredentialStore(): XrayCredentialStore {
       return Promise.resolve();
     },
   } as unknown as vscode.SecretStorage;
-  return new XrayCredentialStore(storage);
+  return new XrayCredentialStore(storage, trustedWorkspace());
 }
 
 describe("probeXrayConnection region integration", () => {

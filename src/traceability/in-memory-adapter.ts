@@ -15,6 +15,7 @@ import {
   TraceabilityAdapter,
 } from "./contracts";
 import { AdapterContext, TraceabilityAdapterFactory } from "./adapter-registry";
+import { currentAdapterVersions } from "./adapter-contract";
 
 export const IN_MEMORY_PROVIDER_ID = "in-memory";
 
@@ -207,6 +208,7 @@ export function createInMemoryAdapterFactory(
 ): TraceabilityAdapterFactory {
   return {
     id: IN_MEMORY_PROVIDER_ID,
+    ...currentAdapterVersions("connection", "metadata", "resultPublishing"),
     create: (_ctx: AdapterContext) => new InMemoryTraceabilityAdapter(fixture),
   };
 }

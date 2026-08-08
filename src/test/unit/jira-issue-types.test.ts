@@ -329,14 +329,13 @@ describe("resolveExecutionIssueType", () => {
     expect(sleeps).toHaveLength(3);
   });
 
-  it("resolves to unknown when an external signal aborts a fetch in flight, exhausting retries", async () => {
+  it("resolves to unknown when an external signal aborts a fetch in flight, without retrying", async () => {
     const { logger } = capturingLogger();
     const external = new AbortController();
     let calls = 0;
     const sleeps: number[] = [];
-    // An abort is not short-circuited: it surfaces as an AbortError, is wrapped as retryable, and
-    // exhausts every attempt via the injected sleep. The first attempt aborts mid-flight; later
-    // attempts see the already-aborted signal and reject at once, so the loop drains without hanging.
+    // The first attempt aborts mid-flight. Cancellation is not transport noise, so no later request
+    // or backoff starts.
     const fetchImpl: FetchLike = (_url, init) =>
       new Promise((_resolve, reject) => {
         calls += 1;
@@ -362,8 +361,8 @@ describe("resolveExecutionIssueType", () => {
     });
 
     expect(result).toEqual({ kind: "unknown" });
-    expect(calls).toBe(4);
-    expect(sleeps).toHaveLength(3);
+    expect(calls).toBe(1);
+    expect(sleeps).toHaveLength(0);
   });
 
   it("defensively skips null, non-object, subtask, and empty-name entries and still resolves", async () => {

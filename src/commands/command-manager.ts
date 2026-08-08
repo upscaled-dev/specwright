@@ -19,6 +19,8 @@ import { GenerateStepsCommand } from "./generate-steps";
 import { runInsertStep } from "./insert-step";
 import { TraceabilityCommands } from "./traceability-commands";
 import { RunCommands } from "./run-commands";
+import { ExecutionAdmissionBlockedError } from "../core/execution-admission";
+import { explainWorkspaceTrust } from "../ui/workspace-trust";
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -62,6 +64,40 @@ const STRATEGY_TYPE_BY_VALUE: Record<string, string> = {
 
 const CATEGORY = "Specwright";
 
+export const PRIVILEGED_COMMANDS: ReadonlySet<string> = new Set([
+  "playwrightBddRunner.runScenario",
+  "playwrightBddRunner.runFeatureFile",
+  "playwrightBddRunner.runAllTests",
+  "playwrightBddRunner.debugScenario",
+  "playwrightBddRunner.runFeatureFileWithTags",
+  "playwrightBddRunner.runScenarioWithTags",
+  "playwrightBddRunner.runAllTestsParallel",
+  "playwrightBddRunner.runScenarioWithContext",
+  "playwrightBddRunner.debugScenarioWithContext",
+  "playwrightBddRunner.runFeatureFileWithContext",
+  "playwrightBddRunner.generateStepDefinitions",
+  "playwrightBddRunner.generateStepDefinitionForStep",
+  "playwrightBddRunner.scaffoldStepFromPanel",
+  "playwrightBddRunner.scaffoldFeatureFromPanel",
+  "playwrightBddRunner.traceability.linkScenario",
+  "playwrightBddRunner.traceability.runAndPublish",
+  "playwrightBddRunner.traceability.runAndPublishAllMapped",
+  "playwrightBddRunner.traceability.runAndPublishFeature",
+  "playwrightBddRunner.traceability.runAndPublishFolder",
+  "playwrightBddRunner.traceability.runAndPublishByTagExpression",
+  "playwrightBddRunner.traceability.publishLastRun",
+  "playwrightBddRunner.traceability.sync",
+  "playwrightBddRunner.traceability.manageConnection",
+  "playwrightBddRunner.traceability.connect",
+  "playwrightBddRunner.traceability.disconnect",
+  "playwrightBddRunner.traceability.testConnection",
+  "playwrightBddRunner.traceability.switchDefaultProject",
+  "playwrightBddRunner.traceability.bulkCreateTests",
+  "playwrightBddRunner.traceability.createTestSet",
+  "playwrightBddRunner.traceability.createTestPlan",
+  "playwrightBddRunner.traceability.createTestExecution",
+]);
+
 export class CommandManager {
   private readonly commands = new Map<string, { title: string; disposable: vscode.Disposable }>();
   private readonly context: PlaywrightBddExtensionContext;
@@ -77,6 +113,7 @@ export class CommandManager {
   private traceabilitySubsystem: TraceabilitySubsystem | undefined;
   private publishLedger: PublishLedger | undefined;
   private extensionUri: vscode.Uri | undefined;
+  private attachmentSpoolRoot: string | undefined;
   private readonly traceabilityCommands: TraceabilityCommands;
   private readonly runCommands: RunCommands;
 
@@ -86,6 +123,8 @@ export class CommandManager {
 
   private constructor(context: PlaywrightBddExtensionContext) {
     this.context = context;
+    this.attachmentSpoolRoot = context.attachmentSpoolRoot;
+    this.extensionUri = context.extensionUri;
     this.runCommands = new RunCommands(context, () => this.testProvider);
     this.traceabilityCommands = new TraceabilityCommands(context.logger, {
       config: context.config,
@@ -95,9 +134,11 @@ export class CommandManager {
       subsystem: () => this.traceabilitySubsystem,
       publishLedger: () => this.publishLedger,
       extensionUri: () => this.extensionUri,
+      attachmentSpoolRoot: () => this.attachmentSpoolRoot,
       runArtifactStore: context.runArtifactStore,
       executionGateway: context.executionGateway,
       featureParser: context.featureParser,
+      workspaceTrust: context.workspaceTrust,
     });
   }
 
@@ -136,6 +177,7 @@ export class CommandManager {
       this.clearCommands();
       // The only place the extension root reaches this class; the board's tab icon resolves against it.
       this.extensionUri = context.extensionUri;
+      this.attachmentSpoolRoot = context.globalStorageUri?.fsPath;
 
       const commands: CommandOptions[] = [
         { command: "playwrightBddRunner.runScenario", title: "Run Scenario", category: CATEGORY, handler: this.runCommands.runScenario.bind(this.runCommands) },
@@ -214,11 +256,18 @@ export class CommandManager {
   private registerCommand(context: vscode.ExtensionContext, options: CommandOptions): void {
     const disposable = vscode.commands.registerCommand(options.command, async (...args: CommandArguments) => {
       try {
-        await options.handler(...args);
+        if (PRIVILEGED_COMMANDS.has(options.command)) {
+          await this.context.workspaceTrust.run(async () => options.handler(...args));
+        } else {
+          await options.handler(...args);
+        }
       } catch (error) {
+        if (await explainWorkspaceTrust(error)) {return;}
         const msg = errMsg(error);
         this.logger.error(`Command failed: ${options.command}`, { error: msg, args });
-        this.showErrorMessage(`Failed to execute ${options.title}: ${msg}`);
+        this.showErrorMessage(error instanceof ExecutionAdmissionBlockedError
+          ? `${error.message} ${error.recovery}`
+          : `Failed to execute ${options.title}: ${msg}`);
       }
     });
     this.commands.set(options.command, { title: options.title, disposable });
@@ -473,7 +522,8 @@ export class CommandManager {
       this.generateStepsCommand = new GenerateStepsCommand(
         this.generateStepsResolver,
         this.context.config,
-        this.context.logger
+        this.context.logger,
+        this.context.workspaceTrust
       );
     }
     return this.generateStepsCommand;

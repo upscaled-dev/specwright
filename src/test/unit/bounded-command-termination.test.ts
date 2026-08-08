@@ -8,6 +8,7 @@ import {
   type BoundedCommandResult,
 } from "../../core/bounded-command-runner";
 import { Logger } from "../../utils/logger";
+import { shellQuote } from "../../utils/shell";
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 
@@ -54,7 +55,7 @@ describe("runBoundedCommand cancellation", () => {
     const controller = new AbortController();
     let settled = false;
     const result = runBoundedCommand({
-      command: "npx playwright test",
+      command: shellQuote(process.execPath),
       workingDir: "/ws",
       logger,
       signal: controller.signal,
@@ -165,7 +166,7 @@ describe("runBoundedCommand cancellation", () => {
   it("keeps a spawn error outside cancellation on its own failure result", async () => {
     const child = new FakeChild();
     vi.mocked(spawn).mockReturnValue(child as never);
-    const pending = runBoundedCommand({ command: "npx playwright test", workingDir: "/ws", logger });
+    const pending = runBoundedCommand({ command: shellQuote(process.execPath), workingDir: "/ws", logger });
 
     child.emit("error", new Error("spawn ENOENT"));
 

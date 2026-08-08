@@ -37,8 +37,15 @@ function targetSpecLines(data: BddFileData, gherkinLine: number): number[] {
 
 interface ChildTracking {
   childIds: Set<string>;
-  rootSession: vscode.DebugSession;
+  expectedRootId?: string;
+  rootSession?: vscode.DebugSession;
 }
+
+export type DebugTerminationResult =
+  | { readonly confirmed: true }
+  | { readonly confirmed: false; readonly failure: string };
+
+export const DEBUG_STOP_TIMEOUT_MS = 2_000;
 
 /**
  * Mirrors user breakpoints set in a .feature file onto the corresponding lines of the
@@ -59,7 +66,13 @@ export class BreakpointMirror {
   private readonly mirrors = new Map<string, string[]>();
   private readonly sharedByLine = new Map<string, SharedBreakpoint>();
   private readonly childSessions = new Map<string, ChildTracking>();
-  private readonly releaseWaiters = new Map<string, Array<() => void>>();
+  private readonly releaseWaiters = new Map<
+    string,
+    Array<(result: DebugTerminationResult) => void>
+  >();
+  private readonly completed = new Map<string, DebugTerminationResult>();
+  private readonly stoppingNaturally = new Set<string>();
+  private disposed = false;
   private counter = 0;
   private readonly subscriptions: vscode.Disposable[];
 
@@ -77,14 +90,26 @@ export class BreakpointMirror {
     this.subscriptions = [
       debugApi.onDidStartDebugSession((session) => {
         const ownId = session.configuration?.[BreakpointMirror.SESSION_KEY] as unknown;
-        if (typeof ownId === "string" && this.mirrors.has(ownId)) {
-          // The root session itself: record it so forceStop can tear it down even
-          // when no child session ever attaches (the chain that otherwise stops it).
+        if (
+          typeof ownId === "string"
+          && this.mirrors.has(ownId)
+          && session.parentSession === undefined
+        ) {
+          // Only the first top-level session, or the root already identified through a child's
+          // parent chain, can establish ownership. A descendant that copied the key cannot replace it.
           const existing = this.childSessions.get(ownId);
-          if (existing) {
+          if (!existing) {
+            this.childSessions.set(ownId, {
+              childIds: new Set(),
+              expectedRootId: session.id,
+              rootSession: session,
+            });
+          } else if (
+            existing.rootSession === undefined
+            && (existing.expectedRootId === undefined || existing.expectedRootId === session.id)
+          ) {
+            existing.expectedRootId = session.id;
             existing.rootSession = session;
-          } else {
-            this.childSessions.set(ownId, { childIds: new Set(), rootSession: session });
           }
           return;
         }
@@ -94,7 +119,7 @@ export class BreakpointMirror {
         }
         let tracking = this.childSessions.get(tracked.mirrorId);
         if (!tracking) {
-          tracking = { childIds: new Set(), rootSession: tracked.rootSession };
+          tracking = { childIds: new Set(), expectedRootId: tracked.rootSession.id };
           this.childSessions.set(tracked.mirrorId, tracking);
         }
         tracking.childIds.add(session.id);
@@ -102,9 +127,13 @@ export class BreakpointMirror {
       debugApi.onDidTerminateDebugSession((session) => {
         const ownId = session.configuration?.[BreakpointMirror.SESSION_KEY] as unknown;
         if (typeof ownId === "string" && this.mirrors.has(ownId)) {
-          // The parent itself terminated (manual disconnect), nothing left to stop.
-          this.release(ownId);
-          return;
+          const tracking = this.childSessions.get(ownId);
+          // A copied mirror key is not identity. Only the exact root id recorded by the root's own
+          // start event can prove that this mirror's debug session terminated.
+          if (tracking?.rootSession?.id === session.id) {
+            this.release(ownId);
+            return;
+          }
         }
         const tracked = this.findTrackedAncestor(session);
         if (!tracked) {
@@ -115,14 +144,10 @@ export class BreakpointMirror {
           return;
         }
         tracking.childIds.delete(session.id);
-        if (tracking.childIds.size > 0) {
+        if (tracking.childIds.size > 0 || tracking.rootSession === undefined) {
           return;
         }
-        const root = tracking.rootSession;
-        this.release(tracked.mirrorId);
-        this.debugApi
-          .stopDebugging(root)
-          .then(undefined, () => { /* the parent may already be gone */ });
+        this.stopNaturally(tracked.mirrorId);
       }),
       // VS Code initializes `debug.breakpoints` lazily; without a listener it can read as empty
       // until the breakpoints API activates, so the first debug after a window reload would
@@ -136,9 +161,12 @@ export class BreakpointMirror {
    * maps (then the id tracks an empty key list); every debug session must be tracked so
    * session-end detection and auto-disconnect work universally.
    */
-  public mirrorBreakpoints(featureFsPath: string, specFsPath: string | undefined): string {
-    const claimedKeys =
-      specFsPath === undefined ? [] : this.claimSpecLines(featureFsPath, specFsPath);
+  public mirrorBreakpoints(
+    featureFsPath: string,
+    specFsPaths: string | readonly string[] | undefined
+  ): string {
+    const paths = typeof specFsPaths === "string" ? [specFsPaths] : specFsPaths ?? [];
+    const claimedKeys = paths.flatMap((specFsPath) => this.claimSpecLines(featureFsPath, specFsPath));
     this.counter += 1;
     const mirrorId = `mirror-${this.counter}`;
     this.mirrors.set(mirrorId, claimedKeys);
@@ -226,25 +254,101 @@ export class BreakpointMirror {
    * (last child session terminates → root stopped) wedges, e.g. pnpm process trees
    * leaving a debug-attached child alive, or no child session ever attaching.
    */
-  public async forceStop(mirrorId: string): Promise<void> {
-    const root = this.childSessions.get(mirrorId)?.rootSession;
-    if (root) {
-      try {
-        await this.debugApi.stopDebugging(root);
-      } catch {
-        // The session may already be gone.
+  public async forceStop(mirrorId: string): Promise<DebugTerminationResult> {
+    if (!this.mirrors.has(mirrorId)) {
+      return { confirmed: true };
+    }
+    const result = await this.stopTrackedRoot(mirrorId);
+    if (result.confirmed) {this.release(mirrorId, result);}
+    return result;
+  }
+
+  public async shutdown(): Promise<DebugTerminationResult[]> {
+    const mirrorIds = [...this.mirrors.keys()];
+    const results = await Promise.all(mirrorIds.map((mirrorId) => this.forceStop(mirrorId)));
+    for (let index = 0; index < mirrorIds.length; index += 1) {
+      const mirrorId = mirrorIds[index];
+      const result = results[index];
+      if (mirrorId !== undefined && result !== undefined && this.mirrors.has(mirrorId)) {
+        this.release(mirrorId, result);
       }
     }
-    // stopDebugging normally triggers the terminate handler, which releases; if the
-    // event never arrives (or no root was tracked), release directly so waiters resolve.
-    if (this.mirrors.has(mirrorId)) {
-      this.release(mirrorId);
+    this.dispose();
+    return results;
+  }
+
+  private async stopTrackedRoot(mirrorId: string): Promise<DebugTerminationResult> {
+    const tracking = this.childSessions.get(mirrorId);
+    const root = tracking?.rootSession;
+    if (!root) {
+      return {
+        confirmed: false,
+        failure: "Debug-session termination could not be confirmed because no tracked root session was available.",
+      };
+    }
+    // stopDebugging resolving confirms that VS Code accepted the request, not that the debug
+    // adapter and its descendants have terminated. The root termination event is the release proof.
+    const terminated = this.waitForRelease(mirrorId);
+    let stop: Promise<void>;
+    try {
+      stop = Promise.resolve(this.debugApi.stopDebugging(root));
+    } catch (error) {
+      return {
+        confirmed: false,
+        failure: `Debug-session termination failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    const rejected = stop.then<never, DebugTerminationResult>(
+      () => new Promise<never>(() => { /* wait for the root termination event */ }),
+      (error: unknown) => ({
+        confirmed: false,
+        failure: `Debug-session termination failed: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<DebugTerminationResult>((resolve) => {
+      timer = setTimeout(() => resolve({
+        confirmed: false,
+        failure: `Debug-session termination was not confirmed within ${DEBUG_STOP_TIMEOUT_MS} ms.`,
+      }), DEBUG_STOP_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([terminated, rejected, timeout]);
+    } finally {
+      if (timer !== undefined) {clearTimeout(timer);}
     }
   }
 
-  public waitForRelease(mirrorId: string): Promise<void> {
+  private stopNaturally(mirrorId: string): void {
+    if (this.stoppingNaturally.has(mirrorId)) {return;}
+    this.stoppingNaturally.add(mirrorId);
+    this.stopTrackedRoot(mirrorId).then(
+      (result) => {
+        if (result.confirmed) {
+          this.release(mirrorId, result);
+        } else {
+          this.complete(mirrorId, result);
+        }
+      },
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.complete(mirrorId, {
+          confirmed: false,
+          failure: `Debug-session termination failed: ${message}`,
+        });
+      }
+    );
+  }
+
+  public waitForRelease(mirrorId: string): Promise<DebugTerminationResult> {
+    const completed = this.completed.get(mirrorId);
+    if (completed !== undefined) {
+      this.completed.delete(mirrorId);
+      return Promise.resolve(completed);
+    }
     if (!this.mirrors.has(mirrorId)) {
-      return Promise.resolve();
+      return Promise.resolve({ confirmed: true });
     }
     return new Promise((resolve) => {
       const waiters = this.releaseWaiters.get(mirrorId);
@@ -256,15 +360,13 @@ export class BreakpointMirror {
     });
   }
 
-  public release(mirrorId: string): void {
+  public release(
+    mirrorId: string,
+    result: DebugTerminationResult = { confirmed: true }
+  ): void {
     this.childSessions.delete(mirrorId);
-    const waiters = this.releaseWaiters.get(mirrorId);
-    if (waiters) {
-      this.releaseWaiters.delete(mirrorId);
-      for (const resolve of waiters) {
-        resolve();
-      }
-    }
+    this.stoppingNaturally.delete(mirrorId);
+    this.complete(mirrorId, result);
     const keys = this.mirrors.get(mirrorId);
     if (!keys) {
       return;
@@ -287,13 +389,36 @@ export class BreakpointMirror {
     }
   }
 
+  private complete(mirrorId: string, result: DebugTerminationResult): void {
+    this.completed.delete(mirrorId);
+    const waiters = this.releaseWaiters.get(mirrorId);
+    if (waiters) {
+      this.releaseWaiters.delete(mirrorId);
+      for (const resolve of waiters) {
+        resolve(result);
+      }
+    } else if (!result.confirmed) {
+      this.completed.set(mirrorId, result);
+    }
+  }
+
   public dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    const disposed: DebugTerminationResult = {
+      confirmed: false,
+      failure: "Debug-session termination was not confirmed before breakpoint tracking was disposed.",
+    };
     for (const waiters of this.releaseWaiters.values()) {
       for (const resolve of waiters) {
-        resolve();
+        resolve(disposed);
       }
     }
     this.releaseWaiters.clear();
+    this.completed.clear();
+    this.stoppingNaturally.clear();
     this.childSessions.clear();
     const all = [...this.sharedByLine.values()].map((shared) => shared.breakpoint);
     if (all.length > 0) {

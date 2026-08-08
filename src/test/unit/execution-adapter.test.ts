@@ -18,6 +18,7 @@ const parser = PlaywrightJsonParser.create(Logger.create());
 
 function completion(over: Partial<RunCompletion> = {}): RunCompletion {
   return {
+    identity: { engine: "legacy-direct", schemaProfile: "legacy-v1" },
     state: "complete",
     results: [{
       scenario: { filePath: "/ws/a.feature", line: 3, name: "A", kind: "scenario" },
@@ -37,7 +38,6 @@ function completion(over: Partial<RunCompletion> = {}): RunCompletion {
 function intent(): RunIntent {
   return {
     mode: "run",
-    selection: { kind: "suite" },
     targets: [{ kind: "suite" }],
   };
 }
@@ -45,12 +45,22 @@ function intent(): RunIntent {
 function gatewayEmitting(events: readonly ExecutionEvent[], result: RunCompletion): ExecutionGateway {
   return {
     running: false,
-    execute: vi.fn((_intent: RunIntent, options?: {
+    diagnose: vi.fn(() => Promise.resolve([])),
+    discover: vi.fn(() => Promise.resolve({ cases: [], diagnostics: [] })),
+    prepare: vi.fn((runIntent) => Promise.resolve({
+      operationId: "operation",
+      identity: result.identity,
+      intent: runIntent,
+    })),
+    run: vi.fn((_prepared, options?: {
       readonly onEvent?: ((event: ExecutionEvent) => void) | undefined;
     }) => {
       for (const event of events) {options?.onEvent?.(event);}
       return Promise.resolve(result);
     }),
+    debug: vi.fn(),
+    cancel: vi.fn(() => Promise.resolve()),
+    dispose: vi.fn(),
   };
 }
 
@@ -111,7 +121,13 @@ describe("runIntentWithObserver", () => {
     const failed = completion({ state: "partial", failure: "the worker stopped" });
     const gateway: ExecutionGateway = {
       running: false,
-      execute: vi.fn(() => Promise.reject(new ExecutionFailure(failed))),
+      diagnose: vi.fn(() => Promise.resolve([])),
+      discover: vi.fn(() => Promise.resolve({ cases: [], diagnostics: [] })),
+      prepare: vi.fn((runIntent) => Promise.resolve({ operationId: "operation", identity: failed.identity, intent: runIntent })),
+      run: vi.fn(() => Promise.reject(new ExecutionFailure(failed))),
+      debug: vi.fn(),
+      cancel: vi.fn(() => Promise.resolve()),
+      dispose: vi.fn(),
     };
 
     const result = await runIntentWithObserver(

@@ -4,6 +4,13 @@ import { XrayJiraCredentials } from "./xray-credential-store";
 import { describeShape } from "./xray-diagnostics";
 import { FetchLike, JiraAccessError, jiraSecrets } from "./jira-project-search";
 import { jqlString } from "./xray-search";
+import {
+  abortableRemoteSleep,
+  operationIdentity,
+  RetryableRemoteError,
+  retryAfterMilliseconds,
+  runRemoteOperation,
+} from "./remote-operation";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const PAGE_SIZE = 50;
@@ -11,9 +18,6 @@ const PAGE_SIZE = 50;
 // renders truncated and honest rather than paging forever.
 const MAX_ISSUES = 200;
 const MAX_PAGES = Math.ceil(MAX_ISSUES / PAGE_SIZE) + 1;
-const MAX_ATTEMPTS = 4;
-const BACKOFF_BASE_MS = 300;
-const BACKOFF_CAP_MS = 8_000;
 
 // The container kinds pin the search to one Xray issue type; a requirement is any issue type the
 // project uses for its stories, so that kind names none and searches on scope alone. Because scope is
@@ -50,16 +54,9 @@ export interface JiraIssueSearchDeps {
   executionIssueType: string;
   logger: Logger;
   fetchImpl?: FetchLike | undefined;
-  sleep?: ((ms: number) => Promise<void>) | undefined;
+  sleep?: ((ms: number, signal?: AbortSignal) => Promise<void>) | undefined;
   random?: (() => number) | undefined;
   signal?: AbortSignal | undefined;
-}
-
-class RetryableError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RetryableError";
-  }
 }
 
 interface TimedResponse {
@@ -78,10 +75,6 @@ function parseBody(bodyText: string): unknown {
 
 function stringifyShape(value: unknown): string {
   return JSON.stringify(describeShape(value), null, 2);
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function basicAuthHeader(credentials: XrayJiraCredentials): string {
@@ -151,14 +144,14 @@ function buildJql(kind: JiraIssueKind, query: string, executionIssueType: string
 
 class JiraIssueSearch {
   private readonly fetchImpl: FetchLike;
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly random: () => number;
   private readonly authHeader: string;
   private readonly jql: string;
 
   constructor(private readonly deps: JiraIssueSearchDeps) {
     this.fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
-    this.sleep = deps.sleep ?? defaultSleep;
+    this.sleep = deps.sleep ?? abortableRemoteSleep;
     this.random = deps.random ?? Math.random;
     this.authHeader = basicAuthHeader(deps.credentials);
     this.jql = buildJql(deps.kind, deps.query, deps.executionIssueType);
@@ -188,7 +181,21 @@ class JiraIssueSearch {
   }
 
   private async requestPage(url: string, nextPageToken: string | undefined): Promise<IssuePage> {
-    const response = await this.withBackoff(() => this.timedFetch(url, nextPageToken));
+    let response: TimedResponse;
+    try {
+      response = await runRemoteOperation(() => this.timedFetch(url, nextPageToken), {
+        identity: operationIdentity("jira.issues.read"),
+        logger: this.deps.logger,
+        signal: this.deps.signal,
+        sleep: this.sleep,
+        random: this.random,
+        abortError: () => this.deps.signal?.reason ?? new Error("Aborted"),
+      });
+    } catch (error) {
+      throw error instanceof RetryableRemoteError
+        ? new JiraAccessError("Could not reach Jira: check your network connection.")
+        : error;
+    }
     if (!response.ok) {
       // The user-facing message stays value-free, so the server's own account of the refusal only
       // exists here: verbatim, with the token masked out in case the body echoes it back.
@@ -205,36 +212,12 @@ class JiraIssueSearch {
     return page;
   }
 
-  private async withBackoff(run: () => Promise<TimedResponse>): Promise<TimedResponse> {
-    let attempt = 0;
-    for (;;) {
-      try {
-        return await run();
-      } catch (error) {
-        if (error instanceof JiraAccessError) {
-          throw error;
-        }
-        attempt += 1;
-        if (!(error instanceof RetryableError) || attempt >= MAX_ATTEMPTS) {
-          throw error instanceof RetryableError
-            ? new JiraAccessError("Could not reach Jira: check your network connection.")
-            : error;
-        }
-        await this.sleep(this.backoffDelay(attempt));
-      }
-    }
-  }
-
-  private backoffDelay(attempt: number): number {
-    const base = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (attempt - 1));
-    return base + Math.floor(this.random() * BACKOFF_BASE_MS);
-  }
-
   private async timedFetch(url: string, nextPageToken: string | undefined): Promise<TimedResponse> {
+    if (this.deps.signal?.aborted) {throw this.deps.signal.reason ?? new Error("Aborted");}
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     const onAbort = (): void => controller.abort();
-    this.deps.signal?.addEventListener("abort", onAbort);
+    this.deps.signal?.addEventListener("abort", onAbort, { once: true });
     const body: Record<string, unknown> = {
       jql: this.jql,
       maxResults: PAGE_SIZE,
@@ -252,14 +235,18 @@ class JiraIssueSearch {
       });
       const bodyText = await response.text();
       if (response.status === 429 || response.status >= 500) {
-        throw new RetryableError(`HTTP ${response.status}`);
+        throw new RetryableRemoteError(
+          `HTTP ${response.status}`,
+          retryAfterMilliseconds(response.headers?.get("retry-after") ?? null)
+        );
       }
       return { status: response.status, ok: response.ok, bodyText };
     } catch (error) {
-      if (error instanceof RetryableError) {
+      if (this.deps.signal?.aborted) {throw this.deps.signal.reason ?? error;}
+      if (error instanceof RetryableRemoteError) {
         throw error;
       }
-      throw new RetryableError(scrubJwtLike(errMsg(error)));
+      throw new RetryableRemoteError(scrubJwtLike(errMsg(error)));
     } finally {
       clearTimeout(timer);
       this.deps.signal?.removeEventListener("abort", onAbort);

@@ -1,21 +1,74 @@
 import * as path from "node:path";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import * as vscode from "vscode";
 import {
   buildStubsForUnmatched,
   compilePatternForDedup,
   defaultNewFilePath,
+  GenerateStepsCommand,
   inferDefaultStepsDir,
   validateNewFilePath,
 } from "../../commands/generate-steps";
 import { inferParameters } from "../../generators/step-stub-generator";
 import { patternToRegexSource } from "../../providers/step-definition-provider";
 import type { UnmatchedStep } from "../../providers/step-resolver";
+import { ExtensionConfig } from "../../core/extension-config";
+import { Logger } from "../../utils/logger";
+import { WorkspaceTrust, WorkspaceTrustRequiredError } from "../../core/workspace-trust";
 
 function makeStep(text: string, keyword: "Given" | "When" | "Then" = "Given"): UnmatchedStep {
   return { line: 0, keyword, effectiveKeyword: keyword, text };
 }
 
 const ROOT = path.resolve("/tmp/ws-root");
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("GenerateStepsCommand trust", () => {
+  it("does not start saving when trust is revoked while applyEdit is pending", async () => {
+    const destination = path.join(ROOT, "steps.ts");
+    let trusted = true;
+    let resolveEdit: ((applied: boolean) => void) | undefined;
+    const save = vi.fn(() => Promise.resolve(true));
+    const resolver = {
+      findStepFiles: vi.fn(() => Promise.resolve([destination])),
+      parseStepFile: vi.fn(() => []),
+      invalidate: vi.fn(),
+    };
+    vi.spyOn(vscode.workspace, "getWorkspaceFolder").mockReturnValue({
+      uri: vscode.Uri.file(ROOT),
+    } as vscode.WorkspaceFolder);
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue({
+      label: "steps.ts",
+      filePath: destination,
+    } as never);
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue({
+      uri: vscode.Uri.file(destination),
+      lineCount: 1,
+      lineAt: () => ({ range: { end: new vscode.Position(0, 0) } }),
+      save,
+    } as unknown as vscode.TextDocument);
+    vi.spyOn(vscode.workspace, "applyEdit").mockImplementation(() =>
+      new Promise<boolean>((resolve) => {resolveEdit = resolve;})
+    );
+    const command = new GenerateStepsCommand(
+      resolver as never,
+      ExtensionConfig.create(),
+      Logger.create(),
+      new WorkspaceTrust(() => trusted)
+    );
+    const pending = command.executeForSteps(vscode.Uri.file(path.join(ROOT, "a.feature")), [
+      makeStep("a missing step"),
+    ]);
+    await vi.waitFor(() => expect(resolveEdit).toBeDefined());
+
+    trusted = false;
+    resolveEdit?.(true);
+
+    await expect(pending).rejects.toBeInstanceOf(WorkspaceTrustRequiredError);
+    expect(save).not.toHaveBeenCalled();
+  });
+});
 
 describe("inferDefaultStepsDir", () => {
   it("uses the literal prefix before the first wildcard segment", () => {

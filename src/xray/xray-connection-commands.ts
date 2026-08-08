@@ -12,6 +12,7 @@ import {
 } from "./xray-connection-test";
 import { parseXrayRegion } from "./xray-region";
 import { XraySetupPanel } from "./xray-setup-panel";
+import type { WorkspaceTrust } from "../core/workspace-trust";
 
 const CONFIG_NAMESPACE = "playwrightBddRunner";
 const SITE_URL_SETTING = "xray.siteUrl";
@@ -50,7 +51,8 @@ export class XrayConnectionCommands {
     private readonly knownTestKeys: () => string[],
     // The single-flighted probe shared with the factory `verify`, so a coincident subsystem verify
     // and panel verify collapse onto one handshake instead of racing two probe sequences.
-    private readonly probe: XrayProbe
+    private readonly probe: XrayProbe,
+    private readonly workspaceTrust: WorkspaceTrust
   ) {}
 
   public async manageConnection(): Promise<void> {
@@ -95,6 +97,7 @@ export class XrayConnectionCommands {
 
   public async connect(): Promise<void> {
     await XraySetupPanel.show({
+      workspaceAvailable: () => this.workspaceTrust.available,
       currentSite: () => this.config.xraySiteUrl,
       hasCredentials: (site) => this.credentialStore.hasCredentials(site),
       getCredentials: (site) => this.credentialStore.getCredentials(site),
@@ -105,15 +108,25 @@ export class XrayConnectionCommands {
       clearJira: (site) => this.credentialStore.clearJiraCredentials(site),
       // The panel renders the outcome inline, so it calls the probe directly, going through the
       // testConnection command would fire the standalone command's toasts on top.
-      probeConnection: (site) => this.probeConnection(site),
-      verifyConnection: (site) => this.probeConnection(site, { authOnly: true }),
+      probeConnection: (site, signal) => this.workspaceTrust.run(
+        (trusted) => this.probeConnection(site, undefined, trusted),
+        signal
+      ),
+      verifyConnection: (site, signal) => this.workspaceTrust.run(
+        (trusted) => this.probeConnection(site, { authOnly: true }, trusted),
+        signal
+      ),
     });
   }
 
   // Site is the just-saved host when the panel supplies it; otherwise read fresh from the config
   // store (never the ExtensionConfig snapshot, which only refreshes on config-change).
-  public probeConnection(site?: string, options?: XrayProbeOptions): Promise<XrayConnectionOutcome> {
-    return this.probe(this.testDeps(site ?? this.freshSite()), options);
+  public probeConnection(
+    site?: string,
+    options?: XrayProbeOptions,
+    signal?: AbortSignal
+  ): Promise<XrayConnectionOutcome> {
+    return this.probe(this.testDeps(site ?? this.freshSite()), options, signal);
   }
 
   private freshSite(): string {
@@ -138,10 +151,18 @@ export class XrayConnectionCommands {
     // retained panel can't strand the intermediate host's credentials on a stale previous site.
     const currentSite = wsConfig.get<string>(SITE_URL_SETTING, "");
 
+    const target = siteUrlTarget(wsConfig);
     if (trimmedSite !== currentSite) {
-      await wsConfig.update(SITE_URL_SETTING, trimmedSite, siteUrlTarget(wsConfig));
+      await wsConfig.update(SITE_URL_SETTING, trimmedSite, target);
     }
-    await this.credentialStore.setCredentials(trimmedSite, clientId.trim(), clientSecret.trim());
+    try {
+      await this.credentialStore.setCredentials(trimmedSite, clientId.trim(), clientSecret.trim());
+    } catch (error) {
+      if (trimmedSite !== currentSite) {
+        await wsConfig.update(SITE_URL_SETTING, currentSite, target);
+      }
+      throw error;
+    }
     // One site per workspace (§2): switching hosts must not leave the old host's secrets
     // stranded in SecretStorage with no command able to reach them.
     const previousSite = normalizeSiteUrl(currentSite);
@@ -175,8 +196,8 @@ export class XrayConnectionCommands {
     vscode.window.showInformationMessage(`Disconnected from Xray (${normalized})`);
   }
 
-  public async testConnection(): Promise<void> {
-    await runXrayConnectionTest(this.testDeps(this.freshSite()));
+  public async testConnection(signal?: AbortSignal): Promise<void> {
+    await runXrayConnectionTest(this.testDeps(this.freshSite()), signal);
   }
 
   private testDeps(site: string): XrayConnectionTestDeps {

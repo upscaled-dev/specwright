@@ -31,11 +31,12 @@ export interface ImportResponse {
 // The transport seam the importers write through, structurally satisfied by XrayClient. Kept as a local
 // interface so this module imports nothing from the vscode-chained client, staying extractable (P5).
 export interface ImportTransport {
-  postJson(path: string, body: unknown, signal?: AbortSignal): Promise<ImportResponse>;
+  postJson(path: string, body: unknown, signal?: AbortSignal, operationId?: string): Promise<ImportResponse>;
   postMultipart(
     path: string,
     parts: { readonly results: string; readonly info: string },
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    operationId?: string
   ): Promise<ImportResponse>;
 }
 
@@ -79,7 +80,7 @@ export type StepResolver = (ref: ScenarioRef) => StepResolution | undefined;
 
 export interface ExecutionImporter<Input, Payload> {
   buildPayload(input: Input): Payload;
-  import(transport: ImportTransport, payload: Payload, signal?: AbortSignal): Promise<ExecutionImportResponse>;
+  import(transport: ImportTransport, payload: Payload, signal?: AbortSignal, operationId?: string): Promise<ExecutionImportResponse>;
 }
 
 // Throws XrayImportError on a non-2xx (extracting the server message when the body carries one);
@@ -212,12 +213,13 @@ export class XrayJsonImporter implements ExecutionImporter<XrayJsonInput, XrayJs
   public async import(
     transport: ImportTransport,
     payload: XrayJsonPayload,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    operationId?: string
   ): Promise<ExecutionImportResponse> {
     if (payload.tests.length === 0) {
       throw new EmptyImportError("This run has no test results to add to the execution. Re-run the tests, then publish again.");
     }
-    return handleImportResponse(await transport.postJson(IMPORT_EXECUTION_PATH, payload, signal));
+    return handleImportResponse(await transport.postJson(IMPORT_EXECUTION_PATH, payload, signal, operationId));
   }
 }
 
@@ -455,7 +457,8 @@ export class CucumberMultipartImporter
   public async import(
     transport: ImportTransport,
     payload: CucumberMultipartPayload,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    operationId?: string
   ): Promise<ExecutionImportResponse> {
     if (payload.results.length === 0) {
       throw new EmptyImportError(
@@ -463,6 +466,6 @@ export class CucumberMultipartImporter
       );
     }
     const parts = { results: JSON.stringify(payload.results), info: JSON.stringify(payload.info) };
-    return handleImportResponse(await transport.postMultipart(CUCUMBER_MULTIPART_PATH, parts, signal));
+    return handleImportResponse(await transport.postMultipart(CUCUMBER_MULTIPART_PATH, parts, signal, operationId));
   }
 }

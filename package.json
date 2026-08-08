@@ -17,6 +17,38 @@
   "engines": {
     "vscode": "^1.99.0"
   },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Gherkin authoring and navigation remain available. Trust the workspace before running or debugging tests, generating files, reading integration credentials, or changing remote test data.",
+      "restrictedConfigurations": [
+        "playwrightBddRunner.playwrightCommand",
+        "playwrightBddRunner.bddgenCommand",
+        "playwrightBddRunner.preRunCommand",
+        "playwrightBddRunner.featuresGenDir",
+        "playwrightBddRunner.workingDirectory",
+        "playwrightBddRunner.testFilePattern",
+        "playwrightBddRunner.parallelExecution",
+        "playwrightBddRunner.maxParallelProcesses",
+        "playwrightBddRunner.reporter",
+        "playwrightBddRunner.useConfigReporters",
+        "playwrightBddRunner.tags",
+        "playwrightBddRunner.dryRun",
+        "playwrightBddRunner.stepDefinitionPaths",
+        "playwrightBddRunner.stepDefinitionExcludePaths",
+        "playwrightBddRunner.traceability.provider",
+        "playwrightBddRunner.traceability.testTagPrefix",
+        "playwrightBddRunner.traceability.reqTagPrefix",
+        "playwrightBddRunner.xray.siteUrl",
+        "playwrightBddRunner.xray.apiRegion",
+        "playwrightBddRunner.xray.syncProjectKeys",
+        "playwrightBddRunner.xray.defaultProjectKey",
+        "playwrightBddRunner.xray.executionIssueType",
+        "playwrightBddRunner.xray.reportGlob",
+        "playwrightBddRunner.xray.attachTo"
+      ]
+    }
+  },
   "categories": [
     "Testing",
     "Programming Languages",
@@ -104,17 +136,17 @@
         "playwrightBddRunner.playwrightCommand": {
           "type": "string",
           "default": "npx playwright test",
-          "description": "Command to run Playwright tests (e.g., 'npx playwright test', 'pnpm exec playwright test', 'yarn playwright test')"
+          "description": "Executable and arguments used to run Playwright tests (e.g., 'npx playwright test', 'pnpm exec playwright test', 'yarn playwright test'). Runs directly without a shell; shell operators are not supported."
         },
         "playwrightBddRunner.bddgenCommand": {
           "type": "string",
           "default": "npx bddgen",
-          "description": "Command to generate Playwright spec files from .feature files (playwright-bdd's codegen step). Set to empty to skip if your playwright.config.ts already runs bddgen via defineBddProject."
+          "description": "Executable and arguments used to generate Playwright spec files from .feature files. Runs directly without a shell; shell operators are not supported. Leave empty only when current generated specs already exist before a targeted run, for example because preRunCommand produces them."
         },
         "playwrightBddRunner.preRunCommand": {
           "type": "string",
           "default": "",
-          "description": "Command to run before each test execution (e.g., 'npm run build:fixtures'). Empty disables the hook. If the command exits non-zero, the test run is aborted."
+          "description": "Trusted compatibility shell command to run before each test execution (e.g., 'npm run build:fixtures'). Empty disables the hook. If the command exits non-zero, the test run is aborted."
         },
         "playwrightBddRunner.featuresGenDir": {
           "type": "string",
@@ -403,52 +435,62 @@
       {
         "command": "playwrightBddRunner.runAllTests",
         "title": "Run All Tests",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.runScenario",
         "title": "Run Scenario",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.debugScenario",
         "title": "Debug Scenario",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.runAllTestsParallel",
         "title": "Run All Tests in Parallel",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.runFeatureFile",
         "title": "Run Feature File",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.runScenarioWithTags",
         "title": "Run Scenario with Tags",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.runFeatureFileWithTags",
         "title": "Run Feature File with Tags",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.runScenarioWithContext",
         "title": "Run Scenario",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.debugScenarioWithContext",
         "title": "Debug Scenario",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.runFeatureFileWithContext",
         "title": "Run Feature File",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.setOrganizationStrategy",
@@ -498,12 +540,14 @@
       {
         "command": "playwrightBddRunner.generateStepDefinitions",
         "title": "Generate Missing Step Definitions",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.generateStepDefinitionForStep",
         "title": "Create Step Definition For Step",
-        "category": "Specwright"
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.goToStepDefinition",
@@ -538,13 +582,15 @@
         "command": "playwrightBddRunner.scaffoldStepFromPanel",
         "title": "Create Step Definition",
         "category": "Specwright",
-        "icon": "$(add)"
+        "icon": "$(add)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.scaffoldFeatureFromPanel",
         "title": "Generate Missing Step Definitions",
         "category": "Specwright",
-        "icon": "$(add)"
+        "icon": "$(add)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.openIssue",
@@ -562,49 +608,57 @@
         "command": "playwrightBddRunner.traceability.linkScenario",
         "title": "Link Scenario to Test",
         "category": "Specwright",
-        "icon": "$(link)"
+        "icon": "$(link)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.runAndPublish",
         "title": "Run Locally and Publish…",
         "category": "Specwright",
-        "icon": "$(play-circle)"
+        "icon": "$(play-circle)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.runAndPublishAllMapped",
         "title": "Run All Mapped Scenarios and Publish",
         "category": "Specwright",
-        "icon": "$(play-circle)"
+        "icon": "$(play-circle)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.runAndPublishFeature",
         "title": "Run and Publish",
         "category": "Specwright",
-        "icon": "$(play-circle)"
+        "icon": "$(play-circle)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.runAndPublishFolder",
         "title": "Run and Publish",
         "category": "Specwright",
-        "icon": "$(play-circle)"
+        "icon": "$(play-circle)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.runAndPublishByTagExpression",
         "title": "Run and Publish by Tag Expression",
         "category": "Specwright",
-        "icon": "$(play-circle)"
+        "icon": "$(play-circle)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.publishLastRun",
         "title": "Publish Last Run…",
         "category": "Specwright",
-        "icon": "$(cloud-upload)"
+        "icon": "$(cloud-upload)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.sync",
         "title": "Sync Traceability",
         "category": "Specwright",
-        "icon": "$(sync)"
+        "icon": "$(sync)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.openBoard",
@@ -616,25 +670,29 @@
         "command": "playwrightBddRunner.traceability.manageConnection",
         "title": "Manage Xray Connection",
         "category": "Specwright",
-        "icon": "$(plug)"
+        "icon": "$(plug)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.connect",
         "title": "Connect to Xray",
         "category": "Specwright",
-        "icon": "$(sign-in)"
+        "icon": "$(sign-in)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.disconnect",
         "title": "Disconnect from Xray",
         "category": "Specwright",
-        "icon": "$(sign-out)"
+        "icon": "$(sign-out)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.testConnection",
         "title": "Test Xray Connection",
         "category": "Specwright",
-        "icon": "$(pulse)"
+        "icon": "$(pulse)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.hidePanel",
@@ -652,7 +710,8 @@
         "command": "playwrightBddRunner.traceability.switchDefaultProject",
         "title": "Switch Default Project…",
         "category": "Specwright",
-        "icon": "$(arrow-swap)"
+        "icon": "$(arrow-swap)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.clearLocalRunHistory",
@@ -664,25 +723,29 @@
         "command": "playwrightBddRunner.traceability.bulkCreateTests",
         "title": "Create Tests from Scenarios…",
         "category": "Specwright",
-        "icon": "$(add)"
+        "icon": "$(add)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.createTestSet",
         "title": "Create Test Set…",
         "category": "Specwright",
-        "icon": "$(library)"
+        "icon": "$(library)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.createTestPlan",
         "title": "Create Test Plan…",
         "category": "Specwright",
-        "icon": "$(checklist)"
+        "icon": "$(checklist)",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "playwrightBddRunner.traceability.createTestExecution",
         "title": "Create Test Execution…",
         "category": "Specwright",
-        "icon": "$(run-all)"
+        "icon": "$(run-all)",
+        "enablement": "isWorkspaceTrusted"
       }
     ],
     "viewsContainers": {
@@ -714,13 +777,18 @@
     "viewsWelcome": [
       {
         "view": "playwrightBddRunner.traceability",
-        "when": "!playwrightBddRunner.traceability.connected",
+        "when": "isWorkspaceTrusted && !playwrightBddRunner.traceability.connected",
         "contents": "Set up Xray integration to map your scenarios to Xray tests, see coverage at a glance, and publish run results back to Jira.\n\n[Set up Xray](command:playwrightBddRunner.traceability.connect)\n\nPrefer to keep this out of the way? [Hide this panel](command:playwrightBddRunner.traceability.hidePanel)."
       },
       {
         "view": "playwrightBddRunner.traceability",
-        "when": "playwrightBddRunner.traceability.connected",
+        "when": "isWorkspaceTrusted && playwrightBddRunner.traceability.connected",
         "contents": "No Xray-tagged scenarios found yet.\n\nTag a scenario with `@TEST_KEY` (and optionally `@REQ_KEY`) in a .feature file to map it to an Xray test. The tree then groups scenarios by their Xray keys, lists untagged scenarios as coverage gaps, and shows pass/fail badges after a run.\n\nSync loads the remote test catalog, the Coverage Board links scenarios to Xray tests, and publishing sends run results back to Jira."
+      },
+      {
+        "view": "playwrightBddRunner.traceability",
+        "when": "!isWorkspaceTrusted",
+        "contents": "Traceability stays offline while this workspace is untrusted. Trust it before connecting, syncing, publishing, or changing remote test data.\n\n[Manage Workspace Trust](command:workbench.trust.manage)"
       }
     ],
     "menus": {

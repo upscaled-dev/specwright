@@ -18,6 +18,7 @@ import type {
 import { NotSupportedError, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayPublishSupport } from "../../xray/xray-adapter-factory";
 import { Logger } from "../../utils/logger";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
 
 const NOOP_PUBLISH_SUPPORT: XrayPublishSupport = {
   resolveSteps: () => undefined,
@@ -131,7 +132,7 @@ describe("XrayAdapter", () => {
 
 describe("XrayAdapter connection capability", () => {
   it("exposes a thin connection view over the credential store when one is supplied", async () => {
-    const store = new XrayCredentialStore(mapSecretStorage());
+    const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
     const adapter = new XrayAdapter(configWith({ "xray.siteUrl": "acme.atlassian.net" }), {
       credentialStore: store,
     });
@@ -144,7 +145,7 @@ describe("XrayAdapter connection capability", () => {
   });
 
   it("reports disconnected when the site is unset even with stored credentials", async () => {
-    const store = new XrayCredentialStore(mapSecretStorage());
+    const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
     await store.setCredentials("acme.atlassian.net", "id-1", "secret-1");
     const adapter = new XrayAdapter(configWith({}), { credentialStore: store });
     expect(await adapter.connection?.isConnected()).toBe(false);
@@ -194,7 +195,7 @@ function recordingProbe(outcome: XrayConnectionOutcome): {
 
 describe("createXrayAdapterFactory verify", () => {
   it("runs an auth-only probe with a live site read and maps ok → ok", async () => {
-    const store = new XrayCredentialStore(mapSecretStorage());
+    const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
     const values: Record<string, unknown> = { "xray.siteUrl": "old.atlassian.net" };
     const config = mutableConfig(values);
     const { probe, calls } = recordingProbe({
@@ -203,7 +204,13 @@ describe("createXrayAdapterFactory verify", () => {
       site: "new.atlassian.net",
       message: "Connected to new.atlassian.net",
     });
-    const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), NOOP_PUBLISH_SUPPORT).create({ config, logger: Logger.create() });
+    const adapter = createXrayAdapterFactory(
+      store,
+      probe,
+      fakeMemento(),
+      NOOP_PUBLISH_SUPPORT,
+      trustedWorkspace()
+    ).create({ config, logger: Logger.create() });
 
     // The site is read at verify time, not captured at create time.
     values["xray.siteUrl"] = "new.atlassian.net";
@@ -217,7 +224,7 @@ describe("createXrayAdapterFactory verify", () => {
   });
 
   it("maps a network-stage outcome to unreachable", async () => {
-    const store = new XrayCredentialStore(mapSecretStorage());
+    const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
     const config = mutableConfig({ "xray.siteUrl": "acme.atlassian.net" });
     const { probe } = recordingProbe({
       ok: false,
@@ -225,7 +232,13 @@ describe("createXrayAdapterFactory verify", () => {
       site: "acme.atlassian.net",
       message: "Could not reach Xray: check your network connection.",
     });
-    const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), NOOP_PUBLISH_SUPPORT).create({ config, logger: Logger.create() });
+    const adapter = createXrayAdapterFactory(
+      store,
+      probe,
+      fakeMemento(),
+      NOOP_PUBLISH_SUPPORT,
+      trustedWorkspace()
+    ).create({ config, logger: Logger.create() });
 
     expect(await adapter.connection!.verify!()).toEqual({
       status: "unreachable",
@@ -234,7 +247,7 @@ describe("createXrayAdapterFactory verify", () => {
   });
 
   it("maps an auth-stage outcome to auth-failed", async () => {
-    const store = new XrayCredentialStore(mapSecretStorage());
+    const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
     const config = mutableConfig({ "xray.siteUrl": "acme.atlassian.net" });
     const { probe } = recordingProbe({
       ok: false,
@@ -242,7 +255,13 @@ describe("createXrayAdapterFactory verify", () => {
       site: "acme.atlassian.net",
       message: "Authentication failed: check your client ID and secret.",
     });
-    const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), NOOP_PUBLISH_SUPPORT).create({ config, logger: Logger.create() });
+    const adapter = createXrayAdapterFactory(
+      store,
+      probe,
+      fakeMemento(),
+      NOOP_PUBLISH_SUPPORT,
+      trustedWorkspace()
+    ).create({ config, logger: Logger.create() });
 
     expect(await adapter.connection!.verify!()).toEqual({
       status: "auth-failed",

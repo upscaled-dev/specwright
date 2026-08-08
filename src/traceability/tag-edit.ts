@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { KeyGrammar } from "./contracts";
 import { computeLinkEdit, computeUnlinkEdit } from "./link-scenario";
 import type { ScenarioRef } from "./scenario-ref";
+import type { WorkspaceTrust } from "../core/workspace-trust";
 
 // What a tag write can answer: the caller's success label, the file already saying it, or a refusal.
 export type TagWrite<Written extends string> = Written | "unchanged" | "rejected";
@@ -12,7 +13,8 @@ export type TagWrite<Written extends string> = Written | "unchanged" | "rejected
 async function writeTagEdit<Written extends string>(
   scenario: ScenarioRef,
   written: Written,
-  build: (doc: vscode.TextDocument, uri: vscode.Uri) => vscode.WorkspaceEdit | undefined
+  build: (doc: vscode.TextDocument, uri: vscode.Uri) => vscode.WorkspaceEdit | undefined,
+  workspaceTrust: WorkspaceTrust
 ): Promise<TagWrite<Written>> {
   const uri = vscode.Uri.file(scenario.filePath);
   const doc = await vscode.workspace.openTextDocument(uri);
@@ -20,6 +22,7 @@ async function writeTagEdit<Written extends string>(
   if (!wsEdit) {
     return "unchanged";
   }
+  workspaceTrust.require();
   if (!(await vscode.workspace.applyEdit(wsEdit))) {
     return "rejected";
   }
@@ -28,6 +31,7 @@ async function writeTagEdit<Written extends string>(
   if (!doc.isDirty) {
     return written;
   }
+  workspaceTrust.require();
   return (await doc.save()) ? written : "rejected";
 }
 
@@ -35,7 +39,8 @@ async function writeTagEdit<Written extends string>(
 export function applyTagInsert(
   scenario: ScenarioRef,
   key: string,
-  grammar: KeyGrammar
+  grammar: KeyGrammar,
+  workspaceTrust: WorkspaceTrust
 ): Promise<TagWrite<"inserted">> {
   return writeTagEdit(scenario, "inserted", (doc, uri) => {
     const edit = computeLinkEdit(doc.getText().split("\n"), scenario.line, key, grammar);
@@ -53,7 +58,7 @@ export function applyTagInsert(
       wsEdit.replace(uri, new vscode.Range(edit.line, 0, edit.line, lineLength), edit.text);
     }
     return wsEdit;
-  });
+  }, workspaceTrust);
 }
 
 // The removal twin of applyTagInsert: drops the `@TEST_<key>` tag from the scenario's tag lines as
@@ -61,7 +66,8 @@ export function applyTagInsert(
 export function applyTagRemove(
   scenario: ScenarioRef,
   key: string,
-  grammar: KeyGrammar
+  grammar: KeyGrammar,
+  workspaceTrust: WorkspaceTrust
 ): Promise<TagWrite<"removed">> {
   return writeTagEdit(scenario, "removed", (doc, uri) => {
     const edit = computeUnlinkEdit(doc.getText().split("\n"), scenario.line, key, grammar);
@@ -76,5 +82,5 @@ export function applyTagRemove(
       wsEdit.replace(uri, new vscode.Range(edit.line, 0, edit.line, lineLength), edit.text);
     }
     return wsEdit;
-  });
+  }, workspaceTrust);
 }

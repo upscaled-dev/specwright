@@ -1,8 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { BoundedOutputTail, EXECUTION_LIMITS, truncationNotice } from "./execution-limits";
 import { errMsg } from "../utils/text";
 import type { Logger } from "../utils/logger";
+import { terminationLease, type TerminationLease } from "./execution-admission";
 
 export type CommandOutputHandler = (stream: "stdout" | "stderr", text: string) => void;
 
@@ -91,6 +94,7 @@ export interface BoundedCommandResult {
   readonly outputStreamed?: boolean;
   /** The owned process tree could not be proven gone; callers must keep admission closed. */
   readonly terminationFailure?: string | undefined;
+  readonly terminationLease?: TerminationLease | undefined;
 }
 
 export interface BoundedCommandOptions {
@@ -100,11 +104,168 @@ export interface BoundedCommandOptions {
   readonly signal?: AbortSignal | undefined;
   readonly onOutput?: CommandOutputHandler | undefined;
   readonly logger: Logger;
+  /** Explicit compatibility escape hatch for the trusted pre-run hook only. */
+  readonly shell?: boolean | undefined;
+}
+
+export interface ExecutableCommand {
+  readonly executable: string;
+  readonly args: readonly string[];
+}
+
+function executableName(executable: string): string {
+  return path.basename(executable).replace(/\.(?:cmd|exe)$/i, "").toLowerCase();
+}
+
+function packageBin(invocation: ExecutableCommand): { name: string; args: string[] } | undefined {
+  const runner = executableName(invocation.executable);
+  const args = [...invocation.args];
+  if (runner === "npx") {
+    const name = args.find((arg) => !arg.startsWith("-"));
+    if (!name) {return undefined;}
+    return { name, args: args.slice(args.indexOf(name) + 1) };
+  }
+  if (runner === "pnpm" && args[0] === "exec" && args[1]) {
+    return { name: args[1], args: args.slice(2) };
+  }
+  if (runner === "npm" && args[0] === "exec") {
+    const separator = args.indexOf("--");
+    const index = separator >= 0 ? separator + 1 : 1;
+    if (args[index]) {return { name: args[index], args: args.slice(index + 1) };}
+  }
+  if (runner === "yarn") {
+    const first = args.findIndex((arg) => !arg.startsWith("-"));
+    const index = args[first] === "run" ? first + 1 : first;
+    if (index >= 0 && args[index]) {return { name: args[index], args: args.slice(index + 1) };}
+  }
+  return undefined;
+}
+
+function windowsShimTarget(shim: string, binDir: string): string | undefined {
+  let body: string;
+  try {body = fs.readFileSync(shim, "utf8");} catch {return undefined;}
+  const match = /%dp0%[\\/]([^"\r\n]+\.(?:cjs|mjs|js))/i.exec(body);
+  return match?.[1]
+    ? path.resolve(binDir, match[1].replaceAll("\\", path.sep))
+    : undefined;
+}
+
+function localBinTarget(
+  workingDir: string,
+  name: string,
+  platform: NodeJS.Platform
+): string | undefined {
+  let directory = path.resolve(workingDir);
+  for (;;) {
+    const binDir = path.join(directory, "node_modules", ".bin");
+    if (platform === "win32") {
+      const target = windowsShimTarget(path.join(binDir, `${name}.cmd`), binDir);
+      if (target && fs.existsSync(target)) {return target;}
+    } else {
+      try {
+        return fs.realpathSync(path.join(binDir, name));
+      } catch { /* try the parent package */ }
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) {return undefined;}
+    directory = parent;
+  }
+}
+
+/** Resolve package runners to an installed project bin, never a package-manager subprocess. */
+export function resolveExecutableCommand(
+  command: string,
+  workingDir: string,
+  platform: NodeJS.Platform = process.platform
+): ExecutableCommand {
+  const parsed = parseExecutableCommand(command);
+  const requested = packageBin(parsed);
+  if (!requested) {
+    if (platform === "win32" && /\.(?:cmd|bat)$/i.test(parsed.executable)) {
+      throw new Error(`Windows command shims are not supported: ${parsed.executable}`);
+    }
+    return parsed;
+  }
+  const target = localBinTarget(workingDir, requested.name, platform);
+  if (!target) {
+    throw new Error(
+      `The project executable "${requested.name}" is not installed under ${workingDir}. ` +
+      "Install the project dependencies before running Specwright."
+    );
+  }
+  return { executable: process.execPath, args: [target, ...requested.args] };
+}
+
+/** Parse a configured command line without invoking a shell or expanding its syntax. */
+export function parseExecutableCommand(command: string): ExecutableCommand {
+  const args: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let started = false;
+  const push = (): void => {
+    if (!started) {return;}
+    args.push(token);
+    token = "";
+    started = false;
+  };
+  const source = command.trim();
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source.charAt(index);
+    if (escaped) {
+      token += character;
+      escaped = false;
+      started = true;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      const next = source[index + 1];
+      const escapable = quote === '"'
+        ? next !== undefined && ['"', "\\", "$", "`"].includes(next)
+        : next !== undefined && (/\s/u.test(next) || ['"', "'", "\\"].includes(next));
+      if (escapable) {
+        escaped = true;
+        started = true;
+        continue;
+      }
+      token += character;
+      started = true;
+      continue;
+    }
+    if (quote !== undefined) {
+      if (character === quote) {quote = undefined;}
+      else {token += character;}
+      started = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (/\s/u.test(character)) {
+      push();
+      continue;
+    }
+    if ("&|;<>".includes(character)) {
+      throw new Error(`Shell operator '${character}' is not supported in executable commands.`);
+    }
+    token += character;
+    started = true;
+  }
+  if (escaped || quote !== undefined) {throw new Error("Command has an unfinished quote or escape.");}
+  push();
+  const [executable, ...parsedArgs] = args;
+  if (!executable) {throw new Error("Command cannot be empty");}
+  const safeArgs = /(^|[\\/])npx(?:\.cmd)?$/i.test(executable) && !parsedArgs.includes("--no-install")
+    ? ["--no-install", ...parsedArgs]
+    : parsedArgs;
+  return { executable, args: safeArgs };
 }
 
 /** Spawn one command while streaming every chunk and retaining only bounded diagnostic tails. */
 export function runBoundedCommand(options: BoundedCommandOptions): Promise<BoundedCommandResult> {
-  const { command, workingDir, extraEnv, signal, onOutput, logger } = options;
+  const { command, workingDir, extraEnv, signal, onOutput, logger, shell = false } = options;
   return new Promise((resolve) => {
     if (!command || command.trim() === "") {
       resolve({ success: false, output: "", error: "Command cannot be empty", returnCode: 1 });
@@ -116,9 +277,12 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
     }
 
     try {
-      const child = spawn(command, {
+      const invocation = shell
+        ? { executable: command, args: [] as string[] }
+        : resolveExecutableCommand(command, workingDir);
+      const child = spawn(invocation.executable, invocation.args, {
         cwd: workingDir,
-        shell: true,
+        shell,
         // POSIX: detach so the child leads its own process group; killing that group on
         // cancellation reaches playwright + browsers. With shell:true, signalling only the
         // shell would orphan playwright. Windows uses awaited taskkill /T instead.
@@ -172,7 +336,7 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
         success: boolean,
         error: string,
         returnCode: number,
-        terminationFailure?: string
+        termination?: TerminationOutcome
       ): BoundedCommandResult => ({
         success,
         output: capture !== undefined && checkpoint !== undefined
@@ -181,15 +345,18 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
         error,
         returnCode,
         ...(outputDelivered ? { outputStreamed: true } : {}),
-        ...(terminationFailure ? { terminationFailure } : {}),
+        ...(termination ? {
+          terminationFailure: termination.failure,
+          terminationLease: termination.lease,
+        } : {}),
       });
-      const settle = (code: number | null, terminationFailure?: string): void => {
+      const settle = (code: number | null, termination?: TerminationOutcome): void => {
         if (settled) {return;}
         settled = true;
         signal?.removeEventListener("abort", onAbort);
         finishOutput();
-        if (terminationFailure !== undefined) {
-          resolve(result(false, terminationFailure, 1, terminationFailure));
+        if (termination !== undefined) {
+          resolve(result(false, termination.failure, 1, termination));
           return;
         }
         if (cancelled) {
@@ -207,11 +374,11 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
       };
       const finishAfterTermination = (): void => {
         if (termination !== undefined) {return;}
-        termination = terminateOwnedTree(child, logger).then((failure) => {
-          if (failure !== undefined) {
-            logger.error(failure, { command, workingDir });
+        termination = terminateOwnedTree(child, logger).then((outcome) => {
+          if (outcome !== undefined) {
+            logger.error(outcome.failure, { command, workingDir });
           }
-          settle(exitCode, failure);
+          settle(exitCode, outcome);
         });
       };
       const onAbort = (): void => {
@@ -307,26 +474,33 @@ function signalProcessGroup(
   }
 }
 
-async function terminatePosixTree(pid: number, logger: Logger): Promise<string | undefined> {
+interface TerminationOutcome {
+  readonly failure: string;
+  readonly lease: TerminationLease;
+}
+
+async function terminatePosixTree(pid: number, logger: Logger): Promise<TerminationOutcome | undefined> {
   if (!processGroupExists(pid)) {return undefined;}
   signalProcessGroup(pid, "SIGTERM", logger);
   await delay(TERMINATION_GRACE_MS);
   if (!processGroupExists(pid)) {return undefined;}
   signalProcessGroup(pid, "SIGKILL", logger);
   await delay(TERMINATION_GRACE_MS);
-  return processGroupExists(pid)
-    ? `Process-group termination could not be confirmed within ${2 * TERMINATION_GRACE_MS}ms after SIGTERM and SIGKILL.`
-    : undefined;
+  if (!processGroupExists(pid)) {return undefined;}
+  const failure = `Process-group termination could not be confirmed within ${2 * TERMINATION_GRACE_MS}ms after SIGTERM and SIGKILL.`;
+  return { failure, lease: terminationLease({ kind: "posix-group", pgid: pid, failure }) };
 }
 
-function terminateWindowsTree(pid: number): Promise<string | undefined> {
+function terminateWindowsTree(pid: number): Promise<TerminationOutcome | undefined> {
   return new Promise((resolve) => {
     let finished = false;
     const complete = (failure?: string): void => {
       if (finished) {return;}
       finished = true;
       clearTimeout(timer);
-      resolve(failure);
+      resolve(failure === undefined
+        ? undefined
+        : { failure, lease: terminationLease({ kind: "windows-tree", pid, failure }) });
     };
     let killer: ChildProcess;
     try {
@@ -335,7 +509,8 @@ function terminateWindowsTree(pid: number): Promise<string | undefined> {
         stdio: "ignore",
       });
     } catch (error) {
-      resolve(`Process-tree termination failed to start: ${errMsg(error)}.`);
+      const failure = `Process-tree termination failed to start: ${errMsg(error)}.`;
+      resolve({ failure, lease: terminationLease({ kind: "windows-tree", pid, failure }) });
       return;
     }
     const timer = setTimeout(() => {
@@ -355,7 +530,7 @@ function terminateWindowsTree(pid: number): Promise<string | undefined> {
 }
 
 /** Terminate and confirm the complete tree owned by the spawned shell. */
-function terminateOwnedTree(child: ChildProcess, logger: Logger): Promise<string | undefined> {
+function terminateOwnedTree(child: ChildProcess, logger: Logger): Promise<TerminationOutcome | undefined> {
   if (child.pid === undefined) {return Promise.resolve(undefined);}
   return process.platform === "win32"
     ? terminateWindowsTree(child.pid)

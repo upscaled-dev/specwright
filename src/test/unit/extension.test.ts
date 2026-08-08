@@ -1,20 +1,31 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type * as vscode from "vscode";
 import { activate, deactivate } from "../../extension";
 import { PROMPTED_STATE_KEY } from "../../commands/prompt-worker-count";
+import { Logger } from "../../utils/logger";
+import { ExecutionAdmissionBlockedError } from "../../core/execution-admission";
+import { SelectedExecutionGateway } from "../../core/execution-engine";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
-import type { ScenarioRef } from "../../traceability/scenario-ref";
+import { WorkspaceTrust } from "../../core/workspace-trust";
+import { TestExecutor } from "../../core/test-executor";
 
-const { gatewayArgs } = vi.hoisted(() => ({ gatewayArgs: [] as unknown[][] }));
+const { gatewayArgs, gateways } = vi.hoisted(() => ({
+  gatewayArgs: [] as unknown[][],
+  gateways: [] as Array<{ execute(...args: unknown[]): Promise<unknown> }>,
+}));
 
 vi.mock("../../core/execution-gateway", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../core/execution-gateway")>();
   return {
     ...actual,
-    ExtensionExecutionGateway: class extends actual.ExtensionExecutionGateway {
-      constructor(...args: ConstructorParameters<typeof actual.ExtensionExecutionGateway>) {
+    LegacyDirectExecutionGateway: class extends actual.LegacyDirectExecutionGateway {
+      constructor(...args: ConstructorParameters<typeof actual.LegacyDirectExecutionGateway>) {
         super(...args);
         gatewayArgs.push(args);
+        gateways.push(this as unknown as { execute(...args: unknown[]): Promise<unknown> });
       }
     },
   };
@@ -30,6 +41,7 @@ interface StubContext {
   subscriptions: { dispose(): void }[];
   workspaceState: StubMemento;
   globalState: StubMemento;
+  globalStorageUri: { fsPath: string };
   secrets: {
     get: ReturnType<typeof vi.fn>;
     store: ReturnType<typeof vi.fn>;
@@ -54,6 +66,7 @@ function makeStubContext(): StubContext {
     workspaceState: stubMemento(),
     // The Xray metadata cache keys off globalState; a realistic stub keeps activation honest.
     globalState: stubMemento(),
+    globalStorageUri: { fsPath: fs.mkdtempSync(path.join(os.tmpdir(), "specwright-extension-")) },
     secrets: {
       get: vi.fn().mockResolvedValue(undefined),
       store: vi.fn().mockResolvedValue(undefined),
@@ -67,40 +80,25 @@ function makeStubContext(): StubContext {
 
 // Activation registers host-wide singletons (the board's webview serializer among them) on the
 // context's subscriptions, so an undrained context makes the next activation fail.
-afterEach(() => {
+afterEach(async () => {
   gatewayArgs.length = 0;
+  gateways.length = 0;
   vi.restoreAllMocks();
-  deactivate();
+  await deactivate();
   for (const context of contexts.splice(0)) {
     for (const subscription of context.subscriptions.splice(0)) {
       subscription.dispose();
     }
+    fs.rmSync(context.globalStorageUri.fsPath, { recursive: true, force: true });
   }
 });
 
 describe("activate", () => {
-  it("gives the execution gateway the traceability snapshot's mapped scenarios", async () => {
-    const scenario: ScenarioRef = {
-      filePath: "/ws/a.feature",
-      line: 3,
-      name: "A",
-      kind: "scenario",
-    };
-    const getSnapshot = vi.spyOn(TraceabilitySubsystem.prototype, "getSnapshot").mockReturnValue({
-      links: [{ testKey: "CALC-1", scenario, reqKeys: [] }],
-      untraced: [],
-      orphans: [],
-      stale: false,
-      completeProjects: [],
-      errors: [],
-    });
-
+  it("configures discovery on the legacy execution boundary", async () => {
     await activate(makeStubContext() as unknown as vscode.ExtensionContext);
 
-    const mapped = gatewayArgs.at(-1)?.[4] as (() => readonly ScenarioRef[]) | undefined;
-    expect(mapped).toBeTypeOf("function");
-    expect(mapped!()).toEqual([scenario]);
-    expect(getSnapshot).toHaveBeenCalled();
+    const discovery = gatewayArgs.at(-1)?.[5] as { discover?: unknown } | undefined;
+    expect(discovery?.discover).toBeTypeOf("function");
   });
 
 
@@ -117,5 +115,56 @@ describe("activate", () => {
 
     await api.seedParallelProfilePrompted(false);
     expect(context.workspaceState.update).toHaveBeenLastCalledWith(PROMPTED_STATE_KEY, false);
+  });
+
+  it("keeps activation alive and execution blocked when a durable lease record is corrupt", async () => {
+    const context = makeStubContext();
+    const admissionDirectory = path.join(context.globalStorageUri.fsPath, "execution-admission");
+    fs.mkdirSync(admissionDirectory, { recursive: true });
+    fs.writeFileSync(path.join(admissionDirectory, "corrupt.json"), "not JSON");
+    const logged = vi.spyOn(Logger.prototype, "error");
+
+    const api = await activate(context as unknown as vscode.ExtensionContext);
+
+    expect(api.providerRegistry).toBeDefined();
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining("Execution admission recovery failed"));
+    await expect(gateways.at(-1)?.execute({
+      mode: "run",
+      selection: { kind: "suite" },
+      targets: [],
+    })).rejects.toBeInstanceOf(ExecutionAdmissionBlockedError);
+  });
+});
+
+describe("deactivate", () => {
+  it("attempts every later cleanup owner after an early rejection", async () => {
+    const context = makeStubContext();
+    await activate(context as unknown as vscode.ExtensionContext);
+    const commandAdapter = context.subscriptions.find((subscription) =>
+      (subscription as { id?: unknown }).id === "xray"
+    );
+    expect(commandAdapter).toBeDefined();
+
+    const gatewayDispose = vi.spyOn(SelectedExecutionGateway.prototype, "dispose")
+      .mockRejectedValueOnce(new Error("gateway cleanup failed"));
+    const traceabilityShutdown = vi.spyOn(TraceabilitySubsystem.prototype, "shutdown");
+    const adapterDispose = vi.spyOn(commandAdapter!, "dispose");
+    const trustDispose = vi.spyOn(WorkspaceTrust.prototype, "dispose");
+    const executorDispose = vi.spyOn(TestExecutor.prototype, "dispose");
+    const logged = vi.spyOn(Logger.prototype, "error");
+    const loggerDispose = vi.spyOn(Logger.prototype, "dispose");
+
+    await expect(deactivate()).resolves.toBeUndefined();
+
+    expect(gatewayDispose).toHaveBeenCalledOnce();
+    expect(traceabilityShutdown).toHaveBeenCalledOnce();
+    expect(adapterDispose).toHaveBeenCalledOnce();
+    expect(trustDispose).toHaveBeenCalledOnce();
+    expect(executorDispose).toHaveBeenCalledOnce();
+    expect(logged).toHaveBeenCalledWith(
+      "Extension deactivation completed with cleanup failures",
+      { error: expect.stringContaining("execution gateway: gateway cleanup failed") }
+    );
+    expect(loggerDispose).toHaveBeenCalledOnce();
   });
 });

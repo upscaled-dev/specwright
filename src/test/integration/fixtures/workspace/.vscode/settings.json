@@ -1,5 +1,5 @@
 {
-  "playwrightBddRunner.bddgenCommand": "",
+  "playwrightBddRunner.bddgenCommand": "npx bddgen",
   "playwrightBddRunner.playwrightCommand": "true",
   "playwrightBddRunner.maxParallelProcesses": 7,
   "playwrightBddRunner.parallelExecution": false

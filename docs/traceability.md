@@ -193,6 +193,8 @@ Jira credentials are required for issue uploads. If `issue` or `both` is selecte
 
 `playwrightBddRunner.xray.reportGlob` suggests run-level report bundles, such as Playwright HTML reports and trace archives. Chosen run-level files always upload to the Jira execution issue after a successful result import, so they require Jira credentials. An attachment failure does not undo a successful import; use the retry action to upload only the pending files instead of importing results again.
 
+Attachment sealing currently requires an operating-system no-follow file-open primitive. Windows does not expose the required primitive to this extension, so attachment sealing and upload are unavailable there. Specwright refuses the operation instead of following a link whose target could change during confirmation. Result publishing without attachments remains available.
+
 Only attach material you are permitted to send to Xray or Jira. Test artifacts can contain screenshots, URLs, user data, or other sensitive information.
 
 ## Scenario Outlines in Xray
@@ -257,6 +259,20 @@ For example, a trial workspace that uses an Australian Xray region and one dispo
 ```
 
 Keep credentials out of this file. Enter them through **Connect to Xray** instead.
+
+## Integration adapter boundary
+
+Xray and the in-memory test adapter are bundled integration adapters that run inside the extension
+host. Registration requires an exact integration API version and an exact version for each declared
+capability. Duplicate IDs and incompatible versions are rejected before activation. Initialization
+and disposal are asynchronous and deadline-bound, and capability responses are checked before the
+traceability model consumes them.
+
+This boundary limits cooperative asynchronous code. It does not isolate the extension host from a
+process crash or blocked event loop. A bundled adapter must not load native add-ons, block the event
+loop, or start arbitrary subprocesses. Third-party integration adapters remain future work and will
+use an out-of-process Integration Protocol. This contract is not the execution-provider contract and
+must not be used for managed execution hosts or delegated bridge adapters.
 
 ## Troubleshooting
 

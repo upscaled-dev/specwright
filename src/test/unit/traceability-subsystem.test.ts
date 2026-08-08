@@ -15,6 +15,10 @@ import {
 } from "../../traceability/traceability-tree-data-provider";
 import { TraceabilityModel, type TraceabilitySnapshot } from "../../traceability/traceability-model";
 import { TraceabilityAdapterRegistry } from "../../traceability/adapter-registry";
+import {
+  currentAdapterVersions,
+  INTEGRATION_ADAPTER_CAPABILITIES,
+} from "../../traceability/adapter-contract";
 import { RunResultStore } from "../../traceability/run-result-store";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
@@ -181,7 +185,10 @@ function fakeAdapter(id: string, connection?: ConnectionCapability): Traceabilit
 function registryOf(adapters: Record<string, TraceabilityAdapter>): TraceabilityAdapterRegistry {
   const registry = new TraceabilityAdapterRegistry();
   for (const [id, adapter] of Object.entries(adapters)) {
-    registry.register({ id, create: () => adapter });
+    const capabilities = INTEGRATION_ADAPTER_CAPABILITIES.filter(
+      (capability) => adapter[capability] !== undefined
+    );
+    registry.register({ id, ...currentAdapterVersions(...capabilities), create: () => adapter });
   }
   return registry;
 }
@@ -253,7 +260,7 @@ describe("TraceabilitySubsystem grouping mode", () => {
     const { config, set, fireChange } = makeConfig();
     const { subsystem } = build(config, undefined, Logger.create(), makeConnection(), memento);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     subsystem.toggleGrouping();
@@ -263,13 +270,15 @@ describe("TraceabilitySubsystem grouping mode", () => {
     // toggle returns to "test" rather than flipping away from a defaulted "test".
     set({ enableTraceabilityPanel: false });
     fireChange();
+    await subsystem.applyCurrent();
     set({ enableTraceabilityPanel: true });
     fireChange();
+    await subsystem.applyCurrent();
     await flush();
 
     subsystem.toggleGrouping();
     expect(memento.get(GROUPING_KEY)).toBe("test");
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("coerces an unknown stored mode to the by-test layout", async () => {
@@ -278,13 +287,13 @@ describe("TraceabilitySubsystem grouping mode", () => {
     const { config } = makeConfig();
     const { subsystem } = build(config, undefined, Logger.create(), makeConnection(), memento);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     // A garbage value reads back as "test", so one toggle lands on "file".
     subsystem.toggleGrouping();
     expect(memento.get(GROUPING_KEY)).toBe("file");
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 });
 
@@ -297,33 +306,33 @@ describe("TraceabilitySubsystem lifecycle", () => {
     vi.restoreAllMocks();
   });
 
-  it("creates the tree view once and is idempotent across repeated applyCurrent", () => {
+  it("creates the tree view once and is idempotent across repeated applyCurrent", async () => {
     const { config } = makeConfig();
     const { subsystem } = build(config);
 
-    subsystem.applyCurrent();
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
+    await subsystem.applyCurrent();
 
     expect(subsystem.traceabilityPanelActive).toBe(true);
     expect(treeViews.__treeViewCounters.createCount).toBe(1);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
-  it("enables native multi-selection on the traceability tree", () => {
+  it("enables native multi-selection on the traceability tree", async () => {
     const createTreeView = vi.spyOn(vscode.window, "createTreeView");
     const { config } = makeConfig();
     const { subsystem } = build(config);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
 
     expect(createTreeView).toHaveBeenCalledWith(
       "playwrightBddRunner.traceability",
       expect.objectContaining({ canSelectMany: true })
     );
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
-  it("scopes an Examples-block result to the selected mapping", () => {
+  it("scopes an Examples-block result to the selected mapping", async () => {
     const { config } = makeConfig();
     const { subsystem } = build(config);
     const outline = { filePath: "/ws/a.feature", line: 3, name: "Divide", kind: "outline" as const };
@@ -354,10 +363,10 @@ describe("TraceabilitySubsystem lifecycle", () => {
     const resolve = subsystem.captureKeyResolver();
 
     expect(resolve({ ...outline, line: 10 }, block)).toBe("CALC-2");
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
-  it("uses each invocation when an outline and its Examples block are both selected", () => {
+  it("uses each invocation when an outline and its Examples block are both selected", async () => {
     const { config } = makeConfig();
     const { subsystem } = build(config);
     const outline = { filePath: "/ws/a.feature", line: 3, name: "Divide", kind: "outline" as const };
@@ -389,19 +398,20 @@ describe("TraceabilitySubsystem lifecycle", () => {
 
     expect(resolve(result, outline)).toBe("CALC-1");
     expect(resolve(result, block)).toBe("CALC-2");
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
-  it("tears down and re-creates with zero residue across disable → re-enable", () => {
+  it("tears down and re-creates with zero residue across disable → re-enable", async () => {
     const { config, set, fireChange } = makeConfig();
     const { subsystem, created } = build(config);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     const firstWatchers = [...created];
     expect(firstWatchers.length).toBeGreaterThan(0);
 
     set({ enableTraceabilityPanel: false });
     fireChange();
+    await subsystem.applyCurrent();
     expect(subsystem.traceabilityPanelActive).toBe(false);
     expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
     for (const w of firstWatchers) {
@@ -410,26 +420,28 @@ describe("TraceabilitySubsystem lifecycle", () => {
 
     set({ enableTraceabilityPanel: true });
     fireChange();
+    await subsystem.applyCurrent();
     expect(subsystem.traceabilityPanelActive).toBe(true);
     expect(treeViews.__treeViewCounters.createCount).toBe(2);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
-  it("rebuilds watchers when the feature pattern changes", () => {
+  it("rebuilds watchers when the feature pattern changes", async () => {
     const { config, set, fireChange } = makeConfig();
     const { subsystem, created } = build(config);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     const initial = created.length;
 
     set({ testFilePattern: "features/**/*.feature" });
     fireChange();
+    await subsystem.applyCurrent();
 
     expect(created.length).toBeGreaterThan(initial);
     for (let i = 0; i < initial; i++) {
       expect(created[i]!.dispose).toHaveBeenCalled();
     }
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("rebuilds the model when the run-result store reports fresh badges (P1 live-badge wiring)", async () => {
@@ -437,7 +449,7 @@ describe("TraceabilitySubsystem lifecycle", () => {
     const { subsystem, store, discovery } = build(config);
     const discover = vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
     const afterInitial = discover.mock.calls.length;
     expect(afterInitial).toBeGreaterThan(0);
@@ -447,25 +459,26 @@ describe("TraceabilitySubsystem lifecycle", () => {
     await flush();
 
     expect(discover.mock.calls.length).toBeGreaterThan(afterInitial);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
-  it("does not tear down watchers when only siteUrl changes", () => {
+  it("does not tear down watchers when only siteUrl changes", async () => {
     const { config, set, fireChange } = makeConfig();
     const { subsystem, created } = build(config);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     const initial = created.length;
 
     set({ xraySiteUrl: "acme.atlassian.net" });
     fireChange();
+    await subsystem.applyCurrent();
 
     expect(created.length).toBe(initial);
     for (const w of created) {
       expect(w.dispose).not.toHaveBeenCalled();
     }
     expect(subsystem.traceabilityPanelActive).toBe(true);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 });
 
@@ -478,35 +491,37 @@ describe("TraceabilitySubsystem provider selection", () => {
     vi.restoreAllMocks();
   });
 
-  it("falls back to xray and warns once when the configured provider is unknown", () => {
+  it("falls back to xray and warns once when the configured provider is unknown", async () => {
     const logger = Logger.create();
     const warn = vi.spyOn(logger, "warn");
     const { config, fireChange } = makeConfig({ traceabilityProvider: "bogus" });
     const { subsystem } = build(config, { xray: fakeAdapter("xray") }, logger);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     fireChange();
+    await subsystem.applyCurrent();
 
     expect(subsystem.traceabilityPanelActive).toBe(true);
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0]![0]).toContain("bogus");
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
-  it("rebuilds the panel when the active provider id changes", () => {
+  it("rebuilds the panel when the active provider id changes", async () => {
     const { config, set, fireChange } = makeConfig({ traceabilityProvider: "xray" });
     const { subsystem } = build(config, { xray: fakeAdapter("xray"), azure: fakeAdapter("azure") });
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     expect(treeViews.__treeViewCounters.createCount).toBe(1);
 
     set({ traceabilityProvider: "azure" });
     fireChange();
+    await subsystem.applyCurrent();
 
     expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
     expect(treeViews.__treeViewCounters.createCount).toBe(2);
     expect(subsystem.traceabilityPanelActive).toBe(true);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 });
 
@@ -534,11 +549,11 @@ describe("TraceabilitySubsystem connection state", () => {
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     expect(connectedStates(exec).at(-1)).toBe(true);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("sets the context key false when disconnected", async () => {
@@ -546,11 +561,11 @@ describe("TraceabilitySubsystem connection state", () => {
     const { config } = makeConfig();
     const { subsystem } = build(config, undefined, Logger.create(), makeConnection(false));
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     expect(connectedStates(exec).at(-1)).toBe(false);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   // The board's quiet loads cannot read a context key back, so they gate on this getter instead; it must
@@ -561,7 +576,7 @@ describe("TraceabilitySubsystem connection state", () => {
     const { subsystem } = build(config, undefined, Logger.create(), conn);
     expect(subsystem.connected).toBe(false);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
     expect(subsystem.connected).toBe(false);
 
@@ -570,7 +585,7 @@ describe("TraceabilitySubsystem connection state", () => {
     await flush();
 
     expect(subsystem.connected).toBe(true);
-    subsystem.dispose();
+    await subsystem.shutdown();
     expect(subsystem.connected).toBe(false);
   });
 
@@ -580,7 +595,7 @@ describe("TraceabilitySubsystem connection state", () => {
     const conn = makeConnection(false);
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
     expect(connectedStates(exec).at(-1)).toBe(false);
 
@@ -590,7 +605,7 @@ describe("TraceabilitySubsystem connection state", () => {
     await flush();
 
     expect(connectedStates(exec).at(-1)).toBe(true);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("clears the context key to false when the panel tears down", async () => {
@@ -598,17 +613,18 @@ describe("TraceabilitySubsystem connection state", () => {
     const { config, set, fireChange } = makeConfig();
     const { subsystem } = build(config, undefined, Logger.create(), makeConnection(true));
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     exec.mockClear();
     set({ enableTraceabilityPanel: false });
     fireChange();
+    await subsystem.applyCurrent();
 
     const states = connectedStates(exec);
     expect(states).toContain(false);
     expect(states.every((value) => value === false)).toBe(true);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("clears the context key to false on dispose", async () => {
@@ -616,11 +632,11 @@ describe("TraceabilitySubsystem connection state", () => {
     const { config } = makeConfig();
     const { subsystem } = build(config, undefined, Logger.create(), makeConnection(true));
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     exec.mockClear();
-    subsystem.dispose();
+    await subsystem.shutdown();
 
     expect(connectedStates(exec).at(-1)).toBe(false);
   });
@@ -631,19 +647,20 @@ describe("TraceabilitySubsystem connection state", () => {
     const deferred = deferredConnection("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), deferred);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
     expect(deferred.resolvers).toHaveLength(1);
 
     set({ enableTraceabilityPanel: false });
     fireChange();
+    await subsystem.applyCurrent();
     exec.mockClear();
 
     deferred.resolvers[0]!(true);
     await flush();
 
     expect(connectedStates(exec)).not.toContain(true);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("keeps the newest result when an older overlapping probe resolves last", async () => {
@@ -652,7 +669,7 @@ describe("TraceabilitySubsystem connection state", () => {
     const deferred = deferredConnection("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), deferred);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
     deferred.fire();
     await flush();
@@ -667,7 +684,7 @@ describe("TraceabilitySubsystem connection state", () => {
     await flush();
 
     expect(connectedStates(exec).at(-1)).toBe(true);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 });
 
@@ -693,13 +710,13 @@ describe("TraceabilitySubsystem connection indicator", () => {
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     const calls = indicatorCalls(setIndicator);
     expect(calls).toContainEqual({ state: "checking", label: "acme.atlassian.net", message: "Checking connection…" });
     expect(calls.at(-1)).toEqual({ state: "ok", label: "acme.atlassian.net", message: "Connected to acme; project CALC" });
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("appends the configured default project key to the committed indicator", async () => {
@@ -709,11 +726,11 @@ describe("TraceabilitySubsystem connection indicator", () => {
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     expect(indicatorCalls(setIndicator).at(-1)?.defaultProject).toBe("CALC");
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("commits an auth-failed indicator when verify reports auth-failed", async () => {
@@ -725,7 +742,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     expect(indicatorCalls(setIndicator).at(-1)).toEqual({
@@ -733,7 +750,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
       label: "acme.atlassian.net",
       message: "Authentication failed: check your client ID and secret.",
     });
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("commits an unreachable indicator when verify reports unreachable", async () => {
@@ -745,7 +762,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     expect(indicatorCalls(setIndicator).at(-1)).toEqual({
@@ -753,7 +770,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
       label: "acme.atlassian.net",
       message: "Could not reach Xray: check your network connection.",
     });
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("maps a thrown verify to an unreachable indicator carrying the error text and its cause", async () => {
@@ -764,15 +781,16 @@ describe("TraceabilitySubsystem connection indicator", () => {
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     expect(indicatorCalls(setIndicator).at(-1)).toEqual({
       state: "unreachable",
       label: "acme.atlassian.net",
-      message: "boom (cause: ECONNREFUSED: connect ECONNREFUSED 10.0.0.1:443)",
+      message: "Integration adapter \"xray\" connection.verify failed. "
+        + "(cause: boom (cause: ECONNREFUSED: connect ECONNREFUSED 10.0.0.1:443))",
     });
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("discards a stale verify: an older refresh resolving last must not overwrite the newer result", async () => {
@@ -787,7 +805,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
     };
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
     expect(deferred.resolvers).toHaveLength(1);
 
@@ -807,7 +825,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
       label: "acme.atlassian.net",
       message: "newest",
     });
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("discards a verify that resolves after dispose", async () => {
@@ -822,11 +840,11 @@ describe("TraceabilitySubsystem connection indicator", () => {
     };
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
     expect(deferred.resolvers).toHaveLength(1);
 
-    subsystem.dispose();
+    await subsystem.shutdown();
     deferred.resolvers[0]!({ status: "ok", message: "too late" });
     await flush();
 
@@ -842,12 +860,12 @@ describe("TraceabilitySubsystem connection indicator", () => {
     conn.setLabel("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), conn);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     expect(setIndicator).toHaveBeenCalledWith(undefined);
     expect(indicatorCalls(setIndicator).some((c) => c?.state === "checking")).toBe(false);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("clears the indicator and does not crash for an adapter with no connection at all", async () => {
@@ -855,13 +873,13 @@ describe("TraceabilitySubsystem connection indicator", () => {
     const { config } = makeConfig();
     const { subsystem } = build(config, { xray: fakeAdapter("xray") });
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     expect(subsystem.traceabilityPanelActive).toBe(true);
     expect(setIndicator).toHaveBeenCalledWith(undefined);
     expect(indicatorCalls(setIndicator).some((c) => c?.state === "checking")).toBe(false);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 });
 
@@ -897,13 +915,13 @@ describe("TraceabilitySubsystem sync staleness row", () => {
     };
     const { subsystem } = build(config, { xray: adapter });
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     const last = indicatorCalls(setIndicator).at(-1);
     expect(last?.state).toBe("ok");
     expect(last?.sync).toEqual({ syncedAt, stale: false });
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 });
 
@@ -921,7 +939,7 @@ describe("TraceabilitySubsystem snapshot change event", () => {
     const { subsystem, store, discovery } = build(config);
     vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     let fired = 0;
@@ -930,7 +948,7 @@ describe("TraceabilitySubsystem snapshot change event", () => {
     await flush();
 
     expect(fired).toBeGreaterThan(0);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("fires on teardown, by which point getSnapshot() already reads empty", async () => {
@@ -938,7 +956,7 @@ describe("TraceabilitySubsystem snapshot change event", () => {
     const { subsystem, discovery } = build(config);
     vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     let fired = false;
@@ -950,10 +968,11 @@ describe("TraceabilitySubsystem snapshot change event", () => {
 
     set({ enableTraceabilityPanel: false });
     fireChange();
+    await subsystem.applyCurrent();
 
     expect(fired).toBe(true);
     expect(emptyAtFire).toBe(true);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("disposes the swapped-out model on a provider change and re-points forwarding at the new one", async () => {
@@ -962,11 +981,12 @@ describe("TraceabilitySubsystem snapshot change event", () => {
     vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
     const disposeModel = vi.spyOn(TraceabilityModel.prototype, "dispose");
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     set({ traceabilityProvider: "azure" });
     fireChange();
+    await subsystem.applyCurrent();
     await flush();
 
     // The xray model is torn down (its emitter with it), so the old forwarding subscription can never
@@ -980,7 +1000,7 @@ describe("TraceabilitySubsystem snapshot change event", () => {
     await flush();
 
     expect(fired).toBe(1);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
   it("severs forwarding on dispose so later store activity fires nothing", async () => {
@@ -988,12 +1008,12 @@ describe("TraceabilitySubsystem snapshot change event", () => {
     const { subsystem, store, discovery } = build(config);
     vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     let fired = 0;
     subsystem.onDidChangeSnapshot(() => { fired += 1; });
-    subsystem.dispose();
+    await subsystem.shutdown();
     const afterDispose = fired;
 
     store.ingest({ "/ws/x.feature:1": "passed" });
@@ -1036,20 +1056,20 @@ Scenario: Untagged by test
     const { subsystem, discovery } = build(config, { xray: adapter });
     vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([file]);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
     await flush();
 
     expect(subsystem.tagDerivedProjectKeys().sort()).toEqual(["CALC", "MATH", "OPS"]);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 
-  it("derives nothing when the panel is off, so no model exists", () => {
+  it("derives nothing when the panel is off, so no model exists", async () => {
     const { config } = makeConfig({ enableTraceabilityPanel: false });
     const { subsystem } = build(config);
 
-    subsystem.applyCurrent();
+    await subsystem.applyCurrent();
 
     expect(subsystem.tagDerivedProjectKeys()).toEqual([]);
-    subsystem.dispose();
+    await subsystem.shutdown();
   });
 });

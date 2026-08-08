@@ -471,6 +471,9 @@ const PUBLISH_SCRIPT = `
   // response never named); neither works out what to call it.
   function republishText(n) {
     const when = new Date(n.publishedAt).toLocaleString();
+    if (n.outcomeUnknown) {
+      return 'The previous publish possibly succeeded on ' + when + ' (correlation ' + n.operationId + '). Check Xray before explicitly publishing again; another publish may create a duplicate.';
+    }
     const mode = n.mode === 'append' ? 'appended' : (n.mode === 'create-new' ? 'new execution' : '');
     const modePart = mode ? ' (' + mode + ')' : '';
     return 'Already published to ' + n.target + ' on ' + when + modePart + '. Publishing again creates a duplicate.';

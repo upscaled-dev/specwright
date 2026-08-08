@@ -233,32 +233,52 @@ describe("palette target resolver", () => {
   });
 
   it("uses undefined only for feature and tag-picker cancellation", async () => {
+    const filePath = writeTempFeature("Feature: Palette\n\nScenario: picked\n  Given a step\n");
     const context = makeContext({
-      discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue(["/ws/a.feature"]) } as never,
+      discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue([filePath]) } as never,
     });
     vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
-    await expect(resolvePaletteFeature(context)).resolves.toBeUndefined();
+    try {
+      await expect(resolvePaletteFeature(context)).resolves.toBeUndefined();
 
-    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined);
-    await expect(promptPaletteTags()).resolves.toBeUndefined();
+      vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined);
+      await expect(promptPaletteTags()).resolves.toBeUndefined();
+    } finally {
+      fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+    }
   });
 
-  it("rejects unreadable and malformed selected feature files", async () => {
+  it("surfaces gateway diagnostics for unreadable and malformed discovered feature files", async () => {
     const missing = "/ws/missing.feature";
     const missingContext = makeContext({
       discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue([missing]) } as never,
     });
-    vi.spyOn(vscode.window, "showQuickPick").mockImplementation((items) =>
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockImplementation((items) =>
       Promise.resolve((items as Array<unknown>)[0] as never)
     );
-    await expect(resolvePaletteFeature(missingContext)).rejects.toThrow(`Unable to read feature file: ${missing}`);
+    await expect(resolvePaletteFeature(missingContext)).rejects.toMatchObject({
+      name: "ExecutionDiagnosticError",
+      diagnostic: {
+        code: "execution.discovery.unreadable-source",
+        severity: "warning",
+        message: `Could not parse ${missing}.`,
+        identity: { engine: "legacy-direct", schemaProfile: "legacy-v1" },
+      },
+    });
 
     const malformed = writeTempFeature("not a feature");
     const malformedContext = makeContext({
       discoveryManager: { discoverTestFiles: vi.fn().mockResolvedValue([malformed]) } as never,
     });
     try {
-      await expect(resolvePaletteScenario(malformedContext)).rejects.toThrow(`Unable to parse feature file: ${malformed}`);
+      await expect(resolvePaletteScenario(malformedContext)).rejects.toMatchObject({
+        name: "ExecutionDiagnosticError",
+        diagnostic: expect.objectContaining({
+          code: "execution.discovery.unreadable-source",
+          message: `Could not parse ${malformed}.`,
+        }),
+      });
+      expect(quickPick).not.toHaveBeenCalled();
     } finally {
       fs.rmSync(path.dirname(malformed), { recursive: true, force: true });
     }

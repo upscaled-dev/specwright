@@ -19,6 +19,8 @@ import { RunResultStore } from "../../traceability/run-result-store";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
+import { WorkspaceTrust } from "../../core/workspace-trust";
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -49,7 +51,7 @@ function mapCredentialStore(): { store: XrayCredentialStore; map: Map<string, st
       return Promise.resolve();
     },
   } as unknown as vscode.SecretStorage;
-  return { store: new XrayCredentialStore(storage), map };
+  return { store: new XrayCredentialStore(storage, trustedWorkspace()), map };
 }
 
 function silentLogger(): Logger {
@@ -102,7 +104,8 @@ function makeCommands(site: string): {
       store,
       silentLogger(),
       () => [],
-      (deps) => Promise.resolve(connected(deps.site))
+      (deps) => Promise.resolve(connected(deps.site)),
+      trustedWorkspace()
     ),
     store,
     map,
@@ -160,6 +163,7 @@ function saveMessage(
 
 afterEach(() => {
   win.__resetWebviewPanels();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -197,6 +201,31 @@ describe("XrayConnectionCommands.saveConnection", () => {
     await commands.saveConnection("new.atlassian.net", "id", "secret");
 
     expect(updates[0]?.target).toBe(vscode.ConfigurationTarget.Workspace);
+  });
+
+  it("restores the previous site when credential storage fails after the settings write", async () => {
+    const { updates } = stubWorkspaceConfig(
+      { workspaceValue: "old.atlassian.net" },
+      { "xray.siteUrl": "old.atlassian.net" }
+    );
+    const { commands, store } = makeCommands("old.atlassian.net");
+    vi.spyOn(store, "setCredentials").mockRejectedValue(new Error("trust revoked"));
+
+    await expect(commands.saveConnection("new.atlassian.net", "id", "secret"))
+      .rejects.toThrow("trust revoked");
+
+    expect(updates).toEqual([
+      {
+        key: "xray.siteUrl",
+        value: "new.atlassian.net",
+        target: vscode.ConfigurationTarget.Workspace,
+      },
+      {
+        key: "xray.siteUrl",
+        value: "old.atlassian.net",
+        target: vscode.ConfigurationTarget.Workspace,
+      },
+    ]);
   });
 
   it("clears the previous site's credentials when switching hosts", async () => {
@@ -262,6 +291,44 @@ describe("validateXraySetupInput", () => {
 });
 
 describe("XrayConnectionCommands.connect", () => {
+  it("aborts and drains the initial auth probe without posting after trust disposal", async () => {
+    const trust = new WorkspaceTrust(() => true);
+    const map = new Map<string, string>();
+    const storage = {
+      get: (key: string) => Promise.resolve(map.get(key)),
+      store: (key: string, value: string) => {map.set(key, value); return Promise.resolve();},
+      delete: (key: string) => {map.delete(key); return Promise.resolve();},
+    } as unknown as vscode.SecretStorage;
+    const store = new XrayCredentialStore(storage, trust);
+    await store.setCredentials("acme.atlassian.net", "id", "secret");
+    let fetchSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => {
+      fetchSignal = init?.signal as AbortSignal | undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        fetchSignal?.addEventListener("abort", () => reject(fetchSignal?.reason), { once: true });
+      });
+    }));
+    const commands = new XrayConnectionCommands(
+      configWith({ "xray.siteUrl": "acme.atlassian.net" }),
+      store,
+      silentLogger(),
+      () => [],
+      probeXrayConnection,
+      trust
+    );
+
+    await commands.connect();
+    const panel = win.__webviewPanels[0]!;
+    await vi.waitFor(() => expect(fetchSignal).toBeDefined());
+    const postsBeforeDisposal = panel.webview.__posted.length;
+
+    await trust.dispose();
+    await flush();
+
+    expect(fetchSignal?.aborted).toBe(true);
+    expect(panel.webview.__posted).toHaveLength(postsBeforeDisposal);
+  });
+
   it("opens the setup webview panel instead of prompting with input boxes", async () => {
     const inputBox = vi.spyOn(vscode.window, "showInputBox");
     const { commands } = makeCommands("acme.atlassian.net");
@@ -363,7 +430,11 @@ describe("Xray setup panel save flow", () => {
 
     await panel.__receive(saveMessage());
 
-    expect(probe).toHaveBeenCalledWith("acme.atlassian.net", { authOnly: true });
+    expect(probe).toHaveBeenCalledWith(
+      "acme.atlassian.net",
+      { authOnly: true },
+      expect.anything()
+    );
     expect(panel.webview.__posted).toContainEqual({
       type: "conn-state",
       state: "connected",
@@ -602,7 +673,11 @@ describe("Xray setup panel connection verification", () => {
     const panel = await openPanel(commands);
     await flush();
 
-    expect(probe).toHaveBeenCalledWith("acme.atlassian.net", { authOnly: true });
+    expect(probe).toHaveBeenCalledWith(
+      "acme.atlassian.net",
+      { authOnly: true },
+      expect.anything()
+    );
     expect(connStates(panel).at(-1)).toEqual({
       type: "conn-state",
       state: "connected",
@@ -1042,11 +1117,18 @@ describe("connection-probe single-flight across production seams", () => {
     const adapter = createXrayAdapterFactory(store, probe, fakeMemento(), {
       resolveSteps: () => undefined,
       workspaceRootFor: () => undefined,
-    }).create({
+    }, trustedWorkspace()).create({
       config,
       logger: silentLogger(),
     });
-    const commands = new XrayConnectionCommands(config, store, silentLogger(), () => [], probe);
+    const commands = new XrayConnectionCommands(
+      config,
+      store,
+      silentLogger(),
+      () => [],
+      probe,
+      trustedWorkspace()
+    );
 
     const [verifyResult, probeOutcome] = await Promise.all([
       adapter.connection!.verify!(),

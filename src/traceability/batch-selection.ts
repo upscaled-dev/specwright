@@ -56,17 +56,25 @@ export function artifactCaptureTarget(
   if (scenario.kind === "scenario") {
     return { scenario, ...(scenario.line > 0 ? { resultLines: [scenario.line] } : {}) };
   }
-  // Both outline-shaped scopes read their rows from the parse. No rows at all means the feature did
-  // not parse, never that the scope owns nothing: capture scoped to an empty line set would discard
-  // every result the run produced, so the scope is left open instead.
-  if (rows.length === 0) {return { scenario };}
+  // An outline-shaped scope is safe only when parsing proves at least one exact owned row. Leaving
+  // it open would let a title grep capture rows the scope does not own.
+  if (rows.length === 0) {
+    throw new Error(
+      `Could not resolve exact example rows for ${scenario.filePath}:${scenario.line}. ` +
+        "No broader outline target was executed."
+    );
+  }
   if (scenario.kind === "examplesBlock") {
-    return {
-      scenario,
-      resultLines: rows
-        .filter((row) => row.examplesBlockLineNumber === scenario.line)
-        .map((row) => row.lineNumber),
-    };
+    const resultLines = rows
+      .filter((row) => row.examplesBlockLineNumber === scenario.line)
+      .map((row) => row.lineNumber);
+    if (resultLines.length === 0) {
+      throw new Error(
+        `Examples block ${scenario.filePath}:${scenario.line} owns no parsed rows. ` +
+          "No broader outline target was executed."
+      );
+    }
+    return { scenario, resultLines };
   }
   // An outline ref names one row when it carries that row's own line; otherwise it names the whole
   // outline, by declaration line (the traceability mapping) or by title alone (a run target).
@@ -82,12 +90,16 @@ export function artifactCaptureTarget(
   const ownedByOutline = (row: OutlineExampleRow): boolean => (
     scenario.line > 0 ? row.outlineLineNumber === scenario.line : row.outlineName === scenario.name
   );
-  return {
-    scenario,
-    resultLines: rows
-      .filter((row) => ownedByOutline(row) && !splitBlocks.has(row.examplesBlockLineNumber))
-      .map((row) => row.lineNumber),
-  };
+  const resultLines = rows
+    .filter((row) => ownedByOutline(row) && !splitBlocks.has(row.examplesBlockLineNumber))
+    .map((row) => row.lineNumber);
+  if (resultLines.length === 0) {
+    throw new Error(
+      `Outline ${scenario.filePath}:${scenario.line} owns no parsed rows. ` +
+        "No broader outline target was executed."
+    );
+  }
+  return { scenario, resultLines };
 }
 
 function allScenarioRefs(snapshot: TraceabilitySnapshot): ScenarioRef[] {

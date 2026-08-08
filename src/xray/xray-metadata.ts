@@ -188,13 +188,9 @@ export class XrayMetadataCapability
     };
   }
 
-  // The last-known project list, right now, plus a background refresh once it has aged past the
-  // directory TTL: the same offline-first shape as `snapshot`. The refresh fires `onDidChange`, which
-  // is what repaints the surfaces, so their read of this stays synchronous.
+  // The last-known project list, right now. The trusted adapter owns background refresh so every
+  // transport call has a trust-owned signal; this raw cache read must never start work by itself.
   public cached(): ProjectDirectory {
-    if (this.directoryStale()) {
-      this.list().catch(() => undefined);
-    }
     return this.directory;
   }
 
@@ -202,6 +198,9 @@ export class XrayMetadataCapability
   // walking the whole site twice. The first caller's signal is therefore the only one honored, which
   // holds while the refresh is the sole production caller.
   public list(signal?: AbortSignal): Promise<ProjectDirectory> {
+    if (!this.directoryStale()) {
+      return Promise.resolve(this.directory);
+    }
     this.directoryInFlight ??= this.fetchDirectory(signal).finally(() => {
       this.directoryInFlight = undefined;
     });

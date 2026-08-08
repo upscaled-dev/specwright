@@ -87,20 +87,15 @@ export interface TestExecutionOptions {
   scenarioName?: string;
   outlineName?: string;
   /**
-   * Preferred precise target: a `<generatedSpec>:<pwTestLine>` filter that selects exactly one
-   * generated test. Resolved from the spec's `bddFileData` (pickleLine→pwTestLine). When set, the
-   * command builder uses it INSTEAD of `--grep`, which is the only reliable way to target a single
-   * Scenario Outline example row; playwright-bdd substitutes the example values into the test
-   * title, so no grep on the source title (with raw `<placeholders>`) can pick one row. Unset →
-   * the builder falls back to grepping by scenario/outline name.
+   * Precise `<generatedSpec>:<pwTestLine>` filters, one per applicable BDD project. They select the
+   * same exact generated test in every project and replace `--grep`, which cannot isolate one
+   * Scenario Outline example row after playwright-bdd substitutes its title placeholders.
    */
-  specLineTarget?: string;
+  specLineTargets?: readonly string[];
   /**
-   * Regex positional filter scoping a name-based `--grep` to one generated spec file. Set for
-   * whole-outline runs, whose title grep is intentional for every row of THAT outline but must not
-   * reach a same-titled outline in another feature file.
+   * Regex positional filters scoping a name-based `--grep` to the feature's generated specs.
    */
-  specFileFilter?: string;
+  specFileFilters?: readonly string[];
   debug?: boolean;
   waitForSessionEnd?: boolean | undefined;
   /**
@@ -176,6 +171,9 @@ export interface PlaywrightBddExtensionContext {
   featureParser: FeatureParser;
   playwrightJsonParser: PlaywrightJsonParser;
   commandBuilder: import("../core/command-builder").CommandBuilder;
+  workspaceTrust: import("../core/workspace-trust").WorkspaceTrust;
+  attachmentSpoolRoot?: string | undefined;
+  extensionUri?: import("vscode").Uri | undefined;
   bddgenDiagnostics?: import("../providers/bddgen-diagnostics-provider").BddgenDiagnosticsProvider | undefined;
   traceabilityAdapter: import("../traceability/contracts").TraceabilityAdapter;
   // Badge-feeding subset of the run-artifact seam (§3.5): the ephemeral JSON report parsed after an
@@ -183,5 +181,5 @@ export interface PlaywrightBddExtensionContext {
   runResultStore?: import("../traceability/run-result-store").RunResultStore | undefined;
   // The richer sibling fed at the same capture seams: a Test Explorer batch opens a builder, each
   // executor invocation contributes a shard, and the batch seals one immutable, publishable artifact.
-  runArtifactStore?: import("../traceability/run-artifact-store").RunArtifactStore | undefined;
+  runArtifactStore?: import("../ui/execution-artifacts").ExecutionArtifactCatalog | undefined;
 }

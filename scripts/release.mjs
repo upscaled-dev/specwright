@@ -239,10 +239,13 @@ function rollbackReleaseCommit(newVersion) {
   log(`  ls -la dist/specwright-${next}.vsix`);
   log(`  cat dist/specwright-${next}.vsix.sha256`);
   log("");
-  log("If everything looks right, start the tag workflow:");
-  log(`  git push && git push origin v${next}`);
-  log("  then download the workflow's artifact set (VSIX + .sha256 + manifest) and verify it:");
-  log(`  node scripts/release-artifact.mjs --verify --out <download>/specwright-${next}.vsix`);
+  log("If everything looks right, build the hosted candidate before promoting it:");
+  log("  git push origin main");
+  log(`  wait for the successful main CI artifact named specwright-$(git rev-parse v${next}^{})`);
+  log(`  git push origin v${next}`);
+  log(`  wait for the tag workflow to verify, attest, and retain specwright-v${next}`);
+  log("  then download that promoted artifact set (VSIX + checksum + SBOM + manifest) and verify it:");
+  log(`  node scripts/release-artifact.mjs --verify --out <download>/specwright-${next}.vsix --commit "$(git rev-parse v${next}^{})" --version ${next}`);
   log("  publish that verified VSIX. The local .sha256 above identifies the local build only;");
   log("  vsce embeds timestamps, so local and CI digests differ by design.");
   log("");

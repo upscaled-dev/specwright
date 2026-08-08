@@ -71,6 +71,10 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   private readonly configChangeDisposable: vscode.Disposable;
   private disposed = false;
   private warnedUnknownProvider = false;
+  private activationEpoch = 0;
+  private activationAbort: AbortController | undefined;
+  private reconcileTail: Promise<void> = Promise.resolve();
+  private shutdownPromise: Promise<void> | undefined;
 
   // Forwards the active model's rebuilds (and teardown) to the Coverage Board, which, unlike the
   // tree's data provider, outlives model swaps, so it subscribes to the subsystem rather than to a
@@ -93,15 +97,30 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     private readonly logger: Logger,
     private readonly workspaceState: vscode.Memento
   ) {
-    this.configChangeDisposable = config.addChangeListener(() => this.applyCurrent());
+    this.configChangeDisposable = config.addChangeListener(() => {
+      this.applyCurrent().catch(() => undefined);
+    });
     // The store outlives model rebuilds and provider swaps, so subscribe once here: a Test Explorer
     // run's fresh badges land without a workspace report on disk (P1 exit criterion).
     this.runResultSubscription = this.runResultStore.onDidChange(() => this.scheduleRebuild());
   }
 
-  public applyCurrent(): void {
-    if (this.disposed) {return;}
-    this.reconcileTraceabilityPanel();
+  public applyCurrent(): Promise<void> {
+    if (this.disposed) {return this.reconcileTail;}
+    this.activationAbort?.abort();
+    const activation = new AbortController();
+    this.activationAbort = activation;
+    const epoch = ++this.activationEpoch;
+    const reconcile = this.reconcileTail.then(async () => {
+      if (this.disposed || activation.signal.aborted || epoch !== this.activationEpoch) {return;}
+      await this.reconcileTraceabilityPanel(epoch, activation.signal);
+    });
+    this.reconcileTail = reconcile.catch((error) => {
+      if (!activation.signal.aborted) {
+        this.logger.warn("Traceability adapter activation failed", { error: String(error) });
+      }
+    });
+    return this.reconcileTail;
   }
 
   public get traceabilityPanelActive(): boolean {
@@ -230,14 +249,14 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     return this.registry.has(FALLBACK_PROVIDER_ID) ? FALLBACK_PROVIDER_ID : undefined;
   }
 
-  private reconcileTraceabilityPanel(): void {
+  private async reconcileTraceabilityPanel(epoch: number, signal: AbortSignal): Promise<void> {
     if (!this.config.enableTraceabilityPanel) {
-      this.teardown();
+      await this.teardown();
       return;
     }
     const id = this.resolveProviderId();
     if (!id) {
-      this.teardown();
+      await this.teardown();
       return;
     }
     // Compute the signature against the still-active adapter when the id is unchanged, so an
@@ -253,56 +272,70 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     }
     // A changed signature (provider swap, prefix, or pattern) rebuilds the whole panel so the new
     // adapter's model, capabilities, label, and watchers all take effect without a window reload.
-    this.teardown();
-    const adapter = this.registry.create(id, { config: this.config, logger: this.logger });
+    await this.teardown();
+    if (this.disposed || signal.aborted || epoch !== this.activationEpoch) {return;}
+    const adapter = await this.registry.activate(
+      id,
+      { config: this.config, logger: this.logger },
+      signal
+    );
     if (!adapter) {
       return;
     }
-    this.activeAdapter = adapter;
-    this.activeAdapterId = id;
-    const model = new TraceabilityModel(
-      this.featureParser,
-      this.discoveryManager,
-      this.playwrightJsonParser,
-      adapter,
-      this.runResultStore,
-      this.logger
-    );
-    this.model = model;
-    const provider = new TraceabilityTreeDataProvider(model, adapter.label, this.groupingStore());
-    this.treeProvider = provider;
-    this.adapterSubscriptions.push(model.onDidChange(() => this._onDidChangeSnapshot.fire()));
-    this.treeView = vscode.window.createTreeView("playwrightBddRunner.traceability", {
-      treeDataProvider: provider,
-      canSelectMany: true,
-    });
-    // Grammar-driven tag diagnostics are offline (no connection needed) and rebuild with the panel
-    // on any prefix/provider change, so they always lint against the active adapter's grammar.
-    this.tagDiagnostics = new TagDiagnosticsProvider(adapter.keyGrammar);
-    this.tagDiagnostics.start();
-    // The tag-line decoration is gated and grammar-sourced the same way, so it lives and dies with
-    // the panel and always washes the active provider's prefixes.
-    this.tagDecorations = new TagDecorationProvider(adapter.keyGrammar);
-    this.tagDecorations.start();
-    if (adapter.connection) {
-      this.adapterSubscriptions.push(
-        adapter.connection.onDidChange(() => this.queueConnectionRefresh())
-      );
+    if (this.disposed || signal.aborted || epoch !== this.activationEpoch) {
+      await adapter.dispose?.();
+      return;
     }
-    if (adapter.metadata) {
-      this.adapterSubscriptions.push(
-        adapter.metadata.onDidChange(() => {
-          this.scheduleRebuild();
-          // Recompose the status row's "synced Nm ago" off the new snapshot, no re-verify.
-          this.commitConnectionIndicator();
-        })
+    try {
+      this.activeAdapter = adapter;
+      this.activeAdapterId = id;
+      const model = new TraceabilityModel(
+        this.featureParser,
+        this.discoveryManager,
+        this.playwrightJsonParser,
+        adapter,
+        this.runResultStore,
+        this.logger
       );
+      this.model = model;
+      const provider = new TraceabilityTreeDataProvider(model, adapter.label, this.groupingStore());
+      this.treeProvider = provider;
+      this.adapterSubscriptions.push(model.onDidChange(() => this._onDidChangeSnapshot.fire()));
+      this.treeView = vscode.window.createTreeView("playwrightBddRunner.traceability", {
+        treeDataProvider: provider,
+        canSelectMany: true,
+      });
+      // Grammar-driven tag diagnostics are offline (no connection needed) and rebuild with the panel
+      // on any prefix/provider change, so they always lint against the active adapter's grammar.
+      this.tagDiagnostics = new TagDiagnosticsProvider(adapter.keyGrammar);
+      this.tagDiagnostics.start();
+      // The tag-line decoration is gated and grammar-sourced the same way, so it lives and dies with
+      // the panel and always washes the active provider's prefixes.
+      this.tagDecorations = new TagDecorationProvider(adapter.keyGrammar);
+      this.tagDecorations.start();
+      if (adapter.connection) {
+        this.adapterSubscriptions.push(
+          adapter.connection.onDidChange(() => this.queueConnectionRefresh())
+        );
+      }
+      if (adapter.metadata) {
+        this.adapterSubscriptions.push(
+          adapter.metadata.onDidChange(() => {
+            this.scheduleRebuild();
+            // Recompose the status row's "synced Nm ago" off the new snapshot, no re-verify.
+            this.commitConnectionIndicator();
+          })
+        );
+      }
+      this.setupWatchers();
+      this.lastSignature = this.signature(id, adapter);
+      this.scheduleRebuild();
+      this.queueConnectionRefresh();
+      this.logger.info("Traceability panel enabled");
+    } catch (error) {
+      await this.teardown();
+      throw error;
     }
-    this.setupWatchers();
-    this.lastSignature = this.signature(id, adapter);
-    this.scheduleRebuild();
-    this.queueConnectionRefresh();
-    this.logger.info("Traceability panel enabled");
   }
 
   private queueConnectionRefresh(): void {
@@ -360,7 +393,12 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     if (!this.treeProvider || !this.lastConnection) {
       return;
     }
-    const snapshot = this.activeAdapter?.metadata?.snapshot();
+    let snapshot: ReturnType<NonNullable<TraceabilityAdapter["metadata"]>["snapshot"]> | undefined;
+    try {
+      snapshot = this.activeAdapter?.metadata?.snapshot();
+    } catch (error) {
+      this.logger.warn("Traceability metadata snapshot was rejected", { error: String(error) });
+    }
     const indicator: ConnectionIndicator = { ...this.lastConnection };
     if (snapshot?.syncedAt !== undefined) {
       indicator.sync = { syncedAt: snapshot.syncedAt, stale: snapshot.stale };
@@ -451,7 +489,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     }
   }
 
-  private teardown(): void {
+  private async teardown(): Promise<void> {
     if (this.rebuildTimer) {
       clearTimeout(this.rebuildTimer);
       this.rebuildTimer = undefined;
@@ -471,9 +509,16 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.tagDecorations = undefined;
     this.model?.dispose();
     this.model = undefined;
-    this.activeAdapter?.dispose?.();
+    const adapter = this.activeAdapter;
     this.activeAdapter = undefined;
     this.activeAdapterId = undefined;
+    if (adapter?.dispose) {
+      try {
+        await adapter.dispose();
+      } catch (error) {
+        this.logger.warn("Traceability adapter disposal failed", { error: String(error) });
+      }
+    }
     this.lastConnection = undefined;
     this.lastSignature = undefined;
     // Bump before committing so an in-flight probe captured under the old epoch can't overwrite
@@ -485,13 +530,25 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this._onDidChangeSnapshot.fire();
   }
 
-  public dispose(): void {
+  public shutdown(): Promise<void> {
+    if (this.shutdownPromise) {return this.shutdownPromise;}
     this.disposed = true;
+    this.activationAbort?.abort();
+    this.activationAbort = undefined;
     this.configChangeDisposable.dispose();
     this.runResultSubscription.dispose();
-    this.teardown();
-    this._onDidChangeSnapshot.dispose();
-    // The discovery manager is handed to this subsystem for its exclusive use.
-    this.discoveryManager.dispose();
+    this.shutdownPromise = this.reconcileTail.then(async () => {
+      await this.teardown();
+      this._onDidChangeSnapshot.dispose();
+      // The discovery manager is handed to this subsystem for its exclusive use.
+      this.discoveryManager.dispose();
+    });
+    return this.shutdownPromise;
+  }
+
+  public dispose(): void {
+    this.shutdown().catch((error) => {
+      this.logger.warn("Traceability subsystem shutdown failed", { error: String(error) });
+    });
   }
 }

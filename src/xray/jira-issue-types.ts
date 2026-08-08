@@ -3,12 +3,16 @@ import { errMsg, maskValues, scrubJwtLike, serverText } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
 import { describeShape } from "./xray-diagnostics";
 import { FetchLike, jiraSecrets } from "./jira-project-search";
+import {
+  abortableRemoteSleep,
+  operationIdentity,
+  RetryableRemoteError,
+  retryAfterMilliseconds,
+  runRemoteOperation,
+} from "./remote-operation";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESULTS = 200;
-const MAX_ATTEMPTS = 4;
-const BACKOFF_BASE_MS = 300;
-const BACKOFF_CAP_MS = 8_000;
 
 // Resolution is a best-effort diagnosis, not a gate. A transient Jira failure must never block a
 // publish that might still succeed, but a successful createmeta listing that lacks the type is
@@ -37,16 +41,9 @@ export interface IssueTypeResolverDeps {
   executionIssueType: string;
   logger: Logger;
   fetchImpl?: FetchLike | undefined;
-  sleep?: ((ms: number) => Promise<void>) | undefined;
+  sleep?: ((ms: number, signal?: AbortSignal) => Promise<void>) | undefined;
   random?: (() => number) | undefined;
   signal?: AbortSignal | undefined;
-}
-
-class RetryableError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RetryableError";
-  }
 }
 
 interface TimedResponse {
@@ -65,10 +62,6 @@ function tryParse(bodyText: string): { ok: true; value: unknown } | { ok: false 
 
 function stringifyShape(value: unknown): string {
   return JSON.stringify(describeShape(value), null, 2);
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function basicAuthHeader(credentials: XrayJiraCredentials): string {
@@ -139,13 +132,13 @@ function resolveFrom(entries: IssueTypeEntry[], executionIssueType: string): Iss
 
 class IssueTypeResolver {
   private readonly fetchImpl: FetchLike;
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly random: () => number;
   private readonly authHeader: string;
 
   constructor(private readonly deps: IssueTypeResolverDeps) {
     this.fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
-    this.sleep = deps.sleep ?? defaultSleep;
+    this.sleep = deps.sleep ?? abortableRemoteSleep;
     this.random = deps.random ?? Math.random;
     this.authHeader = basicAuthHeader(deps.credentials);
   }
@@ -156,7 +149,14 @@ class IssueTypeResolver {
     )}/issuetypes?maxResults=${MAX_RESULTS}`;
     let response: TimedResponse;
     try {
-      response = await this.withBackoff(() => this.timedFetch(url));
+      response = await runRemoteOperation(() => this.timedFetch(url), {
+        identity: operationIdentity("jira.issue-types.read"),
+        logger: this.deps.logger,
+        signal: this.deps.signal,
+        sleep: this.sleep,
+        random: this.random,
+        abortError: () => this.deps.signal?.reason ?? new Error("Aborted"),
+      });
     } catch (error) {
       this.deps.logger.warn(`Issue-type resolution could not reach Jira: ${scrubJwtLike(errMsg(error))}`);
       return { kind: "unknown" };
@@ -182,31 +182,12 @@ class IssueTypeResolver {
     return resolveFrom(parseIssueTypes(parsed.value), this.deps.executionIssueType);
   }
 
-  private async withBackoff(run: () => Promise<TimedResponse>): Promise<TimedResponse> {
-    let attempt = 0;
-    for (;;) {
-      try {
-        return await run();
-      } catch (error) {
-        attempt += 1;
-        if (!(error instanceof RetryableError) || attempt >= MAX_ATTEMPTS) {
-          throw error;
-        }
-        await this.sleep(this.backoffDelay(attempt));
-      }
-    }
-  }
-
-  private backoffDelay(attempt: number): number {
-    const base = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (attempt - 1));
-    return base + Math.floor(this.random() * BACKOFF_BASE_MS);
-  }
-
   private async timedFetch(url: string): Promise<TimedResponse> {
+    if (this.deps.signal?.aborted) {throw this.deps.signal.reason ?? new Error("Aborted");}
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     const onAbort = (): void => controller.abort();
-    this.deps.signal?.addEventListener("abort", onAbort);
+    this.deps.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const response = await this.fetchImpl(url, {
         method: "GET",
@@ -215,14 +196,18 @@ class IssueTypeResolver {
       });
       const bodyText = await response.text();
       if (response.status === 429 || response.status >= 500) {
-        throw new RetryableError(`HTTP ${response.status}`);
+        throw new RetryableRemoteError(
+          `HTTP ${response.status}`,
+          retryAfterMilliseconds(response.headers?.get("retry-after") ?? null)
+        );
       }
       return { status: response.status, ok: response.ok, bodyText };
     } catch (error) {
-      if (error instanceof RetryableError) {
+      if (this.deps.signal?.aborted) {throw this.deps.signal.reason ?? error;}
+      if (error instanceof RetryableRemoteError) {
         throw error;
       }
-      throw new RetryableError(scrubJwtLike(errMsg(error)));
+      throw new RetryableRemoteError(scrubJwtLike(errMsg(error)));
     } finally {
       clearTimeout(timer);
       this.deps.signal?.removeEventListener("abort", onAbort);

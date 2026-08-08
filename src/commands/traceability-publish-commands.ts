@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { ExtensionConfig } from "../core/extension-config";
-import type { ExecutionGateway, RunInitiator } from "../core/run-contracts";
+import type { ExecutionGateway } from "../core/run-contracts";
+import type { RunInitiator } from "../ui/execution-client-context";
 import { FeatureParser } from "../parsers/feature-parser";
 import {
   BatchInvocation,
@@ -32,12 +33,20 @@ import {
   AttachmentSuggestion,
   PublishAttachmentsModel,
   PublishRunSources,
+  LandedAttachmentPreparationError,
+  OutcomeUnknownRecoveryPersistenceError,
   publishRunOptions,
   runnableRuns,
   runPublishFlow,
 } from "../traceability/publish-flow";
-import { PublishLedger } from "../traceability/publish-ledger";
-import { RunArtifactStore } from "../traceability/run-artifact-store";
+import {
+  isOutcomeUnknownEntry,
+  PublishLedger,
+  PublishLedgerPersistenceError,
+  type PendingAttachment,
+} from "../traceability/publish-ledger";
+import { AttachmentSpool, isAttachmentSnapshot, pruneAttachmentSpool } from "../traceability/attachment-spool";
+import type { ExecutionArtifactCatalog } from "../ui/execution-artifacts";
 import type { ScenarioRef } from "../traceability/scenario-ref";
 import type { TraceabilitySubsystem } from "../traceability/traceability-subsystem";
 import { Logger } from "../utils/logger";
@@ -50,6 +59,8 @@ import type { XrayCredentials, XrayJiraCredentials } from "../xray/xray-credenti
 import { boardBatchSelection, treeBatchSelection } from "./run-publish-selection";
 import { runPublishBatch } from "./run-publish-execution";
 import { logCapturedRunOutput } from "./captured-run-progress";
+import { RemoteOutcomeUnknownError, type WorkspaceTrust } from "../core/workspace-trust";
+import { explainWorkspaceTrust } from "../ui/workspace-trust";
 
 const PREFLIGHT_STATE_LABEL: Record<PreflightState, string> = {
   "ready": "ready",
@@ -84,15 +95,27 @@ export interface TraceabilityPublishCommandDeps {
   readonly publishLedger: () => PublishLedger | undefined;
   readonly siteUrl: () => string;
   readonly idleEvent: vscode.Event<void>;
-  readonly runArtifactStore: RunArtifactStore | undefined;
+  readonly runArtifactStore: ExecutionArtifactCatalog | undefined;
   readonly executionGateway: ExecutionGateway;
   readonly featureParser: FeatureParser;
+  readonly workspaceTrust: WorkspaceTrust;
+  readonly attachmentSpoolRoot: () => string | undefined;
 }
 
 export class TraceabilityPublishCommands {
-  constructor(private readonly logger: Logger, private readonly deps: TraceabilityPublishCommandDeps) {}
+  private readonly attachmentSpool: AttachmentSpool;
+
+  constructor(private readonly logger: Logger, private readonly deps: TraceabilityPublishCommandDeps) {
+    const root = deps.attachmentSpoolRoot();
+    if (root === undefined) {throw new Error("Attachment spool storage is unavailable.");}
+    this.attachmentSpool = new AttachmentSpool(root, logger);
+  }
 
   public async runAndPublish(...args: unknown[]): Promise<void> {
+    await this.runAndPublishTrusted(undefined, ...args);
+  }
+
+  public async runAndPublishTrusted(signal: AbortSignal | undefined, ...args: unknown[]): Promise<void> {
     const subsystem = this.deps.subsystem();
     const snapshot = subsystem?.getSnapshot();
     if (!subsystem || !snapshot) {
@@ -109,10 +132,10 @@ export class TraceabilityPublishCommands {
       vscode.window.showInformationMessage("No mapped scenarios were selected. Nothing was run.");
       return;
     }
-    await this.runAndPublishSelection(resolved.selection, "traceability-tree");
+    await this.runAndPublishSelection(resolved.selection, "traceability-tree", signal);
   }
 
-  public async runAndPublishSelected(selectedTestKeys: readonly string[]): Promise<void> {
+  public async runAndPublishSelected(selectedTestKeys: readonly string[], signal?: AbortSignal): Promise<void> {
     const snapshot = this.deps.subsystem()?.getSnapshot();
     if (!snapshot) {
       vscode.window.showInformationMessage("Enable and sync the Traceability panel before running a batch.");
@@ -128,12 +151,13 @@ export class TraceabilityPublishCommands {
       vscode.window.showInformationMessage("No mapped scenarios were selected. Nothing was run.");
       return;
     }
-    await this.runAndPublishSelection(resolved.selection, "coverage-board");
+    await this.runAndPublishSelection(resolved.selection, "coverage-board", signal);
   }
 
   public async runAndPublishSelection(
     selection: BatchSelection,
-    initiatedBy: RunInitiator = "traceability-tree"
+    initiatedBy: RunInitiator = "traceability-tree",
+    signal?: AbortSignal
   ): Promise<void> {
     const subsystem = this.deps.subsystem();
     const snapshot = subsystem?.getSnapshot();
@@ -176,13 +200,13 @@ export class TraceabilityPublishCommands {
     } else if (publishableResults(sealed).publishable.length === 0) {
       vscode.window.showWarningMessage("Nothing to publish. Every result was excluded by preflight or is unmapped.");
     } else {
-      await this.runPublish(sealed.id);
+      await this.runPublish(sealed.id, signal);
     }
   }
 
-  public async publishLastRun(): Promise<void> {await this.runPublish();}
+  public async publishLastRun(signal?: AbortSignal): Promise<void> {await this.runPublish(undefined, signal);}
 
-  public async runPublish(preselectId?: string): Promise<void> {
+  public async runPublish(preselectId?: string, signal?: AbortSignal): Promise<void> {
     const subsystem = this.deps.subsystem();
     const adapter = subsystem?.getActiveAdapter();
     const publishing = adapter?.resultPublishing;
@@ -197,6 +221,9 @@ export class TraceabilityPublishCommands {
 
     const board = this.deps.board();
     const controller = new AbortController();
+    const onAbort = (): void => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {onAbort();}
     const cancelOnClose = board.onDidDispose(() => controller.abort());
     const site = this.deps.siteUrl();
     const credentials = await this.deps.credentials();
@@ -210,14 +237,19 @@ export class TraceabilityPublishCommands {
         ...(preselectId !== undefined ? { preselectId } : {}),
         jiraSearchAvailable,
         knownProjectKeys: this.deps.projectUniverse(adapter),
-        attachments: () => this.buildPublishAttachments(),
+        attachments: () => this.buildPublishAttachments(controller.signal),
         presentDialog: (model) => board.publish.present(model),
         presentRetry: (selectedRunId) => board.publish.presentRetry(selectedRunId),
-        attachFiles: (executionKey, files, signal) =>
-          this.attachFiles(executionKey, files, signal),
-        recordPublish: (entry) => {
+        attachFiles: (executionKey, files, signal, operationId) =>
+          this.attachFiles(executionKey, files, signal, operationId),
+        sealAttachments: (files) =>
+          this.sealAttachments(files),
+        discardAttachments: (files) =>
+          this.attachmentSpool.discard(files.filter(isAttachmentSnapshot)),
+        recordPublish: async (entry) => {
+          const evicted = await this.deps.publishLedger()?.record(entry) ?? [];
+          this.attachmentSpool.discard(evicted);
           published = true;
-          this.deps.publishLedger()?.record(entry);
         },
         reportNoRuns: () => {
           vscode.window.showInformationMessage(NO_PUBLISHABLE_RUNS_MESSAGE);
@@ -258,6 +290,7 @@ export class TraceabilityPublishCommands {
       });
     } finally {
       cancelOnClose.dispose();
+      signal?.removeEventListener("abort", onAbort);
       const settled = board.publish.markSettled();
       const refreshed = published && (await this.deps.rebuild("publishing"));
       if (succeeded && settled && refreshed) {
@@ -280,8 +313,11 @@ export class TraceabilityPublishCommands {
     if (choice !== "Clear runs" && choice !== "Clear runs and ledger") {return;}
 
     const runs = this.deps.runArtifactStore?.clear() ?? 0;
-    const entries =
-      choice === "Clear runs and ledger" ? (this.deps.publishLedger()?.clear() ?? 0) : 0;
+    const cleared = choice === "Clear runs and ledger"
+      ? await this.deps.publishLedger()?.clear()
+      : undefined;
+    const entries = cleared?.removed ?? 0;
+    if (cleared !== undefined) {this.attachmentSpool.discard(cleared.snapshots);}
     vscode.window.showInformationMessage(clearedHistoryMessage(runs, entries));
     if (runs === 0 && entries === 0) {return;}
     await this.deps.rebuild("clearing run history");
@@ -291,20 +327,25 @@ export class TraceabilityPublishCommands {
     artifactId: string,
     site: string
   ): Promise<PendingAttachmentsResult> {
+    await this.cleanupAttachmentSpool();
     const ledger = this.deps.publishLedger();
     const entry = ledger?.find(artifactId, site);
     if (entry === undefined || entry.pendingAttachments.length === 0) {
       return { remaining: 0 };
     }
+    if (isOutcomeUnknownEntry(entry) || entry.executionRef === undefined) {return { remaining: 0 };}
     if (!this.canReplayAttachments(entry.executionRef)) {
       return { remaining: entry.pendingAttachments.length };
     }
     const { failed, cancelled } = await this.attachFiles(
       entry.executionRef,
-      entry.pendingAttachments
+      entry.pendingAttachments,
+      undefined,
+      entry.operationId
     );
     const pending = [...failed, ...cancelled];
-    ledger?.setPendingAttachments(artifactId, site, pending);
+    const evicted = await ledger?.setPendingAttachments(artifactId, site, pending) ?? [];
+    this.attachmentSpool.discard(evicted);
     const attached = entry.pendingAttachments.length - pending.length;
     if (pending.length === 0) {
       vscode.window.showInformationMessage(
@@ -318,7 +359,20 @@ export class TraceabilityPublishCommands {
     return { remaining: pending.length };
   }
 
-  private async buildPublishAttachments(): Promise<PublishAttachmentsModel> {
+  private async sealAttachments(files: readonly string[]): Promise<readonly PendingAttachment[]> {
+    await this.cleanupAttachmentSpool();
+    return this.attachmentSpool.seal(files);
+  }
+
+  private async cleanupAttachmentSpool(): Promise<void> {
+    const ledger = this.deps.publishLedger();
+    await pruneAttachmentSpool(
+      this.attachmentSpool,
+      (candidates) => ledger?.discardSnapshotRefs(candidates) ?? Promise.resolve()
+    );
+  }
+
+  private async buildPublishAttachments(signal: AbortSignal): Promise<PublishAttachmentsModel> {
     const credentials = await this.deps.jiraCredentials();
     return buildAttachmentsModel({
       reportGlobs: this.deps.config.xrayReportGlob,
@@ -335,6 +389,7 @@ export class TraceabilityPublishCommands {
               site: this.deps.siteUrl(),
               credentials,
               logger: this.logger,
+              signal,
             })),
     });
   }
@@ -362,22 +417,27 @@ export class TraceabilityPublishCommands {
 
   private async attachFiles(
     executionKey: string,
-    files: readonly string[],
-    signal?: AbortSignal
-  ): Promise<{ readonly failed: readonly string[]; readonly cancelled: readonly string[] }> {
-    const credentials = await this.deps.jiraCredentials();
-    if (credentials === undefined) {
-      return { failed: files, cancelled: [] };
-    }
-    const result = await uploadJiraAttachments({
-      site: this.deps.siteUrl(),
-      credentials,
-      issueKey: executionKey,
-      files,
-      logger: this.logger,
-      ...(signal !== undefined ? { signal } : {}),
-    });
-    return { failed: result.failed, cancelled: result.cancelled };
+    files: readonly PendingAttachment[],
+    signal?: AbortSignal,
+    operationId?: string
+  ): Promise<{ readonly failed: readonly PendingAttachment[]; readonly cancelled: readonly PendingAttachment[] }> {
+    return this.deps.workspaceTrust.run(async (trustedSignal) => {
+      const credentials = await this.deps.jiraCredentials();
+      if (credentials === undefined) {
+        return { failed: files, cancelled: [] };
+      }
+      const result = await uploadJiraAttachments({
+        site: this.deps.siteUrl(),
+        credentials,
+        issueKey: executionKey,
+        files,
+        logger: this.logger,
+        signal: trustedSignal,
+        spool: this.attachmentSpool,
+        ...(operationId !== undefined ? { operationId } : {}),
+      });
+      return { failed: result.failed, cancelled: result.cancelled };
+    }, signal);
   }
 
   private canReplayAttachments(executionRef: string): boolean {
@@ -395,12 +455,14 @@ export class TraceabilityPublishCommands {
     artifactId: string,
     site: string,
     executionKey: string,
-    files: readonly string[]
+    files: readonly PendingAttachment[],
+    operationId?: string
   ): Promise<void> {
     if (!this.canReplayAttachments(executionKey)) {return;}
-    const { failed, cancelled } = await this.attachFiles(executionKey, files);
+    const { failed, cancelled } = await this.attachFiles(executionKey, files, undefined, operationId);
     const pending = [...failed, ...cancelled];
-    this.deps.publishLedger()?.setPendingAttachments(artifactId, site, pending);
+    const evicted = await this.deps.publishLedger()?.setPendingAttachments(artifactId, site, pending) ?? [];
+    this.attachmentSpool.discard(evicted);
     const attached = files.length - pending.length;
     if (pending.length === 0) {
       vscode.window.showInformationMessage(
@@ -416,7 +478,7 @@ export class TraceabilityPublishCommands {
     )
       .then((choice) =>
         (choice === "Retry"
-          ? this.retryAttachments(artifactId, site, executionKey, pending)
+          ? this.retryAttachments(artifactId, site, executionKey, pending, operationId)
           : undefined)
       )
       .catch(() => undefined);
@@ -445,7 +507,7 @@ export class TraceabilityPublishCommands {
     outcome: PublishOutcome,
     request: PublishRequest,
     attachedCount: number,
-    failed: readonly string[]
+    failed: readonly PendingAttachment[]
   ): void {
     const base = publishOutcomeLead(outcome, request);
     const attachedNote =
@@ -462,7 +524,7 @@ export class TraceabilityPublishCommands {
     Promise.resolve(vscode.window.showWarningMessage(message, ...buttons))
       .then(async (choice) => {
         if (choice === "Retry") {
-          await this.retryAttachments(artifactId, site, outcome.ref.key, failed);
+          await this.retryAttachments(artifactId, site, outcome.ref.key, failed, outcome.operationId);
         } else if (choice === "Open in Jira" && url) {
           await vscode.env.openExternal(vscode.Uri.parse(url));
         }
@@ -492,6 +554,42 @@ export class TraceabilityPublishCommands {
   }
 
   private reportPublishFailure(error: unknown): void {
+    if (error instanceof OutcomeUnknownRecoveryPersistenceError) {
+      this.logger.warn("Publish outcome unknown; local recovery record was not saved", {
+        operationId: error.operationId,
+        persistenceCause: error.persistenceCause,
+      });
+      vscode.window.showWarningMessage(
+        `Publish outcome unknown: it possibly succeeded. Correlation: ${error.operationId}. `
+        + `The local recovery record could not be saved: ${error.persistenceCause}`
+      );
+      return;
+    }
+    if (error instanceof RemoteOutcomeUnknownError) {
+      this.logger.warn("Publish outcome unknown; the remote operation possibly succeeded", {
+        operationId: error.operationId,
+        message: error.message,
+      });
+      vscode.window.showWarningMessage(
+        `Publish outcome unknown: ${error.message} Correlation: ${error.operationId}.`
+      );
+      return;
+    }
+    if (error instanceof LandedAttachmentPreparationError) {
+      this.logger.error("Attachment sealing failed after results were published", {
+        operationId: error.outcome.operationId ?? "unknown",
+        message: error.message,
+      });
+      vscode.window.showErrorMessage(error.message);
+      return;
+    }
+    if (error instanceof PublishLedgerPersistenceError) {
+      this.logger.error("Published-result recovery state was not saved", { message: error.message });
+      vscode.window.showErrorMessage(
+        `Results may have been published, but recovery state was not saved. ${error.message}`
+      );
+      return;
+    }
     if (error instanceof XrayImportError) {
       this.logger.error("Publish failed", {
         status: error.status,
@@ -555,6 +653,7 @@ export class TraceabilityPublishCommands {
       invocations,
       decisions,
       initiatedBy,
+      this.deps.subsystem()?.getSnapshot()?.links.map((link) => link.scenario) ?? [],
       (output, failure) => logCapturedRunOutput(this.logger, "Traceability batch", output, failure)
     );
     return artifactId === undefined
@@ -571,7 +670,16 @@ export class TraceabilityPublishCommands {
           : Promise.reject(new Error("Connect to your test tracker to search."));
       },
       browseFiles: () => this.browsePublishFiles(),
-      attachPending: (runId) => this.attachPendingForRun(runId, this.deps.siteUrl()),
+      attachPending: async (runId) => {
+        try {
+          return await this.attachPendingForRun(runId, this.deps.siteUrl());
+        } catch (error) {
+          if (!(await explainWorkspaceTrust(error))) {throw error;}
+          const remaining = this.deps.publishLedger()
+            ?.find(runId, this.deps.siteUrl())?.pendingAttachments.length ?? 0;
+          return { remaining };
+        }
+      },
       onDidChangeRuns: this.deps.runArtifactStore?.onDidChange ?? this.deps.idleEvent,
       runOptions: () => publishRunOptions(this.publishRunSources()),
     };

@@ -7,13 +7,15 @@ Show VS Code Settings filtered to Specwright. Include execution and authoring se
 
 Use the defaults first. Most projects only need a change when they use a different package manager, a monorepo, non-standard step directories, or a custom `playwright-bdd` output directory.
 
+Run, debug, generation, credential access, sync, publishing, attachments, and remote authoring require a [trusted workspace](https://code.visualstudio.com/docs/editing/workspaces/workspace-trust). Gherkin editing and navigation remain available without trust. Workspace values for privileged command and integration settings are ignored while the workspace is untrusted.
+
 ## Run and discovery settings
 
 | Setting | Default | Use it when… |
 | --- | --- | --- |
-| `playwrightCommand` | `npx playwright test` | Your project runs Playwright through another command, such as `pnpm exec playwright test`. |
-| `bddgenCommand` | `npx bddgen` | You need a different code-generation command. Set it to an empty string when your Playwright configuration already runs `bddgen`. |
-| `preRunCommand` | empty | A command must finish before every test run, for example to build fixtures. A non-zero exit stops the run. |
+| `playwrightCommand` | `npx playwright test` | Your project runs Playwright through another executable and argument list, such as `pnpm exec playwright test`. Shell operators are rejected. |
+| `bddgenCommand` | `npx bddgen` | You need a different code-generation executable and argument list. Shell operators are rejected. Leave it empty only when current generated specs already exist before a targeted run. |
+| `preRunCommand` | empty | A trusted compatibility shell command must finish before every test run, for example to build fixtures or generate current BDD specs. A non-zero exit stops the run. |
 | `featuresGenDir` | `.features-gen` | Your `playwright-bdd` output directory differs from the default. This is needed for feature-file breakpoint mapping. |
 | `workingDirectory` | inferred | Commands must run from a specific folder. By default, Specwright uses the nearest parent `playwright.config.*`, then the workspace folder. |
 | `testFilePattern` | `**/*.feature` | Your feature files live outside the usual locations or use a narrower glob. This also controls the tag index. |
@@ -107,6 +109,8 @@ This setting is especially important when debugging a breakpoint set in a `.feat
 ```
 
 The expression is passed to `bddgen`; only matching specs are generated for the run.
+
+Specwright passes ordinary Playwright and bddgen settings directly as executable arguments on Windows, macOS, and Linux. It does not expand environment variables, redirections, pipes, or command chains, and `npx` runs with `--no-install` so a missing package is never downloaded implicitly. Put a necessary legacy shell chain in `preRunCommand`; that escape hatch runs only after Workspace Trust admission.
 
 ## Related guides
 
