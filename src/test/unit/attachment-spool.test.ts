@@ -14,6 +14,19 @@ const tempRoot = (): string => {
   return root;
 };
 
+// Generic spool behavior is platform-independent. Inject a harmless, universally supported open
+// flag through the no-follow capability seam so Windows CI does not exercise production's deliberate
+// fail-closed path; the dedicated null-flag tests below own that contract.
+const supportedSpool = (
+  storage: string,
+  now: () => number = Date.now
+): AttachmentSpool => new AttachmentSpool(
+  storage,
+  Logger.create(undefined, LogLevel.ERROR),
+  now,
+  { noFollowFlag: fs.constants.O_APPEND }
+);
+
 afterEach(() => {
   for (const root of roots.splice(0)) {fs.rmSync(root, { recursive: true, force: true });}
 });
@@ -23,7 +36,7 @@ describe("AttachmentSpool", () => {
     const root = tempRoot();
     const source = path.join(root, "report.zip");
     fs.writeFileSync(source, "confirmed");
-    const spool = new AttachmentSpool(path.join(root, "storage"), Logger.create(undefined, LogLevel.ERROR));
+    const spool = supportedSpool(path.join(root, "storage"));
     const [snapshot] = spool.seal([source]);
     fs.writeFileSync(source, "changed");
     expect(spool.read(snapshot!)).toEqual(Buffer.from("confirmed"));
@@ -37,7 +50,7 @@ describe("AttachmentSpool", () => {
     const link = path.join(root, "link.zip");
     fs.writeFileSync(target, "bytes");
     fs.symlinkSync(target, link);
-    const spool = new AttachmentSpool(path.join(root, "storage"), Logger.create(undefined, LogLevel.ERROR));
+    const spool = supportedSpool(path.join(root, "storage"));
     expect(() => spool.seal([link])).toThrow();
     const snapshots = spool.seal([target]);
     expect(spool.discard(snapshots)).toBe(1);
@@ -48,7 +61,7 @@ describe("AttachmentSpool", () => {
     const root = tempRoot();
     const external = path.join(root, "external.zip");
     fs.writeFileSync(external, "keep");
-    const spool = new AttachmentSpool(path.join(root, "storage"), Logger.create(undefined, LogLevel.ERROR));
+    const spool = supportedSpool(path.join(root, "storage"));
 
     expect(spool.discard([{ ref: "../../external.zip" } as never])).toBe(0);
     expect(fs.readFileSync(external, "utf8")).toBe("keep");
@@ -87,7 +100,7 @@ describe("AttachmentSpool", () => {
     const storage = path.join(root, "storage");
     const source = path.join(root, "report.zip");
     fs.writeFileSync(source, "confirmed");
-    const supported = new AttachmentSpool(storage, Logger.create(undefined, LogLevel.ERROR));
+    const supported = supportedSpool(storage);
     const [snapshot] = supported.seal([source]);
     const unsupported = new AttachmentSpool(
       storage,
@@ -106,7 +119,7 @@ describe("AttachmentSpool", () => {
     const fd = fs.openSync(source, "w");
     try {fs.ftruncateSync(fd, 26 * 1024 * 1024);} finally {fs.closeSync(fd);}
     const storage = path.join(root, "storage");
-    const spool = new AttachmentSpool(storage, Logger.create(undefined, LogLevel.ERROR));
+    const spool = supportedSpool(storage);
 
     expect(() => spool.seal([source])).toThrow(/safe limit/);
     expect(fs.readdirSync(path.join(storage, "attachment-spool"))).toEqual([]);
@@ -117,7 +130,7 @@ describe("AttachmentSpool", () => {
     const storage = path.join(root, "storage");
     const source = path.join(root, "report.zip");
     fs.writeFileSync(source, "confirmed");
-    const spool = new AttachmentSpool(storage, Logger.create(undefined, LogLevel.ERROR));
+    const spool = supportedSpool(storage);
     const [snapshot] = spool.seal([source]);
     fs.chmodSync(path.join(storage, "attachment-spool", snapshot!.ref), 0o600);
     fs.writeFileSync(path.join(storage, "attachment-spool", snapshot!.ref), "tampered!");
@@ -129,13 +142,9 @@ describe("AttachmentSpool", () => {
     const source = path.join(root, "report.zip");
     fs.writeFileSync(source, "confirmed");
     const storage = path.join(root, "storage");
-    const spool = new AttachmentSpool(storage, Logger.create(undefined, LogLevel.ERROR), () => Date.now());
+    const spool = supportedSpool(storage, () => Date.now());
     const [snapshot] = spool.seal([source]);
-    const future = new AttachmentSpool(
-      storage,
-      Logger.create(undefined, LogLevel.ERROR),
-      () => Date.now() + 8 * 24 * 60 * 60 * 1000
-    );
+    const future = supportedSpool(storage, () => Date.now() + 8 * 24 * 60 * 60 * 1000);
     const candidates = future.cleanupCandidates();
     expect(candidates).toEqual([snapshot!.ref]);
     expect(future.deleteCandidates(candidates)).toBe(1);
@@ -147,7 +156,7 @@ describe("AttachmentSpool", () => {
     const storage = path.join(root, "storage");
     const source = path.join(root, "report.zip");
     fs.writeFileSync(source, "confirmed");
-    const spool = new AttachmentSpool(storage, Logger.create(undefined, LogLevel.ERROR));
+    const spool = supportedSpool(storage);
     const [snapshot] = spool.seal([source]);
     const state = new Map<string, unknown>();
     let fail = false;
@@ -170,11 +179,7 @@ describe("AttachmentSpool", () => {
       pendingAttachments: [snapshot!],
     });
     fail = true;
-    const future = new AttachmentSpool(
-      storage,
-      Logger.create(undefined, LogLevel.ERROR),
-      () => Date.now() + 8 * 24 * 60 * 60 * 1000
-    );
+    const future = supportedSpool(storage, () => Date.now() + 8 * 24 * 60 * 60 * 1000);
 
     await expect(pruneAttachmentSpool(future, (refs) => ledger.discardSnapshotRefs(refs)))
       .rejects.toBeInstanceOf(PublishLedgerPersistenceError);

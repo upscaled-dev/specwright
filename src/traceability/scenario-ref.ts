@@ -66,10 +66,11 @@ export function outlineRef(filePath: string, outlineName: string): ScenarioRef {
 // ScenarioResults, so keying both on this ref gives every layer one scenario identity.
 export function scenarioRefFromResult(result: ScenarioResult): ScenarioRef {
   const line = result.lineNumber ?? 0;
+  const filePath = normalizePath(result.featurePath);
   return result.outlineName === undefined
-    ? { filePath: result.featurePath, line, name: result.scenarioName, kind: "scenario" }
+    ? { filePath, line, name: result.scenarioName, kind: "scenario" }
     : {
-        filePath: result.featurePath,
+        filePath,
         line,
         name: result.scenarioName,
         kind: "outline",

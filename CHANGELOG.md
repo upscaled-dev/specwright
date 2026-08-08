@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Windows run events and stored artifacts now use the same canonical scenario path, preserving result and status reconciliation.
 - Scenario Outline and Examples-row targeting now fails closed when generated output cannot identify the exact case.
 - Debug cancellation terminates the owned root session and contains cleanup failures without masking the run result.
 - Generated integration fixtures no longer leak into ordinary feature discovery.

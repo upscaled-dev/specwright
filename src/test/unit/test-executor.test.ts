@@ -212,7 +212,8 @@ function makeExecutor(
   };
   debugFixture.resolveSpecPaths = (workingDir, filePath) => {
     const discovered = generatedSpecPaths(workingDir, config.featuresGenDir, filePath);
-    if (discovered.length > 0 || (workingDir !== "/abs" && workingDir !== "/work")) {
+    const fixtureRoot = normalizePathKey(workingDir);
+    if (discovered.length > 0 || (fixtureRoot !== "/abs" && fixtureRoot !== "/work")) {
       return discovered;
     }
     return [nodePath.join(workingDir, ".features-gen", "features/a.feature.spec.js")];
@@ -773,7 +774,7 @@ describe("TestExecutor run events", () => {
       expect.objectContaining({ projectName: "chromium", status: "passed" }),
       expect.objectContaining({ projectName: "firefox", status: "failed" }),
     ]));
-    expect(result.scenarioResults?.[`${featurePath}:4`]).toBe("failed");
+    expect(result.scenarioResults?.[`${normalizePathKey(featurePath)}:4`]).toBe("failed");
     fs.rmSync(root, { recursive: true, force: true });
   });
 

@@ -31,6 +31,7 @@ import {
   scopeArtifactDetails,
 } from "../../traceability/run-artifact-store";
 import { PublishLedger } from "../../traceability/publish-ledger";
+import { AttachmentSpool } from "../../traceability/attachment-spool";
 import { BoardViewModel, scenarioDropId } from "../../traceability/board-data";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
@@ -2725,8 +2726,13 @@ describe("traceability publishLastRun: Publish tab", () => {
   // stays put: the warning toast owns the retry.
   it("rebuilds the board but stays off the Executions tab when attachments partly fail", async () => {
     const evidence = path.join("/tmp/specwright-command-tests", "evidence.png");
-    fs.mkdirSync(path.dirname(evidence), { recursive: true });
-    fs.writeFileSync(evidence, "evidence");
+    vi.spyOn(AttachmentSpool.prototype, "seal").mockReturnValue([{
+      ref: "00000001-0000-4000-8000-000000000000",
+      name: "evidence.png",
+      size: 8,
+      sha256: "a".repeat(64),
+      createdAt: 1,
+    }]);
     const { tabs, rebuilds } = await publishOnce([{ ...CONFIRM, attachments: [evidence] }]);
 
     expect(rebuilds).toBe(1);

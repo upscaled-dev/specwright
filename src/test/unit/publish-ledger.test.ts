@@ -280,8 +280,9 @@ describe("PublishLedger", () => {
   });
 
   it("returns snapshots evicted by the fifty-entry cap for physical cleanup", async () => {
+    const safeNames = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     const seeded = Array.from({ length: 50 }, (_, index) =>
-      entry({ artifactId: `run-${index}`, pendingAttachments: [snapshot(String.fromCharCode(65 + index))] })
+      entry({ artifactId: `run-${index}`, pendingAttachments: [snapshot(safeNames[index]!)] })
     );
     const memento = fakeMemento(seeded);
     const ledger = new PublishLedger(memento, logger);
