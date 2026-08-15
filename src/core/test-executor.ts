@@ -1516,6 +1516,11 @@ export class TestExecutor {
     return canonicalCwd(this.resolveWorkingDirectory(forFile));
   }
 
+  /** The working directory a run of this feature would use; the anchor for generated-spec lookups. */
+  public workingDirectoryFor(featureFsPath: string): string {
+    return this.getWorkingDirectory(featureFsPath);
+  }
+
   private resolveWorkingDirectory(forFile?: string): string {
     const folders = this.workspace.workspaceFolders;
     const firstRoot = folders?.[0]?.uri.fsPath;

@@ -46,6 +46,23 @@ describe("parseBddFileData", () => {
     expect(data!.pickleLines.get(19)).toBe(13);
   });
 
+  it("collects skipped pickle lines as missing-step skips", () => {
+    const data = parseBddFileData(backgroundSpecText);
+    expect([...data!.missingStepPickleLines]).toEqual([13]);
+    expect(parseBddFileData(outlineSpecText)!.missingStepPickleLines.size).toBe(0);
+  });
+
+  it("does not count a deliberate @skip/@fixme skip as a missing-step skip", () => {
+    const specText = [
+      "const bddFileData = [ // bdd-data-start",
+      '  {"pwTestLine":6,"pickleLine":4,"skipped":true,"tags":["@skip"]},',
+      '  {"pwTestLine":12,"pickleLine":9,"skipped":true,"tags":["@fixme","@smoke"]},',
+      '  {"pwTestLine":18,"pickleLine":14,"skipped":true,"tags":["@smoke"]},',
+      "]; // bdd-data-end",
+    ].join("\n");
+    expect([...parseBddFileData(specText)!.missingStepPickleLines]).toEqual([14]);
+  });
+
   it("dedupes Background steps repeated across scenario entries", () => {
     const data = parseBddFileData(backgroundSpecText);
     expect(data!.stepLines.get(5)).toEqual([7]);

@@ -12,6 +12,8 @@ interface BddStep {
 interface BddTestEntry {
   pwTestLine: number;
   pickleLine: number;
+  skipped?: boolean;
+  tags?: string[];
   steps?: BddStep[];
 }
 
@@ -22,6 +24,16 @@ export interface BddFileData {
   testLines: Map<number, number>;
   /** pwTestLine (generated test line, 1-based) → pickleLine (Scenario: line, 1-based) */
   pickleLines: Map<number, number>;
+  /**
+   * pickleLines whose generated test bddgen marked skipped without one of the deliberate-skip
+   * tags anywhere in the tag chain. bddgen's `skipped` flag unions two causes; the tagged one
+   * is intentional, so what remains is the skip-scenario fallback for undefined steps.
+   */
+  missingStepPickleLines: Set<number>;
+}
+
+function deliberatelySkipped(tags: readonly string[] | undefined): boolean {
+  return (tags ?? []).some((tag) => tag === "@skip" || tag === "@fixme");
 }
 
 export interface BddSourceData {
@@ -65,9 +77,13 @@ export function parseBddFileData(specText: string): BddFileData | undefined {
   const stepLineSets = new Map<number, Set<number>>();
   const testLines = new Map<number, number>();
   const pickleLines = new Map<number, number>();
+  const missingStepPickleLines = new Set<number>();
   for (const entry of entries) {
     testLines.set(entry.pickleLine, entry.pwTestLine);
     pickleLines.set(entry.pwTestLine, entry.pickleLine);
+    if (entry.skipped === true && !deliberatelySkipped(entry.tags)) {
+      missingStepPickleLines.add(entry.pickleLine);
+    }
     for (const step of entry.steps ?? []) {
       let set = stepLineSets.get(step.gherkinStepLine);
       if (!set) {
@@ -82,7 +98,7 @@ export function parseBddFileData(specText: string): BddFileData | undefined {
   for (const [gherkinLine, pwLines] of stepLineSets) {
     stepLines.set(gherkinLine, [...pwLines].sort((a, b) => a - b));
   }
-  return { stepLines, testLines, pickleLines };
+  return { stepLines, testLines, pickleLines, missingStepPickleLines };
 }
 
 /** Parse the source feature and the complete generated-test line map once for reuse. */

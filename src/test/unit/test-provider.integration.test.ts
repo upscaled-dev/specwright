@@ -319,6 +319,156 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(last.outcome.skipped).not.toContain(`${fixture.featurePath}:4`);
   });
 
+  it("explains a skip caused by bddgen's missing-step skip-scenario marker", async () => {
+    // Regenerate the fixture spec with the scenario marked skipped, the shape bddgen writes
+    // under missingSteps: "skip-scenario" when a step has no definition.
+    fs.writeFileSync(
+      fixture.genSpecPath,
+      [
+        "// Generated from: features/test.feature",
+        "const bddFileData = [ // bdd-data-start",
+        '  {"pwTestLine":6,"pickleLine":4,"skipped":true},',
+        '  {"pwTestLine":18,"pickleLine":12},',
+        '  {"pwTestLine":24,"pickleLine":13},',
+        "]; // bdd-data-end",
+      ].join("\n")
+    );
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const out = reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "skipped" }]);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);}
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+
+    const last = controller.runs.at(-1)!;
+    expect(last.outcome.skipped).toContain(`${fixture.featurePath}:4`);
+    expect(last.outcome.output.join("")).toContain(
+      '"Passing scenario" was skipped by bddgen: a step has no matching definition.'
+    );
+  });
+
+  it("stays quiet about a deliberate @skip skip", async () => {
+    fs.writeFileSync(
+      fixture.genSpecPath,
+      [
+        "// Generated from: features/test.feature",
+        "const bddFileData = [ // bdd-data-start",
+        '  {"pwTestLine":6,"pickleLine":4,"skipped":true,"tags":["@skip"]},',
+        '  {"pwTestLine":18,"pickleLine":12},',
+        '  {"pwTestLine":24,"pickleLine":13},',
+        "]; // bdd-data-end",
+      ].join("\n")
+    );
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const out = reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "skipped" }]);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);}
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+
+    const last = controller.runs.at(-1)!;
+    expect(last.outcome.skipped).toContain(`${fixture.featurePath}:4`);
+    expect(last.outcome.output.join("")).not.toContain("was skipped by bddgen");
+  });
+
+  it("re-publishes cached statuses onto the rebuilt tree after a strategy switch", async () => {
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const out = reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "passed" }]);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);}
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    // An empty status cache publishes nothing: discovery alone opens no run.
+    expect(controller.runs).toHaveLength(0);
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+    expect(controller.runs.at(-1)!.outcome.passed).toContain(`${fixture.featurePath}:4`);
+
+    const beforeSwitch = controller.runs.length;
+    const tagStrategy = provider.organizationManager.getAvailableStrategies()
+      .find((s) => s.strategy.strategyType === "TagBasedOrganization")!.strategy;
+    provider.organizationManager.setStrategy(tagStrategy);
+    await provider.discoverTests();
+
+    // The rebuild replaced every TestItem; exactly one synthetic run restores the known verdicts.
+    expect(controller.runs).toHaveLength(beforeSwitch + 1);
+    const restored = controller.runs.at(-1)!;
+    expect(restored.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(restored.outcome.ended).toBe(true);
+  });
+
+  it("restores a failed verdict with the retirement message and a request scoped to it", async () => {
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const out = reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "failed" }]);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);}
+      return { success: false, output: "", error: "1 test failed", returnCode: 1 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+
+    const tagStrategy = provider.organizationManager.getAvailableStrategies()
+      .find((s) => s.strategy.strategyType === "TagBasedOrganization")!.strategy;
+    provider.organizationManager.setStrategy(tagStrategy);
+    await provider.discoverTests();
+
+    const restored = controller.runs.at(-1)!;
+    expect(restored.outcome.failed).toEqual([
+      {
+        id: `${fixture.featurePath}:4`,
+        message: expect.stringContaining("Re-run for details"),
+      },
+    ]);
+    const request = restored.request as { include?: Array<{ id: string }> };
+    expect(request.include?.map((item) => item.id)).toEqual([`${fixture.featurePath}:4`]);
+  });
+
+  it("does not restore a verdict retired by a skipped run", async () => {
+    let reported: "passed" | "skipped" = "passed";
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const out = reportJson(fixture, [{ title: "Passing scenario", line: 6, status: reported }]);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);}
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+    reported = "skipped";
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+
+    const beforeSwitch = controller.runs.length;
+    const tagStrategy = provider.organizationManager.getAvailableStrategies()
+      .find((s) => s.strategy.strategyType === "TagBasedOrganization")!.strategy;
+    provider.organizationManager.setStrategy(tagStrategy);
+    await provider.discoverTests();
+
+    // The skipped run retired the cached pass, so there is nothing left to restore.
+    expect(controller.runs).toHaveLength(beforeSwitch);
+  });
+
+  it("drops a changed file's cached verdicts before the watcher rebuild restores", async () => {
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const out = reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "passed" }]);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);}
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+    const beforeEdit = controller.runs.length;
+
+    await vscode.__fireFileWatcher("change", vscode.Uri.file(fixture.featurePath));
+
+    // The edit invalidated the file's verdicts, so the rebuild opens no restore run for them.
+    expect(controller.runs).toHaveLength(beforeEdit);
+  });
+
   it("routes a Test Explorer scenario through the gateway and projects its live result", async () => {
     const execute = vi.fn(async (_intent: RunIntent, options?: ExecutionOptions) => {
       const result = {

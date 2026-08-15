@@ -82,6 +82,28 @@ export function verifiedGeneratedSpecPaths(
     : { paths: verified.specs.map((spec) => spec.path) };
 }
 
+/**
+ * Feature lines whose generated test bddgen skipped for undefined steps (skip-scenario mode),
+ * unioned across every verified generated spec of the feature. Specs belonging to another
+ * feature contribute nothing; an unreadable or unidentified spec fails the verification as a
+ * unit (readVerifiedGeneratedSpecs's contract), which empties the whole union.
+ */
+export function missingStepSkipLines(
+  workingDir: string,
+  featuresGenDir: string,
+  featureFsPath: string
+): ReadonlySet<number> {
+  const lines = new Set<number>();
+  const verified = readVerifiedGeneratedSpecs(workingDir, featuresGenDir, featureFsPath);
+  if ("reason" in verified) {return lines;}
+  for (const { content } of verified.specs) {
+    for (const line of parseBddFileData(content)?.missingStepPickleLines ?? []) {
+      lines.add(line);
+    }
+  }
+  return lines;
+}
+
 /** Resolve the exact generated test in every BDD project that owns the feature. */
 export function exactGeneratedTargets(
   workingDir: string,

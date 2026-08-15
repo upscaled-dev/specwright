@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import { missingStepSkipLines } from "../core/generated-test-target";
 import { isOutlineExampleRow } from "../parsers/feature-parser";
 import { groupScenariosByOutline } from "./group-scenarios";
 import { OUTLINE_ID_SEPARATOR } from "./constants";
@@ -78,6 +79,20 @@ type RunStatus = "started" | "passed" | "failed";
 
 /** workspaceState key under which the chosen organization strategy type is persisted. */
 const ORG_STRATEGY_STATE_KEY = "playwrightBddRunner.organizationStrategyType";
+
+/** Invariants of one applyMappedStatus recursion; skippedLeaves accumulates across the walk. */
+interface MappedStatusContext {
+  readonly run: vscode.TestRun;
+  readonly result: RunOutputResult;
+  readonly results: Record<string, ScenarioStatus>;
+  readonly filePath: string;
+  readonly workspaceRoot: string;
+  readonly skippedLeaves: vscode.TestItem[];
+  readonly live?: LiveTestRunProgress | undefined;
+}
+
+// The palette prefixes commands with the "Specwright" category, so tips must name that form.
+const GENERATE_STEPS_COMMAND = 'Specwright: Generate Missing Step Definitions';
 
 /**
  * Bridges VS Code's Test Explorer to playwright-bdd.
@@ -205,12 +220,31 @@ export class PlaywrightBddTestProvider {
   }
 
   /** Watcher changes always refresh through the selected engine's discovery boundary. */
-  private onFeatureFileTouched(_uri: vscode.Uri): Promise<void> {
+  private onFeatureFileTouched(uri: vscode.Uri): Promise<void> {
+    this.dropCachedStatusesFor(uri.fsPath);
     return this.refreshTests();
   }
 
-  private onFeatureFileRemoved(_uri: vscode.Uri): Promise<void> {
+  private onFeatureFileRemoved(uri: vscode.Uri): Promise<void> {
+    this.dropCachedStatusesFor(uri.fsPath);
     return this.refreshTests();
+  }
+
+  /**
+   * A cached verdict is only as durable as its file: an edit can move, rename, or rewrite the
+   * scenario behind a `filePath:line` id, and restoring the old verdict onto whatever now sits
+   * at that line would be confidently wrong. Dropping the file's entries before the refresh
+   * keeps restoration honest; untouched files keep theirs.
+   */
+  private dropCachedStatusesFor(fileFsPath: string): void {
+    const file = normalizePathKey(fileFsPath);
+    // `${file}:` covers scenario ids (`file:line`) and outline ids (`file:outline:...`) alike.
+    for (const id of this.testStatusCache.keys()) {
+      const key = normalizePathKey(id);
+      if (key === file || key.startsWith(`${file}:`)) {
+        this.testStatusCache.delete(id);
+      }
+    }
   }
 
   // --- Discovery --------------------------------------------------------------
@@ -246,10 +280,53 @@ export class PlaywrightBddTestProvider {
       } else {
         this.buildGroupItems(organized);
       }
+      this.restoreCachedStatuses();
     } catch (error) {
       const msg = errMsg(error);
       this.context.logger.error(`Failed to discover tests: ${msg}`);
       vscode.window.showErrorMessage(`Test discovery failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Statuses live on TestItem instances, so every rebuild (a watcher event, an organization
+   * strategy switch) forgets them while the cache still knows the verdicts. Leaf ids are
+   * `filePath:line` under every strategy, which lets the last known result ride onto the
+   * rebuilt tree in one short unpersisted run scoped to exactly the restored items. A verdict
+   * stays valid only while its file is untouched (the watcher drops a changed file's entries),
+   * and an active run owns its own statuses, so restoration stands down for it. Failure detail
+   * died with the old run, so the restored message says to re-run for it; parents need nothing,
+   * the Explorer derives their aggregate from descendants.
+   */
+  private restoreCachedStatuses(): void {
+    if (this.testStatusCache.size === 0 || this.context.executionGateway.running) {return;}
+    const restorable: Array<{ item: vscode.TestItem; status: "passed" | "failed" }> = [];
+    const visit = (item: vscode.TestItem): void => {
+      if (item.children.size > 0) {
+        item.children.forEach(visit);
+        return;
+      }
+      const status = this.testStatusCache.get(item.id);
+      if (status === "passed" || status === "failed") {restorable.push({ item, status });}
+    };
+    this.testController.items.forEach(visit);
+    if (restorable.length === 0) {return;}
+    const run = this.testController.createTestRun(
+      new vscode.TestRunRequest(restorable.map(({ item }) => item)),
+      "Restored results",
+      false
+    );
+    try {
+      for (const { item, status } of restorable) {
+        if (status === "passed") {run.passed(item);}
+        else {
+          run.failed(item, new vscode.TestMessage(
+            "Failed in the last run before the tree was rebuilt. Re-run for details."
+          ));
+        }
+      }
+    } finally {
+      run.end();
     }
   }
 
@@ -579,7 +656,7 @@ export class PlaywrightBddTestProvider {
       .filter((s): s is string => typeof s === "string")
       .join("\n");
     if (extractMissingStepsBlock(combined) === "") {return "";}
-    return 'Tip: run "Playwright-BDD: Generate Missing Step Definitions" to scaffold these.';
+    return `Tip: run "${GENERATE_STEPS_COMMAND}" to scaffold these.`;
   }
 
   /**
@@ -689,6 +766,7 @@ export class PlaywrightBddTestProvider {
 
     let anyFailed = false;
     let anyPassed = false;
+    const skippedLeaves: vscode.TestItem[] = [];
 
     const walk = (item: vscode.TestItem): void => {
       if (item.children.size === 0) {
@@ -708,6 +786,10 @@ export class PlaywrightBddTestProvider {
           anyFailed = true;
         } else {
           if (!live || live.shouldApplyFinal(item, "skipped", detail)) {run.skipped(item);}
+          // A completed run that lands on skipped retires the cached verdict: restoring the
+          // older pass/fail would claim a result this run just declined to confirm.
+          this.testStatusCache.delete(item.id);
+          skippedLeaves.push(item);
         }
         return;
       }
@@ -716,6 +798,7 @@ export class PlaywrightBddTestProvider {
     };
 
     parent.children.forEach((child) => walk(child));
+    this.appendSkipReasons(run, skippedLeaves);
 
     if (anyFailed) {
       run.failed(parent, new vscode.TestMessage("One or more scenarios failed"));
@@ -733,6 +816,7 @@ export class PlaywrightBddTestProvider {
       this.testStatusCache.set(parent.id, "failed");
     } else {
       run.skipped(parent);
+      this.testStatusCache.delete(parent.id);
     }
   }
 
@@ -766,6 +850,41 @@ export class PlaywrightBddTestProvider {
       this.testStatusCache.set(item.id, "failed");
     } else {
       if (!live || live.shouldApplyFinal(item, status, detail)) {run.skipped(item);}
+      this.testStatusCache.delete(item.id);
+      this.appendSkipReasons(run, [item]);
+    }
+  }
+
+  /**
+   * A scenario with an undefined step is generated as a skipped test under bddgen's
+   * `missingSteps: "skip-scenario"`, so Playwright reports it skipped with no reason attached
+   * and the tree shows a bare gray icon. The generated spec marks those entries, so a skip that
+   * matches one gets its explanation written to the Test Results output, tied to the item.
+   * Deliberate @skip/@fixme skips carry no message; they need no explaining.
+   */
+  private appendSkipReasons(run: vscode.TestRun, skipped: readonly vscode.TestItem[]): void {
+    if (typeof run.appendOutput !== "function") {return;}
+    const skipLinesByFile = new Map<string, ReadonlySet<number>>();
+    for (const item of skipped) {
+      const filePath = item.uri?.fsPath;
+      const line = this.lineFromId(item.id);
+      if (!filePath || line === undefined) {continue;}
+      let skipLines = skipLinesByFile.get(filePath);
+      if (skipLines === undefined) {
+        skipLines = missingStepSkipLines(
+          this.context.testExecutor.workingDirectoryFor(filePath),
+          this.context.config.featuresGenDir,
+          filePath
+        );
+        skipLinesByFile.set(filePath, skipLines);
+      }
+      if (!skipLines.has(line)) {continue;}
+      run.appendOutput(
+        `"${item.label}" was skipped by bddgen: a step has no matching definition. ` +
+          `Tip: run "${GENERATE_STEPS_COMMAND}" to scaffold it.\r\n`,
+        undefined,
+        item
+      );
     }
   }
 
@@ -887,22 +1006,25 @@ export class PlaywrightBddTestProvider {
       this.applyBlanketStatus(filePath, run, result, target?.lineNumber, live);
       return;
     }
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    this.testController.items.forEach((item) =>
-      this.applyMappedStatus(item, run, result, results, filePath, workspaceRoot, live)
-    );
+    const context: MappedStatusContext = {
+      run,
+      result,
+      results,
+      filePath,
+      workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd(),
+      skippedLeaves: [],
+      live,
+    };
+    this.testController.items.forEach((item) => this.applyMappedStatus(item, context));
+    this.appendSkipReasons(run, context.skippedLeaves);
   }
 
   /** Recursively apply mapped statuses to a subtree; returns the rolled-up status of file items. */
   private applyMappedStatus(
     item: vscode.TestItem,
-    run: vscode.TestRun,
-    result: RunOutputResult,
-    results: Record<string, ScenarioStatus>,
-    filePath: string,
-    workspaceRoot: string,
-    live?: LiveTestRunProgress
+    context: MappedStatusContext
   ): ScenarioStatus | undefined {
+    const { run, result, results, filePath, workspaceRoot, live } = context;
     if (item.children.size === 0) {
       if (item.uri?.fsPath !== filePath) {return undefined;}
       const status = this.resolveStatusForItem(item, results, filePath, workspaceRoot) ??
@@ -919,6 +1041,8 @@ export class PlaywrightBddTestProvider {
         this.testStatusCache.set(item.id, "failed");
       } else if (status === "skipped") {
         if (!live || live.shouldApplyFinal(item, status, detail)) {run.skipped(item);}
+        this.testStatusCache.delete(item.id);
+        context.skippedLeaves.push(item);
       }
       return status;
     }
@@ -927,15 +1051,7 @@ export class PlaywrightBddTestProvider {
     let anyPassed = false;
     let anySkipped = false;
     item.children.forEach((child) => {
-      const childStatus = this.applyMappedStatus(
-        child,
-        run,
-        result,
-        results,
-        filePath,
-        workspaceRoot,
-        live
-      );
+      const childStatus = this.applyMappedStatus(child, context);
       if (childStatus === "failed") {anyFailed = true;}
       else if (childStatus === "passed") {anyPassed = true;}
       else if (childStatus === "skipped") {anySkipped = true;}
@@ -955,6 +1071,7 @@ export class PlaywrightBddTestProvider {
       return "passed";
     }
     run.skipped(item);
+    this.testStatusCache.delete(item.id);
     return "skipped";
   }
 
@@ -986,8 +1103,9 @@ export class PlaywrightBddTestProvider {
         const fallback = result.error?.trim() ? result.error : "Test failed: see the Test Results output panel.";
         if (apply) {run.failed(item, this.failureMessage(item, result.scenarioDetails, fallback));}
         this.testStatusCache.set(item.id, "failed");
-      } else if (apply) {
-        run.skipped(item);
+      } else {
+        if (apply) {run.skipped(item);}
+        this.testStatusCache.delete(item.id);
       }
       return status;
     };

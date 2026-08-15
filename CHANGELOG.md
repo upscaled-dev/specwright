@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A scenario bddgen skips for a missing step definition now says so in the Test Results output, next to the skipped item, with the command that scaffolds the step. Deliberate @skip and @fixme skips stay quiet.
+- Test Explorer statuses survive tree rebuilds. Switching the organization strategy or saving a feature file no longer wipes every badge; the last known verdicts are restored onto the rebuilt items, and a changed file drops only its own.
 - Privileged commands, test execution, debugging, generation, credentials, uploads, and remote mutations now share one Workspace Trust boundary. Revoking trust cancels active work and blocks later privileged steps.
 - Run entry points now share a language-neutral execution gateway, stable run intent, and one artifact path. The existing direct Playwright BDD engine remains the default.
 - Release candidates now carry a checksum, CycloneDX SBOM, and artifact-set manifest bound to the exact source commit.

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   exactGeneratedTargets,
+  missingStepSkipLines,
   needsGeneratedSpecs,
 } from "../../core/generated-test-target";
 
@@ -135,5 +136,30 @@ describe("generated test targets", () => {
     expect(exactGeneratedTargets(root, ".features-gen", feature, 7)).toEqual({
       reason: expect.stringContaining('has no "Generated from" source identity'),
     });
+  });
+
+  it("unions missing-step skip lines across projects and ignores foreign specs", () => {
+    const browser = path.join(root, ".features-gen/browser/features/a.feature.spec.js");
+    fs.mkdirSync(path.dirname(browser), { recursive: true });
+    fs.writeFileSync(browser, [
+      "// Generated from: features/a.feature",
+      "const bddFileData = [ // bdd-data-start",
+      '  {"pwTestLine":6,"pickleLine":4,"skipped":true},',
+      '  {"pwTestLine":12,"pickleLine":9,"skipped":true,"tags":["@skip"]},',
+      "]; // bdd-data-end",
+    ].join("\n"));
+    const foreign = path.join(root, ".features-gen/a.feature.spec.js");
+    fs.writeFileSync(foreign, [
+      "// Generated from: other/a.feature",
+      "const bddFileData = [ // bdd-data-start",
+      '  {"pwTestLine":5,"pickleLine":20,"skipped":true},',
+      "]; // bdd-data-end",
+    ].join("\n"));
+
+    expect([...missingStepSkipLines(root, ".features-gen", feature)]).toEqual([4]);
+  });
+
+  it("returns no missing-step skip lines when the feature has no generated spec", () => {
+    expect(missingStepSkipLines(root, ".features-gen", feature).size).toBe(0);
   });
 });
