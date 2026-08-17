@@ -78,10 +78,8 @@ interface RenderMessage {
   addToTestSetVerb: CreateVerb;
   testPlanVerb: CreateVerb;
   addToTestPlanVerb: CreateVerb;
-  availableHelper: string;
+  mappingHelper: string;
   executionVerb: CreateVerb;
-  runSelectedVerb: CreateVerb;
-  mappedHelper: string;
 }
 
 // The sync progress strip above the panes. The host composes the whole line, so the webview only paints
@@ -133,11 +131,6 @@ export interface BoardSurfaceDeps {
   // The Executions tab's button: one empty remote execution in the scoped project, for a later publish to
   // append to. It reads no selection, so only the scope decides whether it can run.
   createTestExecution(): void;
-  describeRunSelected(testKeys: readonly string[]): {
-    readonly runnable: number;
-    readonly skipped: number;
-  };
-  runSelected(testKeys: readonly string[]): void;
   // The scope selector's options, read on the same beat as the model: a sync's new catalogue projects
   // appear with the snapshot that carries them. A settings edit alone does not repaint the board, so the
   // list can lag a just-changed sync scope until the next rebuild. That staleness is the price of one
@@ -251,7 +244,6 @@ export class BoardSurface {
     createTestPlan: () => this.deps.createTestPlan(),
     addToTestPlan: () => this.deps.addToTestPlan(),
     createTestExecution: () => this.deps.createTestExecution(),
-    runSelected: () => this.deps.runSelected([...this.selectedTestKeys]),
   };
 
   private handle(message: BoardIncoming): void {
@@ -415,7 +407,7 @@ export class BoardSurface {
     };
   }
 
-  private availableHelper(project: string | undefined): string {
+  private mappingHelper(project: string | undefined): string {
     if (project === undefined) {
       return "Pick a project in the header.";
     }
@@ -449,26 +441,6 @@ export class BoardSurface {
       return { label: "Sync now", enabled: false, hint: "Wait for the active board operation to finish." };
     }
     return { label: "Sync now", enabled: true, hint: "Refresh traceability from the connected provider." };
-  }
-
-  private runSelectedVerb(): CreateVerb {
-    const checked = this.selectedTestKeys.size;
-    const label = "Run and publish selected";
-    if (checked === 0) {
-      return { label, enabled: false, hint: "Check mapped tests to run and publish their scenarios." };
-    }
-    const { runnable, skipped } = this.deps.describeRunSelected([...this.selectedTestKeys]);
-    const skippedText = skipped === 0
-      ? ""
-      : ` ${skipped} checked ${skipped === 1 ? "test has" : "tests have"} no mapped scenario and will be skipped.`;
-    if (runnable === 0) {
-      return { label, enabled: false, hint: `No mapped scenarios will run.${skippedText}` };
-    }
-    return {
-      label,
-      enabled: true,
-      hint: `${runnable} mapped ${runnable === 1 ? "scenario" : "scenarios"} will run and publish.${skippedText}`,
-    };
   }
 
   // What a section's meta says beyond its page arithmetic: `total` is the count the header shows, before
@@ -522,7 +494,6 @@ export class BoardSurface {
       mapped: mapped.meta.page,
     };
     const createVerb = this.createVerb(project);
-    const runSelectedVerb = this.runSelectedVerb();
     const message: RenderMessage = {
       type: "render",
       scenarios: untraced.items,
@@ -548,10 +519,8 @@ export class BoardSurface {
       addToTestSetVerb: this.appendContainerVerb("Test Set", project),
       testPlanVerb: this.containerVerb("Test Plan", project),
       addToTestPlanVerb: this.appendContainerVerb("Test Plan", project),
-      availableHelper: this.availableHelper(project),
+      mappingHelper: this.mappingHelper(project),
       executionVerb: this.executionVerb(project),
-      runSelectedVerb,
-      mappedHelper: runSelectedVerb.hint,
     };
     this.host.post(message);
   }

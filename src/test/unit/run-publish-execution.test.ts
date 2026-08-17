@@ -71,12 +71,12 @@ describe("runPublishBatch", () => {
       selection,
       [{ kind: "scenario", ref: A }],
       decisions,
-      "coverage-board",
+      "traceability-tree",
       [A]
     )).resolves.toBe("run-1");
 
     expect(progressOptions?.title).toBe(
-      "Running batch locally scoped to CALC (board project scope)…"
+      "Running batch locally scoped to CALC (project scope)…"
     );
     const preparedIntent = vi.mocked(executionGateway.prepare).mock.calls[0]![0];
     expect(preparedIntent).toEqual({
@@ -86,7 +86,7 @@ describe("runPublishBatch", () => {
     expect(executionClientContext(preparedIntent)).toEqual({
       selection,
       decisions,
-      initiatedBy: "coverage-board",
+      initiatedBy: "traceability-tree",
       artifactOwnership: [A],
     });
     expect(execute).toHaveBeenCalledWith(

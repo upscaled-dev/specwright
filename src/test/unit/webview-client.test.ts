@@ -3,11 +3,16 @@
 import axe from "axe-core";
 import { build } from "esbuild";
 import { JSDOM } from "jsdom";
+import type * as vscode from "vscode";
 import { describe, expect, it } from "vitest";
 import { boardFragment } from "../../traceability/board-fragment";
+import { BoardSurface, type BoardSurfaceDeps } from "../../traceability/board-surface";
+import type { BoardViewModel } from "../../traceability/board-data";
 import { LINK_FRAGMENT } from "../../traceability/link-picker-panel";
 import { PUBLISH_FRAGMENT } from "../../traceability/publish-dialog-panel";
+import type { SurfaceHost } from "../../traceability/webview-host";
 import type {
+  BoardClientMessage,
   BoardHostMessage,
   ClientMessage,
   HostMessage,
@@ -15,6 +20,7 @@ import type {
   SurfaceName,
   WebviewEnvelope,
 } from "../../webview/protocol";
+import { parseClientEnvelope } from "../../webview/protocol";
 
 const tabs = ["mapping", "matrix", "executions", "publish", "link"] as const;
 
@@ -76,6 +82,60 @@ async function rig(state: Record<string, unknown> = {}): Promise<ClientRig> {
   };
 }
 
+async function bridgeBoardSurface(
+  model: BoardViewModel,
+  onContainerAction: (action: "createTestSet" | "addToTestSet" | "createTestPlan" | "addToTestPlan", surface: BoardSurface) => void
+): Promise<{ readonly client: ClientRig; readonly surface: BoardSurface; routeClientMessages(): void }> {
+  const client = await rig();
+  client.send("shell", { type: "activate", tab: "mapping" });
+  let messageHandler = (_message: BoardClientMessage): void => undefined;
+  const board = { surface: undefined as BoardSurface | undefined };
+  const never: vscode.Event<void> = () => ({ dispose: () => undefined });
+  const host: SurfaceHost<"board"> = {
+    post: (message) => client.send("board", message),
+    onMessage: (handler) => { messageHandler = handler; },
+    activate: () => undefined,
+    onDidDispose: () => undefined,
+    isDisposed: () => false,
+    setTabVisible: () => undefined,
+  };
+  const deps: BoardSurfaceDeps = {
+    buildModel: () => model,
+    buildExecutions: () => [],
+    onDidChange: never,
+    onDidChangeActivity: never,
+    mutationActive: () => false,
+    syncActive: () => false,
+    applyDrop: () => Promise.resolve(),
+    applyUnlink: () => Promise.resolve(),
+    pushText: () => undefined,
+    runSync: () => Promise.resolve(),
+    autoSync: () => Promise.resolve(),
+    openExecution: () => undefined,
+    bulkCreate: () => undefined,
+    createTestSet: () => onContainerAction("createTestSet", board.surface!),
+    addToTestSet: () => onContainerAction("addToTestSet", board.surface!),
+    createTestPlan: () => onContainerAction("createTestPlan", board.surface!),
+    addToTestPlan: () => onContainerAction("addToTestPlan", board.surface!),
+    createTestExecution: () => undefined,
+    knownProjects: () => ["CALC"],
+    projectScope: { get: () => "CALC", set: () => undefined },
+    mappingPageSize: { get: () => 50, set: () => undefined },
+  };
+  const surface = new BoardSurface(host, deps);
+  board.surface = surface;
+  let nextMessage = client.posted.length;
+  const routeClientMessages = (): void => {
+    while (nextMessage < client.posted.length) {
+      const message = parseClientEnvelope(client.posted[nextMessage++]);
+      if (message?.surface === "board") {
+        messageHandler(message.body as BoardClientMessage);
+      }
+    }
+  };
+  return { client, surface, routeClientMessages };
+}
+
 function boardRender(selected = false): Extract<BoardHostMessage, { type: "render" }> {
   const section = { total: 1, filtered: 1, page: 0, pageSize: 25, pageCount: 1, query: "", filtering: false };
   const verb = { label: "Action", enabled: true, hint: "" };
@@ -87,8 +147,17 @@ function boardRender(selected = false): Extract<BoardHostMessage, { type: "rende
     pageSize: 25, matrix: [], executions: [], availableEmptyText: "No tests",
     filtering: false, projects: ["CALC"], project: "CALC", scoped: true,
     createVerb: verb, syncVerb: { label: "Sync now", enabled: true, hint: "" }, untracedHelper: "", testSetVerb: verb, addToTestSetVerb: verb,
-    testPlanVerb: verb, addToTestPlanVerb: verb, availableHelper: "", executionVerb: verb,
-    runSelectedVerb: verb, mappedHelper: "",
+    testPlanVerb: verb, addToTestPlanVerb: verb, mappingHelper: "", executionVerb: verb,
+  };
+}
+
+function mappingActionRender(): Extract<BoardHostMessage, { type: "render" }> {
+  return {
+    ...boardRender(),
+    testSetVerb: { label: "Create Test Set from 2 tests", enabled: true, hint: "Creates a Test Set for the checked tests." },
+    addToTestSetVerb: { label: "Add 2 tests to a Test Set", enabled: false, hint: "Choose a project before adding tests." },
+    testPlanVerb: { label: "Create Test Plan from 2 tests", enabled: true, hint: "Creates a Test Plan for the checked tests." },
+    addToTestPlanVerb: { label: "Add 2 tests to a Test Plan", enabled: false, hint: "Choose a project before adding tests." },
   };
 }
 
@@ -151,6 +220,86 @@ describe("coverage board browser client", () => {
     client.send("board", boardRender());
     expect(client.dom.window.document.querySelector("#scenario-cards .title")?.textContent).toBe("Login");
     expect(client.dom.window.document.getElementById("pane-mapping")?.hidden).toBe(false);
+  });
+
+  it("dispatches each shared Mapping action from both test toolbars", async () => {
+    const client = await rig();
+    const disabled = mappingActionRender();
+    client.send("board", disabled);
+
+    const expected = [
+      ["create-test-set", disabled.testSetVerb],
+      ["add-to-test-set", disabled.addToTestSetVerb],
+      ["create-test-plan", disabled.testPlanVerb],
+      ["add-to-test-plan", disabled.addToTestPlanVerb],
+    ] as const;
+    for (const section of ["available", "mapped"]) {
+      for (const [id, verb] of expected) {
+        const button = client.dom.window.document.getElementById(`${section}-${id}`) as HTMLButtonElement;
+        expect(button.getAttribute("aria-label")).toBe(verb.label);
+        expect(button.nextElementSibling?.textContent).toBe(`${verb.label}. ${verb.hint}`);
+        expect(button.disabled).toBe(!verb.enabled);
+        if (!verb.enabled) {button.click();}
+      }
+    }
+    expect(clientBodies(client, "board")).toEqual([]);
+
+    client.send("board", boardRender());
+    const actions = [...client.dom.window.document.querySelectorAll<HTMLButtonElement>('[data-mapping-action]')];
+    expect(actions).toHaveLength(8);
+    for (const action of actions) {action.click();}
+
+    const messages = clientBodies(client, "board");
+    for (const type of ["createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan"]) {
+      expect(messages.filter((message) => message.type === type)).toHaveLength(2);
+    }
+    expect(client.dom.window.document.getElementById("run-selected")).toBeNull();
+  });
+
+  it("carries one scoped Available and Mapped selection through both Mapping toolbars", async () => {
+    const model: BoardViewModel = {
+      scenarios: [],
+      available: [{ key: "CALC-1", project: "CALC", pills: [], links: [] }],
+      mapped: [{
+        key: "CALC-2",
+        project: "CALC",
+        pills: ["1 scenario"],
+        links: [{ name: "Mapped login", location: "features/login.feature:3", unlinkId: "scenario-1" }],
+      }],
+      matrix: [],
+      availableEmptyText: "No unmapped tests in the last sync.",
+      completeProjects: ["CALC"],
+    };
+    const calls: Array<{ action: string; keys: readonly string[] }> = [];
+    const bridge = await bridgeBoardSurface(model, (action, surface) => {
+      calls.push({ action, keys: surface.selectedTests() });
+    });
+    const select = (key: string): void => {
+      const box = bridge.client.dom.window.document.querySelector<HTMLInputElement>(`input[aria-label="Select test ${key}"]`)!;
+      box.checked = true;
+      box.dispatchEvent(new bridge.client.dom.window.Event("change", { bubbles: true }));
+      bridge.routeClientMessages();
+    };
+
+    select("CALC-1");
+    select("CALC-2");
+    expect(bridge.surface.selectedTests()).toEqual(["CALC-1", "CALC-2"]);
+
+    const actions = ["create-test-set", "add-to-test-set", "create-test-plan", "add-to-test-plan"] as const;
+    for (const section of ["available", "mapped"]) {
+      for (const action of actions) {
+        const button = bridge.client.dom.window.document.getElementById(`${section}-${action}`) as HTMLButtonElement;
+        expect(button.disabled).toBe(false);
+        button.click();
+        bridge.routeClientMessages();
+      }
+    }
+
+    expect(calls.map((call) => call.action)).toEqual([
+      "createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan",
+      "createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan",
+    ]);
+    expect(calls.every((call) => JSON.stringify(call.keys) === JSON.stringify(["CALC-1", "CALC-2"]))).toBe(true);
   });
 
   it("ignores malformed, foreign and out-of-order host envelopes before dispatch", async () => {

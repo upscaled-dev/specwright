@@ -35,11 +35,8 @@ import { JiraAccessError, JiraProject, searchJiraProjects } from "../xray/jira-p
 import { TraceabilityAuthoringCommands } from "./traceability-authoring-commands";
 import { TraceabilityLinkCommands } from "./traceability-link-commands";
 import { TraceabilityPublishCommands } from "./traceability-publish-commands";
-import { boardBatchSelection } from "./run-publish-selection";
 import { commandArgFsPath } from "./run-commands";
 import type { ExecutionGateway } from "../core/run-contracts";
-import { ExecutionAlreadyRunningError, ExecutionFailure } from "../core/execution-gateway";
-import { ExecutionAdmissionBlockedError } from "../core/execution-admission";
 import type { WorkspaceTrust } from "../core/workspace-trust";
 import { explainWorkspaceTrust } from "../ui/workspace-trust";
 import { BoardOperationState } from "../traceability/board-operation-state";
@@ -376,33 +373,6 @@ export class TraceabilityCommands {
             this.logger.warn("Creating a test execution from the board failed", {
               error: errMsg(error),
             });
-          });
-      },
-      describeRunSelected: (testKeys) => {
-        const snapshot = this.deps.subsystem()?.getSnapshot();
-        if (!snapshot) {return { runnable: 0, skipped: testKeys.length };}
-        const resolved = boardBatchSelection(testKeys, snapshot);
-        const runnable = resolved.selection.kind === "scenario"
-          ? 1
-          : resolved.selection.kind === "multi-select"
-            ? resolved.selection.scenarios.length
-            : 0;
-        return { runnable, skipped: resolved.skipped };
-      },
-      runSelected: (testKeys) => {
-        this.boardMutation((signal) => this.getPublishCommands().runAndPublishSelected(testKeys, signal))
-          .catch((error) => {
-            this.logger.warn("Running selected board tests failed", { error: errMsg(error) });
-            if (error instanceof ExecutionAlreadyRunningError) {
-              vscode.window.showWarningMessage(error.message);
-            } else if (error instanceof ExecutionAdmissionBlockedError) {
-              vscode.window.showErrorMessage(`${error.message} ${error.recovery}`);
-            } else if (error instanceof ExecutionFailure) {
-              const saved = error.completion.artifactId ? " The partial run was saved." : "";
-              vscode.window.showErrorMessage(
-                `Run stopped before a complete report was available: ${error.message}${saved}`
-              );
-            }
           });
       },
       publishDelegate: this.getPublishCommands().publishDelegate(),

@@ -56,7 +56,7 @@ function safeString(field: string | undefined, value: string): string {
   if (field === "mode" && /^(?:run|debug)$/u.test(value)) { return value; }
   if (field === "engine" && /^(?:legacy-direct|core-client)$/u.test(value)) { return value; }
   if (field === "schemaProfile" && /^(?:unknown|legacy-v1|client-v1)$/u.test(value)) { return value; }
-  if (field === "initiatedBy" && /^(?:test-explorer|code-lens|editor|explorer|palette|traceability-tree|coverage-board|unknown)$/u.test(value)) { return value; }
+  if (field === "initiatedBy" && /^(?:test-explorer|code-lens|editor|explorer|palette|traceability-tree|unknown)$/u.test(value)) { return value; }
   if (field === "state" && /^(?:complete|partial|cancelled|prepare-rejected|batch-rejected|sink-rejected|unexpected-rejection)$/u.test(value)) { return value; }
   if (field === "outcomeCertainty" && /^(?:confirmed|failed|unknown)$/u.test(value)) { return value; }
   if (field === "captureState" && /^(?:captured|missing)$/u.test(value)) { return value; }

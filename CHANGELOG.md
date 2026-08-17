@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Privileged commands, test execution, debugging, generation, credentials, uploads, and remote mutations now share one Workspace Trust boundary. Revoking trust cancels active work and blocks later privileged steps.
 - Run entry points now share a language-neutral execution gateway, stable run intent, and one artifact path. The existing direct Playwright BDD engine remains the default.
 - Release candidates now carry a checksum, CycloneDX SBOM, and artifact-set manifest bound to the exact source commit.
+- **Find in Traceability** opens the Traceability panel and focuses its always-visible filter. The panel supports keyboard navigation and multi-selection, while retaining its filter, expanded rows, and selection across refreshes.
 
 ### Changed
 
@@ -23,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Command Palette, CodeLens, editor, Explorer, Test Explorer, debug, and publish actions resolve exact targets through the same run contract.
 - Traceability adapters negotiate versions, validate runtime messages, and use bounded activation and disposal.
 - CI pins the supported VS Code and runner dependency versions. A release tag promotes the successful main candidate for the same commit without rebuilding it.
+- The Traceability panel now renders only visible rows, keeping large mappings responsive, and offers scenario, test, mapping, connection, and trust actions inline.
+- Coverage Board Test Set and Test Plan actions now work from both the available and mapped test lists. Checked tests share one selection across the lists.
 
 ### Fixed
 
@@ -30,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scenario Outline and Examples-row targeting now fails closed when generated output cannot identify the exact case.
 - Debug cancellation terminates the owned root session and contains cleanup failures without masking the run result.
 - Generated integration fixtures no longer leak into ordinary feature discovery.
+- Local bddgen and Playwright commands no longer run through VS Code's Electron executable. Standard Windows npm and pnpm command shims now resolve to Node correctly.
+- Jira attachment uploads now send the attachment's actual bytes in the request body.
+- Xray connection diagnostics now recognize GraphQL error envelopes returned with HTTP 400 as expected server responses.
 
 
 ## [0.4.45] - 2026-07-31

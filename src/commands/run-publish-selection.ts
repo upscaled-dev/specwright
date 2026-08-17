@@ -54,20 +54,6 @@ export function treeBatchSelection(
   return { selection: batchSelectionFromScenarios(scenarios), skipped: skipped.size };
 }
 
-export function boardBatchSelection(
-  selectedTestKeys: readonly string[],
-  snapshot: TraceabilitySnapshot
-): { readonly selection: BatchSelection; readonly skipped: number } {
-  const refs: ScenarioRef[] = [];
-  let skipped = 0;
-  for (const key of new Set(selectedTestKeys)) {
-    const linked = snapshot.links.filter((link) => link.testKey === key);
-    if (linked.length === 0) {skipped += 1;}
-    else {refs.push(...linked.map((link) => link.scenario));}
-  }
-  return { selection: batchSelectionFromScenarios(refs), skipped };
-}
-
 export function executionTargets(invocations: readonly BatchInvocation[]): RunTarget[] {
   return invocations.map((invocation): RunTarget => {
     if (invocation.kind === "scenario") {

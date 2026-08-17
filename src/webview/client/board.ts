@@ -1,4 +1,5 @@
 import type {
+  BoardClientMessage,
   BoardHostMessage,
   BoardRenderMessage,
   BoardSectionMeta,
@@ -12,6 +13,7 @@ import { installBoardTables } from "./board-tables";
 export function installBoard(): void {
   type MappingSection = "untraced" | "available" | "mapped";
   type CollapsibleSection = "available" | "mapped";
+  type MappingAction = Extract<BoardClientMessage, { type: "createTestSet" | "addToTestSet" | "createTestPlan" | "addToTestPlan" }>["type"];
   interface MappingElements {
     readonly name: MappingSection;
     readonly count: HTMLElement;
@@ -28,15 +30,10 @@ export function installBoard(): void {
   const scopeSelect = element<HTMLSelectElement>('scope-select');
   const scenarioCards = element<HTMLElement>('scenario-cards');
   const createTests = element<HTMLButtonElement>('create-tests');
-  const createTestSet = element<HTMLButtonElement>('create-test-set');
-  const addToTestSet = element<HTMLButtonElement>('add-to-test-set');
-  const createTestPlan = element<HTMLButtonElement>('create-test-plan');
-  const addToTestPlan = element<HTMLButtonElement>('add-to-test-plan');
   const createExecution = element<HTMLButtonElement>('create-execution');
-  const runSelected = element<HTMLButtonElement>('run-selected');
   const scenarioActionHelper = element<HTMLElement>('scenario-action-helper');
-  const availableActionHelper = element<HTMLElement>('available-action-helper');
-  const mappedActionHelper = element<HTMLElement>('mapped-action-helper');
+  const mappingActionButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-mapping-action]')];
+  const mappingActionHelpers = [...document.querySelectorAll<HTMLElement>('[data-mapping-helper]')];
   const availableCards = element<HTMLElement>('available-cards');
   const mappedCards = element<HTMLElement>('mapped-cards');
   const scenarioCount = element<HTMLElement>('scenario-count');
@@ -222,6 +219,20 @@ export function installBoard(): void {
     button.disabled = verb.enabled !== true;
     button.setAttribute('aria-label', label);
     if (button.nextElementSibling) {button.nextElementSibling.textContent = tooltip;}
+  }
+
+  function mappingAction(action: string | undefined): MappingAction | undefined {
+    if (action === 'createTestSet' || action === 'addToTestSet' || action === 'createTestPlan' || action === 'addToTestPlan') {
+      return action;
+    }
+    return undefined;
+  }
+
+  function mappingVerb(action: MappingAction, msg: BoardRenderMessage): BoardVerb {
+    return action === 'createTestSet' ? msg.testSetVerb
+      : action === 'addToTestSet' ? msg.addToTestSetVerb
+        : action === 'createTestPlan' ? msg.testPlanVerb
+          : msg.addToTestPlanVerb;
   }
 
   // A card's checkbox. The host owns both selections, so this posts the box's new state under its
@@ -414,28 +425,25 @@ export function installBoard(): void {
   pageSizeSelect.addEventListener('change', () => { window.__spec.post('board', { type: 'pageSize', size: Number(pageSizeSelect.value) }); });
   syncNow.addEventListener('click', () => { window.__spec.post('board', { type: 'sync' }); });
   createTests.addEventListener('click', () => { window.__spec.post('board', { type: 'bulkCreate' }); });
-  createTestSet.addEventListener('click', () => { window.__spec.post('board', { type: 'createTestSet' }); });
-  addToTestSet.addEventListener('click', () => { window.__spec.post('board', { type: 'addToTestSet' }); });
-  createTestPlan.addEventListener('click', () => { window.__spec.post('board', { type: 'createTestPlan' }); });
-  addToTestPlan.addEventListener('click', () => { window.__spec.post('board', { type: 'addToTestPlan' }); });
+  for (const button of mappingActionButtons) {
+    const action = mappingAction(button.dataset['mappingAction']);
+    if (action) {button.addEventListener('click', () => { window.__spec.post('board', { type: action }); });}
+  }
   createExecution.addEventListener('click', () => { window.__spec.post('board', { type: 'createTestExecution' }); });
-  runSelected.addEventListener('click', () => { window.__spec.post('board', { type: 'runSelected' }); });
 
   window.__spec.register('board', (msg: BoardHostMessage) => {
     if (msg.type === 'render') {
       filtering = msg.filtering;
       renderScope(msg.projects, msg.project);
       renderIconVerb(createTests, msg.createVerb, 'Create tests');
-      renderIconVerb(createTestSet, msg.testSetVerb, 'Create Test Set');
-      renderIconVerb(addToTestSet, msg.addToTestSetVerb, 'Add to existing Test Set');
-      renderIconVerb(createTestPlan, msg.testPlanVerb, 'Create Test Plan');
-      renderIconVerb(addToTestPlan, msg.addToTestPlanVerb, 'Add to existing Test Plan');
+      for (const button of mappingActionButtons) {
+        const action = mappingAction(button.dataset['mappingAction']);
+        if (action) {renderIconVerb(button, mappingVerb(action, msg), button.getAttribute('aria-label') ?? '');}
+      }
       renderVerb(createExecution, msg.executionVerb, 'Create Execution');
-      renderIconVerb(runSelected, msg.runSelectedVerb, 'Run and publish selected');
       renderVerb(syncNow, msg.syncVerb, 'Sync now');
       scenarioActionHelper.textContent = msg.untracedHelper;
-      availableActionHelper.textContent = msg.availableHelper;
-      mappedActionHelper.textContent = msg.mappedHelper;
+      for (const helper of mappingActionHelpers) {helper.textContent = msg.mappingHelper;}
       renderMapping(msg);
       tables.renderMatrix(msg.matrix, filtering);
       tables.renderExecutions(msg.executions, filtering);

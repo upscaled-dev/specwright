@@ -8,8 +8,7 @@ export type RunInitiator =
   | "editor"
   | "explorer"
   | "palette"
-  | "traceability-tree"
-  | "coverage-board";
+  | "traceability-tree";
 
 export interface ExecutionClientContext {
   readonly selection: BatchSelection;

@@ -21,12 +21,14 @@ function boardRender(matrixRows = 1): Extract<BoardHostMessage, { type: "render"
       result: "passed", file: "features/large.feature", projects: ["CALC"],
     })) }], executions: [], availableEmptyText: "No tests", filtering: false, projects: ["CALC"], project: "", scoped: false,
     createVerb: verb, syncVerb: verb, untracedHelper: "", testSetVerb: verb, addToTestSetVerb: verb, testPlanVerb: verb,
-    addToTestPlanVerb: verb, availableHelper: "", executionVerb: verb, runSelectedVerb: verb, mappedHelper: "",
+    addToTestPlanVerb: verb, mappingHelper: "", executionVerb: verb,
   };
 }
 
 describe("webview protocol", () => {
   it("accepts only exact, bounded privileged client messages", () => {
+    expect(parseClientEnvelope(client("board", { type: "addToTestPlan" }))).toBeDefined();
+    expect(parseClientEnvelope(client("board", { type: "runSelected" }))).toBeUndefined();
     expect(parseClientEnvelope(client("link", { type: "confirm", id: "CALC-1" }))).toBeDefined();
     expect(parseClientEnvelope(client("link", { type: "confirm", id: "x".repeat(513) }))).toBeUndefined();
     expect(parseClientEnvelope(client("link", { type: "confirm", id: "CALC-1", extra: true }))).toBeUndefined();

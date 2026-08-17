@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  boardBatchSelection,
   executionTargets,
   treeBatchSelection,
 } from "../../commands/run-publish-selection";
@@ -76,25 +75,6 @@ describe("treeBatchSelection", () => {
       skipped: 0,
     });
     expect(treeBatchSelection([undefined, []], snapshot)).toEqual({
-      selection: { kind: "multi-select", scenarios: [] },
-      skipped: 0,
-    });
-  });
-});
-
-describe("boardBatchSelection", () => {
-  it("runs only mapped scenarios for checked keys and reports orphans honestly", () => {
-    expect(boardBatchSelection(
-      ["CALC-1", "CALC-2", "CALC-3", "ORPHAN-1", "ORPHAN-1"],
-      snapshot
-    )).toEqual({
-      selection: { kind: "multi-select", scenarios: [A, B] },
-      skipped: 1,
-    });
-  });
-
-  it("never turns an empty checked set into all-mapped", () => {
-    expect(boardBatchSelection([], snapshot)).toEqual({
       selection: { kind: "multi-select", scenarios: [] },
       skipped: 0,
     });

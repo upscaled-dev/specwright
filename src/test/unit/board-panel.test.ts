@@ -55,10 +55,8 @@ interface RenderMessage {
   addToTestSetVerb: Verb;
   testPlanVerb: Verb;
   addToTestPlanVerb: Verb;
-  availableHelper: string;
+  mappingHelper: string;
   executionVerb: Verb;
-  runSelectedVerb: Verb;
-  mappedHelper: string;
 }
 interface Verb {
   label: string;
@@ -221,8 +219,6 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     createTestPlan: () => undefined,
     addToTestPlan: () => undefined,
     createTestExecution: () => undefined,
-    describeRunSelected: () => ({ runnable: 0, skipped: 0 }),
-    runSelected: () => undefined,
     knownProjects: () => PROJECTS,
     projectScope: fakeScope(),
     mappingPageSize: mappingPageSizeStore(memento(), () => undefined),
@@ -410,13 +406,13 @@ describe("BoardPanel", () => {
     expect(html).not.toContain("drag to link");
   });
 
-  // Eight verb buttons across two panes, six compact Mapping actions plus text Sync and Execution verbs.
+  // Eleven verb buttons across two panes, nine compact Mapping actions plus text Sync and Execution verbs.
   it("skins every board button with the one verb class, each inside a verbs row", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
 
     expect(html.split('class="verb"').length - 1).toBe(2);
-    expect(html.split('class="verb icon-verb"').length - 1).toBe(6);
+    expect(html.split('class="verb icon-verb"').length - 1).toBe(9);
     expect(html).not.toContain('class="create-tests"');
     expect(html.split('<div class="verbs mapping-actions">').length - 1).toBe(3);
     expect(html.split('<div class="verbs">').length - 1).toBe(1);
@@ -1288,16 +1284,12 @@ describe("BoardPanel", () => {
     });
   });
 
-  it("supplies Mapping action helpers from the host selection and verb state", async () => {
-    const { panel } = await openReady({
-      projectScope: fakeScope("CALC"),
-      describeRunSelected: () => ({ runnable: 1, skipped: 0 }),
-    });
+  it("supplies the shared Mapping action helper from the host selection state", async () => {
+    const { panel } = await openReady({ projectScope: fakeScope("CALC") });
 
     expect(lastRender(panel)!).toMatchObject({
       untracedHelper: "Check the scenarios you want tests for.",
-      availableHelper: "Check tests in CALC.",
-      mappedHelper: "Check mapped tests to run and publish their scenarios.",
+      mappingHelper: "Check tests in CALC.",
     });
 
     await receive(panel, { surface: "board", type: "select", target: "scenario", id: "id-login", on: true });
@@ -1305,8 +1297,7 @@ describe("BoardPanel", () => {
 
     await receive(panel, { surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
     expect(lastRender(panel)!).toMatchObject({
-      availableHelper: "1 test checked in CALC. Choose a Test Set or Test Plan action.",
-      mappedHelper: "1 mapped scenario will run and publish.",
+      mappingHelper: "1 test checked in CALC. Choose a Test Set or Test Plan action.",
     });
   });
 
@@ -1393,27 +1384,28 @@ describe("BoardPanel", () => {
     expect(posted(panel)).toHaveLength(before);
   });
 
-  it("carries six compact Mapping actions with semantic tooltips and helpers", async () => {
+  it("carries matching compact Mapping actions with unique ids and semantic tooltips", async () => {
     const { panel } = await openReady();
 
     expect(panel.webview.html).toContain('id="create-tests"');
-    expect(panel.webview.html).toContain('id="create-test-set"');
-    expect(panel.webview.html).toContain('id="add-to-test-set"');
-    expect(panel.webview.html).toContain('id="create-test-plan"');
-    expect(panel.webview.html).toContain('id="add-to-test-plan"');
+    for (const section of ["available", "mapped"]) {
+      expect(panel.webview.html).toContain(`id="${section}-create-test-set"`);
+      expect(panel.webview.html).toContain(`id="${section}-add-to-test-set"`);
+      expect(panel.webview.html).toContain(`id="${section}-create-test-plan"`);
+      expect(panel.webview.html).toContain(`id="${section}-add-to-test-plan"`);
+    }
     expect(panel.webview.html).toContain('aria-label="Test Set actions"');
     expect(panel.webview.html).toContain('aria-label="Test Plan actions"');
     expect(panel.webview.html).toContain('class="mapping-action-controls"');
     expect(panel.webview.html).toContain('id="scenario-action-helper" class="mapping-action-helper"');
-    expect(panel.webview.html).toContain('id="available-action-helper" class="mapping-action-helper"');
-    expect(panel.webview.html).toContain('id="mapped-action-helper" class="mapping-action-helper"');
-    expect(panel.webview.html).toContain('class="icon-verb-tooltip"><button id="create-test-set"');
-    expect(panel.webview.html).toContain('aria-describedby="create-test-set-tooltip"');
-    expect(panel.webview.html).toContain('id="create-test-set-tooltip" class="icon-verb-tooltip-content" role="tooltip">Create Test Set</span>');
+    expect(panel.webview.html).toContain('id="available-action-helper" class="mapping-action-helper" data-mapping-helper');
+    expect(panel.webview.html).toContain('id="mapped-action-helper" class="mapping-action-helper" data-mapping-helper');
+    expect(panel.webview.html).toContain('class="icon-verb-tooltip"><button id="available-create-test-set"');
+    expect(panel.webview.html).toContain('aria-describedby="available-create-test-set-tooltip"');
+    expect(panel.webview.html).toContain('id="available-create-test-set-tooltip" class="icon-verb-tooltip-content" role="tooltip">Create Test Set</span>');
     expect(panel.webview.html).toContain('class="verb icon-verb"');
     expect(panel.webview.html).toContain('<svg viewBox="0 0 17 16" aria-hidden="true"');
     expect(panel.webview.html).toContain('M4 7.5l1.6 1.6L8.5 6M13 9v5M10.5 11.5h5');
-    expect(panel.webview.html).toContain('M2.5 2.5v11l8-5.5z');
     expect(panel.webview.html).toContain(".board-pane .icon-verb:disabled { pointer-events: none; }");
     expect(panel.webview.html).toContain(".board-pane .icon-verb-tooltip:hover .icon-verb-tooltip-content, .board-pane .icon-verb-tooltip:focus-within .icon-verb-tooltip-content { visibility: visible; opacity: 1; }");
     expect(panel.webview.html).toContain(".board-pane .verbs { position: relative;");
@@ -1422,6 +1414,8 @@ describe("BoardPanel", () => {
     expect(panel.webview.html).toContain(".board-pane .mapping-action-helper { flex: 1 1 10rem;");
     expect(panel.webview.html).toContain("overflow-wrap: anywhere;");
     expect(panel.webview.html).toContain(".board-pane .mapping-actions { flex-direction: column; align-items: stretch; }");
+    expect(panel.webview.html).not.toContain('id="run-selected"');
+    expect(panel.webview.html).not.toContain('Run and publish selected');
     expect(panel.webview.html).not.toContain('title="Create Test Set"');
     expect(lastRender(panel)!.testSetVerb).toEqual({
       label: "Create Test Set",
@@ -1443,57 +1437,20 @@ describe("BoardPanel", () => {
       enabled: false,
       hint: "Pick a project in the header to choose a Test Plan.",
     });
-    expect(panel.webview.html).toContain('id="run-selected"');
-    expect(lastRender(panel)!.runSelectedVerb).toEqual({
-      label: "Run and publish selected",
-      enabled: false,
-      hint: "Check mapped tests to run and publish their scenarios.",
-    });
   });
 
-  it("describes mapped and skipped checked tests and routes the exact host selection", async () => {
-    const runSelected = vi.fn();
-    const describeRunSelected = vi.fn((keys: readonly string[]) => ({
-      runnable: keys.includes("CALC-1") ? 1 : 0,
-      skipped: keys.includes("PAY-9") ? 1 : 0,
-    }));
-    const { panel } = await openReady({ runSelected, describeRunSelected });
-    await receive(panel, { surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
-    await receive(panel, { surface: "board", type: "select", target: "test", id: "PAY-9", on: true });
-
-    expect(lastRender(panel)!.runSelectedVerb).toEqual({
-      label: "Run and publish selected",
-      enabled: true,
-      hint: "1 mapped scenario will run and publish. 1 checked test has no mapped scenario and will be skipped.",
-    });
-    const before = posted(panel).length;
-    await receive(panel, { surface: "board", type: "runSelected" });
-    expect(runSelected).toHaveBeenCalledWith(["CALC-1", "PAY-9"]);
-    expect(posted(panel)).toHaveLength(before);
-  });
-
-  it("keeps run selected disabled when every checked test is skipped", async () => {
-    const { panel } = await openReady({
-      describeRunSelected: () => ({ runnable: 0, skipped: 1 }),
-    });
-    await receive(panel, { surface: "board", type: "select", target: "test", id: "PAY-9", on: true });
-
-    expect(lastRender(panel)!.runSelectedVerb).toEqual({
-      label: "Run and publish selected",
-      enabled: false,
-      hint: "No mapped scenarios will run. 1 checked test has no mapped scenario and will be skipped.",
-    });
-  });
-
-  it("marks a checked test card selected in either group and clears it again on uncheck", async () => {
-    const { panel } = await openReady();
+  it("shares checked-test enablement between available and mapped cards", async () => {
+    const model = { ...MODEL, available: [{ ...MODEL.available[0]!, key: "CALC-2", project: "CALC" }] };
+    const { panel } = await openReady({ buildModel: () => model, projectScope: fakeScope("CALC") });
     expect(lastRender(panel)!.available.map((t) => t.selected)).toEqual([false]);
     expect(lastRender(panel)!.mapped.map((t) => t.selected)).toEqual([false]);
 
-    await receive(panel, { surface: "board", type: "select", target: "test", id: "PAY-9", on: true });
+    await receive(panel, { surface: "board", type: "select", target: "test", id: "CALC-2", on: true });
+    expect(lastRender(panel)!.testSetVerb).toMatchObject({ enabled: true, label: "Create Test Set from 1 test" });
     await receive(panel, { surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
     expect(lastRender(panel)!.available.map((t) => t.selected)).toEqual([true]);
     expect(lastRender(panel)!.mapped.map((t) => t.selected)).toEqual([true]);
+    expect(lastRender(panel)!.addToTestPlanVerb).toMatchObject({ enabled: true, label: "Add to existing Test Plan with 2 tests" });
 
     await receive(panel, { surface: "board", type: "select", target: "test", id: "CALC-1", on: false });
 

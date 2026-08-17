@@ -18,7 +18,7 @@ export async function runPublishBatch(
 ): Promise<string | undefined> {
   const controller = new AbortController();
   const scoped = selection.kind === "all-mapped" && selection.project
-    ? ` scoped to ${selection.project} (board project scope)`
+    ? ` scoped to ${selection.project} (project scope)`
     : "";
   let artifactId: string | undefined;
   try {

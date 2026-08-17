@@ -104,15 +104,17 @@ interface MappingSectionSpec {
   readonly placeholder: string;
   readonly searchLabel: string;
   readonly collapsible?: boolean;
+  readonly sharedHelper?: boolean;
 }
 
 function mappingSection(spec: MappingSectionSpec): string {
   const heading = spec.collapsible
     ? `<h2><button id="${spec.id}-toggle" class="section-toggle" type="button" aria-expanded="true" aria-controls="${spec.id}-content">${escapeHtml(spec.title)} <span id="${spec.id}-count" class="count" role="status" aria-live="polite"></span></button></h2>`
     : `<h2>${escapeHtml(spec.title)} <span id="${spec.id}-count" class="count" role="status" aria-live="polite"></span></h2>`;
+  const helperData = spec.sharedHelper ? " data-mapping-helper" : "";
   return `          <section class="section">
             <div class="section-chrome"><div class="section-head">${heading}</div>
-              <div class="verbs mapping-actions"><div class="mapping-action-controls">${spec.verbs}</div><span id="${spec.id}-action-helper" class="mapping-action-helper"></span></div>
+              <div class="verbs mapping-actions"><div class="mapping-action-controls">${spec.verbs}</div><span id="${spec.id}-action-helper" class="mapping-action-helper"${helperData}></span></div>
             </div>
             <div id="${spec.id}-content">
               <div class="section-search"><input id="${spec.id}-search" type="text" spellcheck="false" autocomplete="off" placeholder="${escapeHtml(spec.placeholder)}" aria-label="${escapeHtml(spec.searchLabel)}"></div>
@@ -122,18 +124,24 @@ function mappingSection(spec: MappingSectionSpec): string {
           </section>`;
 }
 
-function iconAction(id: string, label: string, icon: string): string {
-  return `<span class="icon-verb-tooltip"><button id="${id}" class="verb icon-verb" type="button" disabled aria-label="${label}" aria-describedby="${id}-tooltip"><svg viewBox="0 0 17 16" aria-hidden="true" focusable="false">${icon}</svg></button><span id="${id}-tooltip" class="icon-verb-tooltip-content" role="tooltip">${label}</span></span>`;
+function iconAction(id: string, label: string, icon: string, action?: string): string {
+  const dataAction = action === undefined ? "" : ` data-mapping-action="${action}"`;
+  return `<span class="icon-verb-tooltip"><button id="${id}" class="verb icon-verb" type="button" disabled aria-label="${label}" aria-describedby="${id}-tooltip"${dataAction}><svg viewBox="0 0 17 16" aria-hidden="true" focusable="false">${icon}</svg></button><span id="${id}-tooltip" class="icon-verb-tooltip-content" role="tooltip">${label}</span></span>`;
 }
 
-function containerAction(id: string, label: string, shape: "set" | "plan", action: "create" | "add"): string {
+function containerAction(id: string, label: string, shape: "set" | "plan", action: "create" | "add", command: string): string {
   const base = shape === "set"
     ? `<rect x="1.5" y="2.5" width="9" height="11" rx="1.2"></rect><path d="M4 5.5h4M4 8h4M4 10.5h3"></path>`
     : `<rect x="1.5" y="3.5" width="9" height="10" rx="1.2"></rect><path d="M1.5 6.5h9M4 1.8v3.4M8 1.8v3.4"></path>`;
   const badge = action === "create"
     ? `<path d="M13 8.5v5M10.5 11h5"></path>`
     : `<path d="M10.5 11h5M13.5 8.5 16 11l-2.5 2.5"></path>`;
-  return iconAction(id, label, `${base}${badge}`);
+  return iconAction(id, label, `${base}${badge}`, command);
+}
+
+function mappingActions(section: "available" | "mapped"): string {
+  return `<span class="container-actions" role="group" aria-label="Test Set actions">${containerAction(`${section}-create-test-set`, "Create Test Set", "set", "create", "createTestSet")}${containerAction(`${section}-add-to-test-set`, "Add to existing Test Set", "set", "add", "addToTestSet")}</span>
+            <span class="container-actions" role="group" aria-label="Test Plan actions">${containerAction(`${section}-create-test-plan`, "Create Test Plan", "plan", "create", "createTestPlan")}${containerAction(`${section}-add-to-test-plan`, "Add to existing Test Plan", "plan", "add", "addToTestPlan")}</span>`;
 }
 
 function boardPanesHtml(providerLabel: string): string {
@@ -148,19 +156,20 @@ function boardPanesHtml(providerLabel: string): string {
   const available = mappingSection({
     id: "available",
     title: `Available ${providerLabel} tests`,
-    verbs: `<span class="container-actions" role="group" aria-label="Test Set actions">${containerAction("create-test-set", "Create Test Set", "set", "create")}${containerAction("add-to-test-set", "Add to existing Test Set", "set", "add")}</span>
-            <span class="container-actions" role="group" aria-label="Test Plan actions">${containerAction("create-test-plan", "Create Test Plan", "plan", "create")}${containerAction("add-to-test-plan", "Add to existing Test Plan", "plan", "add")}</span>`,
+    verbs: mappingActions("available"),
     placeholder: "Filter by key or summary",
     searchLabel: `Filter available ${providerLabel} tests`,
     collapsible: true,
+    sharedHelper: true,
   });
   const mapped = mappingSection({
     id: "mapped",
     title: `Mapped ${providerLabel} tests`,
-    verbs: iconAction("run-selected", "Run and publish selected", `<path d="M2.5 2.5v11l8-5.5z"></path><path d="M13.5 14V6M10.5 9l3-3 3 3"></path>`),
+    verbs: mappingActions("mapped"),
     placeholder: "Filter by key or summary",
     searchLabel: `Filter mapped ${providerLabel} tests`,
     collapsible: true,
+    sharedHelper: true,
   });
   return `    <section id="pane-mapping" class="pane board-pane" data-tab="mapping" role="tabpanel" aria-labelledby="tab-mapping" hidden>
       <div class="mapping-top">

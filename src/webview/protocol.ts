@@ -30,8 +30,7 @@ export type BoardClientMessage =
   | { type: "addToTestSet" }
   | { type: "createTestPlan" }
   | { type: "addToTestPlan" }
-  | { type: "createTestExecution" }
-  | { type: "runSelected" };
+  | { type: "createTestExecution" };
 
 export type LinkClientMessage =
   | { type: "search"; value: string }
@@ -169,10 +168,8 @@ export interface BoardRenderMessage {
   readonly addToTestSetVerb: BoardVerb;
   readonly testPlanVerb: BoardVerb;
   readonly addToTestPlanVerb: BoardVerb;
-  readonly availableHelper: string;
+  readonly mappingHelper: string;
   readonly executionVerb: BoardVerb;
-  readonly runSelectedVerb: BoardVerb;
-  readonly mappedHelper: string;
 }
 
 export type BoardHostMessage = BoardRenderMessage | { type: "syncProgress"; text: string };
@@ -297,7 +294,7 @@ function validShell(body: Record<string, unknown>): boolean {
 
 function validBoard(body: Record<string, unknown>): boolean {
   const section = ["untraced", "available", "mapped"] as const;
-  if (noArgs(body, ["sync", "bulkCreate", "createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan", "createTestExecution", "runSelected"])) {return true;}
+  if (noArgs(body, ["sync", "bulkCreate", "createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan", "createTestExecution"])) {return true;}
   if (body["type"] === "search") {return exact(body, ["type", "value"]) && text(body["value"]);}
   if (body["type"] === "columnSearch") {return exact(body, ["type", "section", "value"]) && oneOf(body["section"], section) && text(body["value"]);}
   if (body["type"] === "page") {return exact(body, ["type", "section", "step"]) && oneOf(body["section"], section) && oneOf(body["step"], ["prev", "next"] as const);}
@@ -494,7 +491,7 @@ function validHostBody(surface: SurfaceName | "shell", body: Record<string, unkn
   }
   if (surface === "board") {
     if (body["type"] === "syncProgress") {return exact(body, ["type", "text"]) && text(body["text"]);}
-    const keys = ["type", "scenarios", "available", "mapped", "sections", "pageSize", "matrix", "executions", "availableEmptyText", "filtering", "projects", "project", "scoped", "createVerb", "syncVerb", "untracedHelper", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "availableHelper", "executionVerb", "runSelectedVerb", "mappedHelper"];
+    const keys = ["type", "scenarios", "available", "mapped", "sections", "pageSize", "matrix", "executions", "availableEmptyText", "filtering", "projects", "project", "scoped", "createVerb", "syncVerb", "untracedHelper", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "mappingHelper", "executionVerb"];
     const budget: ProjectionBudget = { remaining: HOST_PROJECTION_LIMIT };
     return body["type"] === "render" && exact(body, keys) && projectedArray(body["scenarios"], validScenarioCard, budget) &&
       projectedArray(body["available"], validTestCard, budget) && projectedArray(body["mapped"], validTestCard, budget) && projectedArray(body["matrix"], validMatrixGroup, budget) &&
@@ -503,8 +500,8 @@ function validHostBody(surface: SurfaceName | "shell", body: Record<string, unkn
       projectedStrings(body["projects"], 128, budget) &&
       text(body["project"]) && text(body["availableEmptyText"]) &&
       typeof body["filtering"] === "boolean" && typeof body["scoped"] === "boolean" &&
-      ["createVerb", "syncVerb", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "executionVerb", "runSelectedVerb"].every((key) => validVerb(body[key])) &&
-      ["untracedHelper", "availableHelper", "mappedHelper"].every((key) => text(body[key]));
+      ["createVerb", "syncVerb", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "executionVerb"].every((key) => validVerb(body[key])) &&
+      ["untracedHelper", "mappingHelper"].every((key) => text(body[key]));
   }
   if (body["type"] === "settled") {return exact(body, ["type"]);}
   if (body["type"] === "model") {return exact(body, ["type", "model"]) && validModel(body["model"]);}

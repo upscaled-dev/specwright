@@ -56,7 +56,7 @@ import { XrayImportError } from "../xray/execution-importers";
 import { fetchJiraAttachmentMeta, uploadJiraAttachments } from "../xray/jira-attachments";
 import { buildAttachmentsModel } from "../xray/publish-attachment-support";
 import type { XrayCredentials, XrayJiraCredentials } from "../xray/xray-credential-store";
-import { boardBatchSelection, treeBatchSelection } from "./run-publish-selection";
+import { treeBatchSelection } from "./run-publish-selection";
 import { runPublishBatch } from "./run-publish-execution";
 import { logCapturedRunOutput } from "./captured-run-progress";
 import { RemoteOutcomeUnknownError, type WorkspaceTrust } from "../core/workspace-trust";
@@ -135,25 +135,6 @@ export class TraceabilityPublishCommands {
       return;
     }
     await this.runAndPublishSelection(resolved.selection, "traceability-tree", signal);
-  }
-
-  public async runAndPublishSelected(selectedTestKeys: readonly string[], signal?: AbortSignal): Promise<void> {
-    const snapshot = this.deps.subsystem()?.getSnapshot();
-    if (!snapshot) {
-      vscode.window.showInformationMessage("Enable and sync the Traceability panel before running a batch.");
-      return;
-    }
-    const resolved = boardBatchSelection(selectedTestKeys, snapshot);
-    if (resolved.skipped > 0) {
-      vscode.window.showInformationMessage(
-        `${resolved.skipped} checked ${plural(resolved.skipped, "test has", "tests have")} no mapped scenario and will be skipped.`
-      );
-    }
-    if (resolved.selection.kind === "multi-select" && resolved.selection.scenarios.length === 0) {
-      vscode.window.showInformationMessage("No mapped scenarios were selected. Nothing was run.");
-      return;
-    }
-    await this.runAndPublishSelection(resolved.selection, "coverage-board", signal);
   }
 
   public async runAndPublishSelection(
