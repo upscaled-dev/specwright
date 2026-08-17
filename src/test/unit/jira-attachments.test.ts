@@ -85,9 +85,11 @@ describe("uploadJiraAttachments", () => {
   it("POSTs each file to the issue attachments endpoint with the no-check token + basic auth", async () => {
     let url = "";
     let headers: Record<string, string> = {};
+    let body: FormData | undefined;
     const fetchImpl: FetchLike = (u, init) => {
       url = u;
       headers = init.headers as Record<string, string>;
+      body = init.body as FormData;
       return Promise.resolve(response(200, [{ id: "1" }]));
     };
 
@@ -97,6 +99,7 @@ describe("uploadJiraAttachments", () => {
     expect(url).toBe(`https://${SITE}/rest/api/3/issue/XNP-9/attachments`);
     expect(headers["X-Atlassian-Token"]).toBe("no-check");
     expect(headers["Authorization"]).toBe(`Basic ${Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64")}`);
+    expect(await (body?.get("file") as Blob).text()).toBe("bytes");
   });
 
   it("isolates a per-file failure: the 4xx file fails, the others upload", async () => {

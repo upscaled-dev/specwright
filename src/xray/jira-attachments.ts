@@ -232,7 +232,9 @@ class JiraAttachmentUpload {
     this.deps.signal?.addEventListener("abort", onAbort, { once: true });
     const form = new FormData();
     const name = file.name;
-    form.append("file", new Blob([content], { type: contentTypeForFile(name) }), name);
+    const bytes = new Uint8Array(content.byteLength);
+    bytes.set(content);
+    form.append("file", new Blob([bytes], { type: contentTypeForFile(name) }), name);
     let started = false;
     try {
       started = true;
