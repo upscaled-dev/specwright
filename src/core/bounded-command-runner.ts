@@ -144,10 +144,12 @@ function packageBin(invocation: ExecutableCommand): { name: string; args: string
 function windowsShimTarget(shim: string, binDir: string): string | undefined {
   let body: string;
   try {body = fs.readFileSync(shim, "utf8");} catch {return undefined;}
-  const match = /%dp0%[\\/]([^"\r\n]+\.(?:cjs|mjs|js))/i.exec(body);
-  return match?.[1]
-    ? path.resolve(binDir, match[1].replaceAll("\\", path.sep))
-    : undefined;
+  const match = /%(?:dp0%|~dp0)[\\/]([^"\r\n]+?\.(?:cjs|mjs|js))(?=["\s]|$)/i.exec(body);
+  const relative = match?.[1];
+  if (!relative || path.win32.isAbsolute(relative) || path.posix.isAbsolute(relative)) {
+    return undefined;
+  }
+  return path.resolve(binDir, relative.replaceAll("\\", path.sep));
 }
 
 function localBinTarget(
@@ -193,7 +195,13 @@ export function resolveExecutableCommand(
       "Install the project dependencies before running Specwright."
     );
   }
-  return { executable: process.execPath, args: [target, ...requested.args] };
+  // In a VS Code Extension Host process.execPath is Electron, not Node. Launching a CLI through
+  // that runtime leaves process.versions.electron set, which makes CLIs such as bddgen parse the
+  // script path as a user argument. POSIX package bins carry their own Node shebang; Windows needs
+  // the same `node` executable that the configured package runner itself requires on PATH.
+  return platform === "win32"
+    ? { executable: "node", args: [target, ...requested.args] }
+    : { executable: target, args: requested.args };
 }
 
 /** Parse a configured command line without invoking a shell or expanding its syntax. */

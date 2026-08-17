@@ -31,24 +31,90 @@ describe("runBoundedCommand", () => {
     expect(() => parseExecutableCommand("npm test && curl example.test")).toThrow("Shell operator");
   });
 
-  it("resolves a Windows npx shim to its local JavaScript bin", () => {
+  it("resolves Windows bddgen and Playwright shims through Node without a shell", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-win-bin-"));
     const bin = path.join(root, "node_modules", ".bin");
-    const target = path.join(root, "node_modules", "@playwright", "test", "cli.js");
     fs.mkdirSync(bin, { recursive: true });
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, "");
-    fs.writeFileSync(
-      path.join(bin, "playwright.cmd"),
-      '@ECHO off\r\nnode "%dp0%\\..\\@playwright\\test\\cli.js" %*\r\n'
-    );
     try {
+      const bddgen = path.join(root, "node_modules", "playwright-bdd", "dist", "cli", "index.js");
+      const playwright = path.join(root, "node_modules", "@playwright", "test", "cli.js");
+      fs.mkdirSync(path.dirname(bddgen), { recursive: true });
+      fs.mkdirSync(path.dirname(playwright), { recursive: true });
+      fs.writeFileSync(bddgen, "");
+      fs.writeFileSync(playwright, "");
+      fs.writeFileSync(
+        path.join(bin, "bddgen.cmd"),
+        "@SETLOCAL\r\n" +
+        "@IF NOT DEFINED NODE_PATH (\r\n" +
+        '  @SET "NODE_PATH=C:\\pnpm\\node_modules"\r\n' +
+        ") ELSE (\r\n" +
+        '  @SET "NODE_PATH=C:\\pnpm\\node_modules;%NODE_PATH%"\r\n' +
+        ")\r\n" +
+        '@IF EXIST "%~dp0\\node.exe" (\r\n' +
+        '  "%~dp0\\node.exe" "%~dp0\\..\\playwright-bdd\\dist\\cli\\index.js" %*\r\n' +
+        ") ELSE (\r\n" +
+        '  node "%~dp0\\..\\playwright-bdd\\dist\\cli\\index.js" %*\r\n' +
+        ")\r\n"
+      );
+      fs.writeFileSync(
+        path.join(bin, "playwright.cmd"),
+        '@ECHO off\r\nnode "%dp0%\\..\\@playwright\\test\\cli.js" %*\r\n'
+      );
+      expect(resolveExecutableCommand(
+        'pnpm exec bddgen --config "bdd config.ts"',
+        root,
+        "win32"
+      )).toEqual({
+        executable: "node",
+        args: [bddgen, "--config", "bdd config.ts"],
+      });
       expect(resolveExecutableCommand("npx playwright test", root, "win32")).toEqual({
-        executable: process.execPath,
-        args: [target, "test"],
+        executable: "node",
+        args: [playwright, "test"],
       });
       expect(() => resolveExecutableCommand("npx missing test", root, "win32"))
         .toThrow("not installed");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("executes POSIX bddgen and Playwright bins directly through their Node shebangs", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-posix-bin-"));
+    const bin = path.join(root, "node_modules", ".bin");
+    fs.mkdirSync(bin, { recursive: true });
+    try {
+      const bddgen = path.join(root, "node_modules", "playwright-bdd", "cli.js");
+      const playwright = path.join(root, "node_modules", "playwright", "cli.js");
+      for (const [name, target] of [["bddgen", bddgen], ["playwright", playwright]] as const) {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, "#!/usr/bin/env node\n", { mode: 0o755 });
+        fs.symlinkSync(path.relative(bin, target), path.join(bin, name));
+      }
+
+      expect(resolveExecutableCommand("npx bddgen", root, "linux")).toEqual({
+        executable: fs.realpathSync(bddgen),
+        args: [],
+      });
+      expect(resolveExecutableCommand("npx playwright test", root, "linux")).toEqual({
+        executable: fs.realpathSync(playwright),
+        args: ["test"],
+      });
+      for (const [command, executable, args] of [
+        ['npm exec -- bddgen --config "bdd config.ts"', bddgen, ["--config", "bdd config.ts"]],
+        ['pnpm exec bddgen --config "bdd config.ts"', bddgen, ["--config", "bdd config.ts"]],
+        ['yarn bddgen --config "bdd config.ts"', bddgen, ["--config", "bdd config.ts"]],
+        ['yarn run bddgen --config "bdd config.ts"', bddgen, ["--config", "bdd config.ts"]],
+        ['npm exec -- playwright test --grep "login works"', playwright, ["test", "--grep", "login works"]],
+        ['pnpm exec playwright test --grep "login works"', playwright, ["test", "--grep", "login works"]],
+        ['yarn playwright test --grep "login works"', playwright, ["test", "--grep", "login works"]],
+        ['yarn run playwright test --grep "login works"', playwright, ["test", "--grep", "login works"]],
+      ] as const) {
+        expect(resolveExecutableCommand(command, root, "linux")).toEqual({
+          executable: fs.realpathSync(executable),
+          args,
+        });
+      }
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
