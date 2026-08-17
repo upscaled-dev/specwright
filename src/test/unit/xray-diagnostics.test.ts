@@ -84,10 +84,13 @@ describe("graphqlErrorSummaries", () => {
 });
 
 describe("errorShapeVerdict", () => {
-  it("reserves empty success for a 200 response without GraphQL errors", () => {
+  it("accepts the error envelopes returned by Xray's GraphQL endpoint", () => {
     expect(errorShapeVerdict({ status: 200, errors: ["invalid field"] })).toBe("expected-error-envelope");
+    expect(errorShapeVerdict({ status: 400, errors: ["invalid field"] })).toBe("expected-error-envelope");
     expect(errorShapeVerdict({ status: 200, errors: [] })).toBe("unexpected-empty-success");
     expect(errorShapeVerdict({ status: 400, errors: [] })).toBe("unexpected-response");
+    expect(errorShapeVerdict({ status: 401, errors: ["invalid field"] })).toBe("unexpected-response");
+    expect(errorShapeVerdict({ status: 500, errors: ["invalid field"] })).toBe("unexpected-response");
   });
 });
 

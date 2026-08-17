@@ -37,7 +37,7 @@ export function describeShape(value: unknown, depth = 0): unknown {
   return typeof value;
 }
 
-// GraphQL failures arrive as HTTP 200 with an `errors` array. Error `message` and `extensions.code`
+// GraphQL failures arrive as HTTP 200 or 400 with an `errors` array. Error `message` and `extensions.code`
 // are the diagnostic payload the connection test exists to capture (§5 marks the error shape as a
 // live-verification item), so they are the deliberate exception to types-only logging: clipped and
 // JWT-scrubbed, nothing else from the error object.
@@ -61,7 +61,7 @@ export function graphqlErrorSummaries(body: unknown): string[] {
 }
 
 export function errorShapeVerdict(probe: { readonly status: number; readonly errors: readonly string[] }): string {
-  if (probe.status === 200 && probe.errors.length > 0) { return "expected-error-envelope"; }
+  if ((probe.status === 200 || probe.status === 400) && probe.errors.length > 0) { return "expected-error-envelope"; }
   if (probe.status === 200 && probe.errors.length === 0) { return "unexpected-empty-success"; }
   return "unexpected-response";
 }
