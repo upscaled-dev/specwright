@@ -119,15 +119,9 @@ describe("contributes.colors: tag-line decoration", () => {
 });
 
 describe("view/item/context: orphan row commands", () => {
-  it("places open-issue and copy-key on the orphan row, reusing the shared commands", () => {
+  it("moves orphan actions into the traceability webview", () => {
     const itemContext = pkg.contributes.menus["view/item/context"]!;
     const orphan = itemContext.filter((e) => e.when?.includes("traceabilityOrphan"));
-    expect(orphan.map((e) => e.command)).toEqual([
-      "playwrightBddRunner.traceability.openIssue",
-      "playwrightBddRunner.traceability.copyKey",
-    ]);
-    for (const entry of orphan) {
-      expect(entry.when).toBe("view == playwrightBddRunner.traceability && viewItem == traceabilityOrphan");
-    }
+    expect(orphan).toEqual([]);
   });
 });

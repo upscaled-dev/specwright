@@ -8,7 +8,7 @@ Feature: Fixture feature
     When I click the test button
     Then I should see the test result
 
-  @outline
+  @outline @TEST_APEX-17
   Scenario Outline: Test scenario outline
     Given I have a "<input>" value
     When I process the input

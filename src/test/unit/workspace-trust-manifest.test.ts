@@ -56,7 +56,7 @@ describe("workspace trust manifest", () => {
       .filter(({ enablement }) => enablement === "isWorkspaceTrusted")
       .map(({ command }) => command);
     expect(new Set(manifestPrivileged)).toEqual(PRIVILEGED_COMMANDS);
-    const restricted = manifest.contributes.viewsWelcome.find(({ when }) => when === "!isWorkspaceTrusted");
-    expect(restricted?.contents).toContain("command:workbench.trust.manage");
+    const restricted = manifest.contributes.viewsWelcome.find(({ when }) => when === "!isWorkspaceTrusted" && when?.includes("traceability"));
+    expect(restricted).toBeUndefined();
   });
 });

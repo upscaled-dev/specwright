@@ -24,5 +24,4 @@ SOFTWARE.
 
 This extension also bundles third-party works under their own licenses. See
 THIRD_PARTY_LICENSES.md at the repository root for full attribution and
-license text (currently covers the Gherkin TextMate grammar in
-syntaxes/gherkin.tmLanguage.json).
+license notices and details for bundled third-party works.

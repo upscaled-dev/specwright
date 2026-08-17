@@ -98,6 +98,10 @@ afterEach(async () => {
 });
 
 describe("activate", () => {
+  it("matches the VS Code ExtensionMode numeric constants", () => {
+    expect(vscode.ExtensionMode).toEqual({ Production: 1, Development: 2, Test: 3 });
+  });
+
   it("uses workspace feature discovery instead of unconditional startup activation", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as {
       activationEvents: string[];

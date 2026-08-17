@@ -1,4 +1,6 @@
 const esbuild = require("esbuild");
+const { copyFile, mkdir } = require("node:fs/promises");
+const path = require("node:path");
 
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
@@ -26,6 +28,10 @@ const esbuildProblemMatcherPlugin = {
 };
 
 async function main() {
+  await mkdir("dist", { recursive: true });
+  await Promise.all(["codicon.css", "codicon.ttf"].map((asset) =>
+    copyFile(path.join("node_modules", "@vscode", "codicons", "dist", asset), path.join("dist", asset))
+  ));
   const nodeContext = await esbuild.context({
     entryPoints: {
       extension: "src/extension.ts",
@@ -50,6 +56,7 @@ async function main() {
   const webviewContext = await esbuild.context({
     entryPoints: {
       "coverage-board": "src/webview/coverage-board.ts",
+      "traceability-view": "src/webview/traceability-view.ts",
       "xray-setup": "src/webview/xray-setup.ts",
     },
     bundle: true,

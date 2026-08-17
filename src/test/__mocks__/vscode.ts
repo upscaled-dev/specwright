@@ -304,6 +304,7 @@ export const window = {
     showOptions?: unknown,
     options?: unknown
   ): StubWebviewPanel => createStubWebviewPanel(viewType, title, showOptions, options),
+  registerWebviewViewProvider: (_viewId: string, _provider: unknown, _options?: unknown): { dispose: () => void } => ({ dispose: () => {} }),
   // Throws on a second serializer for the same view type, as the real host does.
   registerWebviewPanelSerializer: (
     viewType: string,
@@ -701,6 +702,7 @@ export const extensions = {
 
 export { Position, Range, Location, Uri };
 
+export const ExtensionMode = { Production: 1, Development: 2, Test: 3 };
 export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
 export const LogLevel = { Off: 0, Trace: 1, Debug: 2, Info: 3, Warning: 4, Error: 5 };
 export const ProgressLocation = { SourceControl: 1, Window: 10, Notification: 15 };

@@ -18,9 +18,8 @@ import {
   ConnectionIndicator,
   GroupingMode,
   GroupingModeStore,
-  TraceabilityNode,
-  TraceabilityTreeDataProvider,
-} from "./traceability-tree-data-provider";
+} from "./traceability-tree-projection";
+import { TraceabilityViewProvider } from "./traceability-view-provider";
 import { TagDiagnosticsProvider } from "./tag-diagnostics";
 import { TagDecorationProvider } from "./tag-decoration";
 import { RunResultStore } from "./run-result-store";
@@ -48,8 +47,7 @@ const REPORT_WATCH_GLOBS = REPORT_CANDIDATES.map((candidate) => `**/${candidate}
  * the whole capability stack at runtime without a window reload.
  */
 export class TraceabilitySubsystem implements vscode.Disposable {
-  private treeView: vscode.TreeView<TraceabilityNode> | undefined;
-  private treeProvider: TraceabilityTreeDataProvider | undefined;
+  private panelAttached = false;
   private model: TraceabilityModel | undefined;
   private tagDiagnostics: TagDiagnosticsProvider | undefined;
   private tagDecorations: TagDecorationProvider | undefined;
@@ -106,7 +104,8 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     private readonly logger: Logger,
     private readonly workspaceState: vscode.Memento,
     private readonly hasTraceabilityTags: () => Promise<boolean> = () => Promise.resolve(false),
-    private readonly closeSetupSurface: () => Promise<void> = () => Promise.resolve()
+    private readonly closeSetupSurface: () => Promise<void> = () => Promise.resolve(),
+    private readonly traceabilityView?: TraceabilityViewProvider
   ) {
     this.configChangeDisposable = config.addChangeListener(() => {
       this.applyCurrent().catch(() => undefined);
@@ -135,7 +134,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   }
 
   public get traceabilityPanelActive(): boolean {
-    return this.treeView !== undefined;
+    return this.panelAttached;
   }
 
   // The last committed connection verdict, the same one the `connected` context key gates the palette
@@ -148,9 +147,16 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // Flip the tree between the by-test and by-file layouts. The provider persists the choice through
   // the memento-backed store, so a recreated provider restores it. No-op when the panel is off.
   public toggleGrouping(): void {
-    this.treeProvider?.toggleGroupingMode();
+    if (!this.panelAttached) {return;}
+    const grouping = this.groupingStore();
+    const next = grouping.get() === "test" ? "file" : "test";
+    grouping.set(next);
+    this.traceabilityView?.setGrouping(next);
   }
 
+  public focusFilter(): void {
+    this.traceabilityView?.focusFilter();
+  }
   // Reads/writes the grouping mode in workspaceState. The read coerces any stored value to a valid
   // mode (boundary), defaulting to the by-test layout.
   private groupingStore(): GroupingModeStore {
@@ -290,7 +296,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       this.activeAdapter && this.activeAdapterId === id
         ? this.signature(id, this.activeAdapter)
         : undefined;
-    if (this.treeView && signature !== undefined && this.lastSignature === signature) {
+    if (this.panelAttached && signature !== undefined && this.lastSignature === signature) {
       await this.commitEnabledContext(true);
       this.connectionRefreshActive = true;
       this.queueConnectionRefresh();
@@ -326,13 +332,9 @@ export class TraceabilitySubsystem implements vscode.Disposable {
         this.logger
       );
       this.model = model;
-      const provider = new TraceabilityTreeDataProvider(model, adapter.label, this.groupingStore());
-      this.treeProvider = provider;
       this.adapterSubscriptions.push(model.onDidChange(() => this._onDidChangeSnapshot.fire()));
-      this.treeView = vscode.window.createTreeView("playwrightBddRunner.traceability", {
-        treeDataProvider: provider,
-        canSelectMany: true,
-      });
+      this.traceabilityView?.attach(model, adapter.label, this.groupingStore().get());
+      this.panelAttached = true;
       // Grammar-driven tag diagnostics are offline (no connection needed) and rebuild with the panel
       // on any prefix/provider change, so they always lint against the active adapter's grammar.
       this.tagDiagnostics = new TagDiagnosticsProvider(adapter.keyGrammar);
@@ -400,15 +402,15 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       return;
     }
     this.commitConnectedContext(connected);
-    this.treeProvider?.setConnected(connected);
+    this.traceabilityView?.setConnected(connected);
 
     if (!connected || !connection?.verify) {
       this.lastConnection = undefined;
-      this.treeProvider?.setConnectionIndicator(undefined);
+      this.traceabilityView?.setConnectionIndicator(undefined);
       return;
     }
     const project = this.defaultProjectKey();
-    this.treeProvider?.setConnectionIndicator({
+    this.traceabilityView?.setConnectionIndicator({
       state: "checking",
       label: connection.label,
       message: "Checking connection…",
@@ -432,7 +434,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // info is omitted until the first sync produces a `syncedAt`, so a connection with no metadata
   // capability commits the bare `{state, label, message}` row.
   private commitConnectionIndicator(): void {
-    if (!this.treeProvider || !this.lastConnection) {
+    if (!this.panelAttached || !this.lastConnection) {
       return;
     }
     let snapshot: ReturnType<NonNullable<TraceabilityAdapter["metadata"]>["snapshot"]> | undefined;
@@ -449,7 +451,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     if (project) {
       indicator.defaultProject = project;
     }
-    this.treeProvider.setConnectionIndicator(indicator);
+    this.traceabilityView?.setConnectionIndicator(indicator);
   }
 
   // The configured default project, or undefined when unset. Undefined-safe so a hand-
@@ -483,7 +485,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // The debounced, serialized rebuild request, and the only one a machine-driven trigger should use: a
   // settings edit commits per keystroke, and `rebuildNow` would launch a full discovery for each.
   public scheduleRebuild(): void {
-    if (this.disposed || !this.model || !this.treeView) {return;}
+    if (this.disposed || !this.model || !this.panelAttached) {return;}
     if (this.rebuildTimer) {clearTimeout(this.rebuildTimer);}
     this.rebuildTimer = setTimeout(() => {
       this.rebuildTimer = undefined;
@@ -540,7 +542,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     const shouldWatch = !this.disposed && supportsEvidence &&
       this.config.traceabilityPanelPreference === undefined &&
       !this.config.hasExplicitXrayConfiguration &&
-      !this.treeView;
+      !this.panelAttached;
     const signature = shouldWatch
       ? [
           this.config.testFilePattern,
@@ -554,7 +556,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
 
     const generation = this.evidenceWatcherGeneration;
     const reconcile = (): void => {
-      if (this.disposed || this.treeView || generation !== this.evidenceWatcherGeneration) {return;}
+      if (this.disposed || this.panelAttached || generation !== this.evidenceWatcherGeneration) {return;}
       this.applyCurrent().catch(() => undefined);
     };
     const watcher = vscode.workspace.createFileSystemWatcher(this.config.testFilePattern);
@@ -597,10 +599,8 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       this.rebuildTask,
       ...this.connectionTasks,
     ]);
-    this.treeView?.dispose();
-    this.treeView = undefined;
-    this.treeProvider?.dispose();
-    this.treeProvider = undefined;
+    this.panelAttached = false;
+    this.traceabilityView?.detach();
     this.tagDiagnostics?.dispose();
     this.tagDiagnostics = undefined;
     this.tagDecorations?.dispose();

@@ -11,6 +11,7 @@ const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 const PACKAGE_PATH = resolve(REPO_ROOT, "package.json");
 const CONTENTS_PATH = resolve(SCRIPT_DIR, "package-contents.json");
 const DIST_DIR = resolve(REPO_ROOT, "dist");
+const REQUIRED_SBOM_COMPONENTS = ["@vscode/codicons"];
 
 // git resolves to git.exe and spawns directly on every platform. npm and npx are
 // .cmd shims on Windows, which Node refuses to spawn without a shell (EINVAL since
@@ -63,6 +64,19 @@ export function assertPackageContents(actual, expected) {
 
 export function sha256(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+}
+
+export function assertRequiredSbomComponents(sbom) {
+  const components = Array.isArray(sbom?.components) ? sbom.components : [];
+  const names = new Set(components
+    .filter((component) => component && typeof component === "object")
+    .map((component) => component.name)
+    .filter((name) => typeof name === "string")
+  );
+  const missing = REQUIRED_SBOM_COMPONENTS.filter((name) => !names.has(name));
+  if (missing.length > 0) {
+    throw new Error(`Release SBOM missing required components: ${missing.join(", ")}`);
+  }
 }
 
 export function artifactSet({ packageJson, commit, vsixPath, digest, sbomPath, sbomDigest }) {
@@ -153,6 +167,7 @@ export function verifyReleaseArtifact(vsixPath, expected = {}) {
   if (!sbomFile || sbomFile !== basename(sbomFile) || !sbomDigest || sha256(sbomPath) !== sbomDigest) {
     throw new Error("Artifact-set SBOM checksum mismatch");
   }
+  assertRequiredSbomComponents(JSON.parse(readFileSync(sbomPath, "utf8")));
   return actual;
 }
 
@@ -180,6 +195,7 @@ export function createReleaseArtifact(requestedPath) {
       "--omit",
       "dev",
     ]));
+    assertRequiredSbomComponents(sbom);
     writeFileSync(paths.sbomPath, `${JSON.stringify(sbom, null, 2)}\n`);
     const sbomDigest = sha256(paths.sbomPath);
     writeFileSync(paths.checksumPath, `${digest}  ${basename(paths.vsixPath)}\n`);

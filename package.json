@@ -809,6 +809,12 @@
         "icon": "$(project)"
       },
       {
+        "command": "playwrightBddRunner.traceability.find",
+        "title": "Find in Traceability",
+        "category": "Specwright",
+        "icon": "$(search)"
+      },
+      {
         "command": "playwrightBddRunner.traceability.manageConnection",
         "title": "Manage Xray Connection",
         "category": "Specwright",
@@ -923,6 +929,7 @@
         {
           "id": "playwrightBddRunner.traceability",
           "name": "Traceability",
+          "type": "webview",
           "icon": "media/activity-bar-icon.svg",
           "contextualTitle": "Specwright BDD",
           "when": "playwrightBddRunner.traceability.enabled"
@@ -939,21 +946,6 @@
         "view": "playwrightBddRunner.stepsExplorer",
         "when": "isWorkspaceTrusted",
         "contents": "No step definitions match this workspace yet. Check readiness or point Specwright at the folders that contain your definitions.\n\n[Diagnose workspace](command:playwrightBddRunner.diagnoseWorkspace)\n\n[Configure step paths](command:playwrightBddRunner.configureStepPaths)"
-      },
-      {
-        "view": "playwrightBddRunner.traceability",
-        "when": "isWorkspaceTrusted && !playwrightBddRunner.traceability.connected",
-        "contents": "Set up Xray integration to map your scenarios to Xray tests, see coverage at a glance, and publish run results back to Jira.\n\n[Set up Xray](command:playwrightBddRunner.traceability.connect)\n\nPrefer to keep this out of the way? [Hide this panel](command:playwrightBddRunner.traceability.hidePanel)."
-      },
-      {
-        "view": "playwrightBddRunner.traceability",
-        "when": "isWorkspaceTrusted && playwrightBddRunner.traceability.connected",
-        "contents": "No Xray-tagged scenarios found yet.\n\nTag a scenario with `@TEST_KEY` (and optionally `@REQ_KEY`) in a .feature file to map it to an Xray test. The tree then groups scenarios by their Xray keys, lists untagged scenarios as coverage gaps, and shows pass/fail badges after a run.\n\nSync loads the remote test catalog, the Coverage Board links scenarios to Xray tests, and publishing sends run results back to Jira."
-      },
-      {
-        "view": "playwrightBddRunner.traceability",
-        "when": "!isWorkspaceTrusted",
-        "contents": "Traceability stays offline while this workspace is untrusted. Trust it before connecting, syncing, publishing, or changing remote test data.\n\n[Manage Workspace Trust](command:workbench.trust.manage)"
       }
     ],
     "menus": {
@@ -1047,6 +1039,10 @@
           "when": "playwrightBddRunner.traceability.enabled"
         },
         {
+          "command": "playwrightBddRunner.traceability.find",
+          "when": "false"
+        },
+        {
           "command": "playwrightBddRunner.traceability.hidePanel",
           "when": "false"
         },
@@ -1112,6 +1108,11 @@
           "command": "playwrightBddRunner.traceability.openBoard",
           "when": "view == playwrightBddRunner.traceability",
           "group": "navigation@1"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.find",
+          "when": "view == playwrightBddRunner.traceability",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -1129,55 +1130,6 @@
           "command": "playwrightBddRunner.scaffoldFeatureFromPanel",
           "when": "view == playwrightBddRunner.stepsExplorer && viewItem == unmatchedFile",
           "group": "inline"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.openIssue",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey",
-          "group": "inline@1"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.copyKey",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey",
-          "group": "inline@2"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.linkScenario",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityUntraced",
-          "group": "inline@1"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.linkScenario",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityScenario",
-          "group": "inline@1"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.runAndPublish",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityScenario",
-          "group": "traceability@1"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.runAndPublish",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityFile",
-          "group": "traceability@1"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.openIssue",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityOrphan",
-          "group": "inline@1"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.copyKey",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityOrphan",
-          "group": "inline@2"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.switchDefaultProject",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityConnection"
-        },
-        {
-          "command": "playwrightBddRunner.traceability.switchDefaultProject",
-          "when": "view == playwrightBddRunner.traceability && viewItem == traceabilityConnection",
-          "group": "inline@1"
         }
       ],
       "editor/context": [
@@ -1431,6 +1383,9 @@
     "release:major": "node scripts/release.mjs --type major",
     "release:dry-run": "node scripts/release.mjs --type patch --dry-run",
     "prepare": "husky"
+  },
+  "dependencies": {
+    "@vscode/codicons": "^0.0.46-24"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.0.1",

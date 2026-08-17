@@ -84,7 +84,7 @@ The script refuses a dirty tree, missing commit, or existing tag. If an artifact
 
 Protected references, GitHub alert routing, workflow-artifact access, real promotion, publication, rollback, native signing, and the Core/runtime matrix remain external release gates. Record evidence for each in the release change before publishing.
 
-The package inventory lives in [scripts/package-contents.json](../scripts/package-contents.json). It currently lists 27 files. Update it deliberately when shipping a new packaged file; the package-content gate checks the inventory rather than relying on a fixed historical count. Source: [scripts/release.mjs](../scripts/release.mjs) and [scripts/release-artifact.mjs](../scripts/release-artifact.mjs).
+The package inventory lives in [scripts/package-contents.json](../scripts/package-contents.json). It currently lists 30 files. Update it deliberately when shipping a new packaged file; the package-content gate checks the inventory rather than relying on a fixed historical count. Source: [scripts/release.mjs](../scripts/release.mjs) and [scripts/release-artifact.mjs](../scripts/release-artifact.mjs).
 
 ## Marketplace media acceptance
 

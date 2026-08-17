@@ -112,15 +112,9 @@ describe("traceability switch-default-project contributions", () => {
     );
   });
 
-  // Twice on the same row: once inline, where the swap icon sits on hover, and once in the context menu,
-  // which never renders the inline group.
-  it("offers the command on the connection row, inline and in its context menu", () => {
+  it("keeps the command out of native item menus", () => {
     const items = pkg.contributes.menus["view/item/context"]!.filter((e) => e.command === CMD);
-    const when = "view == playwrightBddRunner.traceability && viewItem == traceabilityConnection";
-    expect(items.map((e) => [e.when, e.group])).toEqual([
-      [when, undefined],
-      [when, "inline@1"],
-    ]);
+    expect(items).toEqual([]);
   });
 });
 

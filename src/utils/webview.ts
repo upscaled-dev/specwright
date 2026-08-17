@@ -16,7 +16,11 @@ export function createNonce(): string {
 }
 
 // The panels' shared Content-Security-Policy: no default fetches, inline styles allowed (VS Code
-// theming rides them), scripts only from the per-render nonce.
-export function contentSecurityPolicy(nonce: string): string {
-  return `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+// theming rides them), scripts only from the per-render nonce. A view that ships local style/font
+// assets opts its own webview source in without widening any other panel.
+export function contentSecurityPolicy(nonce: string, resourceSource?: string): string {
+  const resources = resourceSource
+    ? ` style-src 'unsafe-inline' ${resourceSource}; font-src ${resourceSource};`
+    : " style-src 'unsafe-inline';";
+  return `default-src 'none';${resources} script-src 'nonce-${nonce}';`;
 }

@@ -30,7 +30,7 @@ Do not put either secret in `settings.json`, `.feature` files, screenshots, or s
 
 ## Connect to Xray
 
-1. In the Command Palette, run **Specwright: Connect to Xray**. You can also select **Set up Xray** in the empty Traceability panel.
+1. In the Command Palette, run **Specwright: Connect to Xray**. You can also select **Set up Xray** in the disconnected Traceability panel.
 2. Enter the site host, Xray client ID, and client secret. Use a host such as `example.atlassian.net`; a scheme or trailing slash is normalized, but paths and ports are not valid.
 3. Set `playwrightBddRunner.xray.apiRegion` to the region that matches your Xray Cloud tenant. The default is `global`.
 4. Optionally enter both a Jira email and Jira API token. Leave both fields blank if you do not need Jira project discovery, target search, or issue attachments.
@@ -156,7 +156,7 @@ Push is available only for a synced Gherkin-compatible Xray test with a remote i
 
 ## Run locally and publish results
 
-Use **Specwright: Run Locally and Publish…** from the Traceability panel, a mapped-scenario row, or the Command Palette. In the Traceability tree, Cmd/Ctrl-select mapped-scenario rows, then right-click one selected row and choose **Run Locally and Publish…** to run that selection. A single row runs one scenario; the panel toolbar and Command Palette run all mapped scenarios. Specwright runs the batch through your local Playwright configuration, then opens the Publish workflow.
+The Traceability view has an always-visible filter and inline row actions. Cmd/Ctrl-click mapped scenario rows to select a batch, then use **Run and publish** on one selected row. A single row runs one scenario; the Traceability toolbar's **Run All Mapped Scenarios and Publish** runs all mapped scenarios. The Command Palette offers **Run and Publish by Tag Expression**. Specwright runs the batch through your local Playwright configuration, then opens the Publish workflow.
 
 Before running, Specwright checks for unmapped scenarios, invalid or duplicate mappings, and known incompatible Xray test types. You can repair a mapping, run all flagged scenarios locally, or exclude flagged scenarios from the batch. An explicitly excluded or unmapped result is not sent to Xray. If you choose **Run all locally** and later choose Publish, review the publishable-result summary carefully: a result that still has a usable test mapping can remain eligible for publishing. To guarantee a flagged result stays local, exclude it or cancel the batch.
 

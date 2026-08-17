@@ -9,10 +9,8 @@ import {
   ConnectionVerifyResult,
   TraceabilityAdapter,
 } from "../../traceability/contracts";
-import {
-  ConnectionIndicator,
-  TraceabilityTreeDataProvider,
-} from "../../traceability/traceability-tree-data-provider";
+import { ConnectionIndicator } from "../../traceability/traceability-tree-projection";
+import { TraceabilityViewProvider } from "../../traceability/traceability-view-provider";
 import { TraceabilityModel, type TraceabilitySnapshot } from "../../traceability/traceability-model";
 import { TraceabilityAdapterRegistry } from "../../traceability/adapter-registry";
 import {
@@ -225,10 +223,12 @@ function build(
   discovery: TestDiscoveryManager;
   memento: vscode.Memento;
   registry: TraceabilityAdapterRegistry;
+  view: TraceabilityViewProvider;
 } {
   const registry = registryOf(adapters ?? { xray: fakeAdapter("xray", connection.connection) });
   const store = new RunResultStore();
   const discovery = TestDiscoveryManager.create(logger, config);
+  const view = new TraceabilityViewProvider(vscode.Uri.file("/dist"), logger);
   const subsystem = new TraceabilitySubsystem(
     config,
     registry,
@@ -239,7 +239,8 @@ function build(
     logger,
     memento,
     hasTraceabilityTags,
-    closeSetupSurface
+    closeSetupSurface,
+    view
   );
   subsystem.rebuildDebounceMs = 0;
   const created: FakeWatcher[] = [];
@@ -265,7 +266,7 @@ function build(
     created.push(watcher);
     return watcher as unknown as vscode.FileSystemWatcher;
   });
-  return { subsystem, created, connection, store, discovery, memento, registry };
+  return { subsystem, created, connection, store, discovery, memento, registry, view };
 }
 
 function evidenceConfig(
@@ -549,6 +550,17 @@ describe("TraceabilitySubsystem grouping mode", () => {
     vi.restoreAllMocks();
   });
 
+  it("does not persist a grouping toggle while the panel is inactive", async () => {
+    const memento = fakeMemento();
+    const { config } = makeConfig();
+    const { subsystem } = build(config, undefined, Logger.create(), makeConnection(), memento);
+
+    subsystem.toggleGrouping();
+
+    expect(memento.get(GROUPING_KEY)).toBeUndefined();
+    await subsystem.shutdown();
+  });
+
   it("persists a toggle to workspaceState and restores it on a rebuilt provider", async () => {
     const memento = fakeMemento();
     const { config, set, fireChange } = makeConfig();
@@ -600,29 +612,26 @@ describe("TraceabilitySubsystem lifecycle", () => {
     vi.restoreAllMocks();
   });
 
-  it("creates the tree view once and is idempotent across repeated applyCurrent", async () => {
+  it("attaches the webview projection once and is idempotent across repeated applyCurrent", async () => {
     const { config } = makeConfig();
-    const { subsystem } = build(config);
+    const { subsystem, view } = build(config);
+    const attach = vi.spyOn(view, "attach");
 
     await subsystem.applyCurrent();
     await subsystem.applyCurrent();
 
     expect(subsystem.traceabilityPanelActive).toBe(true);
-    expect(treeViews.__treeViewCounters.createCount).toBe(1);
+    expect(attach).toHaveBeenCalledOnce();
     await subsystem.shutdown();
   });
 
-  it("enables native multi-selection on the traceability tree", async () => {
-    const createTreeView = vi.spyOn(vscode.window, "createTreeView");
+  it("owns selection in the webview rather than creating a native tree", async () => {
     const { config } = makeConfig();
     const { subsystem } = build(config);
 
     await subsystem.applyCurrent();
 
-    expect(createTreeView).toHaveBeenCalledWith(
-      "playwrightBddRunner.traceability",
-      expect.objectContaining({ canSelectMany: true })
-    );
+    expect(treeViews.__treeViewCounters.createCount).toBe(0);
     await subsystem.shutdown();
   });
 
@@ -707,7 +716,6 @@ describe("TraceabilitySubsystem lifecycle", () => {
     fireChange();
     await subsystem.applyCurrent();
     expect(subsystem.traceabilityPanelActive).toBe(false);
-    expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
     for (const w of firstWatchers) {
       expect(w.dispose).toHaveBeenCalled();
     }
@@ -716,7 +724,6 @@ describe("TraceabilitySubsystem lifecycle", () => {
     fireChange();
     await subsystem.applyCurrent();
     expect(subsystem.traceabilityPanelActive).toBe(true);
-    expect(treeViews.__treeViewCounters.createCount).toBe(2);
     await subsystem.shutdown();
   });
 
@@ -902,8 +909,6 @@ describe("TraceabilitySubsystem lifecycle", () => {
     await subsystem.applyCurrent();
 
     expect(adapter.dispose).toHaveBeenCalledOnce();
-    expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
-    expect(treeViews.__treeViewCounters.createCount).toBe(2);
     await subsystem.shutdown();
   });
 });
@@ -938,14 +943,11 @@ describe("TraceabilitySubsystem provider selection", () => {
     const { subsystem } = build(config, { xray: fakeAdapter("xray"), azure: fakeAdapter("azure") });
 
     await subsystem.applyCurrent();
-    expect(treeViews.__treeViewCounters.createCount).toBe(1);
 
     set({ traceabilityProvider: "azure" });
     fireChange();
     await subsystem.applyCurrent();
 
-    expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
-    expect(treeViews.__treeViewCounters.createCount).toBe(2);
     expect(subsystem.traceabilityPanelActive).toBe(true);
     await subsystem.shutdown();
   });
@@ -1126,7 +1128,7 @@ describe("TraceabilitySubsystem connection indicator", () => {
   });
 
   function spyIndicator(): ReturnType<typeof vi.spyOn> {
-    return vi.spyOn(TraceabilityTreeDataProvider.prototype, "setConnectionIndicator");
+    return vi.spyOn(TraceabilityViewProvider.prototype, "setConnectionIndicator");
   }
 
   it("commits a checking row and then the ok indicator on a successful verify", async () => {
@@ -1336,7 +1338,7 @@ describe("TraceabilitySubsystem sync staleness row", () => {
   });
 
   it("carries the metadata snapshot's staleness on the connection row after verify", async () => {
-    const setIndicator = vi.spyOn(TraceabilityTreeDataProvider.prototype, "setConnectionIndicator");
+    const setIndicator = vi.spyOn(TraceabilityViewProvider.prototype, "setConnectionIndicator");
     const { config } = makeConfig();
     const syncedAt = Date.now() - 60_000;
     const adapter: TraceabilityAdapter = {

@@ -81,7 +81,8 @@ export function memento(): vscode.Memento {
 }
 
 export function captureHandlers(
-  context: PlaywrightBddExtensionContext
+  context: PlaywrightBddExtensionContext,
+  configure?: (manager: CommandManager) => void
 ): Map<string, (...args: unknown[]) => Promise<void>> {
   const handlers = new Map<string, (...args: unknown[]) => Promise<void>>();
   const commandsApi = vscode.commands as unknown as { registerCommand: unknown };
@@ -95,6 +96,7 @@ export function captureHandlers(
   };
   try {
     const manager = CommandManager.create(context);
+    configure?.(manager);
     manager.registerCommands({
       subscriptions: [],
       extensionUri: vscode.Uri.file("/extension"),

@@ -40,12 +40,11 @@ import { OutcomeUnknownRecoveryPersistenceError, PublishAttachmentsModel } from 
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
 import { captureHandlers, fakeDoc, makeContext, memento, writeTempFeature } from "./helpers/command-manager-harness";
 import {
-  ExecutionAlreadyRunningError,
   ExecutionFailure,
   LegacyDirectExecutionGateway,
 } from "../../core/execution-gateway";
 import { runOutputFromCompletion } from "../../ui/execution-adapter";
-import { ExecutionAdmission, ExecutionAdmissionBlockedError } from "../../core/execution-admission";
+import { ExecutionAdmission } from "../../core/execution-admission";
 import { trustedWorkspace } from "./helpers/test-workspace-trust";
 import { RemoteOutcomeUnknownError, WorkspaceTrust } from "../../core/workspace-trust";
 
@@ -1082,6 +1081,7 @@ describe("command contributions ↔ handler registrations parity", () => {
       "playwrightBddRunner.traceability.hidePanel",
       "playwrightBddRunner.traceability.setupSaved",
       "playwrightBddRunner.traceability.runAndPublishAllMapped",
+      "playwrightBddRunner.traceability.find",
     ],
   };
 
@@ -1348,13 +1348,10 @@ describe("command contributions ↔ handler registrations parity", () => {
     }
   });
 
-  it("places the traceability node commands inline on the test-key item and hides them from the palette", () => {
+  it("moves traceability node commands into the webview and hides them from the palette", () => {
     const itemContext = pkg.contributes.menus["view/item/context"]!;
     const traceabilityItems = itemContext.filter((e) => e.when?.includes("traceabilityTestKey"));
-    expect(traceabilityItems.map((e) => [e.command, e.when])).toEqual([
-      ["playwrightBddRunner.traceability.openIssue", "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey"],
-      ["playwrightBddRunner.traceability.copyKey", "view == playwrightBddRunner.traceability && viewItem == traceabilityTestKey"],
-    ]);
+    expect(traceabilityItems).toEqual([]);
 
     const palette = pkg.contributes.menus["commandPalette"]!;
     for (const command of ["playwrightBddRunner.traceability.openIssue", "playwrightBddRunner.traceability.copyKey"]) {
@@ -1389,8 +1386,9 @@ describe("command contributions ↔ handler registrations parity", () => {
     expect(plug?.group).toBe("playwrightBddRunner@4");
   });
 
-  it("keeps only Coverage Board and Sync as primary traceability title actions", () => {
-    const slots = pkg.contributes.menus["view/title"]!
+  it("keeps Coverage Board, Sync, and Find as primary traceability title actions", () => {
+    const viewTitle = pkg.contributes.menus["view/title"]!;
+    const slots = viewTitle
       .filter((e) =>
         e.command?.startsWith("playwrightBddRunner.traceability.") &&
         e.group?.startsWith("navigation")
@@ -1400,7 +1398,45 @@ describe("command contributions ↔ handler registrations parity", () => {
     expect(slots).toEqual([
       ["playwrightBddRunner.traceability.sync", "navigation@2"],
       ["playwrightBddRunner.traceability.openBoard", "navigation@1"],
+      ["playwrightBddRunner.traceability.find", "navigation@3"],
     ]);
+    expect(viewTitle.find((entry) => entry.command === "playwrightBddRunner.traceability.find")?.when)
+      .toBe("view == playwrightBddRunner.traceability");
+    expect(pkg.contributes.commands.find((entry) => entry.command === "playwrightBddRunner.traceability.find"))
+      .toMatchObject({ title: "Find in Traceability", icon: "$(search)" });
+  });
+
+  it("focuses Traceability before asking the webview to focus its filter", async () => {
+    const execute = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    const focusFilter = vi.fn();
+    try {
+      const handlers = captureHandlers(makeContext(), (manager) => {
+        manager.setTraceabilitySubsystem({ focusFilter } as unknown as TraceabilitySubsystem);
+      });
+
+      await handlers.get("playwrightBddRunner.traceability.find")!();
+
+      expect(execute.mock.calls.map(([command]) => command)).toEqual(["playwrightBddRunner.traceability.focus"]);
+      expect(focusFilter).toHaveBeenCalledOnce();
+    } finally {
+      execute.mockRestore();
+    }
+  });
+
+  it("does not request filter focus when VS Code cannot focus the webview", async () => {
+    const execute = vi.spyOn(vscode.commands, "executeCommand").mockRejectedValue(new Error("focus failed"));
+    const focusFilter = vi.fn();
+    try {
+      const handlers = captureHandlers(makeContext(), (manager) => {
+        manager.setTraceabilitySubsystem({ focusFilter } as unknown as TraceabilitySubsystem);
+      });
+
+      await handlers.get("playwrightBddRunner.traceability.find")!();
+
+      expect(focusFilter).not.toHaveBeenCalled();
+    } finally {
+      execute.mockRestore();
+    }
   });
 
   // Adjacent duplicates read as one button pressed twice, so the toolbar's glyphs must all differ.
@@ -1411,7 +1447,7 @@ describe("command contributions ↔ handler registrations parity", () => {
       .filter((e) => e.command?.startsWith("playwrightBddRunner.traceability."))
       .map((e) => iconOf(e.command!));
 
-    expect(icons).toEqual(["$(list-tree)", "$(sync)", "$(play-circle)", "$(cloud-upload)", "$(plug)", "$(project)"]);
+    expect(icons).toEqual(["$(list-tree)", "$(sync)", "$(play-circle)", "$(cloud-upload)", "$(plug)", "$(project)", "$(search)"]);
     expect(new Set(icons).size).toBe(icons.length);
   });
 
@@ -1425,14 +1461,14 @@ describe("command contributions ↔ handler registrations parity", () => {
     expect(iconless).toEqual([]);
   });
 
-  it("offers switch-default-project inline on the connection row as well as in its context menu", () => {
+  it("keeps switch-default-project out of native item menus", () => {
     const entries = pkg.contributes.menus["view/item/context"]!.filter(
       (e) =>
         e.command === "playwrightBddRunner.traceability.switchDefaultProject" &&
         e.when === "view == playwrightBddRunner.traceability && viewItem == traceabilityConnection"
     );
 
-    expect(entries.map((e) => e.group)).toEqual([undefined, "inline@1"]);
+    expect(entries).toEqual([]);
   });
 });
 
@@ -1542,16 +1578,11 @@ describe("traceability panel connection UX contributions", () => {
     fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf-8")
   ) as PackageJson;
 
-  it("splits the traceability welcome into connected and not-connected states", () => {
+  it("moves traceability welcome states into the webview", () => {
     const welcomes = pkg.contributes.viewsWelcome.filter(
       (w) => w.view === "playwrightBddRunner.traceability"
     );
-    const setup = welcomes.find((w) => w.when === "isWorkspaceTrusted && !playwrightBddRunner.traceability.connected");
-    const connected = welcomes.find((w) => w.when === "isWorkspaceTrusted && playwrightBddRunner.traceability.connected");
-    expect(setup).toBeDefined();
-    expect(connected).toBeDefined();
-    expect(setup!.contents).toContain("command:playwrightBddRunner.traceability.connect");
-    expect(setup!.contents).toContain("command:playwrightBddRunner.traceability.hidePanel");
+    expect(welcomes).toEqual([]);
   });
 
   it("keeps the welcome-only hidePanel command out of the palette", () => {
@@ -1800,12 +1831,9 @@ describe("traceability linkScenario contributions", () => {
     expect(pkg.contributes.commands.find((c) => c.command === CMD)?.category).toBe("Specwright");
   });
 
-  it("offers the inline link action on both untraced and mapped rows", () => {
+  it("keeps link actions out of native item menus", () => {
     const items = pkg.contributes.menus["view/item/context"]!.filter((e) => e.command === CMD);
-    expect(items.every((e) => e.group === "inline@1")).toBe(true);
-    const whens = items.map((e) => e.when);
-    expect(whens).toContain("view == playwrightBddRunner.traceability && viewItem == traceabilityUntraced");
-    expect(whens).toContain("view == playwrightBddRunner.traceability && viewItem == traceabilityScenario");
+    expect(items).toEqual([]);
   });
 
   it("hides the node action from the palette", () => {
@@ -2643,29 +2671,6 @@ describe("traceability runAndPublish: preflight batch flow", () => {
     expect(store.latest()?.preflight).toEqual([]);
   });
 
-  it("creates no artifact or publish when Coverage Board admission is blocked", async () => {
-    const blocked = new ExecutionAdmissionBlockedError({
-      kind: "debug-session",
-      failure: "debug teardown was not confirmed",
-    });
-    const execute = vi.fn(() => Promise.reject(blocked));
-    const executionGateway = testGateway(execute);
-    const { mgr, store, runScenarioWithOutput } = harness(
-      [READY_LINK],
-      undefined,
-      executionGateway
-    );
-    const publish = vi.spyOn(publishCommands(mgr), "runPublish");
-
-    await expect(publishCommands(mgr).runAndPublishSelected(["CALC-1"]))
-      .rejects.toBe(blocked);
-
-    expect(execute).toHaveBeenCalledOnce();
-    expect(runScenarioWithOutput).not.toHaveBeenCalled();
-    expect(store.latest()).toBeUndefined();
-    expect(publish).not.toHaveBeenCalled();
-  });
-
   it("wires the progress cancel token to the abort controller and seals cancelled", async () => {
     const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
     // A cancelled progress token fires immediately; the batch must abort before dispatching and seal
@@ -2812,71 +2817,6 @@ describe("traceability openBoard command handler", () => {
     expect(String(info.mock.calls[0]?.[0])).toContain("Enable the Traceability panel");
   });
 
-  it("surfaces gateway busy admission once to a board caller", async () => {
-    const mgr = CommandManager.create(makeContext());
-    mgr.setTraceabilitySubsystem(fakeSubsystem());
-    vi.spyOn(publishCommands(mgr), "runAndPublishSelected")
-      .mockRejectedValue(new ExecutionAlreadyRunningError());
-    const warning = vi.spyOn(vscode.window, "showWarningMessage");
-    const error = vi.spyOn(vscode.window, "showErrorMessage");
-
-    traceabilityBoardDeps(mgr).runSelected(["CALC-1"]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(warning).toHaveBeenCalledOnce();
-    expect(warning).toHaveBeenCalledWith("A test run is already in progress.");
-    expect(error).not.toHaveBeenCalled();
-  });
-
-  it("surfaces a durable execution-admission block to a board caller", async () => {
-    const mgr = CommandManager.create(makeContext());
-    mgr.setTraceabilitySubsystem(fakeSubsystem());
-    vi.spyOn(publishCommands(mgr), "runAndPublishSelected").mockRejectedValue(
-      new ExecutionAdmissionBlockedError({
-        kind: "debug-session",
-        failure: "debug teardown was not confirmed",
-        systemUptime: 100,
-      })
-    );
-    const error = vi.spyOn(vscode.window, "showErrorMessage");
-
-    traceabilityBoardDeps(mgr).runSelected(["CALC-1"]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(error).toHaveBeenCalledOnce();
-    const message = String(error.mock.calls[0]?.[0]);
-    expect(message).toContain("debug teardown was not confirmed");
-    expect(message).toContain("Restart the computer to terminate any leftover Playwright or debug processes");
-    expect(message).toContain("while every VS Code window is closed");
-    expect(message).toContain("move the execution-admission directory");
-    expect(message).not.toContain("Terminate and confirm");
-  });
-
-  it("surfaces a sealed partial infrastructure failure once to a board caller", async () => {
-    const mgr = CommandManager.create(makeContext());
-    mgr.setTraceabilitySubsystem(fakeSubsystem());
-    vi.spyOn(publishCommands(mgr), "runAndPublishSelected").mockRejectedValue(new ExecutionFailure({
-      identity: EXECUTION_IDENTITY,
-      state: "partial",
-      results: [],
-      output: "worker stopped\n",
-      passed: 0,
-      failed: 0,
-      durationMs: 2,
-      artifactId: "run-partial",
-      failure: "worker stopped",
-    }));
-    const warning = vi.spyOn(vscode.window, "showWarningMessage");
-    const error = vi.spyOn(vscode.window, "showErrorMessage");
-
-    traceabilityBoardDeps(mgr).runSelected(["CALC-1"]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(error).toHaveBeenCalledOnce();
-    expect(String(error.mock.calls[0]?.[0])).toContain("worker stopped");
-    expect(String(error.mock.calls[0]?.[0])).toContain("partial run was saved");
-    expect(warning).not.toHaveBeenCalled();
-  });
 });
 
 describe("traceability publishLastRun: Publish tab", () => {

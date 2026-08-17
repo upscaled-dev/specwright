@@ -10,7 +10,8 @@
   "include": [
     "src/test/unit/board-panel.test.ts",
     "src/test/unit/webview-client.test.ts",
-    "src/test/unit/xray-setup-client.test.ts"
+    "src/test/unit/xray-setup-client.test.ts",
+    "src/test/unit/traceability-view-client.test.ts"
   ],
   "exclude": []
 }

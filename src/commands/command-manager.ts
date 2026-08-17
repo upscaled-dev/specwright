@@ -64,6 +64,7 @@ const ORGANIZATION_CHOICES = [
 ] as const;
 
 const CATEGORY = "Specwright";
+const TRACEABILITY_VIEW_ID = "playwrightBddRunner.traceability";
 
 export const PRIVILEGED_COMMANDS: ReadonlySet<string> = new Set([
   "playwrightBddRunner.diagnoseWorkspace",
@@ -237,6 +238,10 @@ export class CommandManager {
         // which must never be read as a sync request. The palette and the view title always announce.
         { command: "playwrightBddRunner.traceability.sync", title: "Sync Traceability", category: CATEGORY, handler: () => this.traceabilityCommands.syncTraceability() },
         { command: "playwrightBddRunner.traceability.openBoard", title: "Open Coverage Board", category: CATEGORY, handler: () => this.traceabilityCommands.openBoard() },
+        { command: "playwrightBddRunner.traceability.find", title: "Find in Traceability", category: CATEGORY, handler: async () => {
+          await vscode.commands.executeCommand(`${TRACEABILITY_VIEW_ID}.focus`);
+          this.traceabilitySubsystem?.focusFilter();
+        } },
         { command: "playwrightBddRunner.traceability.manageConnection", title: "Manage Xray Connection", category: CATEGORY, handler: () => this.traceabilityCommands.manageConnection() },
         { command: "playwrightBddRunner.traceability.showPanel", title: "Enable Xray Traceability", category: CATEGORY, handler: () => this.onboardingCommands.enableTraceability() },
         { command: "playwrightBddRunner.traceability.connect", title: "Connect to Xray", category: CATEGORY, handler: async () => {

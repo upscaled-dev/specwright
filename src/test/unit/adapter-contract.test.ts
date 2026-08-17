@@ -370,8 +370,8 @@ describe("TraceabilitySubsystem runtime provider replacement", () => {
     await subsystem.applyCurrent();
     await settle();
     expect(created[0]!.dispose).toHaveBeenCalledTimes(1);
-    expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
-    expect(treeViews.__treeViewCounters.createCount).toBe(2);
+    expect(treeViews.__treeViewCounters.disposeCount).toBe(0);
+    expect(treeViews.__treeViewCounters.createCount).toBe(0);
 
     // Swap back: a fresh in-memory adapter with no state bleed from the disposed one.
     setProvider("in-memory");

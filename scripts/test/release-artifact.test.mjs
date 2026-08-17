@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, posix, resolve } from "node:path";
@@ -7,6 +8,7 @@ import { load } from "js-yaml";
 import test from "node:test";
 import {
   artifactSet,
+  assertRequiredSbomComponents,
   assertReleaseSource,
   assertPackageContents,
   listedPackageFiles,
@@ -24,6 +26,25 @@ const JOB_PERMISSION_ALLOWLIST = new Map([["ci.yml:promote", [
   "id-token: write",
   "attestations: write",
 ]]]);
+let generatedReleaseSbom;
+
+function releaseSbom() {
+  if (generatedReleaseSbom) {
+    return generatedReleaseSbom;
+  }
+  const args = ["sbom", "--package-lock-only", "--sbom-format", "cyclonedx", "--omit", "dev", "--json"];
+  const plan = spawnPlan("npm", args);
+  generatedReleaseSbom = JSON.parse(execFileSync(plan.file, plan.args, {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    shell: plan.shell,
+  }));
+  return generatedReleaseSbom;
+}
+
+function writeReleaseSbom(path) {
+  writeFileSync(path, `${JSON.stringify(releaseSbom())}\n`);
+}
 
 function yamlJob(workflow, name) {
   const marker = new RegExp(`^  ["']?${escapeRegex(name)}["']?:\\r?$`, "mu");
@@ -205,6 +226,33 @@ test("assertPackageContents reports missing and unexpected files", () => {
   );
 });
 
+test("production SBOM includes bundled Codicons", () => {
+  const sbom = releaseSbom();
+  const packageJson = JSON.parse(readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"));
+  assert.equal(packageJson.dependencies["@vscode/codicons"], "^0.0.46-24");
+  assertRequiredSbomComponents(sbom);
+  assert.ok(sbom.components.some((component) => component.name === "@vscode/codicons"));
+});
+
+test("packaged Codicons retain their license and inventory records", () => {
+  const codiconLicense = readFileSync(resolve(REPO_ROOT, "node_modules", "@vscode", "codicons", "LICENSE-CODE"), "utf8")
+    .replaceAll("\r\n", "\n")
+    .trim()
+    .replace(/^ {4}/gmu, "");
+  const thirdParty = readFileSync(resolve(REPO_ROOT, "THIRD_PARTY_LICENSES.md"), "utf8");
+  const projectLicense = readFileSync(resolve(REPO_ROOT, "LICENSE"), "utf8");
+  const development = readFileSync(resolve(REPO_ROOT, "docs", "development.md"), "utf8");
+  const inventory = JSON.parse(readFileSync(resolve(REPO_ROOT, "scripts", "package-contents.json"), "utf8"));
+
+  assert.ok(thirdParty.includes(codiconLicense));
+  assert.match(thirdParty, /creativecommons\.org\/licenses\/by\/4\.0\/legalcode/u);
+  assert.match(projectLicense, /license notices and details for bundled third-party works\./u);
+  assert.match(development, new RegExp(`currently lists ${inventory.length} files`));
+  for (const file of ["dist/codicon.css", "dist/codicon.ttf", "THIRD_PARTY_LICENSES.md", "LICENSE"]) {
+    assert.ok(inventory.includes(file), `package inventory is missing ${file}`);
+  }
+});
+
 test("artifactSet records one extensible component with the tested digest", () => {
   const manifest = artifactSet({
     packageJson: {
@@ -247,7 +295,7 @@ test("verifyReleaseArtifact rejects a changed artifact", () => {
     writeFileSync(artifact, "tested");
     const digest = sha256(artifact);
     const sbom = resolve(directory, "specwright.sbom.cdx.json");
-    writeFileSync(sbom, "sbom");
+    writeReleaseSbom(sbom);
     writeFileSync(`${artifact}.sha256`, `${digest}  specwright.vsix\n`);
     writeFileSync(resolve(directory, "specwright.artifact-set.json"), JSON.stringify({
       schemaVersion: 2,
@@ -277,7 +325,7 @@ test("verifyReleaseArtifact rejects a manifest that disagrees with the checksum 
   try {
     writeFileSync(artifact, "tested");
     const sbom = resolve(directory, "specwright.sbom.cdx.json");
-    writeFileSync(sbom, "sbom");
+    writeReleaseSbom(sbom);
     writeFileSync(`${artifact}.sha256`, `${sha256(artifact)}  specwright.vsix\n`);
     writeFileSync(resolve(directory, "specwright.artifact-set.json"), JSON.stringify({
       schemaVersion: 2,
@@ -293,13 +341,46 @@ test("verifyReleaseArtifact rejects a manifest that disagrees with the checksum 
   }
 });
 
+test("verifyReleaseArtifact rejects an SBOM without bundled Codicons", () => {
+  const directory = mkdtempSync(resolve(tmpdir(), "specwright-artifact-test-"));
+  const artifact = resolve(directory, "specwright.vsix");
+  const sbom = resolve(directory, "specwright.sbom.cdx.json");
+  try {
+    writeFileSync(artifact, "tested");
+    const digest = sha256(artifact);
+    const withoutCodicons = {
+      ...releaseSbom(),
+      components: releaseSbom().components.filter((component) => component.name !== "@vscode/codicons"),
+    };
+    writeFileSync(sbom, `${JSON.stringify(withoutCodicons)}\n`);
+    writeFileSync(`${artifact}.sha256`, `${digest}  specwright.vsix\n`);
+    writeFileSync(resolve(directory, "specwright.artifact-set.json"), JSON.stringify({
+      schemaVersion: 2,
+      source: { commit: "abc123" },
+      components: [{
+        kind: "vscode-extension",
+        version: "1.2.3",
+        artifact: { file: "specwright.vsix", sha256: digest },
+        sbom: { file: "specwright.sbom.cdx.json", sha256: sha256(sbom) },
+      }],
+    }));
+
+    assert.throws(
+      () => verifyReleaseArtifact(artifact, { commit: "abc123", version: "1.2.3" }),
+      /Release SBOM missing required components: @vscode\/codicons/u
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("verifyReleaseArtifact binds the candidate commit, version, and SBOM", () => {
   const directory = mkdtempSync(resolve(tmpdir(), "specwright-artifact-test-"));
   const artifact = resolve(directory, "specwright.vsix");
   const sbom = resolve(directory, "specwright.sbom.cdx.json");
   try {
     writeFileSync(artifact, "tested");
-    writeFileSync(sbom, "sbom");
+    writeReleaseSbom(sbom);
     const digest = sha256(artifact);
     writeFileSync(`${artifact}.sha256`, `${digest}  specwright.vsix\n`);
     const manifestPath = resolve(directory, "specwright.artifact-set.json");

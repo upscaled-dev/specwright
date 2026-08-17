@@ -30,5 +30,5 @@
     "resolveJsonModule": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "out", "dist", "src/test/integration/**", "src/test/unit/board-panel.test.ts", "src/test/unit/webview-client.test.ts", "src/test/unit/xray-setup-client.test.ts", "src/webview/client/**", "src/webview/coverage-board.ts", "src/webview/xray-setup.ts"]
+  "exclude": ["node_modules", "out", "dist", "src/test/integration/**", "src/test/unit/board-panel.test.ts", "src/test/unit/webview-client.test.ts", "src/test/unit/xray-setup-client.test.ts", "src/webview/client/**", "src/webview/coverage-board.ts", "src/webview/xray-setup.ts", "src/webview/traceability-view.ts"]
 }

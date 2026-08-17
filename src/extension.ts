@@ -48,6 +48,11 @@ import { LegacyArtifactGateway } from "./ui/legacy-artifact-gateway";
 import { SelectedArtifactCatalog } from "./ui/execution-artifacts";
 import { XrayAdapter } from "./xray/xray-adapter";
 import { XraySetupPanel } from "./xray/xray-setup-panel";
+import {
+  TRACEABILITY_VIEW_ID,
+  TraceabilityViewProvider,
+  type TraceabilityClientSignal,
+} from "./traceability/traceability-view-provider";
 
 let testProvider: PlaywrightBddTestProvider | undefined;
 let commandManager: CommandManager | undefined;
@@ -56,6 +61,7 @@ let isActivated = false;
 let testController: vscode.TestController | undefined;
 let providerRegistry: ProviderRegistry | undefined;
 let traceabilitySubsystem: TraceabilitySubsystem | undefined;
+let traceabilityViewProvider: TraceabilityViewProvider | undefined;
 let activationLogger: Logger | undefined;
 let workspaceTrust: WorkspaceTrust | undefined;
 let activeExecutionGateway: ExecutionGateway | undefined;
@@ -105,6 +111,15 @@ export interface ExtensionApi {
       }
     | undefined;
   /** @internal */
+  readonly traceabilityView:
+    | {
+        readonly clientReady: boolean;
+        readonly acknowledgedFocusCount: number;
+        readonly currentProjection: { readonly state: "ready" | "disconnected" | "empty" | "untrusted"; readonly total: number; readonly labels: readonly string[] };
+        readonly onDidReceiveClientSignal: vscode.Event<TraceabilityClientSignal>;
+      }
+    | undefined;
+  /** @internal */
   seedParallelProfilePrompted(value: boolean): Promise<void>;
 }
 
@@ -112,6 +127,7 @@ function buildApi(
   provider: PlaywrightBddTestProvider | undefined,
   registry: ProviderRegistry | undefined,
   traceability: TraceabilitySubsystem | undefined,
+  traceabilityView: TraceabilityViewProvider | undefined,
   workspaceState: vscode.Memento | undefined
 ): ExtensionApi {
   const seedParallelProfilePrompted = async (value: boolean): Promise<void> => {
@@ -144,11 +160,20 @@ function buildApi(
         applyCurrent: () => traceability.applyCurrent(),
       }
     : undefined;
+  const traceabilityViewApi = traceabilityView
+    ? {
+        get clientReady() { return traceabilityView.clientReady; },
+        get acknowledgedFocusCount() { return traceabilityView.acknowledgedFocusCount; },
+        get currentProjection() { return traceabilityView.currentProjection; },
+        onDidReceiveClientSignal: traceabilityView.onDidReceiveClientSignal,
+      }
+    : undefined;
   if (!provider) {
     return {
       testProvider: undefined,
       providerRegistry: registryApi,
       traceabilitySubsystem: traceabilityApi,
+      traceabilityView: traceabilityViewApi,
       seedParallelProfilePrompted,
     };
   }
@@ -163,6 +188,7 @@ function buildApi(
     },
     providerRegistry: registryApi,
     traceabilitySubsystem: traceabilityApi,
+    traceabilityView: traceabilityViewApi,
     seedParallelProfilePrompted,
   };
 }
@@ -175,7 +201,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   if (isActivated) {
     activationLogger?.warn("Extension already activated, skipping duplicate activation");
-    return buildApi(testProvider, providerRegistry, traceabilitySubsystem, context.workspaceState);
+    return buildApi(testProvider, providerRegistry, traceabilitySubsystem, traceabilityViewProvider, context.workspaceState);
   }
 
   const diagnostics = new SupportDiagnostics();
@@ -297,7 +323,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   traceabilityRegistry.register(xrayFactory);
   // Not in the public settings enum — resolved only from a hand-typed `traceability.provider`
   // value so the contract-test adapter can be driven in a dev window.
-  traceabilityRegistry.register(createInMemoryAdapterFactory());
+  traceabilityRegistry.register(createInMemoryAdapterFactory({
+    connected: context.extensionMode !== vscode.ExtensionMode.Production,
+  }));
+  traceabilityViewProvider = new TraceabilityViewProvider(
+    vscode.Uri.joinPath(context.extensionUri, "dist"),
+    logger
+  );
+  const traceabilityView = traceabilityViewProvider;
+  traceabilityView.setTrusted(vscode.workspace.isTrusted);
+  context.subscriptions.push(
+    traceabilityView,
+    vscode.window.registerWebviewViewProvider(TRACEABILITY_VIEW_ID, traceabilityView, {
+      webviewOptions: { retainContextWhenHidden: true },
+    })
+  );
   traceabilitySubsystem = new TraceabilitySubsystem(
     config,
     traceabilityRegistry,
@@ -308,7 +348,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     logger,
     context.workspaceState,
     () => providerRegistry?.hasTraceabilityTags() ?? Promise.resolve(false),
-    () => XraySetupPanel.close()
+    () => XraySetupPanel.close(),
+    traceabilityView
   );
   context.subscriptions.push(traceabilitySubsystem);
   // Thread scenario→testKey from the snapshot into every artifact capture (Test Explorer runs
@@ -383,6 +424,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       logger.warn("Traceability activation failed", { error: errMsg(error) });
     });
     context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      traceabilityView.setTrusted(true);
       providerRegistry?.applyCurrent();
       traceabilitySubsystem?.applyCurrent().catch((error) => {
         logger.warn("Traceability activation after granting workspace trust failed", {
@@ -412,7 +454,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     );
   }
 
-  return buildApi(testProvider, providerRegistry, traceabilitySubsystem, context.workspaceState);
+  return buildApi(testProvider, providerRegistry, traceabilitySubsystem, traceabilityViewProvider, context.workspaceState);
 }
 
 export async function deactivate(): Promise<void> {
@@ -465,6 +507,7 @@ export async function deactivate(): Promise<void> {
     testController = undefined;
     providerRegistry = undefined;
     traceabilitySubsystem = undefined;
+    traceabilityViewProvider = undefined;
     activationLogger = undefined;
     workspaceTrust = undefined;
     activeExecutionGateway = undefined;
