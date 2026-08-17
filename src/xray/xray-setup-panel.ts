@@ -1,72 +1,49 @@
 import * as vscode from "vscode";
-import { contentSecurityPolicy, createNonce, escapeHtml } from "../utils/webview";
-import { errMsg, scrubJwtLike } from "../utils/text";
+import { createNonce } from "../utils/webview";
+import { serverText } from "../utils/text";
+import {
+  parseSetupClientEnvelope,
+  XRAY_SETUP_MASK as MASK,
+  type SetupClientMessage,
+  type SetupHostMessage,
+} from "../webview/setup-protocol";
 import { normalizeSiteUrl } from "./xray-adapter";
-import { JiraProject } from "./jira-project-search";
-import { XrayConnectionOutcome, XrayProjectSummary } from "./xray-connection-test";
+import { XrayConnectionOutcome } from "./xray-connection-test";
 import { XrayCredentials, XrayJiraCredentials } from "./xray-credential-store";
+import { parseXrayRegion, type XrayRegion } from "./xray-region";
+import { XraySetupChannel } from "./xray-setup-channel";
+import { renderXraySetupDocument } from "./xray-setup-document";
+import { validateXraySetupInput, type XraySetupValidationErrors } from "./xray-setup-validation";
+import { VerificationRedaction } from "./xray-setup-verification";
 
 const VIEW_TYPE = "playwrightBddRunner.xraySetup";
-
-// A stored credential renders as this sentinel, never the real value. Submitting it back means
-// "keep what's stored" (resolved server-side against the mask-issued host); it is never itself
-// stored as a credential.
-const MASK = "••••••••";
 
 export interface XraySetupDelegate {
   workspaceAvailable(): boolean;
   currentSite(): string;
+  currentRegion(): XrayRegion;
   hasCredentials(site: string): Promise<boolean>;
   getCredentials(site: string): Promise<XrayCredentials | undefined>;
-  saveConnection(site: string, clientId: string, clientSecret: string): Promise<string>;
+  saveSetup(input: XraySetupSave): Promise<string>;
   // Optional Jira access (§6 reserved slots): both-or-neither, stored/cleared for the saved host.
   hasJiraCredentials(site: string): Promise<boolean>;
   getJiraCredentials(site: string): Promise<XrayJiraCredentials | undefined>;
-  saveJira(site: string, email: string, token: string): Promise<void>;
-  clearJira(site: string): Promise<void>;
+  didSave?(): Promise<void>;
   // Full handshake + shape/project probes (Save & Test).
-  probeConnection(site: string, signal?: AbortSignal): Promise<XrayConnectionOutcome>;
+  probeConnection(site: string, region: XrayRegion, signal?: AbortSignal): Promise<XrayConnectionOutcome>;
   // Cheap auth-only handshake; drives the connection dot on open and after a plain Save.
-  verifyConnection(site: string, signal?: AbortSignal): Promise<XrayConnectionOutcome>;
+  verifyConnection(site: string, region: XrayRegion, signal?: AbortSignal): Promise<XrayConnectionOutcome>;
 }
 
-export interface XraySetupValidationErrors {
-  site?: string | undefined;
-  clientId?: string | undefined;
-  clientSecret?: string | undefined;
-  jiraEmail?: string | undefined;
-  jiraToken?: string | undefined;
+export interface XraySetupSave {
+  readonly site: string;
+  readonly region: XrayRegion;
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly jira: XrayJiraCredentials | undefined;
 }
 
-type ConnState = "connected" | "disconnected" | "checking";
-
-// The dot means VERIFIED, not credentials-stored: only `conn-state` moves it, and only a probe that
-// passed every stage sets `connected`. `test-result` drives the status area separately, so a failure
-// carries its own detail alongside the label.
-type OutgoingMessage =
-  | { type: "validation"; errors: XraySetupValidationErrors }
-  | { type: "saved"; site: string; jira: boolean }
-  | { type: "test-result"; ok: boolean; message: string }
-  | { type: "error"; message: string }
-  | { type: "conn-state"; state: ConnState; label: string }
-  | {
-      type: "project-view";
-      hasJira: boolean;
-      jiraProjects: JiraProject[];
-      jiraTruncated: boolean;
-      probed: XrayProjectSummary[];
-      jiraError?: string | undefined;
-    };
-
-interface SaveMessage {
-  type: "save";
-  site: string;
-  clientId: string;
-  clientSecret: string;
-  jiraEmail: string;
-  jiraToken: string;
-  test: boolean;
-}
+type SaveMessage = Extract<SetupClientMessage, { type: "save" }>;
 
 interface ResolvedJira {
   email: string;
@@ -90,388 +67,173 @@ interface ResolvedCredentials {
   clientSecretError?: string | undefined;
 }
 
-// Extension-side, authoritative rules mirrored from the former connect() input boxes. Validate the
-// normalized host, not the raw string: "https://" trims non-empty but normalizes to "", which would
-// store secrets under a degenerate key no command can ever address again.
-export function validateXraySetupInput(
-  site: string,
-  clientId: string,
-  clientSecret: string
-): XraySetupValidationErrors | undefined {
-  const errors: XraySetupValidationErrors = {};
-  const normalized = normalizeSiteUrl(site);
-  if (normalized === "") {
-    errors.site = "Enter a host like acme.atlassian.net";
-  } else {
-    try {
-      if (new URL(`https://${normalized}`).hostname !== normalized) {
-        errors.site = "Enter a bare host (no path or port), like acme.atlassian.net";
-      }
-    } catch {
-      errors.site = "Not a valid host";
-    }
-  }
-  if (clientId.trim() === "") {
-    errors.clientId = "Client id is required";
-  }
-  if (clientSecret.trim() === "") {
-    errors.clientSecret = "Client secret is required";
-  }
-  return Object.keys(errors).length > 0 ? errors : undefined;
-}
-
-function connectionLabel(outcome: XrayConnectionOutcome): string {
-  if (outcome.ok) {
-    return `Connected to ${outcome.site}`;
-  }
-  return outcome.stage === "graphql" ? "Authenticated, but Xray data calls failed" : "Not connected";
-}
-
-function renderHtml(site: string, hasCredentials: boolean, hasJira: boolean): string {
-  const nonce = createNonce();
-  const siteValue = escapeHtml(site);
-  const credentialValue = hasCredentials ? MASK : "";
-  const jiraValue = hasJira ? MASK : "";
-  // Always emit the hint so the retained panel can un-hide it after a first-time save without a
-  // re-render (a re-render would reload the page and race the posted `saved` message).
-  const credHint = `<p class="hint" id="cred-hint"${hasCredentials ? "" : " hidden"}>Credentials are stored for this site. The masked fields keep the stored credentials; type over a field to replace it.</p>`;
-  // Stored credentials render the neutral "checking" dot and kick off an auth-only verify; the
-  // green dot only appears once that handshake succeeds. No credentials → plain red "Not connected".
-  const dotClass = hasCredentials ? " checking" : "";
-  const statusLabel = hasCredentials ? "Checking connection…" : "Not connected";
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy(nonce)}">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Set up Xray</title>
-<style>
-  body {
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    color: var(--vscode-foreground);
-    padding: 1.25rem;
-    max-width: 34rem;
-  }
-  h1 { font-size: 1.3rem; font-weight: 600; margin: 0 0 0.75rem; }
-  p { line-height: 1.4; }
-  .hint { color: var(--vscode-descriptionForeground); }
-  .conn { display: flex; align-items: center; gap: 0.5rem; margin: 0.75rem 0; }
-  .conn-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--vscode-testing-iconFailed, #e51400);
-    flex: none;
-  }
-  .conn-dot.connected { background: var(--vscode-testing-iconPassed, #388a34); }
-  .conn-dot.checking { background: var(--vscode-descriptionForeground); }
-  label { display: block; margin-top: 1rem; font-weight: 600; }
-  input {
-    width: 100%;
-    box-sizing: border-box;
-    margin-top: 0.35rem;
-    padding: 0.4rem 0.5rem;
-    color: var(--vscode-input-foreground);
-    background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-input-border, transparent);
-    border-radius: 2px;
-  }
-  input::placeholder { color: var(--vscode-input-placeholderForeground); }
-  input:focus {
-    outline: 1px solid var(--vscode-focusBorder);
-    outline-offset: -1px;
-  }
-  .field-error {
-    color: var(--vscode-errorForeground);
-    font-size: 0.85em;
-    min-height: 1.1em;
-    margin-top: 0.25rem;
-  }
-  .actions { display: flex; gap: 0.6rem; margin-top: 1.5rem; }
-  button {
-    padding: 0.45rem 0.9rem;
-    border: none;
-    border-radius: 2px;
-    cursor: pointer;
-    font-family: inherit;
-  }
-  button.primary {
-    color: var(--vscode-button-foreground);
-    background: var(--vscode-button-background);
-  }
-  button.primary:hover { background: var(--vscode-button-hoverBackground); }
-  button.secondary {
-    color: var(--vscode-button-secondaryForeground);
-    background: var(--vscode-button-secondaryBackground);
-  }
-  button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
-  #status { margin-top: 1rem; min-height: 1.2em; color: var(--vscode-descriptionForeground); }
-  #status.error { color: var(--vscode-errorForeground); }
-  h2 { font-size: 1rem; font-weight: 600; margin: 1.75rem 0 0; }
-  #project-view:empty { display: none; }
-  #project-view { margin-top: 1.25rem; }
-  .pv-heading { font-weight: 600; margin-top: 1rem; }
-  .pv-note { color: var(--vscode-errorForeground); margin-top: 1rem; }
-  .pv-list { margin: 0.35rem 0 0; padding-left: 1.1rem; }
-  .pv-list li { line-height: 1.5; }
-</style>
-</head>
-<body>
-  <h1>Set up Xray</h1>
-  <p>Connect Specwright to your Jira/Xray Cloud site to map scenarios, view coverage, and publish run results.</p>
-  <div class="conn">
-    <span id="conn-dot" class="conn-dot${dotClass}"></span>
-    <span id="conn-label">${escapeHtml(statusLabel)}</span>
-  </div>
-  ${credHint}
-  <label for="site">Site host</label>
-  <input id="site" type="text" placeholder="acme.atlassian.net" value="${siteValue}" spellcheck="false" autocapitalize="off">
-  <div id="err-site" class="field-error"></div>
-
-  <label for="clientId">Client ID</label>
-  <input id="clientId" type="text" placeholder="client id" value="${credentialValue}" spellcheck="false" autocapitalize="off">
-  <div id="err-clientId" class="field-error"></div>
-
-  <label for="clientSecret">Client secret</label>
-  <input id="clientSecret" type="password" placeholder="client secret" value="${credentialValue}" spellcheck="false" autocapitalize="off">
-  <div id="err-clientSecret" class="field-error"></div>
-
-  <h2>Jira access (optional)</h2>
-  <p class="hint">Add a Jira email and API token to list the projects you can access and verify your tagged projects exist. Leave both blank to skip.</p>
-
-  <label for="jiraEmail">Jira email</label>
-  <input id="jiraEmail" type="text" placeholder="you@example.com" value="${jiraValue}" spellcheck="false" autocapitalize="off">
-  <div id="err-jiraEmail" class="field-error"></div>
-
-  <label for="jiraToken">Jira API token</label>
-  <input id="jiraToken" type="password" placeholder="Jira API token" value="${jiraValue}" spellcheck="false" autocapitalize="off">
-  <div id="err-jiraToken" class="field-error"></div>
-
-  <div class="actions">
-    <button id="save-test" class="primary" type="button">Save &amp; Test Connection</button>
-    <button id="save" class="secondary" type="button">Save</button>
-  </div>
-  <div id="status"></div>
-  <div id="project-view"></div>
-
-<script nonce="${nonce}">
-  const MASK = ${JSON.stringify(MASK)};
-  const vscodeApi = acquireVsCodeApi();
-  const siteInput = document.getElementById('site');
-  const idInput = document.getElementById('clientId');
-  const secretInput = document.getElementById('clientSecret');
-  const jiraEmailInput = document.getElementById('jiraEmail');
-  const jiraTokenInput = document.getElementById('jiraToken');
-  const statusEl = document.getElementById('status');
-  const projectView = document.getElementById('project-view');
-  const errSite = document.getElementById('err-site');
-  const errId = document.getElementById('err-clientId');
-  const errSecret = document.getElementById('err-clientSecret');
-  const errJiraEmail = document.getElementById('err-jiraEmail');
-  const errJiraToken = document.getElementById('err-jiraToken');
-  const credHint = document.getElementById('cred-hint');
-  const connDot = document.getElementById('conn-dot');
-  const connLabel = document.getElementById('conn-label');
-  const saveTestBtn = document.getElementById('save-test');
-  const saveBtn = document.getElementById('save');
-  let pendingTest = false;
-
-  function clearErrors() {
-    errSite.textContent = '';
-    errId.textContent = '';
-    errSecret.textContent = '';
-    errJiraEmail.textContent = '';
-    errJiraToken.textContent = '';
-  }
-
-  function setBusy(busy) {
-    saveTestBtn.disabled = busy;
-    saveBtn.disabled = busy;
-  }
-
-  function submit(test) {
-    clearErrors();
-    pendingTest = test;
-    setBusy(true);
-    statusEl.classList.remove('error');
-    statusEl.textContent = test ? 'Saving and testing…' : 'Saving…';
-    vscodeApi.postMessage({
-      type: 'save',
-      site: siteInput.value,
-      clientId: idInput.value,
-      clientSecret: secretInput.value,
-      jiraEmail: jiraEmailInput.value,
-      jiraToken: jiraTokenInput.value,
-      test: test,
-    });
-  }
-
-  function probedPhrase(s) {
-    if (s.existsOnSite === false) { return s.project + ': not found on this site'; }
-    if (s.existsOnSite === undefined && s.totalTests === 0) {
-      return s.project + ": 0 Xray tests; project may not exist, can't verify without Jira access";
-    }
-    return s.project + ': ' + s.totalTests + ' Xray tests';
-  }
-
-  function appendList(items, toText) {
-    const ul = document.createElement('ul');
-    ul.className = 'pv-list';
-    for (const item of items) {
-      const li = document.createElement('li');
-      li.textContent = toText(item);
-      ul.appendChild(li);
-    }
-    projectView.appendChild(ul);
-  }
-
-  function appendHeading(text) {
-    const el = document.createElement('div');
-    el.className = 'pv-heading';
-    el.textContent = text;
-    projectView.appendChild(el);
-  }
-
-  // Values come from Jira and are rendered with textContent only, never innerHTML, so a project
-  // name can never inject markup past the CSP.
-  function renderProjectView(msg) {
-    projectView.textContent = '';
-    if (msg.hasJira && msg.jiraError) {
-      const note = document.createElement('div');
-      note.className = 'pv-note';
-      note.textContent = 'Jira project list unavailable: ' + msg.jiraError;
-      projectView.appendChild(note);
-    } else if (msg.hasJira) {
-      appendHeading(msg.jiraTruncated
-        ? 'Accessible Jira projects (' + msg.jiraProjects.length + '+, list truncated)'
-        : 'Accessible Jira projects (' + msg.jiraProjects.length + ')');
-      appendList(msg.jiraProjects, function (p) { return p.key + ': ' + p.name; });
-    }
-    if (msg.probed.length > 0) {
-      appendHeading('Xray coverage for tagged projects');
-      appendList(msg.probed, probedPhrase);
-    }
-  }
-
-  saveTestBtn.addEventListener('click', function () { submit(true); });
-  saveBtn.addEventListener('click', function () { submit(false); });
-
-  function applyConnState(state, label) {
-    connDot.classList.remove('connected', 'checking');
-    if (state === 'connected') { connDot.classList.add('connected'); }
-    else if (state === 'checking') { connDot.classList.add('checking'); }
-    connLabel.textContent = label;
-  }
-
-  window.addEventListener('message', function (event) {
-    const msg = event.data;
-    if (msg.type === 'validation') {
-      setBusy(false);
-      statusEl.classList.remove('error');
-      statusEl.textContent = '';
-      errSite.textContent = msg.errors.site || '';
-      errId.textContent = msg.errors.clientId || '';
-      errSecret.textContent = msg.errors.clientSecret || '';
-      errJiraEmail.textContent = msg.errors.jiraEmail || '';
-      errJiraToken.textContent = msg.errors.jiraToken || '';
-    } else if (msg.type === 'saved') {
-      clearErrors();
-      credHint.hidden = false;
-      idInput.value = MASK;
-      secretInput.value = MASK;
-      jiraEmailInput.value = msg.jira ? MASK : '';
-      jiraTokenInput.value = msg.jira ? MASK : '';
-      siteInput.value = msg.site;
-      statusEl.classList.remove('error');
-      statusEl.textContent = pendingTest
-        ? 'Saved credentials for ' + msg.site + '. Testing connection…'
-        : 'Saved credentials for ' + msg.site + '. Checking connection…';
-    } else if (msg.type === 'project-view') {
-      renderProjectView(msg);
-    } else if (msg.type === 'conn-state') {
-      // A "checking" state is not terminal, so it must not re-enable the buttons mid-flight.
-      if (msg.state !== 'checking') { setBusy(false); }
-      applyConnState(msg.state, msg.label);
-    } else if (msg.type === 'test-result') {
-      statusEl.classList.toggle('error', !msg.ok);
-      statusEl.textContent = msg.message;
-    } else if (msg.type === 'error') {
-      setBusy(false);
-      statusEl.classList.add('error');
-      statusEl.textContent = msg.message;
-    }
-  });
-</script>
-</body>
-</html>`;
-}
-
 export class XraySetupPanel {
   private static current: XraySetupPanel | undefined;
+  private static closing: Promise<void> | undefined;
+  private static opening: Promise<void> | undefined;
 
   private readonly disposables: vscode.Disposable[] = [];
-  // The normalized host the current mask was rendered for. A submitted MASK only stands in for a
-  // stored value when the site is still this host; a host change forces fresh credentials.
+  private readonly session = createNonce();
+  // A submitted mask is valid only for the normalized host it was rendered for.
   private maskIssuedSite: string | undefined;
-  // Verifications are async and overlap (open-verify racing a save-verify; two quick saves). Each
-  // captures the epoch at start and only applies its result if still current, so a stale one is
-  // discarded. Mirrors the connection-epoch guard in TraceabilitySubsystem.
+  // A save invalidates the open verify; the guard owns its replacement through settlement.
   private verifyEpoch = 0;
   private verifyAbort: AbortController | undefined;
+  private readonly pendingVerifications = new Set<Promise<void>>();
+  private saveInFlight = false;
+  private saveTask: Promise<void> | undefined;
+  private channel: XraySetupChannel | undefined;
+  private shutdownPromise: Promise<void> | undefined;
   private disposed = false;
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
-    private readonly deps: XraySetupDelegate
+    private readonly deps: XraySetupDelegate,
+    private readonly assetRoot: vscode.Uri
   ) {
     this.disposables.push(
-      this.panel.onDidDispose(() => this.dispose()),
-      this.panel.webview.onDidReceiveMessage((message) => this.handleMessage(message as SaveMessage))
+      this.panel.onDidDispose(() => {
+        this.shutdown(false).catch(() => undefined);
+      }),
+      this.panel.webview.onDidReceiveMessage((message) => this.handleMessage(message))
     );
   }
 
-  public static async show(deps: XraySetupDelegate): Promise<void> {
+  public static close(): Promise<void> {
+    if (XraySetupPanel.current) {return XraySetupPanel.current.shutdown(true);}
+    if (XraySetupPanel.opening) {
+      return XraySetupPanel.opening.then(() => XraySetupPanel.close());
+    }
+    return XraySetupPanel.closing ?? Promise.resolve();
+  }
+
+  public static show(deps: XraySetupDelegate, assetRoot: vscode.Uri): Promise<void> {
+    if (XraySetupPanel.current) {
+      XraySetupPanel.current.panel.reveal(vscode.ViewColumn.Active);
+      return XraySetupPanel.current.channel?.rehydrate() ?? Promise.resolve();
+    }
+    if (XraySetupPanel.opening) {return XraySetupPanel.opening;}
+    const opening = XraySetupPanel.open(deps, assetRoot);
+    XraySetupPanel.opening = opening;
+    const clearOpening = (): void => {
+      if (XraySetupPanel.opening === opening) {XraySetupPanel.opening = undefined;}
+    };
+    opening.then(clearOpening, clearOpening);
+    return opening;
+  }
+
+  private static async open(deps: XraySetupDelegate, assetRoot: vscode.Uri): Promise<void> {
+    await XraySetupPanel.closing;
     if (XraySetupPanel.current) {
       XraySetupPanel.current.panel.reveal(vscode.ViewColumn.Active);
       return;
     }
-    // retainContextWhenHidden keeps typed-but-unsaved secrets in the webview across tab switches;
-    // getState/setState is deliberately never used so secrets never touch disk.
+    // retainContextWhenHidden keeps typed-but-unsaved secrets in memory across tab switches.
+    // Webview state persists only the credential-free document id needed to recognize a reload.
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Set up Xray", vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
-      localResourceRoots: [],
+      localResourceRoots: [assetRoot],
     });
-    const instance = new XraySetupPanel(panel, deps);
+    const instance = new XraySetupPanel(panel, deps, assetRoot);
     XraySetupPanel.current = instance;
-    await instance.render();
+    try {
+      await instance.render();
+    } catch (error) {
+      await instance.shutdown(true);
+      throw error;
+    }
   }
 
   private async render(): Promise<void> {
     const site = this.deps.currentSite();
     const normalized = normalizeSiteUrl(site);
-    const hasCredentials = normalized !== "" && (await this.deps.hasCredentials(site));
-    const hasJira = normalized !== "" && (await this.deps.hasJiraCredentials(site));
+    const presence = normalized === "" ? [] : await Promise.allSettled([
+      Promise.resolve().then(() => this.deps.hasCredentials(site)),
+      Promise.resolve().then(() => this.deps.hasJiraCredentials(site)),
+    ]);
+    const hasCredentials = presence[0]?.status === "fulfilled" && presence[0].value === true;
+    const hasJira = presence[1]?.status === "rejected" ||
+      (presence[1]?.status === "fulfilled" && presence[1].value === true);
+    const presenceFailed = presence.some((result) => result.status === "rejected");
     if (this.stale(this.verifyEpoch)) {return;}
-    // The mask stands in for either stored pair, so it's issued for the host if either exists.
+    // A Jira presence failure stays masked so save re-reads rather than clearing a stored pair.
     this.maskIssuedSite = hasCredentials || hasJira ? normalized : undefined;
-    this.panel.webview.html = renderHtml(site, hasCredentials, hasJira);
-    // Stored credentials: the HTML already paints the checking dot, so verify in the background and
-    // let the result flip it. No credentials: stay red, make no network call.
+    const region = this.deps.currentRegion();
+    this.channel = new XraySetupChannel(
+      this.panel.webview,
+      this.session,
+      () => this.deps.workspaceAvailable(),
+      { site: serverText(site), region, credentials: hasCredentials, jira: hasJira }
+    );
+    this.panel.webview.html = renderXraySetupDocument(
+      this.panel.webview,
+      this.assetRoot,
+      this.session,
+      site,
+      region,
+      hasCredentials,
+      hasJira
+    );
+    if (presenceFailed) {
+      await this.post({
+        type: "error",
+        message: "Could not read stored credential status. Enter credentials to continue.",
+      });
+    }
+    // Verify stored Xray credentials in the background; otherwise leave the disconnected state.
     if (hasCredentials) {
-      this.startVerify(normalized, false, {
+      this.startStoredVerify(normalized, region, {
         announceChecking: false,
         statusOnSuccess: false,
         throwPrefix: "Could not verify connection",
-      }).catch(() => undefined);
+      });
     }
   }
 
-  // A submitted MASK means "keep the stored value", but only for the host the mask was issued for.
-  // Per-field so the user can rotate one credential while leaving the other masked; a host change
-  // (or a mask with nothing stored) can never carry an old secret forward.
+  private startStoredVerify(site: string, region: XrayRegion, options: VerifyOptions): void {
+    const epoch = this.verifyEpoch;
+    const task = this.runStoredVerify(epoch, site, region, options);
+    this.trackVerification(task);
+  }
+
+  private async runStoredVerify(
+    epoch: number,
+    site: string,
+    region: XrayRegion,
+    options: VerifyOptions
+  ): Promise<void> {
+    let credentials: XrayCredentials | undefined;
+    try {
+      credentials = await this.deps.getCredentials(site);
+    } catch {
+      if (!this.stale(epoch)) {await this.storedCredentialReadFailed(options);}
+      return;
+    }
+    if (this.stale(epoch)) {return;}
+    if (credentials === undefined) {
+      await this.storedCredentialReadFailed(options);
+      return;
+    }
+    await this.runVerify(
+      site,
+      region,
+      false,
+      options,
+      new VerificationRedaction([credentials.clientId, credentials.clientSecret])
+    );
+  }
+
+  private async storedCredentialReadFailed(options: VerifyOptions): Promise<void> {
+    await this.post({ type: "conn-state", state: "disconnected", label: "Not connected" });
+    await this.post({
+      type: "error",
+      message: `${options.throwPrefix}: stored credentials could not be read.`,
+    });
+  }
+
+  // Each mask keeps that stored field only for its issued host, allowing one-field rotation without
+  // carrying a credential to a changed host.
   private async resolveCredentials(message: SaveMessage): Promise<ResolvedCredentials> {
     const idIsMask = message.clientId === MASK;
     const secretIsMask = message.clientSecret === MASK;
@@ -508,9 +270,7 @@ export class XraySetupPanel {
     return result;
   }
 
-  // Jira mirror of resolveCredentials with an extra both-or-neither rule: a masked field keeps its
-  // stored value (same host only), and a form with exactly one Jira field filled is rejected. Both
-  // blank means "no Jira access", a valid state that clears any stored pair.
+  // Jira adds a both-or-neither rule; both blank means no Jira access and clears the stored pair.
   private async resolveJira(message: SaveMessage): Promise<ResolvedJira> {
     let email = message.jiraEmail;
     let token = message.jiraToken;
@@ -566,7 +326,7 @@ export class XraySetupPanel {
     jira: ResolvedJira
   ): XraySetupValidationErrors | undefined {
     const errors: XraySetupValidationErrors =
-      validateXraySetupInput(message.site, resolved.clientId, resolved.clientSecret) ?? {};
+      validateXraySetupInput(message.site, resolved.clientId, resolved.clientSecret, message.region) ?? {};
     if (resolved.clientIdError) {
       errors.clientId = resolved.clientIdError;
     }
@@ -579,51 +339,144 @@ export class XraySetupPanel {
     if (jira.tokenError) {
       errors.jiraToken = jira.tokenError;
     }
-    return errors.site || errors.clientId || errors.clientSecret || errors.jiraEmail || errors.jiraToken
+    return errors.site || errors.region || errors.clientId || errors.clientSecret || errors.jiraEmail || errors.jiraToken
       ? errors
       : undefined;
   }
 
-  private async handleMessage(message: SaveMessage): Promise<void> {
-    if (message.type !== "save") {
-      return;
+  private handleMessage(message: unknown): Promise<void> {
+    if (this.disposed) {
+      return Promise.resolve();
     }
-    const resolved = await this.resolveCredentials(message);
-    const jira = await this.resolveJira(message);
-    const errors = this.combinedErrors(message, resolved, jira);
-    if (errors) {
-      await this.post({ type: "validation", errors });
-      return;
+    const envelope = parseSetupClientEnvelope(message);
+    if (envelope?.session !== this.session) {return Promise.resolve();}
+    if (envelope.body.type === "ready") {
+      return envelope.revision === 0
+        ? this.channel?.hydrate(envelope.document, envelope.body.previousDocument) ?? Promise.resolve()
+        : Promise.resolve();
     }
-    let site: string;
-    // A thrown save must reach the form: without this the webview sits at "Saving…" forever,
-    // because the rejection would vanish inside the onDidReceiveMessage handler.
-    try {
-      site = await this.deps.saveConnection(message.site, resolved.clientId, resolved.clientSecret);
-      this.maskIssuedSite = site;
-      // Jira is stored/cleared for the just-saved host; a host switch already dropped the old host's
-      // Jira pair inside saveConnection, so only clear when the saved host still holds one.
-      if (jira.store) {
-        await this.deps.saveJira(site, jira.email, jira.token);
-      } else if (await this.deps.hasJiraCredentials(site)) {
-        await this.deps.clearJira(site);
-      }
-      await this.post({ type: "saved", site, jira: jira.store });
-    } catch (error) {
-      const reason = scrubJwtLike(errMsg(error));
-      await this.post({ type: "error", message: `Could not save: ${reason}` });
-      return;
+    if (this.saveInFlight) {return Promise.resolve();}
+    if (this.channel?.accepts(envelope) !== true) {
+      return this.channel?.recover(envelope) ?? Promise.resolve();
     }
-    // Every save ends with a verify: Save & Test runs the full probe, a plain Save the auth-only
-    // one. Both drive the dot off the just-saved host (Fix 1).
-    await this.startVerify(site, message.test, {
-      announceChecking: true,
-      statusOnSuccess: true,
-      throwPrefix: "Saved, but the connection test failed to run",
-    });
+    const request = envelope.body;
+    this.saveInFlight = true;
+    this.cancelVerification();
+    const task = this.runSave(request);
+    this.saveTask = task;
+    return task;
   }
 
-  private async startVerify(site: string, full: boolean, options: VerifyOptions): Promise<void> {
+  private async runSave(message: SaveMessage): Promise<void> {
+    try {
+      const admitted = await this.post({ type: "busy", busy: true, testing: message.test });
+      if (!admitted || this.channel?.canMutate() !== true) {return;}
+      await this.save(message);
+    } finally {
+      this.saveInFlight = false;
+      await this.post({ type: "busy", busy: false, testing: message.test });
+      this.saveTask = undefined;
+    }
+  }
+
+  private async save(message: SaveMessage): Promise<void> {
+    let committed = false;
+    let redaction = new VerificationRedaction([
+      message.clientId,
+      message.clientSecret,
+      message.jiraEmail,
+      message.jiraToken,
+    ]);
+    try {
+      let resolved: ResolvedCredentials;
+      let jira: ResolvedJira;
+      try {
+        resolved = await this.resolveCredentials(message);
+        jira = await this.resolveJira(message);
+      } catch {
+        await this.post(
+          { type: "error", message: "Could not save: stored credentials could not be read." },
+          false
+        );
+        return;
+      }
+      redaction = new VerificationRedaction([
+        message.clientId,
+        message.clientSecret,
+        message.jiraEmail,
+        message.jiraToken,
+        resolved.clientId,
+        resolved.clientSecret,
+        jira.email,
+        jira.token,
+      ]);
+      const errors = this.combinedErrors(message, resolved, jira);
+      if (errors) {
+        await this.post({ type: "validation", errors }, false);
+        return;
+      }
+      if (this.channel?.canMutate() !== true) {return;}
+      const region = parseXrayRegion(message.region);
+      const site = await this.deps.saveSetup({
+        site: message.site,
+        region,
+        clientId: resolved.clientId,
+        clientSecret: resolved.clientSecret,
+        jira: jira.store ? { email: jira.email, token: jira.token } : undefined,
+      });
+      committed = true;
+      this.maskIssuedSite = site;
+      await this.post({
+        type: "saved",
+        site: redaction.text(site, "Saved site"),
+        region,
+        jira: jira.store,
+      });
+      try {
+        await this.deps.didSave?.();
+      } catch {
+        // Walkthrough completion is optional notification after the setup transaction committed.
+      }
+      // The save guard owns the full or auth-only replacement probe through settlement.
+      await this.startVerify(site, region, message.test, {
+        announceChecking: true,
+        statusOnSuccess: true,
+        throwPrefix: "Saved, but the connection test failed to run",
+      }, redaction);
+    } catch (error) {
+      const reason = redaction.error(error);
+      const prefix = committed ? "Saved, but setup could not update" : "Could not save";
+      await this.post({ type: "error", message: `${prefix}: ${reason}` }, committed);
+    }
+  }
+
+  private startVerify(
+    site: string,
+    region: XrayRegion,
+    full: boolean,
+    options: VerifyOptions,
+    redaction: VerificationRedaction
+  ): Promise<void> {
+    const task = this.runVerify(site, region, full, options, redaction);
+    this.trackVerification(task);
+    return task;
+  }
+
+  private trackVerification(task: Promise<void>): void {
+    this.pendingVerifications.add(task);
+    task.then(
+      () => this.pendingVerifications.delete(task),
+      () => this.pendingVerifications.delete(task)
+    );
+  }
+
+  private async runVerify(
+    site: string,
+    region: XrayRegion,
+    full: boolean,
+    options: VerifyOptions,
+    redaction: VerificationRedaction
+  ): Promise<void> {
     const epoch = ++this.verifyEpoch;
     this.verifyAbort?.abort();
     const controller = new AbortController();
@@ -638,19 +491,19 @@ export class XraySetupPanel {
     // terminal pair settleVerify's async-failure path posts.
     try {
       run = full
-        ? this.deps.probeConnection(site, controller.signal)
-        : this.deps.verifyConnection(site, controller.signal);
+        ? this.deps.probeConnection(site, region, controller.signal)
+        : this.deps.verifyConnection(site, region, controller.signal);
     } catch (error) {
       if (this.stale(epoch)) {
         return;
       }
-      const reason = scrubJwtLike(errMsg(error));
+      const reason = redaction.error(error);
       await this.post({ type: "conn-state", state: "disconnected", label: "Not connected" });
       await this.post({ type: "error", message: `${options.throwPrefix}: ${reason}` });
       return;
     }
     try {
-      await this.settleVerify(epoch, run, options, full);
+      await this.settleVerify(epoch, run, options, full, redaction);
     } finally {
       if (this.verifyAbort === controller) {this.verifyAbort = undefined;}
     }
@@ -660,7 +513,8 @@ export class XraySetupPanel {
     epoch: number,
     run: Promise<XrayConnectionOutcome>,
     options: VerifyOptions,
-    full: boolean
+    full: boolean,
+    redaction: VerificationRedaction
   ): Promise<void> {
     let outcome: XrayConnectionOutcome;
     try {
@@ -669,7 +523,7 @@ export class XraySetupPanel {
       if (this.stale(epoch)) {
         return;
       }
-      const reason = scrubJwtLike(errMsg(error));
+      const reason = redaction.error(error);
       await this.post({ type: "conn-state", state: "disconnected", label: "Not connected" });
       await this.post({ type: "error", message: `${options.throwPrefix}: ${reason}` });
       return;
@@ -683,15 +537,19 @@ export class XraySetupPanel {
     await this.post({
       type: "conn-state",
       state: outcome.ok ? "connected" : "disconnected",
-      label: connectionLabel(outcome),
+      label: redaction.connectionLabel(outcome),
     });
     if (!outcome.ok || options.statusOnSuccess) {
-      await this.post({ type: "test-result", ok: outcome.ok, message: outcome.message });
+      await this.post({
+        type: "test-result",
+        ok: outcome.ok,
+        message: redaction.text(outcome.message, "Connection test returned no detail."),
+      });
     }
     // Only the full probe carries project/Jira data; the auth-only open verify never does, so it
     // leaves the neutral initial view in place.
     if (full && this.hasProjectData(outcome)) {
-      await this.post(this.projectViewMessage(outcome));
+      await this.post(redaction.projectView(outcome));
     }
   }
 
@@ -703,36 +561,38 @@ export class XraySetupPanel {
     );
   }
 
-  private projectViewMessage(outcome: XrayConnectionOutcome): OutgoingMessage {
-    return {
-      type: "project-view",
-      hasJira: outcome.jiraProjects !== undefined || outcome.jiraError !== undefined,
-      jiraProjects: outcome.jiraProjects ?? [],
-      jiraTruncated: outcome.jiraTruncated === true,
-      probed: outcome.projects ?? [],
-      ...(outcome.jiraError !== undefined ? { jiraError: outcome.jiraError } : {}),
-    };
-  }
-
   private stale(epoch: number): boolean {
     return this.disposed || !this.deps.workspaceAvailable() || epoch !== this.verifyEpoch;
   }
 
-  private async post(message: OutgoingMessage): Promise<void> {
-    if (this.disposed || !this.deps.workspaceAvailable()) {
-      return;
-    }
-    await this.panel.webview.postMessage(message);
+  private async post(message: SetupHostMessage, retain = true): Promise<boolean> {
+    return await this.channel?.post(message, retain) ?? false;
   }
 
-  private dispose(): void {
-    this.disposed = true;
+  private cancelVerification(): void {
+    this.verifyEpoch += 1;
     this.verifyAbort?.abort();
     this.verifyAbort = undefined;
+  }
+
+  private shutdown(disposePanel: boolean): Promise<void> {
+    if (this.shutdownPromise) {return this.shutdownPromise;}
+    this.disposed = true;
+    this.cancelVerification();
     XraySetupPanel.current = undefined;
     while (this.disposables.length > 0) {
       this.disposables.pop()?.dispose();
     }
-    this.panel.dispose();
+    const pending = new Set<Promise<void>>(this.pendingVerifications);
+    if (this.saveTask) {pending.add(this.saveTask);}
+    if (this.channel) {pending.add(this.channel.dispose());}
+    this.shutdownPromise = Promise.allSettled([...pending]).then(() => undefined);
+    XraySetupPanel.closing = this.shutdownPromise;
+    const clearClosing = (): void => {
+      if (XraySetupPanel.closing === this.shutdownPromise) {XraySetupPanel.closing = undefined;}
+    };
+    this.shutdownPromise.then(clearClosing, clearClosing);
+    if (disposePanel) {this.panel.dispose();}
+    return this.shutdownPromise;
   }
 }

@@ -19,6 +19,10 @@ Unit tests use [Vitest](https://vitest.dev/) with a minimal stub of the `vscode`
 
 Release only from protected `main` and protect tags matching `v*` in the repository settings. The workflow cannot administer or prove those rules with its token, so verify both rules before the first release and after repository-policy changes. The workflow uses read-only repository permissions; only the tag-only promotion job receives `actions: read`, `id-token: write`, and `attestations: write`.
 
+CI and the devcontainer use the exact Node toolchain in [.node-version](../.node-version): Node `24.18.1`. Dependabot checks npm and GitHub Actions dependencies weekly. Repository maintainers own dependency alerts, Dependabot update pull requests, and quarterly review of the Node pin. GitHub's Security and Dependabot surfaces are the routing points for those alerts and updates; Dependabot does not update `.node-version`, and this repository does not name an individual or team owner in source control.
+
+Release preparation is supported on macOS and Linux hosts with a POSIX-compatible shell. `release.mjs` invokes `/bin/bash` and shell command strings, so it is not a supported Windows release host. Windows and macOS remain native CI quality lanes; containers do not replace native test coverage or any native signing verification.
+
 The release script bumps `package.json` and `package-lock.json` together, updates `CHANGELOG.md`, and runs the source gates. It then creates the release commit before building so the artifact manifest can name the exact commit. After that it builds production once, validates the package inventory, packages one VSIX, runs integration tests against that bundle, installs the VSIX into a clean extension profile, discovers a fixture scenario, and verifies that the VSIX SHA-256 did not change. The tag is created only after every gate passes.
 
 The release artifact set contains the VSIX, its checksum, a CycloneDX SBOM, and a manifest with a `components` array. The manifest binds the source commit, component version, VSIX digest, and SBOM digest. The current component is the VS Code extension; future Core Service and execution-provider packages can add components without changing the manifest shape. Candidate and promoted artifact sets are retained for 90 days. Production source maps are excluded from the VSIX and retained as a separate CI artifact for 30 days. Restrict workflow-artifact access as part of the repository's release permissions.
@@ -35,6 +39,8 @@ The repository does not contain a Core Service executable or Client Protocol sch
 - protocol lifecycle rules for negotiation, session identity, ordering, size limits, cancellation, shutdown, and outcome-unknown starts.
 
 Until those artifacts verify as one set, Core discovery, preparation, run, and debug fail with `execution.core-client.unavailable`. The extension does not fall back to `legacy-direct`. A TypeScript fake can later test client error containment against the supplied framing contract, but cannot satisfy Core lifecycle, provider supervision, or parity acceptance.
+
+Do not add placeholder Core, Python, JVM, .NET, or mixed-runtime containers. The repository lacks the schemas and binaries that would make those images a valid test or release contract.
 
 ```bash
 npm run release            # default: patch bump
@@ -76,11 +82,28 @@ The verification command checks the checksum filename and digest, manifest schem
 
 The script refuses a dirty tree, missing commit, or existing tag. If an artifact gate fails after the release commit, no tag is created and the script removes the release commit again, so a rerun starts from the same version. Before push, delete an unwanted tag with `git tag -d v0.1.1` and remove its commit with `git reset --hard HEAD~1`. After publication, keep the previous promoted artifact set, revert the faulty change, cut a new patch, and provide the previous VSIX and checksum for explicit downgrade while the correction is validated. `npm run release:dry-run` exercises the release and rollback command plan without changing Git or package files. A real promotion, Marketplace rollback, artifact download, and protected-ref audit require authenticated repository administration and remain manual acceptance steps.
 
-The 22-file package allowlist lives in [scripts/package-contents.json](../scripts/package-contents.json). Update it deliberately when shipping a new file. Source: [scripts/release.mjs](../scripts/release.mjs) and [scripts/release-artifact.mjs](../scripts/release-artifact.mjs).
+Protected references, GitHub alert routing, workflow-artifact access, real promotion, publication, rollback, native signing, and the Core/runtime matrix remain external release gates. Record evidence for each in the release change before publishing.
+
+The package inventory lives in [scripts/package-contents.json](../scripts/package-contents.json). It currently lists 27 files. Update it deliberately when shipping a new packaged file; the package-content gate checks the inventory rather than relying on a fixed historical count. Source: [scripts/release.mjs](../scripts/release.mjs) and [scripts/release-artifact.mjs](../scripts/release-artifact.mjs).
+
+## Marketplace media acceptance
+
+The following assets require an external capture before they can be added to documentation. They are not present in the repository and must not be referenced until the capture is accepted.
+
+| Intended asset and guide | Status | Required evidence |
+| --- | --- | --- |
+| `authoring-to-execution.gif` in `README.md` | External capture required | Resolve or generate a missing step, then run the scenario. |
+| `missing-step-quick-fix.png` in `docs/features.md` | External capture required | Show an unmatched-step diagnostic and **Create Step Definition**. |
+| `specwright-settings.png` in `docs/settings.md` | External capture required | Show Settings filtered to Specwright, without configuration values that identify a workspace. |
+| `test-results.png` in `docs/runs.md` | External capture required | Show one failed scenario with a Gherkin step and clickable stack trace. |
+
+Use a disposable workspace. Captures must contain no personal paths, accounts, credentials, bearer tokens, cookies, customer data, remote URLs, or issue keys. Review final pixels and file metadata before adding an asset, then add its Markdown reference in the same change.
 
 ## DevContainer
 
-[.devcontainer/devcontainer.json](../.devcontainer/devcontainer.json) gives you a reproducible Node 20 environment. To use it: install VS Code's "Dev Containers" extension, then run **Dev Containers: Reopen in Container** from the command palette. The container runs `npm ci` automatically on first start.
+The DevContainer gives you a consistent Node 24.18.1 environment. To use it: install VS Code's "Dev Containers" extension, then run **Dev Containers: Reopen in Container** from the command palette. The container runs `npm ci` automatically on first start.
+
+The base image is pinned as `node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7`, the verified multi-architecture OCI index for that tag. Re-verify the tag and index digest with the official Node image registry before updating either value, then update the Dockerfile and release contract test together.
 
 Useful when:
 - Your host node version diverges from the project's target.
@@ -178,7 +201,7 @@ snippets/gherkin.code-snippets            # contributed Gherkin snippets
 scripts/
   build/esbuild.cjs                       # bundler config
   release.mjs                             # release / version-bump script
-.devcontainer/                            # reproducible Node 20 container
+.devcontainer/                            # consistent Node 24.18.1 container
 ```
 
 ## Architectural notes

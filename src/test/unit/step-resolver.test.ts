@@ -3,12 +3,22 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
-import { StepResolver } from "../../providers/step-resolver";
+import { isStepSourceFile, StepResolver } from "../../providers/step-resolver";
 import { extractStepDefsFromSource } from "../../providers/step-definition-provider";
 
 function makeResolver(): StepResolver {
   return new StepResolver();
 }
+
+describe("StepResolver source formats", () => {
+  it("accepts exactly the supported TypeScript and JavaScript module extensions", () => {
+    for (const extension of ["ts", "mts", "cts", "js", "mjs", "cjs"]) {
+      expect(isStepSourceFile(`/repo/features/steps/example.${extension}`)).toBe(true);
+    }
+    expect(isStepSourceFile("/repo/features/steps/example.tsx")).toBe(false);
+    expect(isStepSourceFile("/repo/features/steps/example.json")).toBe(false);
+  });
+});
 
 describe("StepResolver.findUnmatchedSteps", () => {
   it("treats And/But as inheriting the previous Given/When/Then keyword", () => {

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, it, expect } from "vitest";
-import { describeJwt, describeShape, graphqlErrorSummaries } from "../../xray/xray-diagnostics";
+import { describeJwt, describeShape, errorShapeVerdict, graphqlErrorSummaries } from "../../xray/xray-diagnostics";
 
 describe("xray diagnostics module graph", () => {
   const srcDir = path.resolve(__dirname, "../../xray");
@@ -80,6 +80,14 @@ describe("graphqlErrorSummaries", () => {
     expect(summaries[0]).not.toContain(jwt);
     expect(summaries[0]).toContain("[jwt-like-token]");
     expect((summaries[0] ?? "").length).toBeLessThanOrEqual("errors[0]: ".length + 160);
+  });
+});
+
+describe("errorShapeVerdict", () => {
+  it("reserves empty success for a 200 response without GraphQL errors", () => {
+    expect(errorShapeVerdict({ status: 200, errors: ["invalid field"] })).toBe("expected-error-envelope");
+    expect(errorShapeVerdict({ status: 200, errors: [] })).toBe("unexpected-empty-success");
+    expect(errorShapeVerdict({ status: 400, errors: [] })).toBe("unexpected-response");
   });
 });
 

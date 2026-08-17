@@ -26,7 +26,7 @@ const esbuildProblemMatcherPlugin = {
 };
 
 async function main() {
-  const ctx = await esbuild.context({
+  const nodeContext = await esbuild.context({
     entryPoints: {
       extension: "src/extension.ts",
       "specwright-live-reporter": "src/test-providers/specwright-live-reporter.ts",
@@ -47,11 +47,26 @@ async function main() {
       esbuildProblemMatcherPlugin,
     ],
   });
+  const webviewContext = await esbuild.context({
+    entryPoints: {
+      "coverage-board": "src/webview/coverage-board.ts",
+      "xray-setup": "src/webview/xray-setup.ts",
+    },
+    bundle: true,
+    format: "iife",
+    minify: production,
+    sourcemap: production ? "linked" : true,
+    sourcesContent: false,
+    platform: "browser",
+    outdir: "dist",
+    logLevel: "silent",
+    plugins: [esbuildProblemMatcherPlugin],
+  });
   if (watch) {
-    await ctx.watch();
+    await Promise.all([nodeContext.watch(), webviewContext.watch()]);
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    await Promise.all([nodeContext.rebuild(), webviewContext.rebuild()]);
+    await Promise.all([nodeContext.dispose(), webviewContext.dispose()]);
   }
 }
 

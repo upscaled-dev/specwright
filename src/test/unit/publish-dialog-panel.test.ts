@@ -9,25 +9,26 @@ import {
 } from "../../traceability/publish-flow";
 import { PublishRequest, PublishTarget } from "../../traceability/contracts";
 import { SurfaceHost, SurfaceName } from "../../traceability/webview-host";
+import type { PublishClientMessage } from "../../webview/protocol";
 
 // A fake SurfaceHost driving PublishSurface in isolation: `receive` delivers an inbound (webview)
 // message to the surface's handler, `posted` records outbound ones, `activations` records `activate`
 // targets, and `dispose` fires the onDidDispose seam. No real webview or extension host is involved.
 interface FakeHost {
-  host: SurfaceHost;
+  host: SurfaceHost<"publish">;
   posted: Array<{ type: string; [key: string]: unknown }>;
   activations: Array<SurfaceName | undefined>;
-  receive: (message: unknown) => void;
+  receive: (message: PublishClientMessage) => void;
   dispose: () => void;
 }
 
 function fakeHost(): FakeHost {
-  let messageHandler: ((message: unknown) => void) | undefined;
+  let messageHandler: ((message: PublishClientMessage) => void) | undefined;
   let disposeHandler: (() => void) | undefined;
   let disposed = false;
   const posted: Array<{ type: string; [key: string]: unknown }> = [];
   const activations: Array<SurfaceName | undefined> = [];
-  const host: SurfaceHost = {
+  const host: SurfaceHost<"publish"> = {
     post: (message) => posted.push(message as { type: string }),
     onMessage: (handler) => {
       messageHandler = handler;
@@ -156,7 +157,7 @@ describe("PublishSurface: lifecycle", () => {
   it("resolves undefined when the panel is disposed without confirming (the flow's zero-transport signal)", async () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const promise = publish.present(makeModel());
+    const promise = publish.beginFlow().present(makeModel());
 
     rig.dispose();
 
@@ -167,13 +168,14 @@ describe("PublishSurface: lifecycle", () => {
   it("resolves undefined, returns to the board, and makes zero delegate calls when the user cancels", async () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const promise = publish.present(makeModel());
+    const promise = publish.beginFlow().present(makeModel());
 
     rig.receive({ type: "cancel" });
 
     await expect(promise).resolves.toBeUndefined();
     expect(calls).toHaveLength(0);
     expect(rig.activations).toContain("board");
+    expect(rig.posted).toContainEqual({ type: "settled" });
   });
 
   it("resolves the confirmed run id, request, and picked attachments untouched", async () => {
@@ -186,18 +188,20 @@ describe("PublishSurface: lifecycle", () => {
       testPlanKey: "CALC-100",
       environments: ["staging"],
     };
-    const promise = publish.present(makeModel());
+    const file = { path: "/ws/playwright-report/index.html", name: "index.html", size: 100 };
+    const promise = publish.beginFlow().present(makeModel({ attachments: attachmentsModel({ suggestions: [file] }) }));
 
     rig.receive({ type: "confirm", runId: "run-1", request, attachments: ["/ws/playwright-report/index.html"] });
 
     await expect(promise).resolves.toEqual({ runId: "run-1", request, attachments: ["/ws/playwright-report/index.html"] });
+    expect(rig.posted).toContainEqual({ type: "publish-busy", busy: true });
   });
 
   it("guards double resolution: a dispose after a confirm neither re-resolves nor throws", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
     const request: PublishRequest = { mode: "append", executionKey: "XNP-9" };
-    const promise = publish.present(makeModel());
+    const promise = publish.beginFlow().present(makeModel());
 
     rig.receive({ type: "confirm", runId: "run-1", request, attachments: [] });
     expect(await promise).toEqual({ runId: "run-1", request, attachments: [] });
@@ -209,13 +213,68 @@ describe("PublishSurface: lifecycle", () => {
   it("guards double resolution: a message arriving after the surface settled is dropped", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const promise = publish.present(makeModel());
+    const promise = publish.beginFlow().present(makeModel());
 
     rig.dispose();
     await expect(promise).resolves.toBeUndefined();
 
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "LATE-1" }, attachments: [] });
     await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("keeps a confirmed publish busy across repeated activation and starts one new flow after settlement", async () => {
+    const { delegate } = deferredDelegate();
+    const startPublish = vi.fn();
+    const { rig, publish } = surface(delegate, startPublish);
+    const first = publish.beginFlow();
+    const confirmed = first.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await confirmed;
+
+    publish.onManualActivate();
+    publish.onManualActivate();
+    publish.onManualActivate();
+
+    expect(startPublish).not.toHaveBeenCalled();
+    expect(rig.posted.filter((message) => message.type === "settled")).toHaveLength(0);
+    expect(rig.posted.filter((message) => message.type === "publish-busy").at(-1)).toEqual({
+      type: "publish-busy",
+      busy: true,
+    });
+
+    expect(first.markSettled()).toBe(true);
+    startPublish.mockImplementation(() => {
+      const next = publish.beginFlow();
+      void next.present(makeModel());
+    });
+    publish.onManualActivate();
+    publish.onManualActivate();
+
+    expect(startPublish).toHaveBeenCalledOnce();
+  });
+
+  it("prevents an older flow's late settlement from clearing a newer confirmed flow", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const older = publish.beginFlow();
+    const first = older.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    await first;
+
+    const newer = publish.beginFlow();
+    const second = newer.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-2" }, attachments: [] });
+    await second;
+    const beforeLateFinally = [...rig.posted];
+
+    expect(older.markSettled()).toBe(false);
+    expect(rig.posted).toEqual(beforeLateFinally);
+    expect(rig.posted.filter((message) => message.type === "publish-busy").at(-1)).toEqual({
+      type: "publish-busy",
+      busy: true,
+    });
+
+    expect(newer.markSettled()).toBe(true);
   });
 });
 
@@ -224,7 +283,7 @@ describe("PublishSurface: hydrate on present", () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
 
-    void publish.present(makeModel({ runs: [runOption({ id: "new", label: "newest run" })], selectedRunId: "new" }));
+    void publish.beginFlow().present(makeModel({ runs: [runOption({ id: "new", label: "newest run" })], selectedRunId: "new" }));
 
     const model = rig.posted.find((m) => m.type === "model");
     expect(model).toBeDefined();
@@ -236,8 +295,8 @@ describe("PublishSurface: hydrate on present", () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
 
-    const first = publish.present(makeModel({ selectedRunId: "run-1" }));
-    void publish.present(makeModel({ runs: [runOption({ id: "run-2", label: "second" })], selectedRunId: "run-2" }));
+    const first = publish.beginFlow().present(makeModel({ selectedRunId: "run-1" }));
+    void publish.beginFlow().present(makeModel({ runs: [runOption({ id: "run-2", label: "second" })], selectedRunId: "run-2" }));
 
     await expect(first).resolves.toBeUndefined();
     expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(2);
@@ -246,12 +305,13 @@ describe("PublishSurface: hydrate on present", () => {
   it("markSettled clears the busy state to idle after a confirm, staying on the Publish tab", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const promise = publish.present(makeModel());
+    const flow = publish.beginFlow();
+    const promise = flow.present(makeModel());
 
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await promise;
 
-    expect(publish.markSettled()).toBe(true);
+    expect(flow.markSettled()).toBe(true);
     expect(rig.posted.filter((m) => m.type === "settled")).toHaveLength(1);
     expect(rig.activations).not.toContain("board");
   });
@@ -260,11 +320,12 @@ describe("PublishSurface: hydrate on present", () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
 
-    const first = publish.present(makeModel());
-    void publish.present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
+    const older = publish.beginFlow();
+    const first = older.present(makeModel());
+    void publish.beginFlow().present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
     await first;
 
-    expect(publish.markSettled()).toBe(false);
+    expect(older.markSettled()).toBe(false);
     expect(rig.posted.filter((m) => m.type === "settled")).toHaveLength(0);
   });
 
@@ -272,7 +333,7 @@ describe("PublishSurface: hydrate on present", () => {
   it("re-posts the live run model on a re-hydration", () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    void publish.present(makeModel({ runs: [runOption({ id: "run-2", label: "second" })], selectedRunId: "run-2" }));
+    void publish.beginFlow().present(makeModel({ runs: [runOption({ id: "run-2", label: "second" })], selectedRunId: "run-2" }));
 
     publish.rehydrate();
 
@@ -286,11 +347,12 @@ describe("PublishSurface: hydrate on present", () => {
   it("presentRetry clears the busy state without repainting, and takes the next confirm", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const first = publish.present(makeModel());
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel());
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
 
-    const retry = publish.presentRetry("run-1");
+    const retry = flow.presentRetry("run-1");
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-2" }, attachments: [] });
 
     expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(1);
@@ -301,12 +363,13 @@ describe("PublishSurface: hydrate on present", () => {
   it("presentRetry resolves undefined at once when a newer present already owns the tab", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const first = publish.present(makeModel());
+    const older = publish.beginFlow();
+    const first = older.present(makeModel());
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
-    void publish.present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
+    void publish.beginFlow().present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
 
-    await expect(publish.presentRetry("run-1")).resolves.toBeUndefined();
+    await expect(older.presentRetry("run-1")).resolves.toBeUndefined();
     expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(0);
   });
 
@@ -315,16 +378,18 @@ describe("PublishSurface: hydrate on present", () => {
   it("presentRetry resolves undefined once a settled flow has retired the dialog", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const first = publish.present(makeModel());
+    const older = publish.beginFlow();
+    const first = older.present(makeModel());
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
     // A second flow presents, is cancelled, and settles the tab it still owned.
-    const second = publish.present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
+    const newer = publish.beginFlow();
+    const second = newer.present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
     rig.receive({ type: "cancel" });
     await second;
-    expect(publish.markSettled()).toBe(true);
+    expect(newer.markSettled()).toBe(true);
 
-    await expect(publish.presentRetry("run-1")).resolves.toBeUndefined();
+    await expect(older.presentRetry("run-1")).resolves.toBeUndefined();
     expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(0);
     expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(2);
   });
@@ -334,22 +399,25 @@ describe("PublishSurface: hydrate on present", () => {
   it("presentRetry resolves undefined on a disposed host instead of hanging the flow", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const first = publish.present(makeModel());
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel());
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
     rig.dispose();
 
-    await expect(publish.presentRetry("run-1")).resolves.toBeUndefined();
+    await expect(flow.presentRetry("run-1")).resolves.toBeUndefined();
     expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(0);
   });
 
   it("re-posts the model a retry is waiting on, with the picked run, when the webview comes back", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const first = publish.present(makeModel({ runs: [runOption(), runOption({ id: "run-2" })] }));
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel({ runs: [runOption(), runOption({ id: "run-2" })] }));
+    rig.receive({ type: "selectRun", runId: "run-2" });
     rig.receive({ type: "confirm", runId: "run-2", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
-    void publish.presentRetry("run-2");
+    void flow.presentRetry("run-2");
 
     publish.rehydrate();
 
@@ -364,12 +432,13 @@ describe("PublishSurface: hydrate on present", () => {
     const rig0 = deferredDelegate();
     rig0.browseResult = [{ path: "/ws/report.zip", name: "report.zip", size: 10 }];
     const { rig, publish } = surface(rig0.delegate);
-    const first = publish.present(makeModel());
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel());
     rig.receive({ type: "browse" });
     await flush();
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
-    void publish.presentRetry("run-1");
+    void flow.presentRetry("run-1");
 
     publish.rehydrate();
 
@@ -378,26 +447,33 @@ describe("PublishSurface: hydrate on present", () => {
     expect(replayed.attachments.suggestions.map((s) => s.path)).toEqual(["/ws/report.zip"]);
   });
 
-  // A webview rebuilt between the confirm and the failure comes back blank, so revealing the form would
-  // hand the user empty fields under a live Publish button.
-  it("repaints the whole model when the retry lands on a rebuilt document", async () => {
+  // A rebuild during transport replays the model under its authoritative busy acknowledgement; the
+  // later retry clears busy without relying on client-only state.
+  it("replays authoritative busy state across a rebuild and clears it on retry", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const first = publish.present(makeModel());
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel());
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
     publish.rehydrate();
 
-    void publish.presentRetry("run-1");
+    void flow.presentRetry("run-1");
 
-    expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(0);
+    expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(1);
     expect(rig.posted.filter((m) => m.type === "model")).toHaveLength(2);
+    expect(rig.posted.filter((m) => m.type === "publish-busy")).toEqual([
+      { type: "publish-busy", busy: false },
+      { type: "publish-busy", busy: true },
+      { type: "publish-busy", busy: true },
+      { type: "publish-busy", busy: false },
+    ]);
   });
 
   it("posts nothing on a re-hydration with no publish underway, leaving the idle hint alone", async () => {
     const { delegate } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    const promise = publish.present(makeModel());
+    const promise = publish.beginFlow().present(makeModel());
     rig.receive({ type: "cancel" });
     await promise;
 
@@ -414,7 +490,7 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
   it("amends the live model in place and posts only the dropdown, keeping the user's pick", async () => {
     const rig0 = deferredDelegate();
     const { rig, publish } = surface(rig0.delegate);
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
 
     await rig0.recordRuns(twoRuns);
 
@@ -429,7 +505,7 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
   it("moves the selection to the newest offered run when the picked one is gone", async () => {
     const rig0 = deferredDelegate();
     const { rig, publish } = surface(rig0.delegate);
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
 
     await rig0.recordRuns([runOption({ id: "run-9", label: "only survivor" })]);
 
@@ -441,7 +517,7 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
   it("degrades to an honest empty state when the run history empties underneath it", async () => {
     const rig0 = deferredDelegate();
     const { rig, publish } = surface(rig0.delegate);
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
 
     await rig0.recordRuns([]);
 
@@ -453,7 +529,7 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
   it("moves neither the screen nor the selection while a publish is in flight", async () => {
     const rig0 = deferredDelegate();
     const { rig, publish } = surface(rig0.delegate);
-    const first = publish.present(makeModel());
+    const first = publish.beginFlow().present(makeModel());
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
 
@@ -470,12 +546,13 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
   it("carries the list refreshed mid-publish on the retry's own reveal", async () => {
     const rig0 = deferredDelegate();
     const { rig, publish } = surface(rig0.delegate);
-    const first = publish.present(makeModel());
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel());
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
 
     await rig0.recordRuns(twoRuns);
-    void publish.presentRetry("run-1");
+    void flow.presentRetry("run-1");
 
     const retry = rig.posted.filter((m) => m.type === "retry");
     expect(retry).toHaveLength(1);
@@ -488,12 +565,13 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
   it("moves the retry's pick to the newest run when the one it was asked for is gone", async () => {
     const rig0 = deferredDelegate();
     const { rig, publish } = surface(rig0.delegate);
-    const first = publish.present(makeModel());
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel());
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
 
     await rig0.recordRuns([runOption({ id: "run-9", label: "everything else evicted" })]);
-    void publish.presentRetry("run-1");
+    void flow.presentRetry("run-1");
 
     expect(rig.posted.filter((m) => m.type === "retry").at(-1)).toMatchObject({ selectedRunId: "run-9" });
   });
@@ -501,15 +579,16 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
   it("carries the list refreshed mid-publish into a retry that has to repaint a rebuilt document", async () => {
     const rig0 = deferredDelegate();
     const { rig, publish } = surface(rig0.delegate);
-    const first = publish.present(makeModel());
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel());
     rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
     await first;
 
     await rig0.recordRuns(twoRuns);
     publish.rehydrate();
-    void publish.presentRetry("run-1");
+    void flow.presentRetry("run-1");
 
-    expect(rig.posted.filter((m) => m.type === "retry")).toEqual([]);
+    expect(rig.posted.filter((m) => m.type === "retry")).toHaveLength(1);
     const replayed = rig.posted.filter((m) => m.type === "model").at(-1) as unknown as { model: PublishDialogModel };
     expect(replayed.model.runs.map((r) => r.id)).toEqual(["run-1", "run-2"]);
   });
@@ -521,7 +600,7 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
     await rig0.recordRuns(twoRuns);
     expect(rig.posted.filter((m) => m.type === "runs")).toEqual([]);
 
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
     rig.dispose();
     await rig0.recordRuns([runOption({ id: "run-3" })]);
 
@@ -557,7 +636,7 @@ describe("PublishSurface: manual activation", () => {
     const startPublish = vi.fn();
     const { publish } = surface(delegate, startPublish);
 
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
     publish.onManualActivate();
 
     expect(startPublish).not.toHaveBeenCalled();
@@ -568,7 +647,7 @@ describe("PublishSurface: search", () => {
   it("does not call the search delegate until the webview asks for a search", () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
 
     expect(calls).toHaveLength(0);
 
@@ -579,7 +658,7 @@ describe("PublishSurface: search", () => {
   it("does not post a superseded search response (the aborted token is dropped, the fresh one posts)", async () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
 
     rig.receive({ type: "search", token: 1, kind: "execution", query: "A" });
     rig.receive({ type: "search", token: 2, kind: "execution", query: "AB" });
@@ -602,7 +681,7 @@ describe("PublishSurface: search", () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
     const request: PublishRequest = { mode: "append", executionKey: "XNP-3" };
-    const promise = publish.present(makeModel());
+    const promise = publish.beginFlow().present(makeModel());
 
     rig.receive({ type: "search", token: 1, kind: "test-plan", query: "CALC" });
     expect(calls).toHaveLength(1);
@@ -616,10 +695,26 @@ describe("PublishSurface: search", () => {
     expect(rig.posted.filter((m) => m.type === "search-result")).toHaveLength(0);
   });
 
+  it("aborts an admitted search on cancel and never posts its late result", async () => {
+    const { delegate, calls } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const pending = publish.beginFlow().present(makeModel());
+
+    rig.receive({ type: "search", token: 1, kind: "execution", query: "CALC" });
+    rig.receive({ type: "cancel" });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.signal?.aborted).toBe(true);
+    await expect(pending).resolves.toBeUndefined();
+    calls[0]!.resolve([target("CALC-1", "Late")]);
+    await flush();
+    expect(rig.posted.filter((message) => message.type === "search-result")).toHaveLength(0);
+  });
+
   it("scrubs a JWT-shaped thrown value out of the search-result error", async () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
 
     rig.receive({ type: "search", token: 3, kind: "execution", query: "CALC" });
     // A non-Error throw reaches the sink verbatim through errMsg's String() fallback.
@@ -633,7 +728,7 @@ describe("PublishSurface: search", () => {
   it("carries the project kind through to the delegate and back on the response", async () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
 
     rig.receive({ type: "search", token: 7, kind: "project", query: "ca" });
     expect(calls[0]).toMatchObject({ kind: "project", query: "ca" });
@@ -650,11 +745,60 @@ describe("PublishSurface: search", () => {
 });
 
 describe("PublishSurface: attachments", () => {
+  const files = (count: number): AttachmentSuggestion[] => Array.from({ length: count }, (_, index) => ({
+    path: `/ws/file-${index}.zip`, name: `file-${index}.zip`, size: 100,
+  }));
+  const pendingRuns = (): PublishRunOption[] => [
+    runOption({ id: "run-a", pendingAttachments: { target: "CALC-1", count: 2 } }),
+    runOption({ id: "run-b", pendingAttachments: { target: "CALC-2", count: 3 } }),
+  ];
+
+  it("rejects stale runs and attachment paths that are not in the current model", async () => {
+    const rig = deferredDelegate();
+    const { rig: host, publish } = surface(rig.delegate);
+    const pending = publish.beginFlow().present(makeModel({
+      runs: [runOption(), runOption({ id: "run-2" })],
+      attachments: attachmentsModel({ suggestions: files(1) }),
+    }));
+
+    host.receive({ type: "confirm", runId: "run-2", request: { mode: "append", executionKey: "XNP-1" }, attachments: [] });
+    host.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" }, attachments: ["/forged.zip"] });
+    host.receive({
+      type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "XNP-1" },
+      attachments: Array(65).fill("/ws/file-0.zip"),
+    });
+    host.receive({ type: "attachPending", runId: "run-2" });
+
+    expect(host.posted.filter((message) => message.type === "attachment-error")).toHaveLength(2);
+    expect(rig.attachPending).not.toHaveBeenCalled();
+    expect(host.posted).toContainEqual({ type: "pending-busy", runId: "run-2", busy: false });
+    host.receive({ type: "cancel" });
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it("caps model and browse suggestions at the shared attachment limit with visible feedback", async () => {
+    const rig = deferredDelegate();
+    rig.browseResult = files(65);
+    const { rig: host, publish } = surface(rig.delegate);
+    void publish.beginFlow().present(makeModel({ attachments: attachmentsModel({ suggestions: files(65) }) }));
+
+    const model = host.posted.find((message) => message.type === "model") as unknown as { model: PublishDialogModel };
+    expect(model.model.attachments.suggestions).toHaveLength(64);
+    expect(host.posted).toContainEqual({ type: "attachment-error", text: "Choose at most 64 attachments." });
+
+    host.receive({ type: "browse" });
+    await flush();
+    expect(host.posted.filter((message) => message.type === "browse-result")).toHaveLength(0);
+    expect(host.posted.filter((message) => message.type === "attachment-error").at(-1)).toEqual({
+      type: "attachment-error", text: "Choose at most 64 attachments.",
+    });
+  });
+
   it("calls the browse seam on a browse message and posts the picked files back", async () => {
     const rig = deferredDelegate();
     rig.browseResult = [{ path: "/ws/trace.zip", name: "trace.zip", size: 2048 }];
     const { rig: host, publish } = surface(rig.delegate);
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
 
     host.receive({ type: "browse" });
     await flush();
@@ -671,7 +815,7 @@ describe("PublishSurface: attachments", () => {
     const rig = deferredDelegate();
     rig.pendingResult = { remaining: 1 };
     const { rig: host, publish } = surface(rig.delegate);
-    void publish.present(makeModel({ runs: [runOption({ pendingAttachments: { target: "XNP-9", count: 2 } })] }));
+    void publish.beginFlow().present(makeModel({ runs: [runOption({ pendingAttachments: { target: "XNP-9", count: 2 } })] }));
 
     host.receive({ type: "attachPending", runId: "run-1" });
     await flush();
@@ -680,13 +824,119 @@ describe("PublishSurface: attachments", () => {
     expect(host.posted.filter((m) => m.type === "pending-result")).toEqual([{ type: "pending-result", runId: "run-1", remaining: 1 }]);
   });
 
+  it("admits one attach-pending upload at a time and clears the busy state when it settles", async () => {
+    const rig = deferredDelegate();
+    let resolveUpload: (value: PendingAttachmentsResult) => void = () => undefined;
+    rig.attachPending.mockImplementation(() => new Promise((resolve) => { resolveUpload = resolve; }));
+    const { rig: host, publish } = surface(rig.delegate);
+    void publish.beginFlow().present(makeModel({ runs: [runOption({ pendingAttachments: { target: "XNP-9", count: 2 } })] }));
+
+    host.receive({ type: "attachPending", runId: "run-1" });
+    host.receive({ type: "attachPending", runId: "run-1" });
+    expect(rig.attachPending).toHaveBeenCalledOnce();
+    expect(host.posted).toContainEqual({ type: "pending-busy", runId: "run-1", busy: true });
+
+    resolveUpload({ remaining: 1 });
+    await flush();
+    expect(host.posted).toContainEqual({ type: "pending-result", runId: "run-1", remaining: 1 });
+    expect(host.posted).toContainEqual({ type: "pending-busy", runId: "run-1", busy: false });
+  });
+
+  it("retires run A after success with files remaining even while run B is selected", async () => {
+    const rig = deferredDelegate();
+    let resolveUpload: (value: PendingAttachmentsResult) => void = () => undefined;
+    rig.attachPending.mockImplementation(() => new Promise((resolve) => { resolveUpload = resolve; }));
+    const { rig: host, publish } = surface(rig.delegate);
+    void publish.beginFlow().present(makeModel({ runs: pendingRuns(), selectedRunId: "run-a" }));
+
+    host.receive({ type: "attachPending", runId: "run-a" });
+    host.receive({ type: "selectRun", runId: "run-b" });
+    resolveUpload({ remaining: 1 });
+    await flush();
+
+    expect(host.posted).toContainEqual({ type: "pending-result", runId: "run-a", remaining: 1 });
+    expect(host.posted).toContainEqual({ type: "pending-busy", runId: "run-a", busy: false });
+    host.receive({ type: "selectRun", runId: "run-a" });
+    publish.rehydrate();
+    const model = host.posted.filter((message) => message.type === "model").at(-1) as unknown as { model: PublishDialogModel };
+    expect(model.model.runs.find((run) => run.id === "run-a")?.pendingAttachments?.count).toBe(1);
+  });
+
+  it("retires failed run A while B is selected and allows A to retry", async () => {
+    const rig = deferredDelegate();
+    let rejectUpload: (error: unknown) => void = () => undefined;
+    rig.attachPending
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectUpload = reject; }))
+      .mockResolvedValueOnce({ remaining: 0 });
+    const { rig: host, publish } = surface(rig.delegate);
+    void publish.beginFlow().present(makeModel({ runs: pendingRuns(), selectedRunId: "run-a" }));
+
+    host.receive({ type: "attachPending", runId: "run-a" });
+    host.receive({ type: "selectRun", runId: "run-b" });
+    rejectUpload(new Error("upload failed"));
+    await flush();
+
+    expect(host.posted).toContainEqual({ type: "pending-busy", runId: "run-a", busy: false });
+    expect(host.posted).toContainEqual({ type: "attachment-error", text: "Attaching pending files failed: upload failed" });
+    host.receive({ type: "selectRun", runId: "run-a" });
+    host.receive({ type: "attachPending", runId: "run-a" });
+    await flush();
+    expect(rig.attachPending).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an admitted upload authoritative across confirm and publish retry", async () => {
+    const rig = deferredDelegate();
+    let resolveUpload: (value: PendingAttachmentsResult) => void = () => undefined;
+    rig.attachPending.mockImplementation(() => new Promise((resolve) => { resolveUpload = resolve; }));
+    const { rig: host, publish } = surface(rig.delegate);
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel({ runs: pendingRuns(), selectedRunId: "run-a" }));
+    host.receive({ type: "attachPending", runId: "run-a" });
+    host.receive({ type: "confirm", runId: "run-a", request: { mode: "append", executionKey: "CALC-9" }, attachments: [] });
+    await first;
+
+    const retry = flow.presentRetry("run-a");
+    expect(host.posted.filter((message) => message.type === "pending-busy").at(-1)).toEqual({
+      type: "pending-busy", runId: "run-a", busy: true,
+    });
+    resolveUpload({ remaining: 1 });
+    await flush();
+    expect(host.posted).toContainEqual({ type: "pending-result", runId: "run-a", remaining: 1 });
+    expect(host.posted.filter((message) => message.type === "pending-busy").at(-1)).toEqual({
+      type: "pending-busy", runId: "run-a", busy: false,
+    });
+    host.receive({ type: "cancel" });
+    await expect(retry).resolves.toBeUndefined();
+  });
+
+  it("retires an admitted upload after the publish surface settles", async () => {
+    const rig = deferredDelegate();
+    let resolveUpload: (value: PendingAttachmentsResult) => void = () => undefined;
+    rig.attachPending.mockImplementation(() => new Promise((resolve) => { resolveUpload = resolve; }));
+    const { rig: host, publish } = surface(rig.delegate);
+    const flow = publish.beginFlow();
+    const first = flow.present(makeModel({ runs: pendingRuns(), selectedRunId: "run-a" }));
+    host.receive({ type: "attachPending", runId: "run-a" });
+    host.receive({ type: "confirm", runId: "run-a", request: { mode: "append", executionKey: "CALC-9" }, attachments: [] });
+    await first;
+    expect(flow.markSettled()).toBe(true);
+
+    resolveUpload({ remaining: 0 });
+    await flush();
+
+    expect(host.posted.filter((message) => message.type === "pending-result")).toHaveLength(0);
+    expect(host.posted.filter((message) => message.type === "pending-busy").at(-1)).toEqual({
+      type: "pending-busy", runId: "run-a", busy: false,
+    });
+  });
+
   // The picked files and the retried banner are dialog state the host owns; a re-hydration that replayed
   // the present-time model would drop them and let the user publish without evidence they chose.
   it("carries the browsed files into what a re-hydration replays", async () => {
     const rig = deferredDelegate();
     rig.browseResult = [{ path: "/ws/trace.zip", name: "trace.zip", size: 2048 }];
     const { rig: host, publish } = surface(rig.delegate);
-    void publish.present(makeModel());
+    void publish.beginFlow().present(makeModel());
 
     host.receive({ type: "browse" });
     await flush();
@@ -700,7 +950,7 @@ describe("PublishSurface: attachments", () => {
     const rig = deferredDelegate();
     rig.pendingResult = { remaining: 1 };
     const { rig: host, publish } = surface(rig.delegate);
-    void publish.present(makeModel({ runs: [runOption({ pendingAttachments: { target: "XNP-9", count: 2 } })] }));
+    void publish.beginFlow().present(makeModel({ runs: [runOption({ pendingAttachments: { target: "XNP-9", count: 2 } })] }));
 
     host.receive({ type: "attachPending", runId: "run-1" });
     await flush();
@@ -724,7 +974,7 @@ describe("PublishSurface: attachments", () => {
       () => new Promise<PendingAttachmentsResult>((resolve) => { resolvePending = resolve; })
     );
     const { rig: host, publish } = surface(rig.delegate);
-    const promise = publish.present(makeModel());
+    const promise = publish.beginFlow().present(makeModel({ runs: [runOption({ pendingAttachments: { target: "XNP-9", count: 1 } })] }));
 
     host.receive({ type: "attachPending", runId: "run-1" });
     host.dispose();

@@ -78,12 +78,10 @@ async function unmatchedChildren(provider: StepsTreeDataProvider): Promise<Steps
 }
 
 describe("StepsTreeDataProvider", () => {
-  it("shows the two top-level sections when enabled", async () => {
+  it("returns no roots when enabled but empty so viewsWelcome renders", async () => {
     const provider = new StepsTreeDataProvider(makeIndex({}).index, makeConfig().config);
     const roots = await provider.getChildren();
-    expect(roots.map((n) => n.kind)).toEqual(["section", "section"]);
-    expect(provider.getTreeItem(roots[0]!).label).toBe("Step definitions");
-    expect(provider.getTreeItem(roots[1]!).label).toBe("Unmatched steps");
+    expect(roots).toEqual([]);
   });
 
   it("shows a single info node when the panel is disabled via setting", async () => {
@@ -138,7 +136,9 @@ describe("StepsTreeDataProvider", () => {
   });
 
   it("shows the stepDefinitionPaths hint when no definitions exist", async () => {
-    const provider = new StepsTreeDataProvider(makeIndex({}).index, makeConfig().config);
+    const provider = new StepsTreeDataProvider(makeIndex({
+      unmatched: [["/ws/features/a.feature", [unmatched("missing", 2)]]],
+    }).index, makeConfig().config);
     const groups = await definitionsChildren(provider);
     expect(groups).toHaveLength(1);
     expect(provider.getTreeItem(groups[0]!).label).toBe(
@@ -230,7 +230,9 @@ describe("StepsTreeDataProvider", () => {
   });
 
   it("shows an explicit empty state when there are no unmatched steps", async () => {
-    const provider = new StepsTreeDataProvider(makeIndex({}).index, makeConfig().config);
+    const provider = new StepsTreeDataProvider(makeIndex({
+      usages: [[def("defined", { keyword: "Given" }), []]],
+    }).index, makeConfig().config);
     const nodes = await unmatchedChildren(provider);
     expect(nodes).toHaveLength(1);
     expect(provider.getTreeItem(nodes[0]!).label).toBe("No unmatched steps.");

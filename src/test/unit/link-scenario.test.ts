@@ -379,21 +379,24 @@ describe("authorScenarioTest", () => {
     expect(info[0]).toContain("Created CALC-9");
   });
 
-  it("lists non-empty warnings in the success toast", async () => {
-    const info: string[] = [];
+  it("settles a successful create without waiting for its reindex-like warning notification", async () => {
+    const warning = "Project CALC may require administrator reindexing";
+    const never = new Promise<never>(() => undefined);
+    const info = vi.fn((_message: string) => never);
 
     await authorScenarioTest(
       spec,
       "Xray",
-      { confirm: () => Promise.resolve(true), info: (m) => info.push(m), error: () => {} },
+      { confirm: () => Promise.resolve(true), info, error: () => {} },
       {
-        createTest: () => Promise.resolve<AuthoredTest>({ key: "CALC-9", warnings: ["Gherkin was adjusted"] }),
+        createTest: () => Promise.resolve<AuthoredTest>({ key: "CALC-9", warnings: [warning] }),
         insertTag: () => Promise.resolve(),
         merge: () => {},
       }
     );
 
-    expect(info[0]).toContain("Gherkin was adjusted");
+    expect(info).toHaveBeenCalledWith("Created CALC-9 and linked this scenario. 1 provider warning logged.");
+    expect(String(info.mock.calls[0]?.[0])).not.toContain(warning);
   });
 
   it("never inserts a tag it could not read back; reports the remote write and its issue id instead", async () => {

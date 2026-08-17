@@ -363,11 +363,11 @@ describe("FeatureParser.provideScenarioCodeLenses: counts per fixture", () => {
     return fs.readFileSync(path.join(FIXTURES_DIR, name), "utf-8");
   }
 
-  it("background.feature: 1 Run Feature + 3 tag lenses + 2 scenarios * 2 = 8", () => {
+  it("background.feature: 1 Run Feature + 1 tag prompt + 2 scenarios * 2 = 6", () => {
     const parser = FeatureParser.create();
     const content = readFixture("background.feature.txt");
     const lenses = parser.provideScenarioCodeLenses(content, "background.feature");
-    expect(lenses).toHaveLength(8);
+    expect(lenses).toHaveLength(6);
   });
 
   it("rules.feature: 1 Run Feature + 1 tag (@rules) + 3 scenarios * 2 = 8", () => {
@@ -377,18 +377,28 @@ describe("FeatureParser.provideScenarioCodeLenses: counts per fixture", () => {
     expect(lenses).toHaveLength(8);
   });
 
-  it("outline-multi-examples.feature: 1 Run Feature + 3 tags + 1 outline*2 + 5 example rows*2 = 16", () => {
+  it("outline-multi-examples.feature: 1 Run Feature + 1 tag prompt + 1 outline*2 + 5 rows*2 = 14", () => {
     const parser = FeatureParser.create();
     const content = readFixture("outline-multi-examples.feature.txt");
     const lenses = parser.provideScenarioCodeLenses(content, "outline-multi-examples.feature");
-    expect(lenses).toHaveLength(16);
+    expect(lenses).toHaveLength(14);
   });
 
-  it("complex.feature: 1 Run Feature + 5 tags + 2 scenarios*2 + 1 outline*2 + 2 rows*2 = 16", () => {
+  it("complex.feature: 1 Run Feature + 1 tag prompt + 2 scenarios*2 + 1 outline*2 + 2 rows*2 = 12", () => {
     const parser = FeatureParser.create();
     const content = readFixture("complex.feature.txt");
     const lenses = parser.provideScenarioCodeLenses(content, "complex.feature");
-    expect(lenses).toHaveLength(16);
+    expect(lenses).toHaveLength(12);
+  });
+
+  it("offers no tag-expression CodeLens when the feature has no tags", () => {
+    const lenses = FeatureParser.create().provideScenarioCodeLenses(
+      "Feature: Plain\nScenario: One\n  Given a step\n",
+      "plain.feature"
+    );
+    expect(lenses.filter((lens) =>
+      lens.command?.command === "playwrightBddRunner.runFeatureFileWithTags"
+    )).toEqual([]);
   });
 });
 
@@ -419,6 +429,26 @@ describe("FeatureParser.provideScenarioCodeLenses: Gherkin keyword synonyms", ()
 });
 
 describe("FeatureParser.provideScenarioCodeLenses: doc strings", () => {
+  const tagLensCount = (content: string): number => FeatureParser.create()
+    .provideScenarioCodeLenses(content, "fenced.feature")
+    .filter((lens) =>
+      lens.command?.command === "playwrightBddRunner.runFeatureFileWithTags"
+    ).length;
+
+  it("ignores tag-shaped doc-string text but keeps one lens for a real tag", () => {
+    const docString = [
+      "Feature: Fenced",
+      "  Scenario: Real",
+      "    Then the text is:",
+      "      \"\"\"",
+      "      @example",
+      "      \"\"\"",
+    ];
+
+    expect(tagLensCount(lines(...docString))).toBe(0);
+    expect(tagLensCount(lines("@real", ...docString))).toBe(1);
+  });
+
   it("offers no lens for a Scenario line inside a doc string, which is text the parser never sees", () => {
     const parser = FeatureParser.create();
     const content = lines(
@@ -484,7 +514,7 @@ describe("FeatureParser scenario CodeLens ranges", () => {
 });
 
 describe("FeatureParser.parseFeatureContent: hyphenated tag extraction", () => {
-  it("preserves hyphenated tags like @rule-scoped in both scenario tags and CodeLens tag list", () => {
+  it("preserves hyphenated tags while exposing one tag-expression CodeLens", () => {
     const parser = FeatureParser.create();
     const content = lines(
       "Feature: Hyphenated",
@@ -498,9 +528,14 @@ describe("FeatureParser.parseFeatureContent: hyphenated tag extraction", () => {
     expect(parsed!.scenarios[0]!.tags).toEqual(["@rule-scoped", "@smoke"]);
 
     const lenses = parser.provideScenarioCodeLenses(content, "hyphenated.feature");
-    const tagTitles = lenses.map((l) => l.command?.title ?? "").filter((t) => t.startsWith("🏷️"));
-    expect(tagTitles).toContain("🏷️ Run with @rule-scoped");
-    expect(tagTitles).not.toContain("🏷️ Run with @rule");
+    const tagLenses = lenses.filter((lens) =>
+      lens.command?.command === "playwrightBddRunner.runFeatureFileWithTags"
+    );
+    expect(tagLenses).toHaveLength(1);
+    expect(tagLenses[0]?.command).toMatchObject({
+      title: "🏷️ Run by tag…",
+      arguments: ["hyphenated.feature"],
+    });
   });
 });
 
@@ -520,7 +555,7 @@ describe("FeatureParser tag regex: rejects punctuation", () => {
     expect(parsed!.scenarios[0]!.tags).not.toContain("@smoke,@critical");
   });
 
-  it("parses '@smoke,@critical' (no space) as two separate tags in CodeLens tag list", () => {
+  it("uses one tag-expression CodeLens for multiple tags", () => {
     const parser = FeatureParser.create();
     const content = lines(
       "Feature: NoSpaceTags",
@@ -530,10 +565,11 @@ describe("FeatureParser tag regex: rejects punctuation", () => {
       "    Given I have 0 widgets"
     );
     const lenses = parser.provideScenarioCodeLenses(content, "nospace.feature");
-    const tagTitles = lenses.map((l) => l.command?.title ?? "").filter((t) => t.startsWith("🏷️"));
-    expect(tagTitles).toContain("🏷️ Run with @smoke");
-    expect(tagTitles).toContain("🏷️ Run with @critical");
-    expect(tagTitles).not.toContain("🏷️ Run with @smoke,@critical");
+    const tagLenses = lenses.filter((lens) =>
+      lens.command?.command === "playwrightBddRunner.runFeatureFileWithTags"
+    );
+    expect(tagLenses).toHaveLength(1);
+    expect(tagLenses[0]?.command?.arguments).toEqual(["nospace.feature"]);
   });
 
   it("strips trailing ')' from '@foo)' in scenario.tags", () => {
@@ -551,7 +587,7 @@ describe("FeatureParser tag regex: rejects punctuation", () => {
     expect(parsed!.scenarios[0]!.tags).not.toContain("@foo)");
   });
 
-  it("strips trailing ')' from '@foo)' in CodeLens tag list", () => {
+  it("still offers one tag-expression CodeLens when tag punctuation is normalized", () => {
     const parser = FeatureParser.create();
     const content = lines(
       "Feature: ParenTag",
@@ -561,9 +597,10 @@ describe("FeatureParser tag regex: rejects punctuation", () => {
       "    Given I have 0 widgets"
     );
     const lenses = parser.provideScenarioCodeLenses(content, "paren.feature");
-    const tagTitles = lenses.map((l) => l.command?.title ?? "").filter((t) => t.startsWith("🏷️"));
-    expect(tagTitles).toContain("🏷️ Run with @foo");
-    expect(tagTitles).not.toContain("🏷️ Run with @foo)");
+    const tagLenses = lenses.filter((lens) =>
+      lens.command?.command === "playwrightBddRunner.runFeatureFileWithTags"
+    );
+    expect(tagLenses).toHaveLength(1);
   });
 });
 

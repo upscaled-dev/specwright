@@ -36,8 +36,7 @@ match the discovery pattern, or the tree has not refreshed yet.
 
 - Open the project folder, not only an individual file.
 - Use the refresh button at the top of the Testing view, or open a
-  `.feature` file and run **Specwright: Discover Tests** or **Specwright:
-  Refresh Tests** from the Command Palette.
+  `.feature` file and run **Specwright: Discover Tests** from the Command Palette.
 - Check `playwrightBddRunner.testFilePattern`; its default is
   `**/*.feature`.
 - Do not point the pattern at generated output, reports, or `node_modules`.
@@ -155,8 +154,9 @@ Cucumber extension.
 
 - Set `playwrightBddRunner.stepDefinitionPaths` to the TypeScript or JavaScript
   step files used by the workspace. By default, it searches
-  `features/steps/**/*.ts`, `features/steps/**/*.js`, `tests/steps/**/*.ts`,
-  and `steps/**/*.ts`.
+  `features/steps/**/*.{ts,mts,cts,js,mjs,cjs}`,
+  `tests/steps/**/*.{ts,mts,cts,js,mjs,cjs}`, and
+  `steps/**/*.{ts,mts,cts,js,mjs,cjs}`.
 - Keep generated specs and reports out of those paths. If a custom generated
   folder is being scanned, add it to
   `playwrightBddRunner.stepDefinitionExcludePaths`.
@@ -169,7 +169,7 @@ Cucumber extension.
   `enableStepReferences`, or related setting to `on` if you need Specwright's
   provider alongside it.
 
-See [settings: compatibility mode](settings.md#compatibility-mode-settings)
+See [settings: Compatibility](settings.md#compatibility)
 and [language features](features.md) for the exact provider behaviour.
 
 ## Every step is reported as ambiguous
@@ -222,6 +222,17 @@ location. Reopen VS Code and retry only after the restart and move are both
 complete. Keeping the backup makes the repair reversible and preserves the
 records for diagnosis.
 
+## Xray reports that a project needs administrator attention
+
+Repeated Xray project-health or reindex errors come from the Xray/Jira project
+state. Ask an Xray or Jira administrator to inspect and repair that project
+before retrying. Specwright schedules one quiet, read-only project sync after
+every confirmed create. It also preserves provider warnings as diagnostics and
+schedules the same recovery when a failed or ambiguous create or add operation
+reports reindex wording. The sync rereads Xray; it does not perform an
+administrator reindex or retry a mutation whose remote outcome could be
+ambiguous. Repeated errors still require an Xray or Jira administrator.
+
 ## Still blocked?
 
 Capture the following before opening an issue:
@@ -229,6 +240,7 @@ Capture the following before opening an issue:
 - VS Code version, Specwright version, operating system, and package manager.
 - The exact command settings, with secrets removed.
 - The relevant Test Output and Problems-panel message.
+- A snapshot from **Specwright: Open Support Snapshot**, after reviewing the preview for anything that should not be shared. Choose **Copy Snapshot** only when you are ready to include that exact redacted JSON in the report.
 - Whether the same command works from the package directory in a terminal.
 - A minimal feature and step definition that reproduces the behaviour, when it
   is safe to share.

@@ -27,6 +27,7 @@ export class TestDiscoveryManager {
   public async discoverTestFiles(
     options: DiscoveryOptions = {}
   ): Promise<string[]> {
+    const discoveryStartedAt = Date.now();
     const {
       pattern = this.config.testFilePattern,
       maxCacheAge = this.DEFAULT_CACHE_TTL,
@@ -44,6 +45,7 @@ export class TestDiscoveryManager {
             pattern,
             fileCount: cached.data.length,
             cacheAge: Date.now() - cached.timestamp,
+            durationMs: Date.now() - discoveryStartedAt,
           });
           return cached.data;
         }
@@ -66,6 +68,7 @@ export class TestDiscoveryManager {
       this.logger.info("Test discovery completed", {
         pattern,
         fileCount: files.length,
+        durationMs: Date.now() - discoveryStartedAt,
       });
 
       return files;
@@ -73,6 +76,7 @@ export class TestDiscoveryManager {
       this.logger.error("Failed to discover test files", {
         pattern,
         error: errMsg(error),
+        durationMs: Date.now() - discoveryStartedAt,
       });
       throw error;
     }

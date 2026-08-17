@@ -118,7 +118,7 @@ export async function fetchJiraAttachmentMeta(deps: JiraAttachmentMetaDeps): Pro
     return parseMeta(body);
   } catch (error) {
     if (deps.signal?.aborted) {throw deps.signal.reason ?? new XrayAbortError();}
-    deps.logger.warn(`Attachment meta probe failed: ${scrubJwtLike(errMsg(error))}; using evidence-limit fallback`);
+    deps.logger.warn(`Attachment meta probe failed: ${scrubJwtLike(maskValues(errMsg(error), jiraSecrets(deps.credentials)))}; using evidence-limit fallback`);
     return { enabled: true };
   }
 }
@@ -195,8 +195,8 @@ class JiraAttachmentUpload {
     let content: Buffer;
     try {
       content = this.deps.spool?.read(file) ?? (() => {throw new Error("Attachment spool unavailable");})();
-    } catch (error) {
-      this.deps.logger.warn(`Attachment skipped, unreadable: ${scrubJwtLike(errMsg(error))}`);
+    } catch {
+      this.deps.logger.warn("Attachment skipped: evidence snapshot unreadable");
       return false;
     }
     try {
@@ -213,6 +213,9 @@ class JiraAttachmentUpload {
       return true;
     } catch (error) {
       if (error instanceof RemoteOutcomeUnknownError) {throw error;}
+      this.deps.logger.warn("Attachment upload failed and remains pending", {
+        outcome: error instanceof JiraAccessError ? "refused" : "transport",
+      });
       return false;
     }
   }

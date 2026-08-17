@@ -451,14 +451,15 @@ export class FeatureParser {
 
   /**
    * Extract all unique tags from a feature file
-   * @param content - Feature file content
+   * @param lines - Feature file lines
+   * @param fenced - Lines occupied by doc strings
    * @returns Array of unique tags
    */
-  private extractTags(content: string): string[] {
+  private extractTags(lines: readonly string[], fenced: readonly boolean[]): string[] {
     const tags = new Set<string>();
-    const lines = content.split("\n");
 
-    for (const line of lines) {
+    for (const [index, line] of lines.entries()) {
+      if (fenced[index]) {continue;}
       const trimmed = line.trim();
       if (trimmed.startsWith("@")) {
         for (const m of trimmed.matchAll(new RegExp(TAG_TOKEN_PATTERN, "g"))) {
@@ -502,17 +503,14 @@ export class FeatureParser {
     const lines = content.split("\n");
     let lineNumber = 1;
 
-    // Extract all available tags from the feature file
-    const allTags = this.extractTags(content);
+    // A `Scenario:` or tag inside a doc string is text, not Gherkin syntax.
+    const fenced = docStringMask(lines);
+    const allTags = this.extractTags(lines, fenced);
 
     // Parse scenarios to get scenario outline examples
     const parsedFeature = this.parseFeatureContent(content);
     const scenarioOutlineExamples =
       parsedFeature?.scenarios.filter(isOutlineExampleRow) ?? [];
-
-    // A `Scenario:` inside a doc string is text, not a scenario: the parser skips it, so a lens there
-    // would offer to run something that does not exist.
-    const fenced = docStringMask(lines);
 
     for (const line of lines) {
       const trimmed = line.trim();
@@ -621,13 +619,12 @@ export class FeatureParser {
           })
         );
 
-        // Add individual tag CodeLenses for all unique tags
-        for (const tag of allTags) {
+        if (allTags.length > 0) {
           codeLenses.push(
             new vscode.CodeLens(featureRange, {
-              title: `🏷️ Run with ${tag}`,
+              title: "🏷️ Run by tag…",
               command: "playwrightBddRunner.runFeatureFileWithTags",
-              arguments: [filePath, tag],
+              arguments: [filePath],
             })
           );
         }

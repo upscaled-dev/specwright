@@ -1,7 +1,7 @@
 import { Logger } from "../utils/logger";
 import { isTrustRevocation } from "../core/workspace-trust";
 import { errMsg, maskValues, scrubJwtLike, serverText } from "../utils/text";
-import { NormalizedStatus } from "../traceability/contracts";
+import { AddTestsToContainerResult, NormalizedStatus, TestContainerKind, TestContainerTarget } from "../traceability/contracts";
 import { XrayCredentials } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
 import { describeJwt, graphqlErrorSummaries } from "./xray-diagnostics";
@@ -15,6 +15,13 @@ import {
   type OperationIdentity,
   type RemoteOperationName,
 } from "./remote-operation";
+import {
+  addTestsToContainerMutation,
+  parseAddTestsToContainer,
+  parseTestContainerTarget,
+  resolveTestContainerQuery,
+  xrayContainerShape,
+} from "./xray-test-containers";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 // Proactively reuse the JWT well inside its ~24h life so an in-flight batch never trips the true
@@ -107,6 +114,13 @@ export class XrayMutationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "XrayMutationError";
+  }
+}
+
+class XrayQueryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "XrayQueryError";
   }
 }
 
@@ -592,6 +606,51 @@ export class XrayClient {
     return this.createContainer("createTestPlan", "testPlan", "xray.test-plan.create", project, summary, testIssueIds, signal);
   }
 
+  // Resolve by a type-specific exact-key read before any membership mutation. The JQL key clause and
+  // `limit: 1` bound the read; the parser still requires the echoed key and issue id.
+  public async resolveTestContainer(
+    kind: TestContainerKind,
+    key: string,
+    signal?: AbortSignal
+  ): Promise<TestContainerTarget | undefined> {
+    const canonicalKey = key.toUpperCase();
+    const body = await this.graphql(
+      resolveTestContainerQuery(kind, canonicalKey),
+      operationIdentity("xray.graphql.read"),
+      signal,
+      true
+    );
+    const summaries = graphqlErrorSummaries(body);
+    if (summaries.length > 0) {
+      for (const summary of summaries) {
+        this.deps.logger.error(`GraphQL (${xrayContainerShape(kind).query}) ${summary}`);
+      }
+      throw new XrayQueryError(summaries.join("; "));
+    }
+    const parsed = parseTestContainerTarget(body, kind, canonicalKey);
+    if (parsed.kind === "malformed") {
+      this.deps.logger.error(`GraphQL (${xrayContainerShape(kind).query}) returned a malformed lookup response`);
+      const noun = kind === "test-set" ? "Test Set" : "Test Plan";
+      throw new XrayQueryError(`Xray returned a malformed ${noun} lookup response.`);
+    }
+    return parsed.kind === "found" ? parsed.target : undefined;
+  }
+
+  // One non-idempotent membership mutation. Its operation policy allows one attempt and converts
+  // transport ambiguity after dispatch into RemoteOutcomeUnknownError for the command to surface.
+  public async addTestsToContainer(
+    kind: TestContainerKind,
+    issueId: string,
+    testIssueIds: readonly string[],
+    signal?: AbortSignal
+  ): Promise<AddTestsToContainerResult> {
+    const { mutation, operation } = xrayContainerShape(kind);
+    return parseAddTestsToContainer(
+      await this.mutate(mutation, operation, addTestsToContainerMutation(kind, issueId, testIssueIds), signal),
+      kind
+    );
+  }
+
   // An EMPTY Test Execution: no members and no environments, so a later publish is what fills it. Passing
   // no `testIssueIds` at all is deliberate, since it is mutually exclusive with the `tests` argument.
   public createTestExecution(project: string, summary: string, signal?: AbortSignal): Promise<XrayCreatedTest> {
@@ -647,7 +706,8 @@ export class XrayClient {
   private async graphql(
     query: string,
     identity: OperationIdentity,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    strictRead = false
   ): Promise<unknown> {
     const response = await this.sendAuthorized(
       `${this.base}/graphql`,
@@ -659,8 +719,14 @@ export class XrayClient {
       signal,
       identity
     );
-    if (!response.ok && REMOTE_OPERATION_POLICY[identity.name].class !== "read") {
-      throw new XrayMutationError(`Mutation failed (HTTP ${response.status}).`);
+    if (!response.ok) {
+      if (REMOTE_OPERATION_POLICY[identity.name].class !== "read") {
+        throw new XrayMutationError(`Mutation failed (HTTP ${response.status}).`);
+      }
+      if (strictRead) {
+        this.deps.logger.error(`GraphQL read failed (HTTP ${response.status})`);
+        throw new XrayQueryError(`Query failed (HTTP ${response.status}).`);
+      }
     }
     return parseBody(response.bodyText);
   }

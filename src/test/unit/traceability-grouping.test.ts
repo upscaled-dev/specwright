@@ -33,23 +33,22 @@ describe("traceability grouping toggle contributions", () => {
     expect(command?.icon).toBe("$(list-tree)");
   });
 
-  it("slots the toggle leftmost in the title bar, before sync, gated on connected", () => {
+  it("keeps the connected-only toggle in the title-bar overflow menu", () => {
     const button = pkg.contributes.menus["view/title"]!.find((e) => e.command === CMD);
     expect(button?.when).toBe(
       "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected"
     );
-    // navigation@-1 sorts ahead of sync's navigation@0 without renumbering the existing entries.
-    expect(button?.group).toBe("navigation@-1");
+    expect(button?.group).toBe("playwrightBddRunner@1");
     const sync = pkg.contributes.menus["view/title"]!.find(
       (e) => e.command === "playwrightBddRunner.traceability.sync"
     );
-    expect(sync?.group).toBe("navigation@0");
+    expect(sync?.group).toBe("navigation@2");
   });
 
   it("gates the palette entry on the traceability panel being enabled", () => {
     const palette = pkg.contributes.menus["commandPalette"]!;
     expect(palette.find((e) => e.command === CMD)?.when).toBe(
-      "config.playwrightBddRunner.traceability.enablePanel"
+      "playwrightBddRunner.traceability.enabled"
     );
   });
 });
@@ -109,7 +108,7 @@ describe("traceability switch-default-project contributions", () => {
   it("gates the palette entry on the traceability panel being enabled", () => {
     const palette = pkg.contributes.menus["commandPalette"]!;
     expect(palette.find((e) => e.command === CMD)?.when).toBe(
-      "config.playwrightBddRunner.traceability.enablePanel"
+      "playwrightBddRunner.traceability.enabled"
     );
   });
 

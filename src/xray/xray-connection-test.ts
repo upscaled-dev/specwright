@@ -5,7 +5,7 @@ import { normalizeSiteUrl, projectFromKey } from "./xray-adapter";
 import { XrayCredentialStore, XrayJiraCredentials } from "./xray-credential-store";
 import { XrayRegion, xrayBaseUrl } from "./xray-region";
 import { JiraAccessError, JiraProject, fetchJiraIdentity, searchJiraProjects } from "./jira-project-search";
-import { describeJwt, describeShape, graphqlErrorSummaries } from "./xray-diagnostics";
+import { describeJwt, describeShape, errorShapeVerdict, graphqlErrorSummaries } from "./xray-diagnostics";
 import { buildKeysJql, jqlString } from "./xray-search";
 import {
   abortableRemoteSleep,
@@ -72,9 +72,7 @@ export interface XrayConnectionOutcome {
   jiraError?: string | undefined;
 }
 
-// The probe as a value, so a single-flight wrapper can be injected wherever `probeXrayConnection`
-// would otherwise be called module-level; the factory `verify` and the connection commands share
-// one wrapped instance so coincident verifies collapse onto one handshake.
+// The probe as a value so each host surface can inject it with its own cancellation lifecycle.
 export type XrayProbe = (
   deps: XrayConnectionTestDeps,
   options?: XrayProbeOptions,
@@ -129,7 +127,10 @@ async function classifiedFetch(
       return response;
     } catch (error) {
       if (signal?.aborted) {throw signal.reason ?? error;}
-      throw error instanceof RetryableRemoteError ? error : new RetryableRemoteError(scrubJwtLike(errMsg(error)));
+      if (error instanceof RetryableRemoteError) {throw error;}
+      // Discard transport text at this boundary: remote-operation logging receives a stable
+      // classification, never an echoed request value or service-supplied detail.
+      throw new RetryableRemoteError("request-failed");
     }
   }, {
     identity: operationIdentity(operation),
@@ -330,7 +331,7 @@ async function probeErrorShape(
   signal?: AbortSignal
 ): Promise<void> {
   try {
-    await graphqlRequest(
+    const probe = await graphqlRequest(
       base,
       logger,
       jwt,
@@ -338,6 +339,7 @@ async function probeErrorShape(
       errorShapeQuery(),
       signal
     );
+    logger.info(`invalid-field error-shape probe verdict: ${errorShapeVerdict(probe)}`);
   } catch (error) {
     if (signal?.aborted) {throw signal.reason ?? error;}
     logger.error(`invalid-field error-shape probe request error: ${scrubJwtLike(errMsg(error))}`);
@@ -497,7 +499,7 @@ export async function probeXrayConnection(
     auth = await authenticate(base, logger, credentials, signal);
   } catch (error) {
     if (signal?.aborted) {throw signal.reason ?? error;}
-    logger.error(`Authentication request error: ${scrubJwtLike(errMsg(error))}`);
+    logger.error("Authentication request failed");
     return {
       ok: false,
       stage: "network",

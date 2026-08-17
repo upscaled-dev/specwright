@@ -717,7 +717,7 @@ export class TestExecutor {
           workingDir,
           start,
           command,
-          undefined, live
+          undefined, live, signal
         ),
         command,
         exitCode: result.returnCode,
@@ -819,10 +819,13 @@ export class TestExecutor {
         return infrastructureResult(start, termination.failure, "", false, true, termination);
       }
       if (options.signal?.aborted) {
-        return await this.cancelledDebugResult(start, workingDir, report.jsonPath);
+        return this.cancelledDebugResult(start, workingDir);
       }
-      const reportEvidence = await this.readScenarioReport(report.jsonPath, "");
+      const reportEvidence = await this.readScenarioReport(report.jsonPath, "", options.signal);
       const details = reportEvidence.details;
+      if (options.signal?.aborted) {
+        return this.cancelledDebugResult(start, workingDir, details);
+      }
       const infrastructureFailure = reportEvidence.complete
         ? details.length === 0
           ? "The debug session completed without a readable JSON report"
@@ -856,7 +859,7 @@ export class TestExecutor {
       };
     } catch (error) {
       if (options.signal?.aborted) {
-        return await this.cancelledDebugResult(start, workingDir, report.jsonPath);
+        return this.cancelledDebugResult(start, workingDir);
       }
       this.contributeArtifactShard(
         options.artifactBatch,
@@ -873,14 +876,13 @@ export class TestExecutor {
     }
   }
 
-  // Playwright writes the debug report only after the tests finish, so a stop that lands afterwards
-  // still has real results on disk. They are evidence of what ran; the run stays cancelled.
-  private async cancelledDebugResult(
+  // A parse that completed before cancellation remains useful evidence. Cancellation never starts
+  // replacement report I/O after the admitted parse has stopped.
+  private cancelledDebugResult(
     start: number,
     workingDir: string,
-    reportPath: string
-  ): Promise<RunOutputResult> {
-    const details = (await this.readScenarioReport(reportPath, "")).details;
+    details: ScenarioResult[] = []
+  ): RunOutputResult {
     if (details.length > 0) {
       this.context?.runResultStore?.ingest(
         this.playwrightJsonParser.toStatusMap(details, workingDir)
@@ -1103,7 +1105,7 @@ export class TestExecutor {
         workingDir,
         start,
         command,
-        artifactBatch, live
+        artifactBatch, live, signal
       );
     } catch (error) {
       if (signal?.aborted) {
@@ -1267,9 +1269,10 @@ export class TestExecutor {
     command: string,
     artifactBatch: number | undefined,
     live: LiveRunHandle | undefined,
+    signal: AbortSignal | undefined,
     artifactTarget?: ArtifactCaptureTarget
   ): Promise<RunOutputResult> {
-    const report = await this.readScenarioReport(reportPath, result.output);
+    const report = await this.readScenarioReport(reportPath, result.output, signal);
     const scenarioDetails = live?.recoverResults(report.details) ?? report.details;
     const hasAssertionFailure = scenarioDetails.some((detail) =>
       (detail.outcome ?? detail.status) !== "passed" && detail.status !== "skipped"
@@ -1322,7 +1325,8 @@ export class TestExecutor {
    */
   private async readScenarioReport(
     reportPath: string,
-    output: string
+    output: string,
+    signal?: AbortSignal
   ): Promise<PlaywrightReportEvidence & { readonly reportReadFailure?: true }> {
     let hasReport = false;
     try {
@@ -1332,9 +1336,10 @@ export class TestExecutor {
     let report: PlaywrightReportEvidence & { readonly reportReadFailure?: true };
     try {
       report = hasReport
-        ? await this.playwrightJsonParser.inspectFromFileAsync(reportPath)
+        ? await this.playwrightJsonParser.inspectFromFileAsync(reportPath, signal)
         : this.playwrightJsonParser.inspect(output);
     } catch (error) {
+      if (signal?.aborted) {throw error;}
       report = {
         details: [],
         complete: false,

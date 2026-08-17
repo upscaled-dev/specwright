@@ -169,6 +169,7 @@ interface ExecutorDeps {
   debug?: typeof vscode.debug;
   bddgenDiagnostics?: BddgenDiagnosticsProvider;
   mirror?: BreakpointMirror;
+  playwrightJsonParser?: PlaywrightJsonParser;
 }
 
 function makeExecutor(
@@ -177,13 +178,14 @@ function makeExecutor(
   deps: ExecutorDeps = {}
 ): { executor: TestExecutor; commandBuilder: CommandBuilder } {
   const logger = Logger.create();
+  const playwrightJsonParser = deps.playwrightJsonParser ?? PlaywrightJsonParser.create(logger);
   const executor = TestExecutor.create(
     deps.workspace ?? vscode.workspace,
     deps.window ?? vscode.window,
     deps.debug ?? vscode.debug,
     config,
     logger,
-    PlaywrightJsonParser.create(logger),
+    playwrightJsonParser,
     shellRunner,
     deps.mirror,
     parseExecutableCommand
@@ -197,7 +199,7 @@ function makeExecutor(
     discoveryManager: {} as PlaywrightBddExtensionContext["discoveryManager"],
     organizationManager: {} as PlaywrightBddExtensionContext["organizationManager"],
     featureParser: {} as PlaywrightBddExtensionContext["featureParser"],
-    playwrightJsonParser: PlaywrightJsonParser.create(logger),
+    playwrightJsonParser,
     commandBuilder,
     workspaceTrust: new WorkspaceTrust(() => true),
     traceabilityAdapter: {} as PlaywrightBddExtensionContext["traceabilityAdapter"],
@@ -357,6 +359,36 @@ describe("TestExecutor temporary report lifetime", () => {
       })],
     });
     fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("forwards run cancellation to an admitted report parse", async () => {
+    const logger = Logger.create();
+    const parser = PlaywrightJsonParser.create(logger);
+    const controller = new AbortController();
+    let parsedWith: AbortSignal | undefined;
+    let admitParse: (() => void) | undefined;
+    const parseAdmitted = new Promise<void>((resolve) => {admitParse = resolve;});
+    vi.spyOn(parser, "inspectFromFileAsync").mockImplementation(async (_path, signal) => {
+      parsedWith = signal;
+      admitParse?.();
+      return await new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    const shell: ShellRunner = async (_command, _workingDir, env) => {
+      fs.writeFileSync(env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"] ?? "", "{}");
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      playwrightJsonParser: parser,
+    });
+
+    const running = executor.runPathFilterWithOutput("/tmp/x.feature", controller.signal);
+    await parseAdmitted;
+    controller.abort(new Error("stop parsing"));
+
+    await expect(running).resolves.toMatchObject({ success: false, error: "Cancelled" });
+    expect(parsedWith).toBe(controller.signal);
   });
 });
 
@@ -1651,7 +1683,7 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
     access.mockRestore();
   });
 
-  it("reports the results the stopped debug session already wrote", async () => {
+  it("keeps parsed debug results when cancellation lands before result assembly", async () => {
     const controller = new AbortController();
     const fakeDebug: FakeDebug = makeFakeDebug(undefined, async () => {
       const config = fakeDebug.startCalls.at(-1)!.config;
@@ -1668,12 +1700,22 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
         }],
       }));
       fakeDebug.fireStart({ id: "root", configuration: config });
-      controller.abort();
       fakeDebug.fireTerminate({ id: "root", configuration: config });
       return true;
     });
     const mirror = BreakpointMirror.create(fakeDebug.debug, () => undefined);
-    const { executor } = makeExecutor(makeConfig({ workingDirectory: "/abs" }), okShell, { debug: fakeDebug.debug, mirror });
+    const parser = PlaywrightJsonParser.create(Logger.create());
+    const inspect = parser.inspectFromFileAsync.bind(parser);
+    const parsed = vi.spyOn(parser, "inspectFromFileAsync").mockImplementation(async (reportPath, signal) => {
+      const evidence = await inspect(reportPath, signal);
+      controller.abort();
+      return evidence;
+    });
+    const { executor } = makeExecutor(makeConfig({ workingDirectory: "/abs" }), okShell, {
+      debug: fakeDebug.debug,
+      mirror,
+      playwrightJsonParser: parser,
+    });
 
     const result = await executor.debugScenarioWithOutput({
       filePath: "/abs/features/a.feature",
@@ -1685,7 +1727,74 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
     expect(result.scenarioDetails).toEqual([
       expect.objectContaining({ scenarioName: "Passing scenario", status: "passed" }),
     ]);
+    expect(parsed).toHaveBeenCalledOnce();
+    expect(parsed.mock.calls[0]?.[1]).toBe(controller.signal);
   }, 10_000);
+
+  it("does not start a replacement parse when debug cancellation stops an admitted parse", async () => {
+    const controller = new AbortController();
+    const fakeDebug: FakeDebug = makeFakeDebug(undefined, async () => {
+      const config = fakeDebug.startCalls.at(-1)!.config;
+      const reportPath = (config["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
+      fs.writeFileSync(reportPath, "{}");
+      const root = { id: "root", configuration: config };
+      fakeDebug.fireStart(root);
+      fakeDebug.fireTerminate(root);
+      return true;
+    });
+    const parser = PlaywrightJsonParser.create(Logger.create());
+    let admitParse: (() => void) | undefined;
+    const parseAdmitted = new Promise<void>((resolve) => {admitParse = resolve;});
+    const inspect = vi.spyOn(parser, "inspectFromFileAsync").mockImplementation(
+      async (_reportPath, signal) => {
+        admitParse?.();
+        return await new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+    );
+    const mirror = BreakpointMirror.create(fakeDebug.debug, () => undefined);
+    const { executor } = makeExecutor(makeConfig({ workingDirectory: "/abs" }), okShell, {
+      debug: fakeDebug.debug,
+      mirror,
+      playwrightJsonParser: parser,
+    });
+
+    const running = executor.debugScenarioWithOutput({
+      filePath: "/abs/features/a.feature",
+      outlineName: "Passing scenario",
+      signal: controller.signal,
+    });
+    await parseAdmitted;
+    controller.abort(new Error("stop parsing"));
+    const result = await running;
+
+    expect(result).toMatchObject({ success: false, error: "Cancelled" });
+    expect(inspect).toHaveBeenCalledOnce();
+    expect(inspect.mock.calls[0]?.[1]).toBe(controller.signal);
+  });
+
+  it("does not inspect a debug report when cancellation is already requested", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fakeDebug = makeFakeDebug();
+    const parser = PlaywrightJsonParser.create(Logger.create());
+    const inspect = vi.spyOn(parser, "inspectFromFileAsync");
+    const { executor } = makeExecutor(makeConfig({ workingDirectory: "/abs" }), okShell, {
+      debug: fakeDebug.debug,
+      playwrightJsonParser: parser,
+    });
+
+    const result = await executor.debugScenarioWithOutput({
+      filePath: "/abs/features/a.feature",
+      outlineName: "Passing scenario",
+      signal: controller.signal,
+    });
+
+    expect(result).toMatchObject({ success: false, error: "Cancelled" });
+    expect(fakeDebug.startCalls).toHaveLength(0);
+    expect(inspect).not.toHaveBeenCalled();
+  });
 
   it("stays evidence-free when the stopped debug session wrote no report", async () => {
     const controller = new AbortController();

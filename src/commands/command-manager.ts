@@ -11,6 +11,7 @@ import {
   PlaywrightBddExtensionContext,
 } from "../types";
 import { Logger } from "../utils/logger";
+import { DiagnosticsCommands } from "./diagnostics-commands";
 import { errMsg } from "../utils/text";
 import type { XrayProbe } from "../xray/xray-connection-test";
 import type { XrayCredentialStore } from "../xray/xray-credential-store";
@@ -21,6 +22,7 @@ import { TraceabilityCommands } from "./traceability-commands";
 import { RunCommands } from "./run-commands";
 import { ExecutionAdmissionBlockedError } from "../core/execution-admission";
 import { explainWorkspaceTrust } from "../ui/workspace-trust";
+import { OnboardingCommands, type ProjectCapabilitySource } from "./onboarding-commands";
 
 interface OrganizationStrategy {
   strategyType: string;
@@ -38,11 +40,10 @@ interface TestProviderLike {
   organizationManager?: OrganizationManagerLike;
   discoveryManager?: DiscoveryManagerLike;
   discoverTests?: () => Promise<void>;
-  forceRefreshTestExplorer?: () => Promise<void>;
   persistOrganizationStrategy?: (strategyType: string) => void;
 }
 
-interface UsageIndexHost {
+interface UsageIndexHost extends ProjectCapabilitySource {
   getUsageIndex(): StepUsageIndex;
 }
 
@@ -54,17 +55,18 @@ export interface CommandOptions {
   handler: CommandHandler;
 }
 
-const STRATEGY_TYPE_BY_VALUE: Record<string, string> = {
-  tag: "TagBasedOrganization",
-  file: "FileBasedOrganization",
-  scenarioType: "ScenarioTypeOrganization",
-  flat: "FlatOrganization",
-  feature: "FeatureBasedOrganization",
-};
+const ORGANIZATION_CHOICES = [
+  { label: "Tags", description: "Group scenarios by tag", value: "tag", strategyType: "TagBasedOrganization" },
+  { label: "File", description: "Group scenarios by file", value: "file", strategyType: "FileBasedOrganization" },
+  { label: "Scenario type", description: "Group scenarios and outlines", value: "scenarioType", strategyType: "ScenarioTypeOrganization" },
+  { label: "None", description: "Show one flat scenario list", value: "flat", strategyType: "FlatOrganization" },
+  { label: "Feature", description: "Nest scenarios under features", value: "feature", strategyType: "FeatureBasedOrganization" },
+] as const;
 
 const CATEGORY = "Specwright";
 
 export const PRIVILEGED_COMMANDS: ReadonlySet<string> = new Set([
+  "playwrightBddRunner.diagnoseWorkspace",
   "playwrightBddRunner.runScenario",
   "playwrightBddRunner.runFeatureFile",
   "playwrightBddRunner.runAllTests",
@@ -116,6 +118,8 @@ export class CommandManager {
   private attachmentSpoolRoot: string | undefined;
   private readonly traceabilityCommands: TraceabilityCommands;
   private readonly runCommands: RunCommands;
+  private readonly onboardingCommands: OnboardingCommands;
+  private diagnosticsCommands: DiagnosticsCommands | undefined;
 
   public static create(context: PlaywrightBddExtensionContext): CommandManager {
     return new CommandManager(context);
@@ -126,6 +130,10 @@ export class CommandManager {
     this.attachmentSpoolRoot = context.attachmentSpoolRoot;
     this.extensionUri = context.extensionUri;
     this.runCommands = new RunCommands(context, () => this.testProvider);
+    this.onboardingCommands = new OnboardingCommands(
+      context.executionGateway,
+      () => this.usageIndexHost
+    );
     this.traceabilityCommands = new TraceabilityCommands(context.logger, {
       config: context.config,
       fallbackAdapter: () => context.traceabilityAdapter,
@@ -158,8 +166,8 @@ export class CommandManager {
     this.credentialStore = store;
   }
 
-  // The single-flighted probe built in activation and shared with the adapter factory's `verify`, so
-  // the connection commands and the subsystem refresh coalesce onto one in-flight handshake.
+  // The setup commands receive the extension's probe implementation and supply their own lifecycle
+  // signal, independently from the live adapter owned by the traceability subsystem.
   public setXrayProbe(probe: XrayProbe): void {
     this.xrayProbe = probe;
   }
@@ -178,14 +186,20 @@ export class CommandManager {
       // The only place the extension root reaches this class; the board's tab icon resolves against it.
       this.extensionUri = context.extensionUri;
       this.attachmentSpoolRoot = context.globalStorageUri?.fsPath;
+      this.diagnosticsCommands = new DiagnosticsCommands(this.logger, context);
 
       const commands: CommandOptions[] = [
+        { command: "playwrightBddRunner.diagnoseWorkspace", title: "Diagnose Workspace", category: CATEGORY, handler: () => this.onboardingCommands.diagnoseWorkspace() },
+        { command: "playwrightBddRunner.openTesting", title: "Open Testing", category: CATEGORY, handler: () => this.onboardingCommands.openTesting() },
+        { command: "playwrightBddRunner.openSteps", title: "Open Steps", category: CATEGORY, handler: () => this.onboardingCommands.openSteps() },
+        { command: "playwrightBddRunner.configureStepPaths", title: "Configure Step Paths", category: CATEGORY, handler: () => this.onboardingCommands.configureStepPaths() },
         { command: "playwrightBddRunner.runScenario", title: "Run Scenario", category: CATEGORY, handler: this.runCommands.runScenario.bind(this.runCommands) },
         { command: "playwrightBddRunner.runFeatureFile", title: "Run Feature File", category: CATEGORY, handler: this.runCommands.runFeature.bind(this.runCommands) },
         { command: "playwrightBddRunner.runAllTests", title: "Run All Tests", category: CATEGORY, handler: this.runCommands.runAllTests.bind(this.runCommands) },
         { command: "playwrightBddRunner.debugScenario", title: "Debug Scenario", category: CATEGORY, handler: this.runCommands.debugScenario.bind(this.runCommands) },
-        { command: "playwrightBddRunner.refreshTests", title: "Refresh Tests", category: CATEGORY, handler: this.refreshTests.bind(this) },
+        { command: "playwrightBddRunner.refreshTests", title: "Refresh Tests", category: CATEGORY, handler: this.discoverTests.bind(this) },
         { command: "playwrightBddRunner.showOutput", title: "Show Test Output", category: CATEGORY, handler: this.showOutput.bind(this) },
+        { command: "playwrightBddRunner.openSupportSnapshot", title: "Open Support Snapshot", category: CATEGORY, handler: () => this.diagnosticsCommands?.openSupportSnapshot() },
         { command: "playwrightBddRunner.validateConfiguration", title: "Validate Configuration", category: CATEGORY, handler: this.validateConfiguration.bind(this) },
         { command: "playwrightBddRunner.discoverTests", title: "Discover Tests", category: CATEGORY, handler: this.discoverTests.bind(this) },
         { command: "playwrightBddRunner.runFeatureFileWithTags", title: "Run Feature File with Tags", category: CATEGORY, handler: this.runCommands.runFeatureWithTags.bind(this.runCommands) },
@@ -194,13 +208,13 @@ export class CommandManager {
         { command: "playwrightBddRunner.runScenarioWithContext", title: "Run Scenario", category: CATEGORY, handler: this.runCommands.runScenarioWithContext.bind(this.runCommands) },
         { command: "playwrightBddRunner.debugScenarioWithContext", title: "Debug Scenario", category: CATEGORY, handler: this.runCommands.debugScenarioWithContext.bind(this.runCommands) },
         { command: "playwrightBddRunner.runFeatureFileWithContext", title: "Run Feature File", category: CATEGORY, handler: this.runCommands.runFeatureWithContext.bind(this.runCommands) },
-        { command: "playwrightBddRunner.setOrganizationStrategy", title: "Set Organization Strategy", category: CATEGORY, handler: this.setOrganizationStrategy.bind(this) },
-        { command: "playwrightBddRunner.setTagBasedOrganization", title: "Organize by Tags", category: CATEGORY, handler: () => this.setStrategyByValue("tag") },
-        { command: "playwrightBddRunner.setFileBasedOrganization", title: "Organize by File", category: CATEGORY, handler: () => this.setStrategyByValue("file") },
-        { command: "playwrightBddRunner.setScenarioTypeOrganization", title: "Organize by Scenario Type", category: CATEGORY, handler: () => this.setStrategyByValue("scenarioType") },
-        { command: "playwrightBddRunner.setFlatOrganization", title: "Flat Organization", category: CATEGORY, handler: () => this.setStrategyByValue("flat") },
-        { command: "playwrightBddRunner.setFeatureBasedOrganization", title: "Hierarchical Organization", category: CATEGORY, handler: () => this.setStrategyByValue("feature") },
-        { command: "playwrightBddRunner.debugOrganization", title: "Debug Organization Strategy", category: CATEGORY, handler: this.debugOrganization.bind(this) },
+        { command: "playwrightBddRunner.setOrganizationStrategy", title: "Group tests by", category: CATEGORY, handler: this.setOrganizationStrategy.bind(this) },
+        { command: "playwrightBddRunner.setTagBasedOrganization", title: "Tags", category: CATEGORY, handler: () => this.setStrategyByValue("tag") },
+        { command: "playwrightBddRunner.setFileBasedOrganization", title: "File", category: CATEGORY, handler: () => this.setStrategyByValue("file") },
+        { command: "playwrightBddRunner.setScenarioTypeOrganization", title: "Scenario type", category: CATEGORY, handler: () => this.setStrategyByValue("scenarioType") },
+        { command: "playwrightBddRunner.setFlatOrganization", title: "None", category: CATEGORY, handler: () => this.setStrategyByValue("flat") },
+        { command: "playwrightBddRunner.setFeatureBasedOrganization", title: "Feature", category: CATEGORY, handler: () => this.setStrategyByValue("feature") },
+        { command: "playwrightBddRunner.debugOrganization", title: "Debug test grouping", category: CATEGORY, handler: this.debugOrganization.bind(this) },
         { command: "playwrightBddRunner.generateStepDefinitions", title: "Generate Missing Step Definitions", category: CATEGORY, handler: this.generateStepDefinitions.bind(this) },
         { command: "playwrightBddRunner.generateStepDefinitionForStep", title: "Create Step Definition For Step", category: CATEGORY, handler: this.generateStepDefinitionForStep.bind(this) },
         { command: "playwrightBddRunner.goToStepDefinition", title: "Go to Step Definition", category: CATEGORY, handler: this.goToStepDefinition.bind(this) },
@@ -224,7 +238,12 @@ export class CommandManager {
         { command: "playwrightBddRunner.traceability.sync", title: "Sync Traceability", category: CATEGORY, handler: () => this.traceabilityCommands.syncTraceability() },
         { command: "playwrightBddRunner.traceability.openBoard", title: "Open Coverage Board", category: CATEGORY, handler: () => this.traceabilityCommands.openBoard() },
         { command: "playwrightBddRunner.traceability.manageConnection", title: "Manage Xray Connection", category: CATEGORY, handler: () => this.traceabilityCommands.manageConnection() },
-        { command: "playwrightBddRunner.traceability.connect", title: "Connect to Xray", category: CATEGORY, handler: () => this.traceabilityCommands.connect() },
+        { command: "playwrightBddRunner.traceability.showPanel", title: "Enable Xray Traceability", category: CATEGORY, handler: () => this.onboardingCommands.enableTraceability() },
+        { command: "playwrightBddRunner.traceability.connect", title: "Connect to Xray", category: CATEGORY, handler: async () => {
+          await this.onboardingCommands.enableTraceability(false);
+          await this.traceabilityCommands.connect();
+        } },
+        { command: "playwrightBddRunner.traceability.setupSaved", title: "Xray Setup Saved", category: CATEGORY, handler: () => Promise.resolve() },
         { command: "playwrightBddRunner.traceability.disconnect", title: "Disconnect from Xray", category: CATEGORY, handler: () => this.traceabilityCommands.disconnect() },
         { command: "playwrightBddRunner.traceability.testConnection", title: "Test Xray Connection", category: CATEGORY, handler: () => this.traceabilityCommands.testConnection() },
         { command: "playwrightBddRunner.traceability.hidePanel", title: "Hide Traceability Panel", category: CATEGORY, handler: () => this.traceabilityCommands.hideTraceabilityPanel() },
@@ -279,18 +298,6 @@ export class CommandManager {
     return new Map([...this.commands].map(([command, { title }]) => [command, title]));
   }
 
-  private refreshTests(): void {
-    if (!this.testProvider) {
-      this.showErrorMessage("Failed to refresh tests: Test provider not available");
-      return;
-    }
-    const provider = this.testProvider as TestProviderLike;
-    provider.discoverTests?.().catch((error) => {
-      this.logger.error("Failed to refresh tests", { error: errMsg(error) });
-      this.showErrorMessage(`Failed to refresh tests: ${errMsg(error)}`);
-    });
-  }
-
   private showOutput(): void {
     this.logger.showOutput();
   }
@@ -304,16 +311,16 @@ export class CommandManager {
     }
   }
 
-  private discoverTests(): void {
+  private discoverTests(): Promise<void> {
     if (!this.testProvider) {
       this.showErrorMessage("Failed to discover tests: Test provider not available");
-      return;
+      return Promise.resolve();
     }
     const provider = this.testProvider as TestProviderLike;
-    provider.discoverTests?.().catch((error) => {
+    return provider.discoverTests?.().catch((error) => {
       this.logger.error("Failed to discover tests", { error: errMsg(error) });
       this.showErrorMessage(`Failed to discover tests: ${errMsg(error)}`);
-    });
+    }) ?? Promise.resolve();
   }
 
   private showErrorMessage(message: string): void {
@@ -342,15 +349,8 @@ export class CommandManager {
   }
 
   private async setOrganizationStrategy(): Promise<void> {
-    const strategies = [
-      { label: "Tag-based", description: "Group scenarios by their tags", value: "tag" },
-      { label: "File-based", description: "Group scenarios by their file location", value: "file" },
-      { label: "Scenario Type", description: "Group by regular scenarios vs scenario outlines", value: "scenarioType" },
-      { label: "Flat", description: "No grouping, all scenarios in one list", value: "flat" },
-      { label: "Feature-Based (Hierarchical)", description: "Show feature files as roots with scenarios as children", value: "feature" },
-    ];
-    const selected = await vscode.window.showQuickPick(strategies, {
-      placeHolder: "Select organization strategy",
+    const selected = await vscode.window.showQuickPick(ORGANIZATION_CHOICES, {
+      placeHolder: "Group tests by",
       canPickMany: false,
     });
     if (selected) {await this.setStrategyByValue(selected.value);}
@@ -362,7 +362,8 @@ export class CommandManager {
       const organizationManager = provider?.organizationManager;
       if (!organizationManager) {throw new Error("Organization manager not available");}
 
-      const targetType = STRATEGY_TYPE_BY_VALUE[strategyValue];
+      const choice = ORGANIZATION_CHOICES.find(({ value }) => value === strategyValue);
+      const targetType = choice?.strategyType;
       const available = organizationManager.getAvailableStrategies();
       const strategy = (targetType && available.find((s) => s.strategy.strategyType === targetType)) ?? available[0];
       if (!strategy) {throw new Error(`Strategy not found: ${strategyValue}`);}
@@ -377,11 +378,11 @@ export class CommandManager {
       provider?.discoveryManager?.clearCache();
       await provider?.discoverTests?.();
 
-      vscode.window.showInformationMessage(`Organization strategy changed to: ${strategy.name}`);
+      vscode.window.showInformationMessage(`Tests grouped by: ${choice?.label ?? strategy.name}`);
     } catch (error) {
       const msg = errMsg(error);
-      this.logger.error("Failed to change organization strategy", { error: msg });
-      this.showErrorMessage(`Failed to change organization strategy: ${msg}`);
+      this.logger.error("Failed to change test grouping", { error: msg });
+      this.showErrorMessage(`Failed to change test grouping: ${msg}`);
     }
   }
 
@@ -564,15 +565,15 @@ export class CommandManager {
       if (!organizationManager) {throw new Error("Organization manager not available");}
 
       const current = organizationManager.getStrategy();
-      this.logger.info("Current Organization Strategy", {
+      this.logger.info("Current test grouping", {
         name: current.strategyType,
         description: current.getDescription(),
       });
-      vscode.window.showInformationMessage(`Current Organization Strategy: ${current.strategyType}`);
+      vscode.window.showInformationMessage(`Current test grouping: ${current.strategyType}`);
     } catch (error) {
       const msg = errMsg(error);
-      this.logger.error("Failed to debug organization strategy", { error: msg });
-      this.showErrorMessage(`Failed to debug organization strategy: ${msg}`);
+      this.logger.error("Failed to debug test grouping", { error: msg });
+      this.showErrorMessage(`Failed to debug test grouping: ${msg}`);
     }
   }
 

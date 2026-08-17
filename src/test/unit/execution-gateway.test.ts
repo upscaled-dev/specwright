@@ -1210,3 +1210,87 @@ describe("LegacyDirectExecutionGateway", () => {
     });
   });
 });
+
+describe("LegacyArtifactGateway lifecycle diagnostics", () => {
+  const prepared = { operationId: "operation-1", identity: { engine: "legacy-direct" }, intent: { mode: "run", targets: [] } } as never;
+  const completion = (state: "complete" | "partial" | "cancelled") => ({ identity: { engine: "legacy-direct" }, state, results: [], output: "", passed: 0, failed: 0, durationMs: 1 }) as never;
+
+  function fake(
+    run: () => Promise<unknown>,
+    prepare = async () => prepared,
+    artifactOwnership?: () => readonly ScenarioRef[]
+  ) {
+    const logger = loggerStub();
+    const engine = { running: false, prepare: vi.fn(prepare), run: vi.fn(run), debug: vi.fn(run), executeWithArtifactBatch: vi.fn(run), cancel: vi.fn(), dispose: vi.fn(), diagnose: vi.fn(), discover: vi.fn() };
+    const artifacts = { beginBatch: vi.fn(() => 1), sealBatch: vi.fn(() => ({ id: "artifact-1", state: "complete" })) };
+    const executor = { registerArtifactSink: vi.fn(() => ({ dispose: () => undefined })) };
+    return { gateway: new LegacyArtifactGateway(engine as never, artifacts as never, logger, executor as never, artifactOwnership), logger, engine };
+  }
+
+  it("logs success, cancellation, failures, and a missing capture without payloads", async () => {
+    const success = fake(async () => completion("complete"));
+    await success.gateway.run(prepared);
+    expect(success.logger.info).toHaveBeenCalledWith("Legacy execution lifecycle", expect.objectContaining({ operationId: "operation-1", state: "complete", captureState: "missing" }));
+    expect(success.logger.info).toHaveBeenCalledTimes(1);
+    const captured = fake(async () => completion("complete"));
+    await captured.gateway.execute(intent());
+    expect(captured.logger.info).toHaveBeenCalledWith("Legacy execution lifecycle", expect.objectContaining({ artifactId: "artifact-1", initiatedBy: "test-explorer", engine: "legacy-direct", schemaProfile: "unknown", durationMs: expect.any(Number), captureState: "captured" }));
+    expect(captured.logger.info).toHaveBeenCalledTimes(1);
+    const cancelled = fake(async () => completion("cancelled"));
+    await cancelled.gateway.run(prepared);
+    expect(cancelled.logger.info).toHaveBeenCalledWith("Legacy execution lifecycle", expect.objectContaining({ cancelled: true, state: "cancelled" }));
+    expect(cancelled.logger.info).toHaveBeenCalledTimes(1);
+    const known = fake(async () => { throw new ExecutionFailure(completion("partial")); });
+    await expect(known.gateway.run(prepared)).rejects.toBeInstanceOf(ExecutionFailure);
+    expect(known.logger.info).toHaveBeenCalledWith("Legacy execution lifecycle", expect.objectContaining({ state: "partial" }));
+    expect(known.logger.info).toHaveBeenCalledTimes(1);
+    const unexpected = fake(async () => { throw new Error("/private/secret.feature"); });
+    await expect(unexpected.gateway.run(prepared)).rejects.toThrow("secret.feature");
+    expect(unexpected.logger.info).toHaveBeenCalledWith("Legacy execution lifecycle", expect.objectContaining({ state: "unexpected-rejection" }));
+    expect(unexpected.logger.info).toHaveBeenCalledTimes(1);
+    const capturedUnexpected = fake(async () => { throw new Error("transport failed"); });
+    await expect(capturedUnexpected.gateway.execute(intent())).rejects.toThrow("transport failed");
+    expect(capturedUnexpected.logger.info).toHaveBeenCalledWith("Legacy execution lifecycle", expect.objectContaining({ state: "unexpected-rejection", artifactId: "artifact-1", durationMs: expect.any(Number) }));
+    expect(capturedUnexpected.logger.info).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs a direct preparation rejection once without changing the error", async () => {
+    const failure = new Error("prepare failed");
+    const direct = fake(async () => completion("complete"), async () => { throw failure; });
+
+    await expect(direct.gateway.prepare({ mode: "run", targets: [] })).rejects.toBe(failure);
+    expect(direct.logger.info).toHaveBeenCalledTimes(1);
+    expect(direct.logger.info).toHaveBeenCalledWith("Legacy execution lifecycle", expect.objectContaining({
+      state: "prepare-rejected",
+      captureState: "missing",
+      initiatedBy: "unknown",
+      engine: "legacy-direct",
+      schemaProfile: "unknown",
+    }));
+
+    const executed = fake(async () => completion("complete"), async () => { throw failure; });
+    await expect(executed.gateway.execute(intent())).rejects.toBe(failure);
+    expect(executed.logger.info).toHaveBeenCalledTimes(1);
+    expect(executed.logger.info).toHaveBeenCalledWith("Legacy execution lifecycle", expect.objectContaining({
+      initiatedBy: "test-explorer",
+      captureState: "missing",
+    }));
+    expect((executed.gateway as unknown as { captures: Map<string, unknown> }).captures.size).toBe(0);
+  });
+
+  it("logs the initiator once when capture ownership preparation rejects", async () => {
+    const failure = new Error("ownership unavailable");
+    const resolver = vi.fn(() => { throw failure; });
+    const rejected = fake(async () => completion("complete"), undefined, resolver);
+
+    await expect(rejected.gateway.execute(intent())).rejects.toBe(failure);
+    expect(rejected.engine.prepare).not.toHaveBeenCalled();
+    expect(rejected.logger.info).toHaveBeenCalledTimes(1);
+    expect(rejected.logger.info).toHaveBeenCalledWith("Legacy execution lifecycle", expect.objectContaining({
+      state: "prepare-rejected",
+      initiatedBy: "test-explorer",
+      captureState: "missing",
+    }));
+    expect((rejected.gateway as unknown as { captures: Map<string, unknown> }).captures.size).toBe(0);
+  });
+});

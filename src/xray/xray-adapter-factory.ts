@@ -124,6 +124,9 @@ export function createXrayAdapterFactory(
         createTest: (spec, signal) => client.createTest(spec, signal),
         createTestSet: (spec, signal) => client.createTestSet(spec.project, spec.summary, spec.testIssueIds, signal),
         createTestPlan: (spec, signal) => client.createTestPlan(spec.project, spec.summary, spec.testIssueIds, signal),
+        resolveTestContainer: (kind, key, signal) => client.resolveTestContainer(kind, key, signal),
+        addTestsToContainer: (kind, issueId, testIssueIds, signal) =>
+          client.addTestsToContainer(kind, issueId, testIssueIds, signal),
         createTestExecution: (spec, signal) => client.createTestExecution(spec.project, spec.summary, signal),
         pushGherkin: (issueId, gherkin, signal) => client.updateGherkinTestDefinition(issueId, gherkin, signal),
       };

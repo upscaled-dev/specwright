@@ -83,10 +83,15 @@ describe("StatusBar", () => {
     statusBar = new StatusBar(gateway, makeWindow(captured));
   });
 
-  it("renders idle state on creation", () => {
+  it("does not allocate an item until a run starts", () => {
+    expect(captured).toHaveLength(0);
+  });
+
+  it("updates to running state when a running event fires", () => {
+    gateway.fire({ kind: "started", targetCount: 1 });
     expect(captured).toHaveLength(1);
     const item = captured[0]!;
-    expect(item.text).toBe("$(beaker) Specwright");
+    expect(item.text).toBe("$(loading~spin) Specwright: running…");
     expect(item.tooltip).toBe("No runs this session");
     expect(item.command).toBe("playwrightBddRunner.showOutput");
     expect(item.alignment).toBe(vscode.StatusBarAlignment.Left);
@@ -94,14 +99,8 @@ describe("StatusBar", () => {
     expect(item.disposed).toBe(false);
   });
 
-  it("updates to running state when a running event fires", () => {
-    gateway.fire({ kind: "started", targetCount: 1 });
-    const item = captured[0]!;
-    expect(item.text).toBe("$(loading~spin) Specwright: running…");
-    expect(item.tooltip).toBe("No runs this session");
-  });
-
   it("shows completed and total counts while a run is active", () => {
+    gateway.fire({ kind: "started", targetCount: 1 });
     gateway.fire({
       kind: "case-finished",
       result: {
@@ -118,6 +117,7 @@ describe("StatusBar", () => {
   });
 
   it("updates to success state with passed count and updates tooltip with last run time", () => {
+    gateway.fire({ kind: "started", targetCount: 1 });
     gateway.fire({ kind: "finished", completion: completion({ passed: 7 }) });
     const item = captured[0]!;
     expect(item.text).toBe("$(check) Specwright: passed 7");
@@ -125,6 +125,7 @@ describe("StatusBar", () => {
   });
 
   it("updates to failure state with passed/failed counts", () => {
+    gateway.fire({ kind: "started", targetCount: 1 });
     gateway.fire({ kind: "finished", completion: completion({ passed: 3, failed: 2 }) });
     const item = captured[0]!;
     expect(item.text).toBe("$(error) Specwright: 3 passed, 2 failed");
@@ -140,6 +141,7 @@ describe("StatusBar", () => {
   });
 
   it("preserves the last-run tooltip when transitioning back to running", () => {
+    gateway.fire({ kind: "started", targetCount: 1 });
     gateway.fire({ kind: "finished", completion: completion({ passed: 1 }) });
     const tooltipAfterSuccess = captured[0]!.tooltip;
     gateway.fire({ kind: "started", targetCount: 1 });
@@ -149,7 +151,13 @@ describe("StatusBar", () => {
   it("disposes the status bar item and unsubscribes from the gateway", () => {
     expect(gateway.listenerCount).toBe(1);
     statusBar.dispose();
-    expect(captured[0]!.disposed).toBe(true);
+    expect(captured).toHaveLength(0);
     expect(gateway.listenerCount).toBe(0);
+  });
+
+  it("disposes the lazily created item", () => {
+    gateway.fire({ kind: "started", targetCount: 1 });
+    statusBar.dispose();
+    expect(captured[0]!.disposed).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { Logger } from "./utils/logger";
+import { SupportDiagnostics } from "./core/support-diagnostics";
 import { PlaywrightBddTestProvider } from "./test-providers/playwright-bdd-test-provider";
 import { CommandManager } from "./commands/command-manager";
 import { ExtensionConfig } from "./core/extension-config";
@@ -19,9 +20,8 @@ import { createInMemoryAdapterFactory } from "./traceability/in-memory-adapter";
 import { createXrayAdapterFactory, XrayPublishSupport } from "./xray/xray-adapter-factory";
 import { makeFeatureStepResolver } from "./xray/feature-step-resolver";
 import { PublishLedger } from "./traceability/publish-ledger";
-import { probeXrayConnection, type XrayConnectionTestDeps, type XrayProbeOptions } from "./xray/xray-connection-test";
+import { probeXrayConnection } from "./xray/xray-connection-test";
 import { XrayCredentialStore } from "./xray/xray-credential-store";
-import { singleFlight } from "./utils/single-flight";
 import { PROMPTED_STATE_KEY } from "./commands/prompt-worker-count";
 import { StatusBar } from "./ui/status-bar";
 import { LegacyDirectExecutionGateway } from "./core/execution-gateway";
@@ -46,7 +46,8 @@ import type { ExecutionEngine, ExecutionGateway, ExecutionIdentity } from "./cor
 import { LegacyExecutionDiscovery } from "./core/legacy-discovery";
 import { LegacyArtifactGateway } from "./ui/legacy-artifact-gateway";
 import { SelectedArtifactCatalog } from "./ui/execution-artifacts";
-import type { TraceabilityAdapter } from "./traceability/contracts";
+import { XrayAdapter } from "./xray/xray-adapter";
+import { XraySetupPanel } from "./xray/xray-setup-panel";
 
 let testProvider: PlaywrightBddTestProvider | undefined;
 let commandManager: CommandManager | undefined;
@@ -58,7 +59,6 @@ let traceabilitySubsystem: TraceabilitySubsystem | undefined;
 let activationLogger: Logger | undefined;
 let workspaceTrust: WorkspaceTrust | undefined;
 let activeExecutionGateway: ExecutionGateway | undefined;
-let activeTraceabilityAdapter: TraceabilityAdapter | undefined;
 
 /**
  * Test-only API surface. Not a public contract for other extensions.
@@ -101,6 +101,7 @@ export interface ExtensionApi {
   readonly traceabilitySubsystem:
     | {
         readonly traceabilityPanelActive: boolean;
+        applyCurrent(): Promise<void>;
       }
     | undefined;
   /** @internal */
@@ -140,6 +141,7 @@ function buildApi(
   const traceabilityApi = traceability
     ? {
         get traceabilityPanelActive() { return traceability.traceabilityPanelActive; },
+        applyCurrent: () => traceability.applyCurrent(),
       }
     : undefined;
   if (!provider) {
@@ -166,6 +168,7 @@ function buildApi(
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi> {
+  const activationStartedAt = Date.now();
   // Nothing is awaited during activation yet; this keeps the async contract (and the
   // require-await lint rule) satisfied so future async setup won't change the signature.
   await Promise.resolve();
@@ -175,7 +178,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     return buildApi(testProvider, providerRegistry, traceabilitySubsystem, context.workspaceState);
   }
 
-  const logger = Logger.create();
+  const diagnostics = new SupportDiagnostics();
+  context.subscriptions.push(diagnostics);
+  const logger = Logger.create(undefined, undefined, diagnostics);
   activationLogger = logger;
   const config = ExtensionConfig.create();
   context.subscriptions.push(config);
@@ -275,27 +280,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const publishLedger = new PublishLedger(context.workspaceState, logger);
   await publishLedger.ready();
   const traceabilityRegistry = new TraceabilityAdapterRegistry();
-  // One credential-save event fans out into the subsystem's connection-refresh verify and the setup
-  // panel's post-save verify; coincident identical probes with the same cancellation owner share a
-  // single handshake instead of racing three of them (§12 F5 finding #3).
-  const probeSignalIds = new WeakMap<AbortSignal, number>();
-  let nextProbeSignalId = 0;
-  const probe = singleFlight(
-    (deps: XrayConnectionTestDeps, options?: XrayProbeOptions, signal?: AbortSignal) => {
-      let signalId = "none";
-      if (signal) {
-        let id = probeSignalIds.get(signal);
-        if (id === undefined) {
-          nextProbeSignalId += 1;
-          id = nextProbeSignalId;
-          probeSignalIds.set(signal, id);
-        }
-        signalId = String(id);
-      }
-      return `${deps.site}\0${options?.authOnly ? "auth" : "full"}\0${signalId}`;
-    },
-    probeXrayConnection
-  );
+  // The setup panel and live adapter have independent cancellation owners. Keep their probes
+  // independent so either lifecycle can abort and drain its own request without pinning the other.
+  const probe = probeXrayConnection;
   const publishSupport: XrayPublishSupport = {
     resolveSteps: makeFeatureStepResolver(featureParser),
     workspaceRootFor: (filePath) => vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath,
@@ -319,7 +306,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     PlaywrightJsonParser.create(logger),
     runResultStore,
     logger,
-    context.workspaceState
+    context.workspaceState,
+    () => providerRegistry?.hasTraceabilityTags() ?? Promise.resolve(false),
+    () => XraySetupPanel.close()
   );
   context.subscriptions.push(traceabilitySubsystem);
   // Thread scenario→testKey from the snapshot into every artifact capture (Test Explorer runs
@@ -328,22 +317,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const subsystemForKeys = traceabilitySubsystem;
   runArtifactStore.setKeyResolver(() => subsystemForKeys.captureKeyResolver());
 
-  // The command context needs a browse-URL adapter for the active provider; construct one from the
-  // registry (Xray fallback) and own its lifetime if it holds resources.
-  const traceabilityAdapterId = traceabilityRegistry.has(config.traceabilityProvider)
-    ? config.traceabilityProvider
-    : "xray";
-  const traceabilityAdapter = await traceabilityRegistry.activate(
-    traceabilityAdapterId,
-    { config, logger }
-  );
-  if (!traceabilityAdapter) {
-    throw new Error(`Traceability adapter "${traceabilityAdapterId}" is not registered`);
-  }
-  activeTraceabilityAdapter = traceabilityAdapter;
-  if (typeof traceabilityAdapter.dispose === "function") {
-    context.subscriptions.push(traceabilityAdapter as vscode.Disposable);
-  }
+  // Commands need only offline grammar and browse URLs when the panel is off. The live adapter and
+  // all of its subscriptions belong exclusively to TraceabilitySubsystem's reversible lifecycle.
+  const traceabilityAdapter = new XrayAdapter(config);
 
   const sharedContext: PlaywrightBddExtensionContext = {
     logger,
@@ -381,14 +357,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     testController = vscode.tests.createTestController(controllerId, "Specwright Tests");
     context.subscriptions.push(testController);
 
-    testProvider = PlaywrightBddTestProvider.create(testController, sharedContext, context.workspaceState);
+    testProvider = PlaywrightBddTestProvider.create(
+      testController,
+      sharedContext,
+      context.workspaceState,
+      () => executionSelection.begin().engine === "legacy-direct"
+    );
     context.subscriptions.push(testProvider);
-
-    testProvider.discoverTests().catch((error) => {
-      logger.error("Error during initial test discovery:", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
 
     commandManager = CommandManager.create(sharedContext);
     commandManager.registerCommands(context);
@@ -404,7 +379,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     commandManager.registerBoardSerializer(context);
 
     providerRegistry.applyCurrent();
-    await traceabilitySubsystem.applyCurrent();
+    traceabilitySubsystem.applyCurrent().catch((error) => {
+      logger.warn("Traceability activation failed", { error: errMsg(error) });
+    });
     context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(() => {
       providerRegistry?.applyCurrent();
       traceabilitySubsystem?.applyCurrent().catch((error) => {
@@ -412,7 +389,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
           error: errMsg(error),
         });
       });
-      testProvider?.discoverTests().catch((error) => {
+      testProvider?.onWorkspaceTrustGranted().catch((error) => {
         logger.warn("Test discovery after granting workspace trust failed", {
           error: errMsg(error),
         });
@@ -423,10 +400,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     context.subscriptions.push(statusBar);
 
     isActivated = true;
-    logger.info("✅ Specwright activated");
+    logger.info("✅ Specwright activated", { durationMs: Date.now() - activationStartedAt });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    logger.error("❌ Error during extension activation:", { error: errorMessage });
+    logger.error("❌ Error during extension activation:", {
+      error: errorMessage,
+      durationMs: Date.now() - activationStartedAt,
+    });
     vscode.window.showErrorMessage(
       `Failed to activate Specwright: ${errorMessage}`
     );
@@ -465,7 +445,6 @@ export async function deactivate(): Promise<void> {
     await settleCleanup("test controller", () => testController?.dispose());
     await settleCleanup("provider registry", () => providerRegistry?.dispose());
     await settleCleanup("traceability subsystem", () => traceabilitySubsystem?.shutdown());
-    await settleCleanup("traceability command adapter", () => activeTraceabilityAdapter?.dispose?.());
     await settleCleanup("workspace trust", () => workspaceTrust?.dispose());
     await settleCleanup("test executor", () => activeTestExecutor?.dispose());
 
@@ -489,6 +468,5 @@ export async function deactivate(): Promise<void> {
     activationLogger = undefined;
     workspaceTrust = undefined;
     activeExecutionGateway = undefined;
-    activeTraceabilityAdapter = undefined;
   }
 }

@@ -1,6 +1,6 @@
-# Run your first Sync
+# Run your first sync
 
-**Sync** is the only action that fetches from Xray. It pulls remote metadata, status, and requirement coverage for the tests your scenarios reference, plus the catalog needed to flag orphan tests.
+**Sync Traceability** pulls remote metadata, status, and requirement coverage for the tests your scenarios reference, plus the catalog needed to flag orphan tests.
 
 After a sync the **Traceability** tree shows:
 
@@ -8,4 +8,4 @@ After a sync the **Traceability** tree shows:
 - normalized **status badges**,
 - **orphan** Xray tests with no local scenario.
 
-Sync is manual. Saving a feature file re-derives the local mapping offline, with no network call. Re-run **Sync with Xray** whenever you want fresh remote data.
+Saving an ordinary feature file re-derives the local mapping offline, with no network call. Specwright also schedules one quiet project sync after a confirmed remote create, or when an operation reports that Xray may need reindexing. Run **Sync Traceability** whenever you want an immediate refresh.

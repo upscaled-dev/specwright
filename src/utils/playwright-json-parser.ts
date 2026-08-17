@@ -259,17 +259,20 @@ export class PlaywrightJsonParser {
   }
 
   /** Read extension-launched reports without blocking the extension host on file I/O. */
-  public async parseFromFileAsync(jsonPath: string): Promise<ScenarioResult[]> {
-    return (await this.inspectFromFileAsync(jsonPath)).details;
+  public async parseFromFileAsync(jsonPath: string, signal?: AbortSignal): Promise<ScenarioResult[]> {
+    return (await this.inspectFromFileAsync(jsonPath, signal)).details;
   }
 
-  public async inspectFromFileAsync(jsonPath: string): Promise<PlaywrightReportEvidence> {
+  public async inspectFromFileAsync(
+    jsonPath: string,
+    signal?: AbortSignal
+  ): Promise<PlaywrightReportEvidence> {
     try {
-      const raw = await readPlaywrightReport(jsonPath) as RawPlaywrightReport;
+      const raw = await readPlaywrightReport(jsonPath, signal) as RawPlaywrightReport;
       this.specDataCache.clear();
       return this.evidence(raw);
     } catch (err) {
-      if (isPlaywrightReportLimitError(err)) {throw err;}
+      if (isPlaywrightReportLimitError(err) || signal?.aborted) {throw err;}
       this.logger.warn(`Could not read Playwright JSON report at ${jsonPath}`, {
         error: String(err),
       });

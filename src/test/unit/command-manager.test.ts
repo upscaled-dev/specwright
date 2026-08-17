@@ -36,7 +36,7 @@ import { BoardViewModel, scenarioDropId } from "../../traceability/board-data";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { PreflightChoice } from "../../traceability/preflight-flow";
-import { OutcomeUnknownRecoveryPersistenceError } from "../../traceability/publish-flow";
+import { OutcomeUnknownRecoveryPersistenceError, PublishAttachmentsModel } from "../../traceability/publish-flow";
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
 import { captureHandlers, fakeDoc, makeContext, memento, writeTempFeature } from "./helpers/command-manager-harness";
 import {
@@ -74,7 +74,10 @@ function testGateway(
 // delivers an inbound message, and the reset disposes every panel between tests.
 interface StubBoardPanel {
   title: string;
-  webview: { __posted: Array<{ surface?: string; type: string; projects?: string[]; text?: string }> };
+  webview: {
+    html: string;
+    __posted: Array<{ session: string; revision: number; surface: string; body: { type: string; [key: string]: unknown } }>;
+  };
   __revealCount: number;
   dispose: () => void;
   __receive: (message: unknown) => Promise<void>;
@@ -111,6 +114,20 @@ function traceabilityBoardDeps(manager: CommandManager): BoardPanelDeps {
       boardDeps: () => BoardPanelDeps;
     }
   ).boardDeps();
+}
+
+function boardPosts(panel: StubBoardPanel): Array<{ surface: string; type: string; [key: string]: unknown }> {
+  return panel.webview.__posted.map((message) => ({ surface: message.surface, ...message.body }));
+}
+
+function receiveBoard(
+  panel: StubBoardPanel,
+  surface: string,
+  body: { type: string; [key: string]: unknown }
+): Promise<void> {
+  const session = panel.webview.html.match(/data-session="([^"]+)"/)?.[1] ?? "";
+  const revision = body.type === "ready" ? 0 : (panel.webview.__posted.at(-1)?.revision ?? 0);
+  return panel.__receive({ version: 1, session, revision, surface, body });
 }
 
 describe("CommandManager scenario intents: one parse per invocation", () => {
@@ -730,6 +747,38 @@ describe("CommandManager palette run commands", () => {
     expect(exec.runFeatureFileWithOutput).not.toHaveBeenCalled();
   });
 
+  it("prompts for a tag expression when a CodeLens supplies only the feature path", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      identity: EXECUTION_IDENTITY,
+      state: "complete",
+      results: [],
+      passed: 0,
+      failed: 0,
+      durationMs: 1,
+    });
+    const input = vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("@smoke");
+    const handlers = captureHandlers(makeContext({ executionGateway: testGateway(execute) }));
+
+    await handlers.get("playwrightBddRunner.runFeatureFileWithTags")!("/ws/a.feature");
+
+    expect(input).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0]?.[0]).toEqual({
+      mode: "run",
+      targets: [{ kind: "path", path: "/ws/a.feature", tagExpression: "@smoke" }],
+    });
+
+    input.mockClear();
+    execute.mockClear();
+    await handlers.get("playwrightBddRunner.runFeatureFileWithTags")!(
+      "/ws/a.feature",
+      "@critical"
+    );
+    expect(input).not.toHaveBeenCalled();
+    expect(execute.mock.calls[0]?.[0]).toMatchObject({
+      targets: [{ kind: "path", path: "/ws/a.feature", tagExpression: "@critical" }],
+    });
+  });
+
   it("preserves admission recovery through a registered run command", async () => {
     const admission = new ExecutionAdmission();
     await admission.block({
@@ -901,11 +950,68 @@ describe("CommandManager: StepDefinitionProvider caching", () => {
   });
 });
 
+describe("CommandManager onboarding discovery ordering", () => {
+  it("keeps the real discovery handler pending before diagnosis focuses Testing", async () => {
+    const events: string[] = [];
+    let finishDiscovery: (() => void) | undefined;
+    const discovery = new Promise<void>((resolve) => {finishDiscovery = resolve;});
+    const context = makeContext({
+      executionGateway: testGateway(vi.fn(() => Promise.reject(new Error("not used")))),
+    });
+    const manager = CommandManager.create(context);
+    manager.setUsageIndexHost({
+      getUsageIndex: () => undefined as never,
+      projectCapabilities: () => Promise.resolve({
+        workspace: true,
+        featureFiles: 1,
+        stepDefinitions: 1,
+        stepDefinitionPaths: ["steps/**/*.ts"],
+      }),
+    });
+    manager.setTestProvider({
+      discoverTests: () => {
+        events.push("discovery:start");
+        return discovery.then(() => {events.push("discovery:end");});
+      },
+    });
+    vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue("Open Testing" as never);
+    const registered = new Map<string, (...args: unknown[]) => Promise<void>>();
+    vi.spyOn(vscode.commands, "registerCommand").mockImplementation((command, handler) => {
+      registered.set(command, handler as (...args: unknown[]) => Promise<void>);
+      return { dispose: () => {} };
+    });
+    vi.spyOn(vscode.commands, "executeCommand").mockImplementation((async (command: string) => {
+      events.push(`execute:${command}`);
+      return registered.get(command)?.();
+    }) as typeof vscode.commands.executeCommand);
+    manager.registerCommands({
+      subscriptions: [],
+      extensionUri: vscode.Uri.file("/extension"),
+      globalStorageUri: vscode.Uri.file("/tmp/specwright-command-tests"),
+    } as unknown as vscode.ExtensionContext);
+
+    const diagnosis = registered.get("playwrightBddRunner.diagnoseWorkspace")!();
+    await vi.waitFor(() => expect(events).toContain("discovery:start"));
+
+    expect(events).not.toContain("execute:workbench.view.testing.focus");
+    finishDiscovery?.();
+    await diagnosis;
+    expect(events).toEqual([
+      "execute:playwrightBddRunner.discoverTests",
+      "discovery:start",
+      "discovery:end",
+      "execute:workbench.view.testing.focus",
+    ]);
+  });
+});
+
 describe("command contributions ↔ handler registrations parity", () => {
   interface PackageJson {
     contributes: {
-      commands: Array<{ command: string; title: string; icon?: string }>;
+      commands: Array<{ command: string; title: string; category?: string; icon?: string }>;
       menus: Record<string, Array<{ command?: string; when?: string; submenu?: string; group?: string }>>;
+      views: Record<string, Array<{ id: string; when?: string }>>;
+      submenus: Array<{ id: string; label: string }>;
     };
   }
   const pkg = JSON.parse(
@@ -914,8 +1020,8 @@ describe("command contributions ↔ handler registrations parity", () => {
 
   const paletteCommands = {
     visible: [
+      "playwrightBddRunner.diagnoseWorkspace",
       "playwrightBddRunner.discoverTests",
-      "playwrightBddRunner.refreshTests",
       "playwrightBddRunner.runAllTests",
       "playwrightBddRunner.runScenario",
       "playwrightBddRunner.debugScenario",
@@ -931,6 +1037,7 @@ describe("command contributions ↔ handler registrations parity", () => {
       "playwrightBddRunner.setFeatureBasedOrganization",
       "playwrightBddRunner.debugOrganization",
       "playwrightBddRunner.showOutput",
+      "playwrightBddRunner.openSupportSnapshot",
       "playwrightBddRunner.validateConfiguration",
       "playwrightBddRunner.generateStepDefinitions",
       "playwrightBddRunner.goToStepDefinition",
@@ -943,6 +1050,7 @@ describe("command contributions ↔ handler registrations parity", () => {
       "playwrightBddRunner.traceability.sync",
       "playwrightBddRunner.traceability.openBoard",
       "playwrightBddRunner.traceability.manageConnection",
+      "playwrightBddRunner.traceability.showPanel",
       "playwrightBddRunner.traceability.connect",
       "playwrightBddRunner.traceability.disconnect",
       "playwrightBddRunner.traceability.testConnection",
@@ -955,6 +1063,10 @@ describe("command contributions ↔ handler registrations parity", () => {
       "playwrightBddRunner.traceability.createTestExecution",
     ],
     hidden: [
+      "playwrightBddRunner.openTesting",
+      "playwrightBddRunner.openSteps",
+      "playwrightBddRunner.configureStepPaths",
+      "playwrightBddRunner.refreshTests",
       "playwrightBddRunner.runScenarioWithContext",
       "playwrightBddRunner.debugScenarioWithContext",
       "playwrightBddRunner.runFeatureFileWithContext",
@@ -968,6 +1080,7 @@ describe("command contributions ↔ handler registrations parity", () => {
       "playwrightBddRunner.traceability.runAndPublishFeature",
       "playwrightBddRunner.traceability.runAndPublishFolder",
       "playwrightBddRunner.traceability.hidePanel",
+      "playwrightBddRunner.traceability.setupSaved",
       "playwrightBddRunner.traceability.runAndPublishAllMapped",
     ],
   };
@@ -1013,6 +1126,11 @@ describe("command contributions ↔ handler registrations parity", () => {
     expect(registered).toEqual(contributed);
   });
 
+  it("groups the support snapshot command with Specwright in the Command Palette", () => {
+    expect(pkg.contributes.commands.find(({ command }) => command === "playwrightBddRunner.openSupportSnapshot")?.category)
+      .toBe("Specwright");
+  });
+
   // A failure message names the registered title. A title the manifest never declares sends the user
   // looking for a command that appears nowhere in the UI.
   it("registers each command under the title the manifest declares", () => {
@@ -1054,6 +1172,74 @@ describe("command contributions ↔ handler registrations parity", () => {
       expect(entries).toHaveLength(1);
       expect(entries.every((entry) => entry.when === "false")).toBe(true);
     }
+  });
+
+  it("keeps Discover Tests canonical and refreshTests as a hidden compatibility alias", async () => {
+    const discoverTests = vi.fn().mockResolvedValue(undefined);
+    const handlers = new Map<string, (...args: unknown[]) => Promise<void>>();
+    const registration = vi.spyOn(vscode.commands, "registerCommand").mockImplementation(
+      (command, handler) => {
+        handlers.set(command, handler as (...args: unknown[]) => Promise<void>);
+        return { dispose: () => {} };
+      }
+    );
+    const manager = CommandManager.create(makeContext());
+    manager.setTestProvider({ discoverTests });
+    manager.registerCommands({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+    try {
+      await handlers.get("playwrightBddRunner.discoverTests")!();
+      await handlers.get("playwrightBddRunner.refreshTests")!();
+    } finally {
+      manager.dispose();
+      registration.mockRestore();
+    }
+
+    expect(discoverTests).toHaveBeenCalledTimes(2);
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    expect(palette.find((entry) =>
+      entry.command === "playwrightBddRunner.refreshTests"
+    )?.when).toBe("false");
+    const nonPaletteRefresh = Object.entries(pkg.contributes.menus)
+      .filter(([menu]) => menu !== "commandPalette")
+      .flatMap(([, entries]) => entries)
+      .filter((entry) => entry.command === "playwrightBddRunner.refreshTests");
+    expect(nonPaletteRefresh).toEqual([]);
+    expect(pkg.contributes.menus["testing/view/context"]).toBeUndefined();
+  });
+
+  it("scopes test grouping to this Testing controller", () => {
+    expect(pkg.contributes.menus["testing/item/context"]).toEqual([{
+      submenu: "playwrightBddRunner.organizationSubmenu",
+      when: "controllerId == playwrightBddRunner",
+      group: "playwrightBddRunner@1",
+    }]);
+  });
+
+  it("uses the same concise test-grouping labels in commands, submenu, and Quick Pick", async () => {
+    const commandIds = [
+      "playwrightBddRunner.setTagBasedOrganization",
+      "playwrightBddRunner.setFileBasedOrganization",
+      "playwrightBddRunner.setScenarioTypeOrganization",
+      "playwrightBddRunner.setFlatOrganization",
+      "playwrightBddRunner.setFeatureBasedOrganization",
+    ];
+    expect(commandIds.map((id) =>
+      pkg.contributes.commands.find(({ command }) => command === id)?.title
+    )).toEqual(["Tags", "File", "Scenario type", "None", "Feature"]);
+    expect(pkg.contributes.commands.find(({ command }) =>
+      command === "playwrightBddRunner.setOrganizationStrategy"
+    )?.title).toBe("Group tests by");
+    expect(pkg.contributes.submenus.find(({ id }) =>
+      id === "playwrightBddRunner.organizationSubmenu"
+    )?.label).toBe("Group tests by");
+
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const handlers = captureHandlers(makeContext());
+    await handlers.get("playwrightBddRunner.setOrganizationStrategy")!();
+    expect((quickPick.mock.calls[0]?.[0] as Array<{ label: string }>).map(({ label }) => label))
+      .toEqual(["Tags", "File", "Scenario type", "None", "Feature"]);
+    expect(quickPick.mock.calls[0]?.[1]).toMatchObject({ placeHolder: "Group tests by" });
+    quickPick.mockRestore();
   });
 
   // The palette invokes with no arguments. A command that needs one belongs in the hidden list, so
@@ -1126,6 +1312,14 @@ describe("command contributions ↔ handler registrations parity", () => {
     for (const entry of stepsTitle) {
       expect(entry.when).toBe("view == playwrightBddRunner.stepsExplorer");
     }
+    expect(stepsTitle.map((entry) => entry.group)).toEqual([
+      "navigation@1",
+      "playwrightBddRunner@1",
+      "playwrightBddRunner@2",
+    ]);
+    expect(pkg.contributes.views["specwright"]?.find((view) =>
+      view.id === "playwrightBddRunner.stepsExplorer"
+    )?.when).toBe("config.playwrightBddRunner.enableStepsPanel");
 
     const itemContext = pkg.contributes.menus["view/item/context"]!;
     const stepsItems = itemContext.filter((e) => e.when?.includes("stepsExplorer"));
@@ -1188,27 +1382,24 @@ describe("command contributions ↔ handler registrations parity", () => {
     expect(palette.find((e) => e.command === "playwrightBddRunner.traceability.clearLocalRunHistory")).toBeUndefined();
   });
 
-  it("puts the manage-connection plug last in the traceability view title bar", () => {
+  it("puts connection management in the traceability overflow menu", () => {
     const viewTitle = pkg.contributes.menus["view/title"]!;
     const plug = viewTitle.find((e) => e.command === "playwrightBddRunner.traceability.manageConnection");
     expect(plug?.when).toBe("view == playwrightBddRunner.traceability");
-    expect(plug?.group).toBe("navigation@4");
+    expect(plug?.group).toBe("playwrightBddRunner@4");
   });
 
-  // One toolbar, six buttons, one slot each: two commands sharing a slot leaves their order to chance.
-  it("gives every traceability title-bar button its own navigation slot, in the approved order", () => {
+  it("keeps only Coverage Board and Sync as primary traceability title actions", () => {
     const slots = pkg.contributes.menus["view/title"]!
-      .filter((e) => e.command?.startsWith("playwrightBddRunner.traceability."))
-      .map((e) => [e.command, e.group] as const)
-      .sort((a, b) => Number(a[1]?.split("@")[1]) - Number(b[1]?.split("@")[1]));
+      .filter((e) =>
+        e.command?.startsWith("playwrightBddRunner.traceability.") &&
+        e.group?.startsWith("navigation")
+      )
+      .map((e) => [e.command, e.group] as const);
 
     expect(slots).toEqual([
-      ["playwrightBddRunner.traceability.toggleGrouping", "navigation@-1"],
-      ["playwrightBddRunner.traceability.sync", "navigation@0"],
+      ["playwrightBddRunner.traceability.sync", "navigation@2"],
       ["playwrightBddRunner.traceability.openBoard", "navigation@1"],
-      ["playwrightBddRunner.traceability.runAndPublishAllMapped", "navigation@2"],
-      ["playwrightBddRunner.traceability.publishLastRun", "navigation@3"],
-      ["playwrightBddRunner.traceability.manageConnection", "navigation@4"],
     ]);
   });
 
@@ -1218,10 +1409,9 @@ describe("command contributions ↔ handler registrations parity", () => {
       pkg.contributes.commands.find((c) => c.command === command)?.icon;
     const icons = pkg.contributes.menus["view/title"]!
       .filter((e) => e.command?.startsWith("playwrightBddRunner.traceability."))
-      .sort((a, b) => Number(a.group?.split("@")[1]) - Number(b.group?.split("@")[1]))
       .map((e) => iconOf(e.command!));
 
-    expect(icons).toEqual(["$(list-tree)", "$(sync)", "$(project)", "$(play-circle)", "$(cloud-upload)", "$(plug)"]);
+    expect(icons).toEqual(["$(list-tree)", "$(sync)", "$(play-circle)", "$(cloud-upload)", "$(plug)", "$(project)"]);
     expect(new Set(icons).size).toBe(icons.length);
   });
 
@@ -1370,19 +1560,16 @@ describe("traceability panel connection UX contributions", () => {
       palette.find((e) => e.command === "playwrightBddRunner.traceability.hidePanel")?.when
     ).toBe("false");
   });
+
+  it("offers a real discovery recovery action in the empty Testing view", () => {
+    const welcome = pkg.contributes.viewsWelcome.find(
+      (item) => item.view === "workbench.view.testing"
+    );
+    expect(welcome?.contents).toContain("command:playwrightBddRunner.discoverTests");
+  });
 });
 
 describe("traceability linkScenario command", () => {
-  const win = vscode.window as unknown as {
-    __webviewPanels: Array<{
-      title: string;
-      webview: { __posted: Array<{ type: string; visible?: boolean }> };
-      __receive: (message: unknown) => Promise<void>;
-      dispose: () => void;
-    }>;
-    __resetWebviewPanels: () => void;
-  };
-
   afterEach(() => {
     win.__resetWebviewPanels();
     vi.restoreAllMocks();
@@ -1396,7 +1583,16 @@ describe("traceability linkScenario command", () => {
   // The command opens the board and begins a Link session on it; drive a link-tagged confirm on the
   // board panel, then await the handler so the tag-write side effect has run.
   async function confirmLink(pending: Promise<void>, id: string): Promise<void> {
-    await win.__webviewPanels.at(-1)!.__receive({ surface: "link", type: "confirm", id });
+    const panel = win.__webviewPanels.at(-1)!;
+    if (panel.webview.__posted.length === 0) {
+      await receiveBoard(panel, "shell", { type: "ready" });
+    }
+    await receiveBoard(panel, "link", { type: "search", value: id });
+    const rows = boardPosts(panel).filter((message) => message.surface === "link" && message.type === "rows").at(-1)?.["rows"];
+    expect(rows).toEqual(expect.arrayContaining([expect.objectContaining({ id })]));
+    const current = (BoardPanel as unknown as { current?: { revision: number } }).current;
+    expect(panel.webview.__posted.at(-1)?.revision).toBe(current?.revision);
+    await receiveBoard(panel, "link", { type: "confirm", id });
     await pending;
   }
 
@@ -1475,10 +1671,82 @@ describe("traceability linkScenario command", () => {
 
     const board = win.__webviewPanels.at(-1)!;
     expect(board.title).toBe("Coverage Board");
-    await board.__receive({ type: "ready" });
-    expect(board.webview.__posted.find((m) => m.type === "linkTab" && m.visible === true)).toBeDefined();
+    await receiveBoard(board, "shell", { type: "ready" });
+    expect(boardPosts(board).find((m) => m.type === "linkTab" && m["visible"] === true)).toBeDefined();
 
     await confirmLink(pending, "5");
+  });
+
+  it("quietly forces a project sync after a newly created test is tagged", async () => {
+    const changed = new vscode.EventEmitter<void>();
+    const created = vi.fn(() => Promise.resolve({ key: "CALC-9", warnings: [] }));
+    const merged: string[] = [];
+    let finishMerge!: () => void;
+    const pendingMerge = new Promise<void>((resolve) => {finishMerge = resolve;});
+    const adapter = {
+      id: "xray",
+      label: "Xray",
+      keyGrammar: {
+        testPrefix: "TEST_",
+        reqPrefix: "REQ_",
+        keyShape: /^[A-Za-z][A-Za-z0-9_-]*-\d+$/,
+        canonicalizeKey: (key: string) => key.toUpperCase(),
+        projectOf: (key: string) => key.replace(/-\d+$/, ""),
+      },
+      browseUrl: () => undefined,
+      metadata: {
+        onDidChange: changed.event,
+        snapshot: () => ({
+          tests: new Map(), fetchedScopes: [], catalogueProjects: ["CALC"], completeProjects: ["CALC"],
+          verifiedAbsentKeys: [], stale: false, errors: [], syncedAt: 1,
+        }),
+        sync: () => Promise.resolve(),
+      },
+      remoteSearch: {
+        search: () => Promise.resolve({ tests: [], complete: true }),
+        mergeKeys: (keys: readonly string[]) => {merged.push(...keys); return pendingMerge;},
+      },
+      testAuthoring: { createTest: created },
+    } as TraceabilityAdapter;
+    const scenario = untracedNode.item.scenario as ScenarioRef;
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(
+      fakeDoc("Feature: F\n\nScenario: A\n  Given x\n")
+    );
+    vi.spyOn(vscode.workspace, "applyEdit").mockResolvedValue(true);
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("CALC" as never);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Create test" as never);
+
+    const manager = CommandManager.create(makeContext({ traceabilityAdapter: adapter }));
+    manager.setTraceabilitySubsystem({
+      traceabilityPanelActive: true,
+      connected: true,
+      getActiveAdapter: () => adapter,
+      getSnapshot: () => ({
+        links: [], untraced: [{ scenario, reqKeys: [] }], orphans: [], stale: false,
+        completeProjects: ["CALC"], errors: [],
+      }),
+      knownTestKeys: () => [],
+      tagDerivedProjectKeys: () => [],
+      projectScope: () => NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
+      onDidChangeSnapshot: changed.event,
+    } as unknown as TraceabilitySubsystem);
+    const commands = traceabilityCommands(manager);
+    const sync = vi.spyOn(commands, "syncTraceability").mockResolvedValue();
+
+    await confirmLink(commands.linkScenario(untracedNode), " create");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(created).toHaveBeenCalledOnce();
+    expect(merged).toEqual(["CALC-9"]);
+    expect(sync).not.toHaveBeenCalled();
+
+    finishMerge();
+    await pendingMerge;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sync).toHaveBeenCalledWith({ announce: false, explicitKey: "CALC", forceProject: true });
+    changed.dispose();
   });
 
   async function reMap(feature: string): Promise<string> {
@@ -1653,6 +1921,64 @@ describe("traceability sync command handler", () => {
 
   const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
+  it("schedules one quiet direct sync for bounded reindex diagnostics and contains refresh failure", async () => {
+    const logger = Logger.create();
+    const commands = traceabilityCommands(managerFor(syncSubsystem({ catalogueProjects: ["CALC"] }), {}, logger));
+    const sync = vi.spyOn(commands, "syncTraceability").mockImplementation(() => {
+      throw new Error("refresh offline");
+    });
+    const logged = vi.spyOn(logger, "warn");
+    const recover = commands as unknown as {
+      scheduleProjectSync(project: string, diagnostics?: Iterable<string>): void;
+    };
+
+    recover.scheduleProjectSync("CALC", ["ordinary warning", "Project may need re-indexing", "reindexed"]);
+    await flush();
+
+    expect(sync).toHaveBeenCalledOnce();
+    expect(sync).toHaveBeenCalledWith({ announce: false, explicitKey: "CALC", forceProject: true });
+    expect(logged).toHaveBeenCalledWith(
+      "Follow-up traceability sync failed",
+      expect.objectContaining({ project: "CALC", error: "refresh offline" })
+    );
+  });
+
+  it("does not schedule recovery for an ordinary provider warning", async () => {
+    const commands = traceabilityCommands(managerFor(syncSubsystem()));
+    const sync = vi.spyOn(commands, "syncTraceability").mockResolvedValue();
+    (commands as unknown as { scheduleProjectSync(project: string, diagnostics?: Iterable<string>): void })
+      .scheduleProjectSync("CALC", ["summary was trimmed"]);
+
+    await flush();
+
+    expect(sync).not.toHaveBeenCalled();
+  });
+
+  it("starts a successful create's project sync only after the authoring mutation owner has retired", async () => {
+    const commands = traceabilityCommands(managerFor(syncSubsystem({ catalogueProjects: ["CALC"] })));
+    const internals = commands as unknown as {
+      operations: { mutationActive: boolean };
+      scheduleProjectSync(project: string, diagnostics?: Iterable<string>): void;
+      getAuthoringCommands(): { bulkCreateTests(): Promise<void> };
+    };
+    vi.spyOn(internals, "getAuthoringCommands").mockReturnValue({
+      bulkCreateTests: async () => {
+        internals.scheduleProjectSync("CALC");
+      },
+    });
+    const activeWhenSyncStarts: boolean[] = [];
+    const sync = vi.spyOn(commands, "syncTraceability").mockImplementation(() => {
+      activeWhenSyncStarts.push(internals.operations.mutationActive);
+      return Promise.resolve();
+    });
+
+    await commands.bulkCreateTests();
+    await flush();
+
+    expect(activeWhenSyncStarts).toEqual([false]);
+    expect(sync).toHaveBeenCalledWith({ announce: false, explicitKey: "CALC", forceProject: true });
+  });
+
   it("syncs with the workspace + configured project scope and surfaces snapshot errors as a toast", async () => {
     const sync = vi.fn(() => Promise.resolve());
     const errorToast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
@@ -1745,6 +2071,42 @@ describe("traceability sync command handler", () => {
     // Only the run the user asked for spoke; the load it replayed stayed quiet.
     expect(info).toHaveBeenCalledOnce();
     expect(info).toHaveBeenCalledWith("Synced 0 remote tests.");
+  });
+
+  it("preserves every forced project behind an active sync despite later ordinary loads", async () => {
+    const scopes: SyncScope[] = [];
+    const resolvers: Array<() => void> = [];
+    const sync = vi.fn((scope: SyncScope) => {
+      scopes.push(scope);
+      return new Promise<void>((resolve) => resolvers.push(resolve));
+    });
+    const mgr = managerFor(syncSubsystem({ sync }));
+    const commands = traceabilityCommands(mgr);
+    const recover = commands as unknown as {
+      scheduleProjectSync(project: string, diagnostics?: Iterable<string>): void;
+    };
+
+    const initial = runSyncOn(mgr);
+    recover.scheduleProjectSync("CALC", ["CALC needs reindexing"]);
+    recover.scheduleProjectSync("PAY", ["PAY needs reindexing"]);
+    void boardLoads(mgr).autoSync("CALC");
+    void boardLoads(mgr).autoSync("PAY");
+    await flush();
+    expect(sync).toHaveBeenCalledOnce();
+
+    resolvers[0]!();
+    await initial;
+    await vi.waitFor(() => expect(sync).toHaveBeenCalledTimes(2));
+    resolvers[1]!();
+    await vi.waitFor(() => expect(sync).toHaveBeenCalledTimes(3));
+    resolvers[2]!();
+    await flush();
+
+    expect(scopes).toEqual([
+      { testKeys: [], projectKeys: [] },
+      { testKeys: [], projectKeys: ["CALC"] },
+      { testKeys: [], projectKeys: ["PAY"] },
+    ]);
   });
 
   // The gates belong to the moment the follow-up runs, not the moment it was queued: the run in flight
@@ -1857,12 +2219,12 @@ describe("traceability sync command handler", () => {
   async function openBoardFor(mgr: CommandManager): Promise<StubBoardPanel> {
     traceabilityCommands(mgr).openBoard();
     const panel = win.__webviewPanels[0]!;
-    await panel.__receive({ type: "ready" });
+    await receiveBoard(panel, "shell", { type: "ready" });
     return panel;
   }
 
   const strips = (panel: StubBoardPanel): Array<string | undefined> =>
-    panel.webview.__posted.filter((m) => m.type === "syncProgress").map((m) => m.text);
+    boardPosts(panel).filter((m) => m.type === "syncProgress").map((m) => m["text"] as string | undefined);
 
   const reportingSync = (): ((scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress) => Promise<void>) =>
     (_scope, _signal, onProgress) => {
@@ -1929,13 +2291,11 @@ describe("traceability sync command handler", () => {
     // Either half catches an inverted scope bit at the call site, since it flips both branches at once.
     expect(built({ "xray.syncProjectKeys": ["CALC"] })).toMatchObject({
       availableEmptyText: "No synced tests yet.",
-      offerSync: true,
     });
-    // The setting is only one rung: a tag-derived project is scope enough for a sync to be worth offering.
-    expect(built({}, ["CALC"])).toMatchObject({ availableEmptyText: "No synced tests yet.", offerSync: true });
+    // The setting is only one rung: a tag-derived project is scope enough for useful unsynced copy.
+    expect(built({}, ["CALC"])).toMatchObject({ availableEmptyText: "No synced tests yet." });
     expect(built({})).toMatchObject({
       availableEmptyText: "Pick a project in the header to load its tests.",
-      offerSync: false,
     });
   });
 });
@@ -1970,7 +2330,10 @@ describe("traceability sync contributions", () => {
 });
 
 describe("traceability run-and-publish entry points", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    win.__resetWebviewPanels();
+    vi.restoreAllMocks();
+  });
 
   it("maps Explorer resources and preserves the entered tag expression unchanged", async () => {
     const manager = CommandManager.create(makeContext());
@@ -1992,14 +2355,32 @@ describe("traceability run-and-publish entry points", () => {
 
   it("treats a cancelled tag prompt as a quiet no-op", async () => {
     const manager = CommandManager.create(makeContext());
+    manager.setTraceabilitySubsystem({
+      traceabilityPanelActive: true,
+      getActiveAdapter: () => undefined,
+      getSnapshot: () => undefined,
+      tagDerivedProjectKeys: () => [],
+      projectScope: () => NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
+      onDidChangeSnapshot: new vscode.EventEmitter<void>().event,
+    } as unknown as TraceabilitySubsystem);
+    BoardPanel.open(traceabilityBoardDeps(manager));
+    const panel = win.__webviewPanels[0]!;
+    await receiveBoard(panel, "shell", { type: "ready" });
     const commands = traceabilityCommands(manager);
     const run = vi.spyOn(publishCommands(manager), "runAndPublishSelection")
       .mockResolvedValue(undefined);
-    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined);
+    vi.spyOn(vscode.window, "showInputBox").mockImplementation(() => {
+      const render = boardPosts(panel).filter((message) => message.type === "render").at(-1)!;
+      expect((render["syncVerb"] as { enabled: boolean }).enabled).toBe(false);
+      return Promise.resolve(undefined);
+    });
 
     await commands.runAndPublishByTagExpression();
 
     expect(run).not.toHaveBeenCalled();
+    const settled = boardPosts(panel).filter((message) => message.type === "render").at(-1)!;
+    expect((settled["syncVerb"] as { enabled: boolean }).enabled).toBe(true);
   });
 });
 
@@ -2380,10 +2761,10 @@ describe("traceability openBoard command handler", () => {
 
     openBoard(mgr);
     const panel = win.__webviewPanels[0]!;
-    await panel.__receive({ type: "ready" });
+    await receiveBoard(panel, "shell", { type: "ready" });
 
-    const render = panel.webview.__posted.find((m) => m.surface === "board" && m.type === "render");
-    expect(render?.projects).toEqual(["CALC", "MATH", "PAY", "SHOP"]);
+    const render = boardPosts(panel).find((m) => m.surface === "board" && m.type === "render");
+    expect(render?.["projects"]).toEqual(["CALC", "MATH", "PAY", "SHOP"]);
   });
 
   it("offers every project the connection can reach, plus the keys the workspace's own tags name", async () => {
@@ -2392,10 +2773,10 @@ describe("traceability openBoard command handler", () => {
 
     openBoard(mgr);
     const panel = win.__webviewPanels[0]!;
-    await panel.__receive({ type: "ready" });
+    await receiveBoard(panel, "shell", { type: "ready" });
 
-    const render = panel.webview.__posted.find((m) => m.surface === "board" && m.type === "render");
-    expect(render?.projects).toEqual(["CALC", "OPS", "PAY"]);
+    const render = boardPosts(panel).find((m) => m.surface === "board" && m.type === "render");
+    expect(render?.["projects"]).toEqual(["CALC", "OPS", "PAY"]);
   });
 
   it("offers the tag-derived keys alone when the connection enumerates no projects", () => {
@@ -2502,13 +2883,33 @@ describe("traceability publishLastRun: Publish tab", () => {
   const win = vscode.window as unknown as {
     __webviewPanels: Array<{
       title: string;
-      webview: { __posted: Array<{ surface?: string; type: string; tab?: string }> };
+      webview: {
+        html: string;
+        __posted: Array<{
+          session: string;
+          revision: number;
+          surface: string;
+          body: { type: string; tab?: string; [key: string]: unknown };
+        }>;
+      };
       __receive: (message: unknown) => Promise<void>;
       dispose: () => void;
     }>;
     __resetWebviewPanels: () => void;
   };
+  type PublishPanel = (typeof win.__webviewPanels)[number];
   const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+  const posts = (panel: PublishPanel, type: string, surface?: string): Array<{ type: string; tab?: string; [key: string]: unknown }> =>
+    panel.webview.__posted
+      .filter((message) => message.body.type === type && (surface === undefined || message.surface === surface))
+      .map((message) => message.body);
+  const receive = (panel: PublishPanel, message: { type: string; surface?: string; [key: string]: unknown }): Promise<void> => {
+    const session = panel.webview.html.match(/data-session="([^"]+)"/)?.[1] ?? "";
+    const surface = message.surface ?? "shell";
+    const { surface: _surface, ...body } = message;
+    const revision = body.type === "ready" ? 0 : (panel.webview.__posted.at(-1)?.revision ?? 0);
+    return panel.__receive({ version: 1, session, revision, surface, body });
+  };
 
   afterEach(() => {
     win.__resetWebviewPanels();
@@ -2581,11 +2982,11 @@ describe("traceability publishLastRun: Publish tab", () => {
 
     const panel = win.__webviewPanels[0]!;
     expect(panel.title).toBe("Coverage Board");
-    await panel.__receive({ type: "ready" });
-    expect(panel.webview.__posted.find((m) => m.surface === "publish" && m.type === "model")).toBeDefined();
+    await receive(panel, { type: "ready" });
+    expect(posts(panel, "model", "publish")[0]).toBeDefined();
 
     // Cancel resolves the present so the flow (and its finally) unwinds.
-    await panel.__receive({ surface: "publish", type: "cancel" });
+    await receive(panel, { surface: "publish", type: "cancel" });
     await promise;
   });
 
@@ -2605,14 +3006,14 @@ describe("traceability publishLastRun: Publish tab", () => {
     const promise = publishCommands(mgr).runPublish();
     await flush();
     const panel = win.__webviewPanels[0]!;
-    await panel.__receive({ type: "ready" });
+    await receive(panel, { type: "ready" });
 
-    const model = panel.webview.__posted.find((m) => m.surface === "publish" && m.type === "model") as unknown as {
+    const model = posts(panel, "model", "publish")[0] as unknown as {
       model: { knownProjectKeys: string[] };
     };
     expect(model.model.knownProjectKeys).toEqual(["CALC", "MATH", "PAY", "SHOP"]);
 
-    await panel.__receive({ surface: "publish", type: "cancel" });
+    await receive(panel, { surface: "publish", type: "cancel" });
     await promise;
   });
 
@@ -2633,14 +3034,14 @@ describe("traceability publishLastRun: Publish tab", () => {
     const promise = publishCommands(mgr).runPublish();
     await flush();
     const panel = win.__webviewPanels[0]!;
-    await panel.__receive({ type: "ready" });
-    const posted = panel.webview.__posted.find((m) => m.surface === "publish" && m.type === "model") as unknown as {
+    await receive(panel, { type: "ready" });
+    const posted = posts(panel, "model", "publish")[0] as unknown as {
       model: {
         knownProjectKeys: string[];
         runs: Array<{ project: { value: string; fromDerivation: boolean; fromScope?: boolean } }>;
       };
     };
-    await panel.__receive({ surface: "publish", type: "cancel" });
+    await receive(panel, { surface: "publish", type: "cancel" });
     await promise;
     return posted.model;
   }
@@ -2683,12 +3084,166 @@ describe("traceability publishLastRun: Publish tab", () => {
     attachments: [] as string[],
   };
 
+  it("admits one command-level publish across distinct entry points, then permits the next", async () => {
+    let releaseImport: (() => void) | undefined;
+    let imports = 0;
+    const publish = vi.fn(() => {
+      imports += 1;
+      if (imports > 1) {
+        return Promise.resolve({ ref: { kind: "execution" as const, key: "XNP-2" }, imported: 1, warnings: [] });
+      }
+      return new Promise<unknown>((resolve) => {
+        releaseImport = () => resolve({ ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [] });
+      });
+    });
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem([], NO_PROJECT_SCOPE, publish));
+    const commands = publishCommands(mgr);
+
+    const first = commands.runPublish();
+    await flush();
+    const panel = win.__webviewPanels[0]!;
+    await receive(panel, { type: "ready" });
+    await vi.waitFor(() => {
+      expect(posts(panel, "model", "publish")).toHaveLength(1);
+    });
+    const syncEnabled = (): boolean => (
+      posts(panel, "render", "board").at(-1)?.["syncVerb"] as { enabled: boolean }
+    ).enabled;
+    expect(syncEnabled()).toBe(false);
+    await receive(panel, { surface: "publish", ...CONFIRM });
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
+    expect(syncEnabled()).toBe(false);
+    const modelCount = posts(panel, "model", "publish").length;
+
+    const joined = commands.publishLastRun();
+    expect(joined).toBe(first);
+    await flush();
+    expect(win.__webviewPanels).toHaveLength(1);
+    expect(posts(panel, "model", "publish")).toHaveLength(modelCount);
+    expect(publish).toHaveBeenCalledOnce();
+
+    releaseImport!();
+    await Promise.all([first, joined]);
+    expect(syncEnabled()).toBe(true);
+
+    const later = commands.publishLastRun();
+    await vi.waitFor(() => {
+      expect(posts(panel, "model", "publish")).toHaveLength(modelCount + 1);
+    });
+    await receive(panel, { surface: "publish", ...CONFIRM });
+    await later;
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps Sync disabled for the full admitted pending-attachment upload", async () => {
+    let release!: () => void;
+    const upload = new Promise<{ remaining: number }>((resolve) => {
+      release = () => resolve({ remaining: 0 });
+    });
+    const mgr = CommandManager.create(makeContext());
+    mgr.setTraceabilitySubsystem(connectedSubsystem());
+    const commands = publishCommands(mgr);
+    const attach = vi.spyOn(
+      commands as unknown as {
+        attachPendingForRun(runId: string, site: string): Promise<{ remaining: number }>;
+      },
+      "attachPendingForRun"
+    ).mockReturnValue(upload);
+    BoardPanel.open(traceabilityBoardDeps(mgr));
+    const panel = win.__webviewPanels[0]!;
+    await receive(panel, { type: "ready" });
+
+    const pending = commands.publishDelegate().attachPending("run-1");
+    const syncEnabled = (): boolean => (
+      posts(panel, "render", "board").at(-1)?.["syncVerb"] as { enabled: boolean }
+    ).enabled;
+    expect(syncEnabled()).toBe(false);
+    expect(attach).toHaveBeenCalledOnce();
+
+    release();
+    await pending;
+
+    expect(syncEnabled()).toBe(true);
+  });
+
+  it("retires command-level admission after a failed publish is cancelled", async () => {
+    let imports = 0;
+    const publish = vi.fn(() => {
+      imports += 1;
+      return imports === 1
+        ? Promise.reject(new Error("HTTP 400"))
+        : Promise.resolve({ ref: { kind: "execution" as const, key: "XNP-2" }, imported: 1, warnings: [] });
+    });
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem([], NO_PROJECT_SCOPE, publish));
+    const commands = publishCommands(mgr);
+
+    const failed = commands.runPublish();
+    await flush();
+    const panel = win.__webviewPanels[0]!;
+    await receive(panel, { type: "ready" });
+    await vi.waitFor(() => {
+      expect(posts(panel, "model", "publish")).toHaveLength(1);
+    });
+    await receive(panel, { surface: "publish", ...CONFIRM });
+    await vi.waitFor(() => {
+      expect(posts(panel, "retry", "publish")).toHaveLength(1);
+    });
+    await receive(panel, { surface: "publish", type: "cancel" });
+    await failed;
+
+    const later = commands.publishLastRun();
+    const modelCount = posts(panel, "model", "publish").length;
+    await vi.waitFor(() => {
+      expect(posts(panel, "model", "publish")).toHaveLength(modelCount + 1);
+    });
+    await receive(panel, { surface: "publish", ...CONFIRM });
+    await later;
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
+  it("retires command-level admission when setup rejects", async () => {
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    const connected = connectedSubsystem();
+    const adapter = connected.getActiveAdapter();
+    let rejectSetup = true;
+    mgr.setTraceabilitySubsystem({
+      ...connected,
+      getActiveAdapter: () => {
+        if (rejectSetup) {
+          rejectSetup = false;
+          throw new Error("adapter unavailable");
+        }
+        return adapter;
+      },
+    } as TraceabilitySubsystem);
+    const commands = publishCommands(mgr);
+
+    await expect(commands.runPublish()).rejects.toThrow("adapter unavailable");
+
+    const later = commands.publishLastRun();
+    await flush();
+    const panel = win.__webviewPanels[0]!;
+    await receive(panel, { type: "ready" });
+    await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+    await receive(panel, { surface: "publish", type: "cancel" });
+    await expect(later).resolves.toBeUndefined();
+  });
+
   // One publish driven to completion: open the dialog and answer it with each reply in turn (a failed
   // import leaves the dialog live on the picked run, so its retry takes an answer of its own), then report
   // the tabs the shell was told to activate and how many board rebuilds the flow forced.
   async function publishOnce(
     replies: Array<Record<string, unknown>>,
-    over: { publish?: () => Promise<unknown>; rebuild?: () => Promise<void> } = {}
+    over: {
+      publish?: () => Promise<unknown>;
+      rebuild?: () => Promise<void>;
+      attachments?: PublishAttachmentsModel;
+    } = {}
   ): Promise<{ tabs: Array<string | undefined>; rebuilds: number }> {
     let rebuilds = 0;
     const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
@@ -2700,17 +3255,24 @@ describe("traceability publishLastRun: Publish tab", () => {
         return over.rebuild?.() ?? Promise.resolve();
       },
     } as unknown as TraceabilitySubsystem);
+    const commands = publishCommands(mgr);
+    if (over.attachments !== undefined) {
+      vi.spyOn(
+        commands as unknown as { buildPublishAttachments: () => Promise<PublishAttachmentsModel> },
+        "buildPublishAttachments"
+      ).mockResolvedValue(over.attachments);
+    }
 
-    const promise = publishCommands(mgr).runPublish();
+    const promise = commands.runPublish();
     await flush();
     const panel = win.__webviewPanels[0]!;
-    await panel.__receive({ type: "ready" });
+    await receive(panel, { type: "ready" });
     for (const reply of replies) {
-      await panel.__receive({ surface: "publish", ...reply });
+      await receive(panel, { surface: "publish", type: String(reply["type"]), ...reply });
       await flush();
     }
     await expect(promise).resolves.toBeUndefined();
-    return { tabs: panel.webview.__posted.filter((m) => m.type === "activate").map((m) => m.tab), rebuilds };
+    return { tabs: posts(panel, "activate", "shell").map((message) => message.tab), rebuilds };
   }
 
   // The settle leaves the Publish tab on its idle hint, so a publish that landed has to hand the user the
@@ -2733,7 +3295,14 @@ describe("traceability publishLastRun: Publish tab", () => {
       sha256: "a".repeat(64),
       createdAt: 1,
     }]);
-    const { tabs, rebuilds } = await publishOnce([{ ...CONFIRM, attachments: [evidence] }]);
+    const { tabs, rebuilds } = await publishOnce([{ ...CONFIRM, attachments: [evidence] }], {
+      attachments: {
+        available: true,
+        suggestions: [{ path: evidence, name: "evidence.png", size: 8 }],
+        uploadLimitBytes: 1_024,
+        evidenceStream: "evidence",
+      },
+    });
 
     expect(rebuilds).toBe(1);
     expect(tabs).not.toContain("executions");
@@ -2842,8 +3411,8 @@ describe("traceability publishLastRun: Publish tab", () => {
     const promise = publishCommands(mgr).runPublish();
     await flush();
     const panel = win.__webviewPanels[0]!;
-    await panel.__receive({ type: "ready" });
-    await panel.__receive({ surface: "publish", ...CONFIRM });
+    await receive(panel, { type: "ready" });
+    await receive(panel, { surface: "publish", ...CONFIRM });
     await promise;
 
     expect(info.mock.calls.map((call) => String(call[0]))).toContain("Publish cancelled.");
@@ -2898,7 +3467,7 @@ describe("traceability coverage board contributions", () => {
   it("gates the palette entry on the traceability panel being enabled", () => {
     const palette = pkg.contributes.menus["commandPalette"]!;
     expect(palette.find((e) => e.command === CMD)?.when).toBe(
-      "config.playwrightBddRunner.traceability.enablePanel"
+      "playwrightBddRunner.traceability.enabled"
     );
   });
 });
@@ -3089,11 +3658,6 @@ describe("traceability board unlink handler", () => {
 });
 
 describe("traceability bulkCreateTests wiring", () => {
-  const win = vscode.window as unknown as {
-    __webviewPanels: Array<{ webview: { __posted: unknown[] }; __receive: (message: unknown) => Promise<void> }>;
-    __resetWebviewPanels: () => void;
-  };
-
   afterEach(() => {
     win.__resetWebviewPanels();
     vi.restoreAllMocks();
@@ -3121,8 +3685,8 @@ describe("traceability bulkCreateTests wiring", () => {
   async function selectOnBoard(mgr: CommandManager): Promise<void> {
     BoardPanel.open(traceabilityBoardDeps(mgr));
     const panel = win.__webviewPanels[0]!;
-    await panel.__receive({ type: "ready" });
-    await panel.__receive({ surface: "board", type: "select", id: scenarioDropId(A), on: true });
+    await receiveBoard(panel, "shell", { type: "ready" });
+    await receiveBoard(panel, "board", { type: "select", target: "scenario", id: scenarioDropId(A), on: true });
   }
 
   it("reads an unconfigured site as not connected instead of letting the credential lookup reject", async () => {
@@ -3260,8 +3824,8 @@ describe("board refresh on a settings change", () => {
     const { openBoard, fire } = wireBoard(subsystem, movingConfig(() => keys));
     openBoard();
     const panel = win.__webviewPanels[0]!;
-    await panel.__receive({ type: "ready" });
-    const rendered = (): unknown => [...panel.webview.__posted].reverse().find((m) => m.type === "render");
+    await receiveBoard(panel, "shell", { type: "ready" });
+    const rendered = (): unknown => [...boardPosts(panel)].reverse().find((m) => m.type === "render");
     expect(rendered()).toMatchObject({ project: "PAY", scoped: true, projects: ["CALC", "PAY"] });
 
     keys = ["calc"];

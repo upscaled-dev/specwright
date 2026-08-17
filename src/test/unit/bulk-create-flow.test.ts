@@ -74,6 +74,32 @@ describe("runBulkCreate", () => {
     expect(result.failed).toEqual([]);
   });
 
+  it("preserves provider warnings independently from the fully-created outcome", async () => {
+    const warning = "Project CALC may require administrator reindexing";
+    const { deps } = rig([{ key: "CALC-1", warnings: [warning] }]);
+
+    const result = await runBulkCreate([A], "CALC", deps, new AbortController().signal);
+
+    expect(result.created).toEqual([{ scenario: A, key: "CALC-1" }]);
+    expect(result.authored).toEqual([{ scenario: A, test: { key: "CALC-1", warnings: [warning] } }]);
+    expect(result.failed).toEqual([]);
+  });
+
+  it("preserves warnings when the remote create has no key or the local tag write is rejected", async () => {
+    const keyless = { issueId: "45678", warnings: ["project needs attention"] };
+    const rejected = { key: "CALC-2", warnings: ["screen field ignored"] };
+    const { deps } = rig([keyless, rejected], { "CALC-2": "rejected" });
+
+    const result = await runBulkCreate([A, B], "CALC", deps, new AbortController().signal);
+
+    expect(result.created).toEqual([]);
+    expect(result.failed).toHaveLength(2);
+    expect(result.authored).toEqual([
+      { scenario: A, test: keyless },
+      { scenario: B, test: rejected },
+    ]);
+  });
+
   it("serializes the writes: the next create never starts before the previous tag write settles", async () => {
     const order: string[] = [];
     let releaseTag!: () => void;
@@ -169,7 +195,7 @@ describe("runBulkCreate", () => {
 
     expect(specs).toEqual([]);
     expect(reported).toEqual([]);
-    expect(result).toEqual({ created: [], failed: [] });
+    expect(result).toEqual({ created: [], failed: [], authored: [] });
   });
 
   it("survives a throwing progress callback, failing only that item", async () => {

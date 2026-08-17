@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import type * as vscode from "vscode";
 import { ExtensionConfig } from "../../core/extension-config";
 import {
@@ -19,11 +19,14 @@ import { NotSupportedError, TraceabilityAdapter } from "../../traceability/contr
 import { XrayPublishSupport } from "../../xray/xray-adapter-factory";
 import { Logger } from "../../utils/logger";
 import { trustedWorkspace } from "./helpers/test-workspace-trust";
+import { xrayBaseUrl } from "../../xray/xray-region";
 
 const NOOP_PUBLISH_SUPPORT: XrayPublishSupport = {
   resolveSteps: () => undefined,
   workspaceRootFor: () => undefined,
 };
+
+afterEach(() => vi.unstubAllGlobals());
 
 function mapSecretStorage(): vscode.SecretStorage {
   const map = new Map<string, string>();
@@ -268,6 +271,61 @@ describe("createXrayAdapterFactory verify", () => {
       message: "Authentication failed: check your client ID and secret.",
     });
   });
+
+  it("captures the selected region for each replacement adapter endpoint", async () => {
+    const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
+    await store.setCredentials("acme.atlassian.net", "id", "secret");
+    const values: Record<string, unknown> = {
+      "xray.siteUrl": "acme.atlassian.net",
+      "xray.apiRegion": "global",
+    };
+    const config = mutableConfig(values);
+    const { probe, calls } = recordingProbe({
+      ok: true,
+      stage: "ok",
+      site: "acme.atlassian.net",
+      message: "Connected",
+    });
+    const factory = createXrayAdapterFactory(
+      store,
+      probe,
+      fakeMemento(),
+      NOOP_PUBLISH_SUPPORT,
+      trustedWorkspace()
+    );
+
+    const globalAdapter = factory.create({ config, logger: Logger.create() });
+    await globalAdapter.connection!.verify!();
+    await globalAdapter.dispose?.();
+    values["xray.apiRegion"] = "au";
+    const auAdapter = factory.create({ config, logger: Logger.create() });
+    await auAdapter.connection!.verify!();
+    const urls: string[] = [];
+    const jwt = `${"a".repeat(40)}.${"b".repeat(40)}.${"c".repeat(40)}`;
+    vi.stubGlobal("fetch", (url: string) => {
+      urls.push(url);
+      const body = url.endsWith("/authenticate")
+        ? JSON.stringify(jwt)
+        : JSON.stringify({ data: { getTests: { total: 0, results: [] } } });
+      return Promise.resolve({
+        status: 200,
+        ok: true,
+        headers: new Headers(),
+        text: () => Promise.resolve(body),
+      } as unknown as Response);
+    });
+    await auAdapter.remoteSearch!.search("CALC-1");
+
+    expect(calls.map(({ deps }) => xrayBaseUrl(deps.region))).toEqual([
+      "https://xray.cloud.getxray.app/api/v2",
+      "https://au.xray.cloud.getxray.app/api/v2",
+    ]);
+    expect(urls).toEqual([
+      "https://au.xray.cloud.getxray.app/api/v2/authenticate",
+      "https://au.xray.cloud.getxray.app/api/v2/graphql",
+    ]);
+    await auAdapter.dispose?.();
+  });
 });
 
 describe("classifyXrayBinding", () => {
@@ -308,5 +366,32 @@ describe("XrayAdapter.testAuthoring", () => {
       adapter.testAuthoring?.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" })
     ).resolves.toBe(created);
     expect(authoring.createTest).toHaveBeenCalledOnce();
+  });
+});
+
+describe("XrayAdapter disposal", () => {
+  it("awaits metadata lifecycle disposal", async () => {
+    let finish!: () => void;
+    const deferred = new Promise<void>((resolve) => {finish = resolve;});
+    const metadata = {
+      onDidChange: () => ({ dispose: () => {} }),
+      snapshot: () => ({
+        tests: new Map(), fetchedScopes: [], catalogueProjects: [], completeProjects: [],
+        verifiedAbsentKeys: [], syncedAt: undefined, stale: false, errors: [],
+      }),
+      sync: () => Promise.resolve(),
+      dispose: vi.fn(() => deferred),
+    };
+    const adapter = new XrayAdapter(configWith({}), { metadata });
+    let settled = false;
+
+    const disposal = adapter.dispose().then(() => {settled = true;});
+    await Promise.resolve();
+    expect(metadata.dispose).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+
+    finish();
+    await disposal;
+    expect(settled).toBe(true);
   });
 });

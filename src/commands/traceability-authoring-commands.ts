@@ -3,7 +3,7 @@ import { Logger } from "../utils/logger";
 import { errMsg, plural } from "../utils/text";
 import { resolveBoardLink, scenarioDropId } from "../traceability/board-data";
 import { BulkCreateResult, BulkCreateScenario, runBulkCreate } from "../traceability/bulk-create-flow";
-import { runContainerCreate } from "../traceability/container-create-flow";
+import { containerMemberIssueId, runContainerCreate } from "../traceability/container-create-flow";
 import { opensScenario, scenarioGherkinSlice } from "../parsers/gherkin-slice";
 import {
   AuthoredTest,
@@ -12,11 +12,18 @@ import {
   RemoteSearchCapability,
   TestAuthoringCapability,
   TestCaseMetadata,
+  TestContainerKind,
   TraceabilityAdapter,
 } from "../traceability/contracts";
+import {
+  RemoteWriteCancellation,
+  runContainerAddCommand,
+  runContainerWrite,
+} from "./traceability-container-add-command";
 import { PushGherkinOutcome, runPushGherkin } from "../traceability/push-gherkin";
 import type { ScenarioRef } from "../traceability/scenario-ref";
 import type { WorkspaceTrust } from "../core/workspace-trust";
+import { providerWarnings } from "../traceability/provider-warnings";
 import { applyTagInsert } from "../traceability/tag-edit";
 import type { TraceabilitySnapshot } from "../traceability/traceability-model";
 
@@ -39,6 +46,10 @@ export interface AuthoringCommandDeps {
   // Records a standalone execution create in the publish ledger, so the Executions tab shows it and a
   // later publish can append to it. The site and account stamps live with the ledger wiring, not here.
   recordExecution(key: string, summary: string): Promise<void>;
+  // A confirmed remote change omits diagnostics and always schedules a later read-only refresh.
+  // A failed or ambiguous write supplies diagnostics, so only reindex evidence schedules recovery.
+  // The callback never owns this command's write guard.
+  scheduleProjectSync(project: string, diagnostics?: Iterable<string>): void;
 }
 
 const NO_SELECTION = "Select scenarios on the Coverage Board's Mapping tab first.";
@@ -50,17 +61,14 @@ const EXAMPLE_ROW =
   "Pushing text is not available for an example-row link. Link the outline itself to push its text.";
 const RESYNC = "Sync traceability, then try again.";
 
+function* bulkFailures(result: BulkCreateResult): IterableIterator<string> {
+  for (const failure of result.failed) {yield failure.reason;}
+}
+
 // Where a create is about to land, named the way every confirm names it: with the site when one is
 // configured, so the user reads which tracker is being written to.
 function projectTarget(site: string, project: string): string {
   return site !== "" ? `project ${project} on ${site}` : `project ${project}`;
-}
-
-// The remote issue id the last sync recorded for a test key, from wherever the board's card came from: a
-// mapped test carries it on its link's metadata, an available one on the orphan's.
-function issueIdFor(snapshot: TraceabilitySnapshot | undefined, key: string): string | undefined {
-  const link = snapshot?.links.find((item) => item.testKey === key);
-  return link?.meta?.issueId ?? snapshot?.orphans.find((item) => item.testKey === key)?.meta.issueId;
 }
 
 // The write one container verb runs, and how that verb reads its own seam off a capability that need
@@ -68,15 +76,6 @@ function issueIdFor(snapshot: TraceabilitySnapshot | undefined, key: string): st
 // receiver, like the push path does.
 type ContainerSeam = (spec: NewContainerSpec, signal?: AbortSignal) => Promise<AuthoredTest>;
 type SeamOf = (authoring: TestAuthoringCapability) => ContainerSeam | undefined;
-
-// A cancel before the seam is called proves nothing was sent. Once the seam has been called, an abort
-// cannot prove whether the single POST landed, so the command reports that ambiguity instead of turning
-// it into either a failed create or a safe retry.
-class CreateCancellation extends Error {
-  constructor(readonly requestStarted: boolean) {
-    super("Create cancelled");
-  }
-}
 
 // The authoring commands: creating remote tests from local scenarios in bulk, pushing a scenario's text
 // to its test, and gathering picked tests into a new container. The single-scenario create still lives
@@ -139,7 +138,11 @@ export class TraceabilityAuthoringCommands {
     const result = await this.runBatch(scenarios, project, adapter, authoring);
     // Counted against the selection, not the resolved list, so the scenarios that dropped out above
     // are named in the summary instead of vanishing from it.
-    await this.report(result, { selected: ids.length, dropped: ids.length - scenarios.length }, adapter.label);
+    this.report(result, { selected: ids.length, dropped: ids.length - scenarios.length }, adapter.label);
+    this.deps.scheduleProjectSync(
+      project,
+      result.authored.length > 0 ? undefined : bulkFailures(result)
+    );
   }
 
   /**
@@ -157,6 +160,14 @@ export class TraceabilityAuthoringCommands {
     return this.createContainer("Test Plan", (authoring) => authoring.createTestPlan?.bind(authoring));
   }
 
+  public addToTestSet(): Promise<void> {
+    return this.addToContainer("test-set", "Test Set");
+  }
+
+  public addToTestPlan(): Promise<void> {
+    return this.addToContainer("test-plan", "Test Plan");
+  }
+
   /**
    * Create one EMPTY remote Test Execution in the board's selected project and record it in the publish
    * ledger, so the Executions tab shows it as created-not-published and a later publish can append to it.
@@ -170,6 +181,10 @@ export class TraceabilityAuthoringCommands {
 
   private createContainer(kind: string, seamOf: SeamOf): Promise<void> {
     return this.guarded(() => this.containerFromSelection(kind, seamOf));
+  }
+
+  private addToContainer(kind: TestContainerKind, noun: string): Promise<void> {
+    return this.guarded(() => runContainerAddCommand(kind, noun, this.logger, this.deps));
   }
 
   // One guard for every container verb: they write to the same project from the same board, so a second
@@ -207,7 +222,7 @@ export class TraceabilityAuthoringCommands {
     const snapshot = this.deps.snapshot();
     try {
       const outcome = await runContainerCreate(keys, project, summary, {
-        issueIdFor: (key) => issueIdFor(snapshot, key),
+        issueIdFor: (key) => containerMemberIssueId(snapshot, key),
         create: (spec) => this.runCreate(kind, adapter.label, project, (signal) => seam(spec, signal)),
       });
       if (outcome.kind === "unresolved") {
@@ -224,7 +239,9 @@ export class TraceabilityAuthoringCommands {
         adapter.label,
         (key) => `Created ${kind} ${key} holding ${keys.length} ${plural(keys.length, "test")}.`
       );
+      this.deps.scheduleProjectSync(project);
     } catch (error) {
+      this.deps.scheduleProjectSync(project, [errMsg(error)]);
       this.reportCreateFailure(kind, project, error);
     }
   }
@@ -252,7 +269,9 @@ export class TraceabilityAuthoringCommands {
         await this.recordExecution(created.key, summary);
       }
       this.reportCreated(created, kind, adapter.label, (key) => `Created ${kind} ${key} in ${project}.`);
+      this.deps.scheduleProjectSync(project);
     } catch (error) {
+      this.deps.scheduleProjectSync(project, [errMsg(error)]);
       this.reportCreateFailure(kind, project, error);
     }
   }
@@ -322,42 +341,12 @@ export class TraceabilityAuthoringCommands {
     project: string,
     create: (signal: AbortSignal) => Promise<T>
   ): Promise<T> {
-    return vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: `Creating ${providerLabel} ${kind} in ${project}…`,
-        cancellable: true,
-      },
-      async (_progress, token) => {
-        const controller = new AbortController();
-        token.onCancellationRequested(() => controller.abort());
-        if (token.isCancellationRequested) {
-          controller.abort();
-        }
-        if (controller.signal.aborted) {
-          throw new CreateCancellation(false);
-        }
-        try {
-          const created = await create(controller.signal);
-          if (controller.signal.aborted) {
-            throw new CreateCancellation(true);
-          }
-          return created;
-        } catch (error) {
-          if (error instanceof CreateCancellation) {
-            throw error;
-          }
-          if (controller.signal.aborted) {
-            throw new CreateCancellation(true);
-          }
-          throw error;
-        }
-      }
-    );
+    return runContainerWrite(`Creating ${providerLabel} ${kind} in ${project}…`, create);
   }
 
-  // Every container create reports the same way: warnings logged verbatim and appended to the line, and a
-  // response that carried no key reported as an honest gap rather than a failure, since the issue exists
+  // Every container create reports the same way: bounded warning detail goes to the log while the toast
+  // carries only a count. A response that carried no key is an honest gap rather than a failure, since
+  // the issue exists
   // remotely either way. `landed` is the sentence for the readable case, which only the caller can word.
   private reportCreated(
     created: AuthoredTest,
@@ -365,24 +354,29 @@ export class TraceabilityAuthoringCommands {
     providerLabel: string,
     landed: (key: string) => string
   ): void {
-    if (created.warnings.length > 0) {
-      this.logger.warn(`${providerLabel} returned warnings creating a ${kind}`, { warnings: created.warnings.join("; ") });
+    const warnings = providerWarnings(created.warnings);
+    if (warnings.count > 0) {
+      this.logger.warn(`${providerLabel} returned warnings creating a ${kind}`, {
+        warnings: warnings.detail,
+        warningsOmitted: warnings.omitted,
+      });
     }
     if (created.key === undefined) {
       const idNote = created.issueId !== undefined ? ` (issue id ${created.issueId})` : "";
+      const warningNote = warnings.count > 0 ? ` ${warnings.summary} logged.` : "";
       vscode.window.showWarningMessage(
-        `The ${kind} was created${idNote} but its key could not be read back, so it could not be named here.`
+        `The ${kind} was created${idNote} but its key could not be read back, so it could not be named here.${warningNote}`
       );
       return;
     }
     const base = landed(created.key);
     vscode.window.showInformationMessage(
-      created.warnings.length > 0 ? `${base} Warnings: ${created.warnings.join("; ")}` : base
+      warnings.count > 0 ? `${base} ${warnings.summary} logged.` : base
     );
   }
 
   private reportCreateFailure(kind: string, project: string, error: unknown): void {
-    if (error instanceof CreateCancellation) {
+    if (error instanceof RemoteWriteCancellation) {
       if (error.requestStarted) {
         vscode.window.showWarningMessage(
           `Cancelled while waiting for Xray. The ${kind} may still have been created; check in Jira before retrying.`
@@ -652,15 +646,25 @@ export class TraceabilityAuthoringCommands {
   // route whenever a reason exists. The scenarios a cancellation never reached are counted from the
   // selection the batch started with, so a stopped batch never reads as a whole one; they log nothing,
   // since there is nothing to say about them beyond the count.
-  private async report(
+  private report(
     result: BulkCreateResult,
     counts: { selected: number; dropped: number },
     providerLabel: string
-  ): Promise<void> {
+  ): void {
     for (const failure of result.failed) {
       this.logger.warn("Creating a test from a scenario failed", {
         scenario: failure.scenario.ref.name,
         reason: failure.reason,
+      });
+    }
+    const warned = result.authored.filter(({ test }) => test.warnings.length > 0);
+    for (const { scenario, test } of warned) {
+      const warnings = providerWarnings(test.warnings);
+      this.logger.warn(`${providerLabel} returned warnings creating a test`, {
+        scenario: scenario.ref.name,
+        ...(test.key !== undefined ? { key: test.key } : {}),
+        warnings: warnings.detail,
+        warningsOmitted: warnings.omitted,
       });
     }
     const notAttempted = counts.selected - result.created.length - result.failed.length;
@@ -671,15 +675,24 @@ export class TraceabilityAuthoringCommands {
     if (notAttempted > 0) {
       parts.push(`${notAttempted} not attempted`);
     }
+    if (warned.length > 0) {
+      const warningCount = warned.reduce((count, { test }) => count + test.warnings.length, 0);
+      parts.push(`${warningCount} provider ${plural(warningCount, "warning")} on ${warned.length} remote ${plural(warned.length, "create")}`);
+    }
     const summary = `${parts.join(", ")}.`;
     if (parts.length === 1) {
       vscode.window.showInformationMessage(summary);
       return;
     }
-    const logged = result.failed.length > 0 || counts.dropped > 0;
-    const pick = await vscode.window.showWarningMessage(summary, ...(logged ? ["Show Output"] : []));
-    if (pick === "Show Output") {
-      this.logger.showOutput();
-    }
+    const logged = result.failed.length > 0 || counts.dropped > 0 || warned.length > 0;
+    Promise.resolve(vscode.window.showWarningMessage(summary, ...(logged ? ["Show Output"] : [])))
+      .then((pick) => {
+        if (pick === "Show Output") {
+          this.logger.showOutput();
+        }
+      })
+      .catch((error) => {
+        this.logger.warn("Showing the bulk create summary failed", { error: errMsg(error) });
+      });
   }
 }

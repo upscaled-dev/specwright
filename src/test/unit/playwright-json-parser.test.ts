@@ -1,12 +1,17 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Worker, type WorkerOptions } from "node:worker_threads";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   PlaywrightJsonParser,
   type ScenarioResult,
 } from "../../utils/playwright-json-parser";
-import { PlaywrightReportTooLargeError } from "../../utils/playwright-report-reader";
+import {
+  PlaywrightReportTooLargeError,
+  readPlaywrightReport,
+} from "../../utils/playwright-report-reader";
 import { Logger } from "../../utils/logger";
 import { EXECUTION_LIMITS } from "../../core/execution-limits";
 
@@ -165,7 +170,7 @@ describe("PlaywrightJsonParser", () => {
     expect(parser.parse(report)).toEqual([]);
   });
 
-  it("ignores inline attachment bodies of any size and collects only path attachments", () => {
+  it("ignores inline attachment bodies within the whole-report cap", () => {
     const report = JSON.stringify({
       suites: [{
         specs: [{
@@ -200,17 +205,127 @@ describe("PlaywrightJsonParser", () => {
       ]);
 
       fs.truncateSync(reportPath, EXECUTION_LIMITS.reportBytesPerRun + 1);
-      const oversizedRead = parser.parseFromFileAsync(reportPath);
-      await expect(oversizedRead).rejects.toBeInstanceOf(PlaywrightReportTooLargeError);
-      await expect(oversizedRead).rejects.toThrowError(
-        new PlaywrightReportTooLargeError(EXECUTION_LIMITS.reportBytesPerRun + 1)
-      );
+      const readFile = vi.spyOn(fs.promises, "readFile");
+      try {
+        const oversizedRead = parser.parseFromFileAsync(reportPath);
+        await expect(oversizedRead).rejects.toBeInstanceOf(PlaywrightReportTooLargeError);
+        await expect(oversizedRead).rejects.toThrowError(
+          new PlaywrightReportTooLargeError(EXECUTION_LIMITS.reportBytesPerRun + 1)
+        );
+        expect(readFile).not.toHaveBeenCalled();
+      } finally {
+        readFile.mockRestore();
+      }
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 
-  it("parses a 10,000-scenario report from disk", async () => {
+  it("returns unreadable evidence when file-worker JSON parsing fails", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pw-malformed-"));
+    const reportPath = path.join(tempDir, "results.json");
+    fs.writeFileSync(reportPath, "not json");
+    try {
+      await expect(parser.inspectFromFileAsync(reportPath)).resolves.toMatchObject({
+        details: [],
+        complete: false,
+        failure: "The Playwright JSON report could not be read.",
+        failureKind: "unreadable",
+      });
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("isolates the report worker from parent memory flags and environment", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pw-worker-options-"));
+    const reportPath = path.join(tempDir, "results.json");
+    fs.writeFileSync(reportPath, "{}");
+    const inheritedExecArgv = [...process.execArgv];
+    const inheritedNodeOptions = process.env["NODE_OPTIONS"];
+    let workerOptions: WorkerOptions | undefined;
+    try {
+      process.execArgv.push("--max-old-space-size=8");
+      process.env["NODE_OPTIONS"] = "--max-old-space-size=8";
+
+      await expect(readPlaywrightReport(reportPath, undefined, (source, options) => {
+        workerOptions = options;
+        return new Worker(source, options);
+      })).resolves.toEqual({});
+
+      expect(workerOptions).toMatchObject({
+        eval: true,
+        execArgv: [],
+        env: {},
+        resourceLimits: {
+          maxOldGenerationSizeMb: EXECUTION_LIMITS.reportParserWorkerHeapMb,
+        },
+      });
+    } finally {
+      process.execArgv.splice(0, process.execArgv.length, ...inheritedExecArgv);
+      if (inheritedNodeOptions === undefined) {delete process.env["NODE_OPTIONS"];}
+      else {process.env["NODE_OPTIONS"] = inheritedNodeOptions;}
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["error", () => new Worker('throw new Error("worker failed")', { eval: true }), /worker failed/],
+    ["exit", () => new Worker("process.exit(7)", { eval: true }), /exited with code 7/],
+  ])("rejects and terminates when the report worker emits an %s", async (_kind, factory, failure) => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pw-worker-fault-"));
+    const reportPath = path.join(tempDir, "results.json");
+    fs.writeFileSync(reportPath, "{}");
+    let worker: Worker | undefined;
+    try {
+      await expect(readPlaywrightReport(reportPath, undefined, () => {
+        worker = factory();
+        vi.spyOn(worker, "terminate");
+        return worker;
+      })).rejects.toThrow(failure);
+      expect(worker?.terminate).toHaveBeenCalledOnce();
+      expect(worker?.listenerCount("message")).toBe(0);
+      expect(worker?.listenerCount("error")).toBe(0);
+      expect(worker?.listenerCount("exit")).toBe(0);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("terminates a cancelled worker and ignores its late completion", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pw-worker-cancel-"));
+    const reportPath = path.join(tempDir, "results.json");
+    fs.writeFileSync(reportPath, "{}");
+    const worker = new EventEmitter() as EventEmitter & {
+      postMessage: ReturnType<typeof vi.fn>;
+      terminate: ReturnType<typeof vi.fn>;
+    };
+    worker.postMessage = vi.fn();
+    worker.terminate = vi.fn().mockResolvedValue(1);
+    const controller = new AbortController();
+    const reason = new Error("stop parsing");
+    try {
+      const reading = readPlaywrightReport(
+        reportPath,
+        controller.signal,
+        () => worker as unknown as Worker
+      );
+      await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalledOnce());
+      const rejected = expect(reading).rejects.toBe(reason);
+      controller.abort(reason);
+      await rejected;
+
+      expect(worker.terminate).toHaveBeenCalledOnce();
+      expect(worker.eventNames()).toEqual([]);
+      worker.emit("message", { value: { suites: [] } });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(worker.terminate).toHaveBeenCalledOnce();
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("parses a 10,000-scenario report within the host resource budget", async () => {
     const report = JSON.stringify({
       suites: [{
         specs: Array.from({ length: 10_000 }, (_, index) => ({
@@ -222,12 +337,28 @@ describe("PlaywrightJsonParser", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pw-benchmark-"));
     const reportPath = path.join(tempDir, "results.json");
     fs.writeFileSync(reportPath, report);
+    let keepTicking = true;
+    let eventLoopTicks = 0;
+    const tick = (): void => {
+      if (!keepTicking) {return;}
+      eventLoopTicks += 1;
+      setImmediate(tick);
+    };
+    setImmediate(tick);
     try {
+      const heapBefore = process.memoryUsage().heapUsed;
+      const started = performance.now();
       const results = await parser.parseFromFileAsync(reportPath);
+      const durationMs = performance.now() - started;
+      const heapGrowthBytes = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
 
+      expect(eventLoopTicks).toBeGreaterThanOrEqual(2);
+      expect(durationMs).toBeLessThanOrEqual(2_000);
+      expect(heapGrowthBytes).toBeLessThanOrEqual(96 * 1024 * 1024);
       expect(results).toHaveLength(10_000);
       expect(results[9_999]).toMatchObject({ scenarioName: "Scenario 9999", status: "passed" });
     } finally {
+      keepTicking = false;
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });

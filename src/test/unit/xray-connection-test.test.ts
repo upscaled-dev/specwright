@@ -214,6 +214,22 @@ describe("runXrayConnectionTest: secret/JWT redaction invariant", () => {
     );
   });
 
+  it("uses a value-free classification when authentication fetch throws opaque credential text", async () => {
+    const deps = await seededDeps();
+    const path = "/private/customer workspace/secret.txt";
+    const fetchMock = vi.fn(() => Promise.reject(new Error(`client fake-client-id secret ${FAKE_SECRET} at ${path}`)));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+
+    await runXrayConnectionTest(deps);
+
+    const emitted = deps.lines.join("\n");
+    expect(emitted).toContain("Authentication request failed");
+    expect(emitted).not.toContain("fake-client-id");
+    expect(emitted).not.toContain(FAKE_SECRET);
+    expect(emitted).not.toContain(path);
+  });
+
   it("fails the probe and scrubs jwt-like strings when GraphQL returns 200 with errors", async () => {
     const deps = await seededDeps(() => ["CALC-1"]);
     const { lines } = deps;
@@ -266,7 +282,7 @@ describe("runXrayConnectionTest: secret/JWT redaction invariant", () => {
     await vi.advanceTimersByTimeAsync(130_000);
     await run;
 
-    expect(lines.join("\n")).toContain("Authentication request error");
+    expect(lines.join("\n")).toContain("Authentication request failed");
     expect(errorToast).toHaveBeenCalledWith(
       expect.stringContaining("Could not reach Xray"),
       "Show Output"
@@ -498,6 +514,14 @@ describe("probeXrayConnection: structured outcome", () => {
     const emitted = deps.lines.join("\n");
     expect(emitted).toContain("invalid-field error-shape probe");
     expect(emitted).toContain("FieldUndefined");
+    expect(emitted).toContain("expected-error-envelope");
+  });
+
+  it("records an unexpected empty invalid-field success without changing the outcome", async () => {
+    const deps = await seededDeps(() => ["CALC-1"]);
+    vi.stubGlobal("fetch", jwtThenGraphql(() => ({ data: { getTests: { total: 1, results: [] } } })));
+    await expect(probeXrayConnection(deps)).resolves.toMatchObject({ ok: true });
+    expect(deps.lines.join("\n")).toContain("unexpected-empty-success");
   });
 });
 
@@ -592,7 +616,8 @@ describe("probeXrayConnection: Jira project view", () => {
 
     expect(outcome.ok).toBe(true);
     expect(outcome.message).toContain(`Jira authenticated as ${JIRA_NAME}`);
-    expect(deps.lines.join("\n")).toContain(`GET /rest/api/3/myself → 200; authenticated as ${JIRA_NAME}`);
+    expect(deps.lines.join("\n")).toContain("GET /rest/api/3/myself → 200; identity received");
+    expect(deps.lines.join("\n")).not.toContain(JIRA_NAME);
   });
 
   it("reports the identity failure and never lists projects when /myself is refused", async () => {

@@ -7,9 +7,12 @@ playwright.config.ts
 # Tooling configs — only meaningful at dev time
 tsconfig.json
 tsconfig.integration.json
+tsconfig.webview.json
+tsconfig.webview-test.json
 vitest.config.ts
 eslint.config.mjs
 commitlint.config.mjs
+.node-version
 .husky/**
 .claude/**
 .agents/**

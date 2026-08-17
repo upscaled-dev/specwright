@@ -2,9 +2,32 @@ import * as vscode from "vscode";
 import { ConfigurationChangeListener } from "../types";
 
 const CONFIG_NAMESPACE = "playwrightBddRunner";
+const TRACEABILITY_PANEL_SETTING = "traceability.enablePanel";
+const XRAY_CONFIGURATION_SETTINGS = [
+  "traceability.provider",
+  "traceability.testTagPrefix",
+  "traceability.reqTagPrefix",
+  "xray.siteUrl",
+  "xray.apiRegion",
+  "xray.syncProjectKeys",
+  "xray.cacheTtlMinutes",
+  "xray.defaultProjectKey",
+  "xray.executionIssueType",
+  "xray.reportGlob",
+  "xray.attachTo",
+] as const;
 
 export const MAX_PARALLEL_PROCESSES_MIN = 1;
 export const MAX_PARALLEL_PROCESSES_MAX = 16;
+
+export function configurationTarget(
+  config: vscode.WorkspaceConfiguration,
+  setting: string
+): vscode.ConfigurationTarget {
+  return config.inspect(setting)?.workspaceValue !== undefined
+    ? vscode.ConfigurationTarget.Workspace
+    : vscode.ConfigurationTarget.Global;
+}
 
 export class ExtensionConfig {
   private config: vscode.WorkspaceConfiguration;
@@ -104,10 +127,9 @@ export class ExtensionConfig {
 
   public get stepDefinitionPaths(): string[] {
     return this.config.get<string[]>("stepDefinitionPaths", [
-      "features/steps/**/*.ts",
-      "features/steps/**/*.js",
-      "tests/steps/**/*.ts",
-      "steps/**/*.ts",
+      "features/steps/**/*.{ts,mts,cts,js,mjs,cjs}",
+      "tests/steps/**/*.{ts,mts,cts,js,mjs,cjs}",
+      "steps/**/*.{ts,mts,cts,js,mjs,cjs}",
     ]);
   }
 
@@ -172,7 +194,17 @@ export class ExtensionConfig {
   }
 
   public get enableTraceabilityPanel(): boolean {
-    return this.config.get<boolean>("traceability.enablePanel", true);
+    return this.config.get<boolean>(TRACEABILITY_PANEL_SETTING, false);
+  }
+
+  public get traceabilityPanelPreference(): boolean | undefined {
+    return this.hasExplicitValue(TRACEABILITY_PANEL_SETTING)
+      ? this.config.get<boolean>(TRACEABILITY_PANEL_SETTING, false)
+      : undefined;
+  }
+
+  public get hasExplicitXrayConfiguration(): boolean {
+    return XRAY_CONFIGURATION_SETTINGS.some((setting) => this.hasExplicitValue(setting));
   }
 
   public get traceabilityProvider(): string {
@@ -304,5 +336,12 @@ export class ExtensionConfig {
     this.configChangeSubscription?.dispose();
     this.configChangeSubscription = undefined;
     this.changeListeners = [];
+  }
+
+  private hasExplicitValue(setting: string): boolean {
+    const inspected = this.config.inspect(setting);
+    return inspected?.globalValue !== undefined ||
+      inspected?.workspaceValue !== undefined ||
+      inspected?.workspaceFolderValue !== undefined;
   }
 }

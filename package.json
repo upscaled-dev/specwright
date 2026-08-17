@@ -90,7 +90,7 @@
     "test result publishing"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "workspaceContains:**/*.feature"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -129,299 +129,441 @@
         "language": "gherkin"
       }
     ],
-    "configuration": {
-      "type": "object",
-      "title": "Specwright",
-      "properties": {
-        "playwrightBddRunner.playwrightCommand": {
-          "type": "string",
-          "default": "npx playwright test",
-          "description": "Executable and arguments used to run Playwright tests (e.g., 'npx playwright test', 'pnpm exec playwright test', 'yarn playwright test'). Runs directly without a shell; shell operators are not supported."
-        },
-        "playwrightBddRunner.bddgenCommand": {
-          "type": "string",
-          "default": "npx bddgen",
-          "description": "Executable and arguments used to generate Playwright spec files from .feature files. Runs directly without a shell; shell operators are not supported. Leave empty only when current generated specs already exist before a targeted run, for example because preRunCommand produces them."
-        },
-        "playwrightBddRunner.preRunCommand": {
-          "type": "string",
-          "default": "",
-          "description": "Trusted compatibility shell command to run before each test execution (e.g., 'npm run build:fixtures'). Empty disables the hook. If the command exits non-zero, the test run is aborted."
-        },
-        "playwrightBddRunner.featuresGenDir": {
-          "type": "string",
-          "default": ".features-gen",
-          "description": "Directory where bddgen writes generated spec files, relative to the working directory. Used to mirror feature-file breakpoints into generated specs when debugging."
-        },
-        "playwrightBddRunner.workingDirectory": {
-          "type": "string",
-          "default": "",
-          "description": "Working directory for running tests. Empty = inferred per run: the directory of the nearest playwright.config.* above the feature file (so monorepo packages resolve their own bddgen/playwright binaries), falling back to the file's workspace folder."
-        },
-        "playwrightBddRunner.testFilePattern": {
-          "type": "string",
-          "default": "**/*.feature",
-          "description": "Glob pattern for feature file discovery"
-        },
-        "playwrightBddRunner.enableCodeLens": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable CodeLens buttons on feature files (disable if conflicting with other extensions)"
-        },
-        "playwrightBddRunner.parallelExecution": {
-          "type": "boolean",
-          "default": false,
-          "description": "Pass a worker count to Playwright. This controls available workers but does not enable Playwright's fullyParallel mode."
-        },
-        "playwrightBddRunner.maxParallelProcesses": {
-          "type": "number",
-          "default": 4,
-          "minimum": 1,
-          "maximum": 16,
-          "description": "Maximum number of Playwright workers when parallel execution is enabled"
-        },
-        "playwrightBddRunner.reporter": {
-          "type": "string",
-          "examples": [
-            "list",
-            "line",
-            "dot",
-            "html",
-            "json",
-            "junit",
-            "github",
-            "blob",
-            "null",
-            "list,json",
-            "./my-reporter.ts"
-          ],
-          "default": "list",
-          "description": "Reporter(s) for Playwright test output: a built-in name (list, line, dot, html, json, junit, github, blob, null), a custom reporter module path, or a comma-separated list of these. Terminal display only; result mapping always uses the JSON reporter."
-        },
-        "playwrightBddRunner.useConfigReporters": {
-          "type": "boolean",
-          "default": false,
-          "description": "Run the reporters declared in your Playwright config instead of the extension injecting its own. Lets a custom reporter run alongside the extension's Test Results panel. Requires a bare ['json'] entry (no outputFile) in your config's reporter array. The extension steers it to its temp file via PLAYWRIGHT_JSON_OUTPUT_NAME and parses that."
-        },
-        "playwrightBddRunner.tags": {
-          "type": "string",
-          "default": "",
-          "description": "Default tag expression passed to bddgen --tags (e.g., '@smoke and not @wip')"
-        },
-        "playwrightBddRunner.dryRun": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable Playwright --list to see what tests would be executed without running them"
-        },
-        "playwrightBddRunner.stepDefinitionPaths": {
-          "type": "array",
-          "scope": "resource",
-          "items": {
-            "type": "string"
+    "configuration": [
+      {
+        "type": "object",
+        "title": "Specwright: Execution",
+        "order": 10,
+        "properties": {
+          "playwrightBddRunner.playwrightCommand": {
+            "order": 10,
+            "type": "string",
+            "default": "npx playwright test",
+            "description": "Executable and arguments used to run Playwright tests (e.g., 'npx playwright test', 'pnpm exec playwright test', 'yarn playwright test'). Runs directly without a shell; shell operators are not supported."
           },
-          "default": [
-            "features/steps/**/*.ts",
-            "features/steps/**/*.js",
-            "tests/steps/**/*.ts",
-            "steps/**/*.ts"
-          ],
-          "description": "Glob patterns for TypeScript/JavaScript files containing playwright-bdd Given/When/Then step definitions. Globs resolve per workspace folder, so each package in a monorepo can point at its own step directories. Used for 'Go to Definition' navigation from steps in .feature files."
-        },
-        "playwrightBddRunner.stepDefinitionExcludePaths": {
-          "type": "array",
-          "scope": "resource",
-          "items": {
-            "type": "string"
+          "playwrightBddRunner.bddgenCommand": {
+            "order": 20,
+            "type": "string",
+            "default": "npx bddgen",
+            "description": "Executable and arguments used to generate Playwright spec files from .feature files. Runs directly without a shell; shell operators are not supported. Leave empty only when current generated specs already exist before a targeted run, for example because preRunCommand produces them."
           },
-          "default": [],
-          "description": "Additional glob patterns excluded from step-definition discovery, merged with the built-in excludes (node_modules, the generated featuresGenDir, playwright-report, test-results). Use this to exclude generated or report directories whose files contain Given/When/Then invocations that would otherwise be mistaken for step definitions. Example: \"**/reports/**\". Resolves per workspace folder."
-        },
-        "playwrightBddRunner.enableStepDefinitionNavigation": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable 'Go to Definition' from a Gherkin step to its TypeScript step definition. Disable if conflicting with another extension."
-        },
-        "playwrightBddRunner.enableStepDiagnostics": {
-          "type": "boolean",
-          "default": true,
-          "description": "Highlight Gherkin steps in .feature files that have no matching playwright-bdd step definition. Provides a 'Create step definition' quick fix."
-        },
-        "playwrightBddRunner.enableStepsPanel": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show the Specwright Steps panel in the Activity Bar: all step definitions grouped by keyword with usage counts, plus Gherkin steps with no matching definition. Disabling releases the panel and its share of the step-usage index."
-        },
-        "playwrightBddRunner.enableStepAutocomplete": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
-          "default": "auto",
-          "description": "Suggest existing playwright-bdd step definitions when typing a step in a .feature file. 'auto' disables completions when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate suggestions. 'on' always enables. 'off' always disables."
-        },
-        "playwrightBddRunner.enableTagAutocomplete": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
-          "default": "auto",
-          "description": "Suggest existing tags when typing @ in a .feature file. 'auto' disables completions when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate suggestions. 'on' always enables. 'off' always disables."
-        },
-        "playwrightBddRunner.enableStepHover": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
-          "default": "auto",
-          "description": "Show the matching playwright-bdd step definition's pattern and source location when hovering over a step in a .feature file. 'auto' disables the hover when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate tooltips. 'on' always enables. 'off' always disables."
-        },
-        "playwrightBddRunner.enableStepReferences": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
-          "default": "auto",
-          "description": "Enable 'Find All References' on a playwright-bdd step definition to list every Gherkin step in .feature files that matches it. 'auto' disables references when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate results. 'on' always enables. 'off' always disables."
-        },
-        "playwrightBddRunner.enableStepUsageCodeLens": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
-          "default": "auto",
-          "description": "Show a 'Used N times' CodeLens above each Given/When/Then step definition. Clicking the CodeLens opens VS Code's References panel. 'auto' disables the CodeLens when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate annotations. 'on' always enables. 'off' always disables."
-        },
-        "playwrightBddRunner.enableUnusedStepDiagnostics": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
-          "default": "auto",
-          "description": "Publish an Information-severity diagnostic on each playwright-bdd step definition that has zero matching steps across all .feature files in the workspace. 'auto' disables the diagnostic when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate annotations. 'on' always enables. 'off' always disables."
-        },
-        "playwrightBddRunner.enableStepLiteralPromotion": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
-          "default": "auto",
-          "description": "Offer a refactor on a Gherkin step that promotes a hard-coded literal (\"foo\", 42, 3.14) into a Cucumber-expression parameter ({string}, {int}, {float}), updating both the .feature file and the matching step definition. 'auto' disables when the Cucumber (Gherkin) Full Support extension is installed. 'on' always enables. 'off' always disables."
-        },
-        "playwrightBddRunner.enableTableFormatting": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
-          "default": "auto",
-          "description": "Auto-align Gherkin data tables (| col | col |) when VS Code's 'Format Document' runs on a .feature file. 'auto' disables when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate formatting. 'on' always enables. 'off' always disables."
-        },
-        "playwrightBddRunner.collapseMarkdownExportSections": {
-          "type": "boolean",
-          "default": false,
-          "description": "Render the collapsible sections in exported feature/step Markdown catalogs collapsed by default. Recommended for large catalogs so the document opens as a scannable outline."
-        },
-        "playwrightBddRunner.traceability.enablePanel": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show the Traceability panel beneath the Steps panel: scenarios grouped by their @TEST_ keys, coverage gaps for untagged scenarios, and pass/fail badges from the last run. Disabling releases the panel and its watchers."
-        },
-        "playwrightBddRunner.traceability.provider": {
-          "type": "string",
-          "enum": [
-            "xray"
-          ],
-          "default": "xray",
-          "description": "Which ALM backend the Traceability panel maps to. Only 'xray' (Jira Xray Cloud) is available today; more providers land in later releases."
-        },
-        "playwrightBddRunner.traceability.testTagPrefix": {
-          "type": "string",
-          "default": "TEST_",
-          "description": "Tag prefix that maps a scenario to a test in the tracker. '@TEST_CALC-1043' links to test CALC-1043. Matched case-insensitively."
-        },
-        "playwrightBddRunner.traceability.reqTagPrefix": {
-          "type": "string",
-          "default": "REQ_",
-          "description": "Tag prefix that marks a scenario as covering a requirement. '@REQ_CALC-900' covers requirement CALC-900. Matched case-insensitively."
-        },
-        "playwrightBddRunner.xray.siteUrl": {
-          "type": "string",
-          "default": "",
-          "description": "Your Jira/Xray Cloud site host, e.g. 'acme.atlassian.net'. Used to build browse links (https://{siteUrl}/browse/{KEY}) for the 'Open in tracker' action."
-        },
-        "playwrightBddRunner.xray.apiRegion": {
-          "type": "string",
-          "enum": [
-            "global",
-            "us",
-            "eu",
-            "au"
-          ],
-          "default": "global",
-          "description": "Xray Cloud API region host used for authentication, GraphQL, and sync. 'global' uses xray.cloud.getxray.app; the others use the matching regional host (us/eu/au). Must match your Xray site's region."
-        },
-        "playwrightBddRunner.xray.syncProjectKeys": {
-          "type": "array",
-          "items": {
-            "type": "string"
+          "playwrightBddRunner.preRunCommand": {
+            "order": 30,
+            "type": "string",
+            "default": "",
+            "description": "Trusted compatibility shell command to run before each test execution (e.g., 'npm run build:fixtures'). Empty disables the hook. If the command exits non-zero, the test run is aborted."
           },
-          "default": [],
-          "description": "Project keys included in every traceability sync. Tag-derived keys, the default project key, projects selected on the Coverage Board, and already synced projects join the scope as well."
-        },
-        "playwrightBddRunner.xray.cacheTtlMinutes": {
-          "type": "number",
-          "default": 15,
-          "description": "How long a synced Xray snapshot is considered fresh, in minutes. Past this the panel dims the data and marks it stale: display only, and no test data is re-fetched until you run Sync again. The same window paces the project list behind the board's project picker, which does refresh itself in the background once it is stale (never more often than once a minute)."
-        },
-        "playwrightBddRunner.xray.defaultProjectKey": {
-          "type": "string",
-          "default": "",
-          "description": "Default Jira project key (e.g. 'CALC'). Prefills the Project field when publishing a new Test Execution, and joins the sync scope alongside tag-derived keys, the configured sync project keys, already synced projects, and the board's project selection. Appending to an existing execution derives its project from the execution key instead."
-        },
-        "playwrightBddRunner.xray.executionIssueType": {
-          "type": "string",
-          "default": "Test Execution",
-          "description": "Jira work type name used for Xray Test Executions. Change it when your project maps a differently named work type to Xray's Test Execution entity, such as 'Sub-Test Execution' in some team-managed projects. The name must belong to a standard-level work type, since a subtask type cannot hold a standalone execution."
-        },
-        "playwrightBddRunner.xray.reportGlob": {
-          "type": "array",
-          "items": {
-            "type": "string"
+          "playwrightBddRunner.featuresGenDir": {
+            "order": 40,
+            "type": "string",
+            "default": ".features-gen",
+            "description": "Directory where bddgen writes generated spec files, relative to the working directory. Used to mirror feature-file breakpoints into generated specs when debugging."
           },
-          "default": [
-            "playwright-report/**",
-            "test-results/**/*.zip"
-          ],
-          "description": "Workspace globs used to suggest run-level report bundles to attach when publishing (e.g. the HTML report folder, trace zips). Discovered files appear as removable chips in the Publish dialog and upload to the execution's Jira issue after a successful import."
-        },
-        "playwrightBddRunner.xray.attachTo": {
-          "type": "string",
-          "enum": [
-            "evidence",
-            "issue",
-            "both"
-          ],
-          "default": "evidence",
-          "description": "Where per-test-run evidence (screenshots, traces, videos) is published: 'evidence' embeds it in the Xray result payload, 'issue' uploads it as attachments on the execution's Jira issue instead, 'both' does both. Run-level report bundles you pick always go to the Jira issue regardless of this setting."
+          "playwrightBddRunner.workingDirectory": {
+            "order": 50,
+            "type": "string",
+            "default": "",
+            "description": "Working directory for running tests. Empty = inferred per run: the directory of the nearest playwright.config.* above the feature file (so monorepo packages resolve their own bddgen/playwright binaries), falling back to the file's workspace folder."
+          },
+          "playwrightBddRunner.testFilePattern": {
+            "order": 60,
+            "type": "string",
+            "default": "**/*.feature",
+            "description": "Glob pattern for feature file discovery"
+          },
+          "playwrightBddRunner.parallelExecution": {
+            "order": 70,
+            "type": "boolean",
+            "default": false,
+            "description": "Pass a worker count to Playwright. This controls available workers but does not enable Playwright's fullyParallel mode."
+          },
+          "playwrightBddRunner.maxParallelProcesses": {
+            "order": 80,
+            "type": "number",
+            "default": 4,
+            "minimum": 1,
+            "maximum": 16,
+            "description": "Maximum number of Playwright workers when parallel execution is enabled"
+          },
+          "playwrightBddRunner.reporter": {
+            "order": 90,
+            "type": "string",
+            "examples": [
+              "list",
+              "line",
+              "dot",
+              "html",
+              "json",
+              "junit",
+              "github",
+              "blob",
+              "null",
+              "list,json",
+              "./my-reporter.ts"
+            ],
+            "default": "list",
+            "description": "Reporter(s) for Playwright test output: a built-in name (list, line, dot, html, json, junit, github, blob, null), a custom reporter module path, or a comma-separated list of these. Terminal display only; result mapping always uses the JSON reporter."
+          },
+          "playwrightBddRunner.useConfigReporters": {
+            "order": 100,
+            "type": "boolean",
+            "default": false,
+            "description": "Run the reporters declared in your Playwright config instead of the extension injecting its own. Lets a custom reporter run alongside the extension's Test Results panel. Requires a bare ['json'] entry (no outputFile) in your config's reporter array. The extension steers it to its temp file via PLAYWRIGHT_JSON_OUTPUT_NAME and parses that."
+          },
+          "playwrightBddRunner.tags": {
+            "order": 110,
+            "type": "string",
+            "default": "",
+            "description": "Default tag expression passed to bddgen --tags (e.g., '@smoke and not @wip')"
+          },
+          "playwrightBddRunner.dryRun": {
+            "order": 120,
+            "type": "boolean",
+            "default": false,
+            "description": "Enable Playwright --list to see what tests would be executed without running them"
+          }
+        }
+      },
+      {
+        "type": "object",
+        "title": "Specwright: Authoring",
+        "order": 20,
+        "properties": {
+          "playwrightBddRunner.enableCodeLens": {
+            "order": 10,
+            "type": "boolean",
+            "default": true,
+            "description": "Enable CodeLens buttons on feature files (disable if conflicting with other extensions)"
+          },
+          "playwrightBddRunner.stepDefinitionPaths": {
+            "order": 20,
+            "type": "array",
+            "scope": "resource",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "features/steps/**/*.{ts,mts,cts,js,mjs,cjs}",
+              "tests/steps/**/*.{ts,mts,cts,js,mjs,cjs}",
+              "steps/**/*.{ts,mts,cts,js,mjs,cjs}"
+            ],
+            "description": "Glob patterns for TypeScript/JavaScript files containing playwright-bdd Given/When/Then step definitions. Globs resolve per workspace folder, so each package in a monorepo can point at its own step directories. Used for 'Go to Definition' navigation from steps in .feature files."
+          },
+          "playwrightBddRunner.stepDefinitionExcludePaths": {
+            "order": 30,
+            "type": "array",
+            "scope": "resource",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Additional glob patterns excluded from step-definition discovery, merged with the built-in excludes (node_modules, the generated featuresGenDir, playwright-report, test-results). Use this to exclude generated or report directories whose files contain Given/When/Then invocations that would otherwise be mistaken for step definitions. Example: \"**/reports/**\". Resolves per workspace folder."
+          },
+          "playwrightBddRunner.enableStepDefinitionNavigation": {
+            "order": 40,
+            "type": "boolean",
+            "default": true,
+            "description": "Enable 'Go to Definition' from a Gherkin step to its TypeScript step definition. Disable if conflicting with another extension."
+          },
+          "playwrightBddRunner.enableStepDiagnostics": {
+            "order": 50,
+            "type": "boolean",
+            "default": true,
+            "description": "Highlight Gherkin steps in .feature files that have no matching playwright-bdd step definition. Provides a 'Create step definition' quick fix."
+          },
+          "playwrightBddRunner.enableStepsPanel": {
+            "order": 60,
+            "type": "boolean",
+            "default": true,
+            "description": "Show the Specwright Steps panel in the Activity Bar: all step definitions grouped by keyword with usage counts, plus Gherkin steps with no matching definition. Disabling releases the panel and its share of the step-usage index."
+          },
+          "playwrightBddRunner.collapseMarkdownExportSections": {
+            "order": 70,
+            "type": "boolean",
+            "default": false,
+            "description": "Render the collapsible sections in exported feature/step Markdown catalogs collapsed by default. Recommended for large catalogs so the document opens as a scannable outline."
+          }
+        }
+      },
+      {
+        "type": "object",
+        "title": "Specwright: Compatibility",
+        "order": 30,
+        "properties": {
+          "playwrightBddRunner.enableStepAutocomplete": {
+            "order": 10,
+            "type": "string",
+            "enum": [
+              "auto",
+              "on",
+              "off"
+            ],
+            "enumDescriptions": [
+              "Enable unless Cucumber (Gherkin) Full Support is installed.",
+              "Always enable Specwright step suggestions.",
+              "Disable Specwright step suggestions."
+            ],
+            "default": "auto",
+            "description": "Suggest existing playwright-bdd step definitions when typing a step in a .feature file. 'auto' disables completions when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate suggestions. 'on' always enables. 'off' always disables."
+          },
+          "playwrightBddRunner.enableTagAutocomplete": {
+            "order": 20,
+            "type": "string",
+            "enum": [
+              "auto",
+              "on",
+              "off"
+            ],
+            "enumDescriptions": [
+              "Enable unless Cucumber (Gherkin) Full Support is installed.",
+              "Always enable Specwright tag suggestions.",
+              "Disable Specwright tag suggestions."
+            ],
+            "default": "auto",
+            "description": "Suggest existing tags when typing @ in a .feature file. 'auto' disables completions when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate suggestions. 'on' always enables. 'off' always disables."
+          },
+          "playwrightBddRunner.enableStepHover": {
+            "order": 30,
+            "type": "string",
+            "enum": [
+              "auto",
+              "on",
+              "off"
+            ],
+            "enumDescriptions": [
+              "Enable unless Cucumber (Gherkin) Full Support is installed.",
+              "Always enable Specwright step hovers.",
+              "Disable Specwright step hovers."
+            ],
+            "default": "auto",
+            "description": "Show the matching playwright-bdd step definition's pattern and source location when hovering over a step in a .feature file. 'auto' disables the hover when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate tooltips. 'on' always enables. 'off' always disables."
+          },
+          "playwrightBddRunner.enableStepReferences": {
+            "order": 40,
+            "type": "string",
+            "enum": [
+              "auto",
+              "on",
+              "off"
+            ],
+            "enumDescriptions": [
+              "Enable unless Cucumber (Gherkin) Full Support is installed.",
+              "Always enable Specwright step references.",
+              "Disable Specwright step references."
+            ],
+            "default": "auto",
+            "description": "Enable 'Find All References' on a playwright-bdd step definition to list every Gherkin step in .feature files that matches it. 'auto' disables references when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate results. 'on' always enables. 'off' always disables."
+          },
+          "playwrightBddRunner.enableStepUsageCodeLens": {
+            "order": 50,
+            "type": "string",
+            "enum": [
+              "auto",
+              "on",
+              "off"
+            ],
+            "enumDescriptions": [
+              "Enable unless Cucumber (Gherkin) Full Support is installed.",
+              "Always enable Specwright step-usage CodeLens.",
+              "Disable Specwright step-usage CodeLens."
+            ],
+            "default": "auto",
+            "description": "Show a 'Used N times' CodeLens above each Given/When/Then step definition. Clicking the CodeLens opens VS Code's References panel. 'auto' disables the CodeLens when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate annotations. 'on' always enables. 'off' always disables."
+          },
+          "playwrightBddRunner.enableUnusedStepDiagnostics": {
+            "order": 60,
+            "type": "string",
+            "enum": [
+              "auto",
+              "on",
+              "off"
+            ],
+            "enumDescriptions": [
+              "Enable unless Cucumber (Gherkin) Full Support is installed.",
+              "Always enable Specwright unused-step diagnostics.",
+              "Disable Specwright unused-step diagnostics."
+            ],
+            "default": "auto",
+            "description": "Publish an Information-severity diagnostic on each playwright-bdd step definition that has zero matching steps across all .feature files in the workspace. 'auto' disables the diagnostic when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate annotations. 'on' always enables. 'off' always disables."
+          },
+          "playwrightBddRunner.enableStepLiteralPromotion": {
+            "order": 70,
+            "type": "string",
+            "enum": [
+              "auto",
+              "on",
+              "off"
+            ],
+            "enumDescriptions": [
+              "Enable unless Cucumber (Gherkin) Full Support is installed.",
+              "Always enable Specwright literal promotion.",
+              "Disable Specwright literal promotion."
+            ],
+            "default": "auto",
+            "description": "Offer a refactor on a Gherkin step that promotes a hard-coded literal (\"foo\", 42, 3.14) into a Cucumber-expression parameter ({string}, {int}, {float}), updating both the .feature file and the matching step definition. 'auto' disables when the Cucumber (Gherkin) Full Support extension is installed. 'on' always enables. 'off' always disables."
+          },
+          "playwrightBddRunner.enableTableFormatting": {
+            "order": 80,
+            "type": "string",
+            "enum": [
+              "auto",
+              "on",
+              "off"
+            ],
+            "enumDescriptions": [
+              "Enable unless Cucumber (Gherkin) Full Support is installed.",
+              "Always enable Specwright table formatting.",
+              "Disable Specwright table formatting."
+            ],
+            "default": "auto",
+            "description": "Auto-align Gherkin data tables (| col | col |) when VS Code's 'Format Document' runs on a .feature file. 'auto' disables when the Cucumber (Gherkin) Full Support extension is installed to avoid duplicate formatting. 'on' always enables. 'off' always disables."
+          }
+        }
+      },
+      {
+        "type": "object",
+        "title": "Specwright: Xray",
+        "order": 40,
+        "properties": {
+          "playwrightBddRunner.traceability.enablePanel": {
+            "order": 10,
+            "type": "boolean",
+            "default": false,
+            "description": "Show the experimental Xray Traceability panel beneath the Steps panel. Existing Xray settings or traceability tags reveal it automatically unless this setting is explicitly false. Disabling releases the panel and its watchers."
+          },
+          "playwrightBddRunner.traceability.provider": {
+            "order": 20,
+            "type": "string",
+            "enum": [
+              "xray"
+            ],
+            "enumDescriptions": [
+              "Jira Xray Cloud."
+            ],
+            "default": "xray",
+            "description": "Which ALM backend the Traceability panel maps to. Only 'xray' (Jira Xray Cloud) is available today; more providers land in later releases."
+          },
+          "playwrightBddRunner.traceability.testTagPrefix": {
+            "order": 30,
+            "type": "string",
+            "default": "TEST_",
+            "description": "Tag prefix that maps a scenario to a test in the tracker. '@TEST_CALC-1043' links to test CALC-1043. Matched case-insensitively."
+          },
+          "playwrightBddRunner.traceability.reqTagPrefix": {
+            "order": 40,
+            "type": "string",
+            "default": "REQ_",
+            "description": "Tag prefix that marks a scenario as covering a requirement. '@REQ_CALC-900' covers requirement CALC-900. Matched case-insensitively."
+          },
+          "playwrightBddRunner.xray.siteUrl": {
+            "order": 50,
+            "type": "string",
+            "default": "",
+            "description": "Your Jira/Xray Cloud site host, e.g. 'acme.atlassian.net'. Used to build browse links (https://{siteUrl}/browse/{KEY}) for the 'Open in tracker' action."
+          },
+          "playwrightBddRunner.xray.apiRegion": {
+            "order": 60,
+            "type": "string",
+            "enum": [
+              "global",
+              "us",
+              "eu",
+              "au"
+            ],
+            "enumDescriptions": [
+              "Global Xray Cloud API.",
+              "United States regional API.",
+              "European Union regional API.",
+              "Australia regional API."
+            ],
+            "default": "global",
+            "description": "Xray Cloud API region host used for authentication, GraphQL, and sync. 'global' uses xray.cloud.getxray.app; the others use the matching regional host (us/eu/au). Must match your Xray site's region."
+          },
+          "playwrightBddRunner.xray.syncProjectKeys": {
+            "order": 70,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Project keys included in every traceability sync. Tag-derived keys, the default project key, projects selected on the Coverage Board, and already synced projects join the scope as well."
+          },
+          "playwrightBddRunner.xray.cacheTtlMinutes": {
+            "order": 80,
+            "type": "number",
+            "default": 15,
+            "description": "How long a synced Xray snapshot is considered fresh, in minutes. Past this the panel dims the data and marks it stale: display only, and no test data is re-fetched until you run Sync again. The same window paces the project list behind the board's project picker, which does refresh itself in the background once it is stale (never more often than once a minute)."
+          },
+          "playwrightBddRunner.xray.defaultProjectKey": {
+            "order": 90,
+            "type": "string",
+            "default": "",
+            "description": "Default Jira project key (e.g. 'CALC'). Prefills the Project field when publishing a new Test Execution, and joins the sync scope alongside tag-derived keys, the configured sync project keys, already synced projects, and the board's project selection. Appending to an existing execution derives its project from the execution key instead."
+          },
+          "playwrightBddRunner.xray.executionIssueType": {
+            "order": 100,
+            "type": "string",
+            "default": "Test Execution",
+            "description": "Jira work type name used for Xray Test Executions. Change it when your project maps a differently named work type to Xray's Test Execution entity, such as 'Sub-Test Execution' in some team-managed projects. The name must belong to a standard-level work type, since a subtask type cannot hold a standalone execution."
+          },
+          "playwrightBddRunner.xray.reportGlob": {
+            "order": 110,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "playwright-report/**",
+              "test-results/**/*.zip"
+            ],
+            "description": "Workspace globs used to suggest run-level report bundles to attach when publishing (e.g. the HTML report folder, trace zips). Discovered files appear as removable chips in the Publish dialog and upload to the execution's Jira issue after a successful import."
+          },
+          "playwrightBddRunner.xray.attachTo": {
+            "order": 120,
+            "type": "string",
+            "enum": [
+              "evidence",
+              "issue",
+              "both"
+            ],
+            "enumDescriptions": [
+              "Embed per-test attachments in the Xray result payload.",
+              "Upload per-test attachments to the Jira execution issue.",
+              "Send per-test attachments to both destinations."
+            ],
+            "default": "evidence",
+            "description": "Where per-test-run evidence (screenshots, traces, videos) is published: 'evidence' embeds it in the Xray result payload, 'issue' uploads it as attachments on the execution's Jira issue instead, 'both' does both. Run-level report bundles you pick always go to the Jira issue regardless of this setting."
+          }
         }
       }
-    },
+    ],
     "commands": [
+      {
+        "command": "playwrightBddRunner.openSupportSnapshot",
+        "title": "Open Support Snapshot",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.diagnoseWorkspace",
+        "title": "Diagnose Workspace",
+        "category": "Specwright",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "playwrightBddRunner.openTesting",
+        "title": "Open Testing",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.openSteps",
+        "title": "Open Steps",
+        "category": "Specwright"
+      },
+      {
+        "command": "playwrightBddRunner.configureStepPaths",
+        "title": "Configure Step Paths",
+        "category": "Specwright"
+      },
       {
         "command": "playwrightBddRunner.discoverTests",
         "title": "Discover Tests",
@@ -494,37 +636,37 @@
       },
       {
         "command": "playwrightBddRunner.setOrganizationStrategy",
-        "title": "Set Organization Strategy",
+        "title": "Group tests by",
         "category": "Specwright"
       },
       {
         "command": "playwrightBddRunner.setTagBasedOrganization",
-        "title": "Organize by Tags",
+        "title": "Tags",
         "category": "Specwright"
       },
       {
         "command": "playwrightBddRunner.setFileBasedOrganization",
-        "title": "Organize by File",
+        "title": "File",
         "category": "Specwright"
       },
       {
         "command": "playwrightBddRunner.setScenarioTypeOrganization",
-        "title": "Organize by Scenario Type",
+        "title": "Scenario type",
         "category": "Specwright"
       },
       {
         "command": "playwrightBddRunner.setFlatOrganization",
-        "title": "Flat Organization",
+        "title": "None",
         "category": "Specwright"
       },
       {
         "command": "playwrightBddRunner.setFeatureBasedOrganization",
-        "title": "Hierarchical Organization",
+        "title": "Feature",
         "category": "Specwright"
       },
       {
         "command": "playwrightBddRunner.debugOrganization",
-        "title": "Debug Organization Strategy",
+        "title": "Debug test grouping",
         "category": "Specwright"
       },
       {
@@ -746,6 +888,18 @@
         "category": "Specwright",
         "icon": "$(run-all)",
         "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.showPanel",
+        "title": "Enable Xray Traceability",
+        "category": "Specwright",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "playwrightBddRunner.traceability.setupSaved",
+        "title": "Xray Setup Saved",
+        "category": "Specwright",
+        "icon": "$(pass)"
       }
     ],
     "viewsContainers": {
@@ -763,18 +917,29 @@
           "id": "playwrightBddRunner.stepsExplorer",
           "name": "Steps",
           "icon": "media/activity-bar-icon.svg",
-          "contextualTitle": "Specwright BDD"
+          "contextualTitle": "Specwright BDD",
+          "when": "config.playwrightBddRunner.enableStepsPanel"
         },
         {
           "id": "playwrightBddRunner.traceability",
           "name": "Traceability",
           "icon": "media/activity-bar-icon.svg",
           "contextualTitle": "Specwright BDD",
-          "when": "config.playwrightBddRunner.traceability.enablePanel"
+          "when": "playwrightBddRunner.traceability.enabled"
         }
       ]
     },
     "viewsWelcome": [
+      {
+        "view": "workbench.view.testing",
+        "when": "isWorkspaceTrusted",
+        "contents": "No BDD scenarios are visible yet. Diagnose project and execution-provider readiness, then refresh discovery.\n\n[Diagnose workspace](command:playwrightBddRunner.diagnoseWorkspace)\n\n[Discover scenarios](command:playwrightBddRunner.discoverTests)"
+      },
+      {
+        "view": "playwrightBddRunner.stepsExplorer",
+        "when": "isWorkspaceTrusted",
+        "contents": "No step definitions match this workspace yet. Check readiness or point Specwright at the folders that contain your definitions.\n\n[Diagnose workspace](command:playwrightBddRunner.diagnoseWorkspace)\n\n[Configure step paths](command:playwrightBddRunner.configureStepPaths)"
+      },
       {
         "view": "playwrightBddRunner.traceability",
         "when": "isWorkspaceTrusted && !playwrightBddRunner.traceability.connected",
@@ -793,6 +958,22 @@
     ],
     "menus": {
       "commandPalette": [
+        {
+          "command": "playwrightBddRunner.openTesting",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.openSteps",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.configureStepPaths",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.refreshTests",
+          "when": "false"
+        },
         {
           "command": "playwrightBddRunner.generateStepDefinitions",
           "when": "resourceExtname == .feature"
@@ -851,11 +1032,11 @@
         },
         {
           "command": "playwrightBddRunner.traceability.runAndPublishByTagExpression",
-          "when": "config.playwrightBddRunner.traceability.enablePanel"
+          "when": "playwrightBddRunner.traceability.enabled"
         },
         {
           "command": "playwrightBddRunner.traceability.publishLastRun",
-          "when": "config.playwrightBddRunner.traceability.enablePanel"
+          "when": "playwrightBddRunner.traceability.enabled"
         },
         {
           "command": "playwrightBddRunner.traceability.sync",
@@ -863,10 +1044,14 @@
         },
         {
           "command": "playwrightBddRunner.traceability.openBoard",
-          "when": "config.playwrightBddRunner.traceability.enablePanel"
+          "when": "playwrightBddRunner.traceability.enabled"
         },
         {
           "command": "playwrightBddRunner.traceability.hidePanel",
+          "when": "false"
+        },
+        {
+          "command": "playwrightBddRunner.traceability.setupSaved",
           "when": "false"
         },
         {
@@ -875,11 +1060,11 @@
         },
         {
           "command": "playwrightBddRunner.traceability.toggleGrouping",
-          "when": "config.playwrightBddRunner.traceability.enablePanel"
+          "when": "playwrightBddRunner.traceability.enabled"
         },
         {
           "command": "playwrightBddRunner.traceability.switchDefaultProject",
-          "when": "config.playwrightBddRunner.traceability.enablePanel"
+          "when": "playwrightBddRunner.traceability.enabled"
         }
       ],
       "view/title": [
@@ -891,37 +1076,37 @@
         {
           "command": "playwrightBddRunner.exportSteps",
           "when": "view == playwrightBddRunner.stepsExplorer",
-          "group": "navigation@2"
+          "group": "playwrightBddRunner@1"
         },
         {
           "command": "playwrightBddRunner.exportScenarios",
           "when": "view == playwrightBddRunner.stepsExplorer",
-          "group": "navigation@3"
+          "group": "playwrightBddRunner@2"
         },
         {
           "command": "playwrightBddRunner.traceability.toggleGrouping",
           "when": "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected",
-          "group": "navigation@-1"
+          "group": "playwrightBddRunner@1"
         },
         {
           "command": "playwrightBddRunner.traceability.sync",
           "when": "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected",
-          "group": "navigation@0"
+          "group": "navigation@2"
         },
         {
           "command": "playwrightBddRunner.traceability.runAndPublishAllMapped",
           "when": "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected",
-          "group": "navigation@2"
+          "group": "playwrightBddRunner@2"
         },
         {
           "command": "playwrightBddRunner.traceability.publishLastRun",
           "when": "view == playwrightBddRunner.traceability && playwrightBddRunner.traceability.connected",
-          "group": "navigation@3"
+          "group": "playwrightBddRunner@3"
         },
         {
           "command": "playwrightBddRunner.traceability.manageConnection",
           "when": "view == playwrightBddRunner.traceability",
-          "group": "navigation@4"
+          "group": "playwrightBddRunner@4"
         },
         {
           "command": "playwrightBddRunner.traceability.openBoard",
@@ -1017,24 +1202,19 @@
         },
         {
           "command": "playwrightBddRunner.traceability.runAndPublishFeature",
-          "when": "resourceExtname == .feature && resourceScheme == file && config.playwrightBddRunner.traceability.enablePanel",
+          "when": "resourceExtname == .feature && resourceScheme == file && playwrightBddRunner.traceability.enabled",
           "group": "playwrightBddRunner@2"
         },
         {
           "command": "playwrightBddRunner.traceability.runAndPublishFolder",
-          "when": "explorerResourceIsFolder && resourceScheme == file && config.playwrightBddRunner.traceability.enablePanel",
+          "when": "explorerResourceIsFolder && resourceScheme == file && playwrightBddRunner.traceability.enabled",
           "group": "playwrightBddRunner@2"
         }
       ],
       "testing/item/context": [
         {
           "submenu": "playwrightBddRunner.organizationSubmenu",
-          "group": "playwrightBddRunner@1"
-        }
-      ],
-      "testing/view/context": [
-        {
-          "command": "playwrightBddRunner.discoverTests",
+          "when": "controllerId == playwrightBddRunner",
           "group": "playwrightBddRunner@1"
         }
       ],
@@ -1068,11 +1248,6 @@
           "command": "playwrightBddRunner.generateStepDefinitions",
           "when": "resourceExtname == .feature && resourceScheme == file",
           "group": "3_tools@1"
-        },
-        {
-          "command": "playwrightBddRunner.refreshTests",
-          "when": "resourceExtname == .feature && resourceScheme == file",
-          "group": "3_tools@2"
         }
       ],
       "playwrightBddRunner.organizationSubmenu": [
@@ -1096,7 +1271,7 @@
     "submenus": [
       {
         "id": "playwrightBddRunner.organizationSubmenu",
-        "label": "Organization Strategy"
+        "label": "Group tests by"
       },
       {
         "id": "playwrightBddRunner.contextSubmenu",
@@ -1117,14 +1292,77 @@
     ],
     "walkthroughs": [
       {
+        "id": "specwright.coreWorkflow",
+        "title": "Run your first BDD scenario",
+        "description": "Check workspace readiness, discover scenarios, run one, and connect Gherkin steps to their definitions.",
+        "steps": [
+          {
+            "id": "specwright.coreWorkflow.diagnose",
+            "title": "Diagnose workspace readiness",
+            "description": "Check the project capabilities and active execution provider before your first run.\n[Diagnose workspace](command:playwrightBddRunner.diagnoseWorkspace)",
+            "media": {
+              "markdown": "media/walkthrough/core-diagnose.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.diagnoseWorkspace"
+            ]
+          },
+          {
+            "id": "specwright.coreWorkflow.testing",
+            "title": "Open Testing",
+            "description": "Open VS Code Testing to see the feature files and scenarios Specwright discovered.\n[Open Testing](command:playwrightBddRunner.openTesting)",
+            "media": {
+              "markdown": "media/walkthrough/core-testing.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.openTesting"
+            ]
+          },
+          {
+            "id": "specwright.coreWorkflow.run",
+            "title": "Run one scenario",
+            "description": "Choose a scenario from Testing or the editor and run only that scenario.\n[Run a scenario](command:playwrightBddRunner.runScenario)",
+            "media": {
+              "markdown": "media/walkthrough/core-run.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.runScenario"
+            ]
+          },
+          {
+            "id": "specwright.coreWorkflow.stepDefinition",
+            "title": "Navigate or create a step definition",
+            "description": "Place the cursor on a Gherkin step and open its definition. If it is unmatched, generate the missing definition instead.\n[Go to step definition](command:playwrightBddRunner.goToStepDefinition)\n\n[Generate missing definitions](command:playwrightBddRunner.generateStepDefinitions)",
+            "media": {
+              "markdown": "media/walkthrough/core-step-definition.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.goToStepDefinition",
+              "onCommand:playwrightBddRunner.generateStepDefinitions"
+            ]
+          },
+          {
+            "id": "specwright.coreWorkflow.steps",
+            "title": "Open Steps",
+            "description": "Open the Steps panel to browse definitions, usage counts, and unmatched Gherkin steps.\n[Open Steps](command:playwrightBddRunner.openSteps)",
+            "media": {
+              "markdown": "media/walkthrough/core-steps.md"
+            },
+            "completionEvents": [
+              "onCommand:playwrightBddRunner.openSteps"
+            ]
+          }
+        ]
+      },
+      {
         "id": "specwright.setupXray",
         "title": "Set up Xray",
         "description": "Connect Specwright to Jira Xray Cloud: map scenarios to tests, see coverage at a glance, and publish run results back to Jira.",
         "steps": [
           {
             "id": "specwright.setupXray.site",
-            "title": "Set your Xray site URL and region",
-            "description": "Open the Xray setup panel and enter your Atlassian site (for example `your-team.atlassian.net`) and API region.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
+            "title": "Open Xray setup",
+            "description": "Open the setup form for your Atlassian site, such as `acme.atlassian.net`, and choose Global, US, EU, or AU as the Xray API region.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
             "media": {
               "markdown": "media/walkthrough/site.md"
             },
@@ -1133,42 +1371,20 @@
             ]
           },
           {
-            "id": "specwright.setupXray.apiKey",
-            "title": "Create an Xray API key",
-            "description": "In Jira, open Xray → API Keys and create a key. You'll get a client id and client secret used only for authentication.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
-            "media": {
-              "markdown": "media/walkthrough/api-key.md"
-            },
-            "completionEvents": [
-              "onCommand:playwrightBddRunner.traceability.connect"
-            ]
-          },
-          {
             "id": "specwright.setupXray.credentials",
-            "title": "Paste your client id and secret",
-            "description": "Paste the client id and client secret into the setup panel. Specwright validates them with a live connection test and stores them in the OS secret store, never in settings or the repo.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
+            "title": "Save and test the connection",
+            "description": "Create an Xray API key, enter its client id and secret, and save the form. Jira email and API token are optional. Credentials stay in the OS secret store.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
             "media": {
               "markdown": "media/walkthrough/credentials.md"
             },
             "completionEvents": [
-              "onCommand:playwrightBddRunner.traceability.connect"
-            ]
-          },
-          {
-            "id": "specwright.setupXray.jira",
-            "title": "Add Jira access (optional)",
-            "description": "Add a Jira email and API token to unlock the real project view and issue attachments. This is optional: skip it to keep tag-derived project probes.\n[Open Xray Setup](command:playwrightBddRunner.traceability.connect)",
-            "media": {
-              "markdown": "media/walkthrough/jira.md"
-            },
-            "completionEvents": [
-              "onCommand:playwrightBddRunner.traceability.connect"
+              "onCommand:playwrightBddRunner.traceability.setupSaved"
             ]
           },
           {
             "id": "specwright.setupXray.sync",
-            "title": "Run your first Sync",
-            "description": "Sync pulls remote test metadata, status, and coverage for your tagged scenarios. The Traceability tree then shows remote summaries, status badges, and orphan tests.\n[Sync with Xray](command:playwrightBddRunner.traceability.sync)",
+            "title": "Run your first sync",
+            "description": "Sync pulls remote test metadata, status, and coverage for your tagged scenarios. The Traceability tree then shows remote summaries, status badges, and orphan tests.\n[Sync Traceability](command:playwrightBddRunner.traceability.sync)",
             "media": {
               "markdown": "media/walkthrough/sync.md"
             },
@@ -1185,6 +1401,7 @@
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node scripts/build/esbuild.cjs --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "watch:webview": "tsc --noEmit --watch --project tsconfig.webview.json",
     "build:prod": "npm run check-types && npm run lint && npm test && node scripts/build/esbuild.cjs --production",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -1195,7 +1412,10 @@
     "test:integration": "npm run build && npm run test:integration:built",
     "test:vsix": "npm run compile:integration && node scripts/smoke-vsix.mjs",
     "test:all": "npm test && npm run test:integration",
-    "check-types": "tsc --noEmit",
+    "check-types": "npm-run-all check-types:*",
+    "check-types:extension": "tsc --noEmit",
+    "check-types:webview": "tsc -p tsconfig.webview.json",
+    "check-types:webview-test": "tsc -p tsconfig.webview-test.json",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "clean": "rimraf dist out",
@@ -1217,6 +1437,7 @@
     "@commitlint/config-conventional": "^21.0.1",
     "@playwright/test": "^1.60.0",
     "@types/glob": "^8.1.0",
+    "@types/jsdom": "^21.1.7",
     "@types/mocha": "^10.0.10",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.99.0",
@@ -1225,10 +1446,13 @@
     "@vitest/coverage-v8": "^2.1.9",
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.2.1",
+    "axe-core": "^4.13.0",
     "esbuild": "^0.28.0",
     "eslint": "^10.4.0",
     "glob": "^13.0.6",
     "husky": "^9.1.7",
+    "js-yaml": "4.1.1",
+    "jsdom": "^26.1.0",
     "mocha": "^11.7.6",
     "npm-run-all": "^4.1.5",
     "playwright-bdd": "^8.5.1",

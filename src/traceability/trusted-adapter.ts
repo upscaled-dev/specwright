@@ -104,6 +104,8 @@ function authoringOf(
   if (!capability) {return undefined;}
   const createTestSet = capability.createTestSet?.bind(capability);
   const createTestPlan = capability.createTestPlan?.bind(capability);
+  const resolveTestContainer = capability.resolveTestContainer?.bind(capability);
+  const addTestsToContainer = capability.addTestsToContainer?.bind(capability);
   const createTestExecution = capability.createTestExecution?.bind(capability);
   const pushGherkin = capability.pushGherkin?.bind(capability);
   return {
@@ -113,6 +115,14 @@ function authoringOf(
       : {}),
     ...(createTestPlan
       ? { createTestPlan: (spec, signal) => trust.run((trusted) => createTestPlan(spec, trusted), signal) }
+      : {}),
+    ...(resolveTestContainer
+      ? { resolveTestContainer: (kind, key, signal) =>
+          trust.run((trusted) => resolveTestContainer(kind, key, trusted), signal) }
+      : {}),
+    ...(addTestsToContainer
+      ? { addTestsToContainer: (kind, issueId, testIssueIds, signal) =>
+          trust.run((trusted) => addTestsToContainer(kind, issueId, testIssueIds, trusted), signal) }
       : {}),
     ...(createTestExecution
       ? { createTestExecution: (spec, signal) => trust.run((trusted) => createTestExecution(spec, trusted), signal) }

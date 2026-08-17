@@ -116,6 +116,8 @@ export class RunCommands {
     if (!filePath) {
       filePath = await resolvePaletteFeature(this.context);
       if (!filePath) {return;}
+    }
+    if (tags === undefined) {
       tags = await promptPaletteTags();
       if (tags === undefined) {return;}
     }

@@ -1,6 +1,9 @@
 export const EXECUTION_LIMITS = {
   outputTailBytesPerStream: 256 * 1024,
   reportBytesPerRun: 16 * 1024 * 1024,
+  // JSON expansion needs substantially more heap than the encoded report. Keep that work in a
+  // worker with enough old-generation space for the maximum admitted 16 MiB report.
+  reportParserWorkerHeapMb: 128,
   artifactBytesPerWorkspace: 8 * 1024 * 1024,
   // Bounds only the bulky half of a live result (steps, stack, attachments). The identity, status
   // and duration of every case stay retained so a cancelled run can still report what completed.

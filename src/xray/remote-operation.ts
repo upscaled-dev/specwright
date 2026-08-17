@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { RemoteOperationName as CoreRemoteOperationName } from "../core/remote-operation-name";
 import { RemoteOutcomeUnknownError } from "../core/workspace-trust";
 import type { Logger } from "../utils/logger";
 
@@ -6,22 +7,7 @@ export type RemoteOperationClass = "read" | "idempotent-write" | "non-idempotent
 export type RetryBudget = "authentication" | "read" | "write";
 export type OutcomeCertainty = "confirmed" | "failed" | "unknown";
 
-export type RemoteOperationName =
-  | "xray.authenticate"
-  | "xray.graphql.read"
-  | "xray.test.create"
-  | "xray.test-set.create"
-  | "xray.test-plan.create"
-  | "xray.execution.create"
-  | "xray.gherkin.update"
-  | "xray.execution.import-json"
-  | "xray.execution.import-cucumber"
-  | "jira.attachment-meta.read"
-  | "jira.attachment.upload"
-  | "jira.issue-types.read"
-  | "jira.issues.read"
-  | "jira.projects.read"
-  | "jira.profile.read";
+export type RemoteOperationName = CoreRemoteOperationName;
 
 export interface RemoteOperationPolicy {
   readonly class: RemoteOperationClass;
@@ -41,6 +27,8 @@ export const REMOTE_OPERATION_POLICY: Readonly<Record<RemoteOperationName, Remot
   "xray.test.create": { class: "non-idempotent-write", budget: "write", attempts: 1, idempotencyKey: false },
   "xray.test-set.create": { class: "non-idempotent-write", budget: "write", attempts: 1, idempotencyKey: false },
   "xray.test-plan.create": { class: "non-idempotent-write", budget: "write", attempts: 1, idempotencyKey: false },
+  "xray.test-set.add-tests": { class: "non-idempotent-write", budget: "write", attempts: 1, idempotencyKey: false },
+  "xray.test-plan.add-tests": { class: "non-idempotent-write", budget: "write", attempts: 1, idempotencyKey: false },
   "xray.execution.create": { class: "non-idempotent-write", budget: "write", attempts: 1, idempotencyKey: false },
   "xray.gherkin.update": { class: "non-idempotent-write", budget: "write", attempts: 1, idempotencyKey: false },
   "xray.execution.import-json": { class: "non-idempotent-write", budget: "write", attempts: 1, idempotencyKey: false },

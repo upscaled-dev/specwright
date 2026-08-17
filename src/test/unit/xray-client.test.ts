@@ -806,17 +806,24 @@ describe("XrayClient.createTest", () => {
     expect(created).toEqual({ key: "CALC-1", issueId: "1", warnings: ["gherkin adjusted"] });
   });
 
-  it("throws XrayMutationError on a GraphQL errors envelope (the create is treated as not having happened)", async () => {
+  it("does not locally quarantine the client after a reindex-like GraphQL mutation error", async () => {
+    let mutations = 0;
     const client = makeClient({
-      fetchImpl: jwtThenGraphql(() => ({
-        errors: [{ message: "Project CALC does not exist", extensions: { code: "BAD_REQUEST" } }],
-        data: null,
-      })),
+      fetchImpl: jwtThenGraphql(() => {
+        mutations += 1;
+        return {
+          errors: [{ message: "Project CALC may require administrator reindexing", extensions: { code: "BAD_REQUEST" } }],
+          data: null,
+        };
+      }),
     });
 
-    await expect(
-      client.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" })
-    ).rejects.toBeInstanceOf(XrayMutationError);
+    const create = (): Promise<unknown> =>
+      client.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" });
+
+    await expect(create()).rejects.toBeInstanceOf(XrayMutationError);
+    await expect(create()).rejects.toBeInstanceOf(XrayMutationError);
+    expect(mutations).toBe(2);
   });
 });
 
@@ -974,6 +981,115 @@ describe("XrayClient container creates", () => {
       client.createTestPlan("CALC", "Release 4", ["1001"], controller.signal)
     ).rejects.toBeInstanceOf(XrayAbortError);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("XrayClient existing containers", () => {
+  it("resolves a Test Set by a bounded exact-key type-specific read", async () => {
+    let captured = "";
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        captured = query;
+        return { data: { getTestSets: { results: [{ issueId: "5000", jira: { key: "calc-90" } }] } } };
+      }),
+    });
+
+    await expect(client.resolveTestContainer("test-set", "CALC-90")).resolves.toEqual({
+      kind: "test-set",
+      key: "CALC-90",
+      issueId: "5000",
+    });
+    expect(captured).toContain('getTestSets(jql: "key = \\"CALC-90\\"", limit: 1)');
+    expect(captured).toContain('results { issueId jira(fields: ["key"]) }');
+    expect(captured).not.toContain("getTestPlans");
+  });
+
+  it("returns undefined when the expected container type has no exact readable target", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({
+        data: { getTestPlans: { results: [{ issueId: "6000", jira: { key: "CALC-92" } }] } },
+      })),
+    });
+
+    await expect(client.resolveTestContainer("test-plan", "CALC-91")).resolves.toBeUndefined();
+  });
+
+  it("returns undefined for a structurally valid empty lookup", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({ data: { getTestSets: { results: [] } } })),
+    });
+
+    await expect(client.resolveTestContainer("test-set", "CALC-90")).resolves.toBeUndefined();
+  });
+
+  it("rejects a malformed HTTP-200 lookup envelope instead of treating it as missing", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({ data: { getTestSets: {} } })),
+    });
+
+    await expect(client.resolveTestContainer("test-set", "CALC-90"))
+      .rejects.toThrow("Xray returned a malformed Test Set lookup response.");
+  });
+
+  it("rejects an exact target row without a readable issue id instead of treating it as missing", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({
+        data: { getTestPlans: { results: [{ jira: { key: "CALC-91" } }] } },
+      })),
+    });
+
+    await expect(client.resolveTestContainer("test-plan", "CALC-91"))
+      .rejects.toThrow("Xray returned a malformed Test Plan lookup response.");
+  });
+
+  it("throws on a GraphQL errors envelope instead of misreporting the target as absent", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({
+        errors: [{ message: "Permission denied", extensions: { code: "FORBIDDEN" } }],
+        data: null,
+      })),
+    });
+
+    await expect(client.resolveTestContainer("test-set", "CALC-90")).rejects.toThrow("Permission denied");
+  });
+
+  it("throws on a non-OK read with a non-GraphQL body instead of misreporting the target as absent", async () => {
+    const client = makeClient({
+      fetchImpl: (url) => Promise.resolve(
+        url.endsWith("/authenticate")
+          ? response(200, JSON.stringify(JWT))
+          : response(403, "forbidden")
+      ),
+    });
+
+    await expect(client.resolveTestContainer("test-set", "CALC-90")).rejects.toThrow("Query failed (HTTP 403)");
+  });
+
+  it("sends one addTestsToTestSet mutation addressed by container and member issue ids", async () => {
+    let captured = "";
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        captured = query;
+        return { data: { addTestsToTestSet: { addedTests: ["1001"], warning: "1002 already exists" } } };
+      }),
+    });
+
+    await expect(client.addTestsToContainer("test-set", "5000", ["1001", "1002"])).resolves.toEqual({
+      addedTests: ["1001"],
+      warning: "1002 already exists",
+    });
+    expect(captured).toContain('addTestsToTestSet(issueId: "5000", testIssueIds: ["1001", "1002"])');
+    expect(captured).toContain("{ addedTests warning }");
+  });
+
+  it("keeps an unreadable addedTests field absent rather than returning an invented empty list", async () => {
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql(() => ({ data: { addTestsToTestPlan: { warning: "inspect membership" } } })),
+    });
+
+    await expect(client.addTestsToContainer("test-plan", "6000", ["1001"])).resolves.toEqual({
+      warning: "inspect membership",
+    });
   });
 });
 

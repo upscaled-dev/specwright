@@ -8,6 +8,7 @@ import type {
   AdapterEvent,
   AttachmentCapability,
   AuthoredTest,
+  AddTestsToContainerResult,
   AutomationBindingCapability,
   AutomationBindingClassification,
   ConnectionCapability,
@@ -29,6 +30,7 @@ import type {
   ResultPublishingCapability,
   SyncProgress,
   TestAuthoringCapability,
+  TestContainerTarget,
   TestCaseMetadata,
   TraceabilityAdapter,
 } from "./contracts";
@@ -250,6 +252,27 @@ function authored(value: unknown, budget: ValidationBudget): value is AuthoredTe
     && optional(value["key"], budget, text)
     && optional(value["issueId"], budget, text)
     && texts(value["warnings"], budget);
+}
+
+function containerTarget(value: unknown, budget: ValidationBudget): value is TestContainerTarget {
+  return object(value, budget)
+    && text(value["kind"], budget)
+    && ["test-set", "test-plan"].includes(value["kind"])
+    && nonEmptyText(value["key"], budget)
+    && nonEmptyText(value["issueId"], budget);
+}
+
+function optionalContainerTarget(
+  value: unknown,
+  budget: ValidationBudget
+): value is TestContainerTarget | undefined {
+  return optional(value, budget, containerTarget);
+}
+
+function addedTests(value: unknown, budget: ValidationBudget): value is AddTestsToContainerResult {
+  return object(value, budget)
+    && optional(value["addedTests"], budget, texts)
+    && optional(value["warning"], budget, text);
 }
 
 function searchResult(value: unknown, budget: ValidationBudget): value is RemoteSearchResult {
@@ -506,6 +529,8 @@ function authoringOf(
   const createTest = source.createTest.bind(source);
   const createTestSet = source.createTestSet?.bind(source);
   const createTestPlan = source.createTestPlan?.bind(source);
+  const resolveTestContainer = source.resolveTestContainer?.bind(source);
+  const addTestsToContainer = source.addTestsToContainer?.bind(source);
   const createTestExecution = source.createTestExecution?.bind(source);
   const pushGherkin = source.pushGherkin?.bind(source);
   return {
@@ -520,6 +545,24 @@ function authoringOf(
     ...(createTestPlan
       ? { createTestPlan: (spec, signal) => accepted(
           adapterId, state, "testAuthoring.createTestPlan", () => createTestPlan(spec, signalFor(state, signal)), authored
+        ) }
+      : {}),
+    ...(resolveTestContainer
+      ? { resolveTestContainer: (kind, key, signal) => accepted(
+          adapterId,
+          state,
+          "testAuthoring.resolveTestContainer",
+          () => resolveTestContainer(kind, key, signalFor(state, signal)),
+          optionalContainerTarget
+        ) }
+      : {}),
+    ...(addTestsToContainer
+      ? { addTestsToContainer: (kind, issueId, testIssueIds, signal) => accepted(
+          adapterId,
+          state,
+          "testAuthoring.addTestsToContainer",
+          () => addTestsToContainer(kind, issueId, testIssueIds, signalFor(state, signal)),
+          addedTests
         ) }
       : {}),
     ...(createTestExecution
@@ -595,7 +638,14 @@ const REQUIRED_CAPABILITY_MEMBERS: Readonly<Record<IntegrationAdapterCapability,
 
 const OPTIONAL_CAPABILITY_MEMBERS: Readonly<Partial<Record<IntegrationAdapterCapability, readonly string[]>>> = {
   connection: ["verify"],
-  testAuthoring: ["createTestSet", "createTestPlan", "createTestExecution", "pushGherkin"],
+  testAuthoring: [
+    "createTestSet",
+    "createTestPlan",
+    "resolveTestContainer",
+    "addTestsToContainer",
+    "createTestExecution",
+    "pushGherkin",
+  ],
 };
 
 function capabilityShape(value: unknown, capability: IntegrationAdapterCapability): boolean {

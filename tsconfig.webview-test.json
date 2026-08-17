@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true
+  },
+  "include": [
+    "src/test/unit/board-panel.test.ts",
+    "src/test/unit/webview-client.test.ts",
+    "src/test/unit/xray-setup-client.test.ts"
+  ],
+  "exclude": []
+}

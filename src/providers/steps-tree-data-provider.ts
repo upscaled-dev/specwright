@@ -139,6 +139,13 @@ export class StepsTreeDataProvider
       return node ? [] : [{ kind: "info", label: DISABLED_MESSAGE }];
     }
     if (!node) {
+      const [definitions, unmatched] = await Promise.all([
+        this.index.getAllUsages(),
+        this.index.getUnmatchedSteps(),
+      ]);
+      if (definitions.size === 0 && unmatched.size === 0) {
+        return [];
+      }
       return [
         { kind: "section", section: "definitions" },
         { kind: "section", section: "unmatched" },

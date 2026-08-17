@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as vscode from "vscode";
 import { ProviderRegistry, shouldRegisterCompletion } from "../../core/provider-registry";
 import type { ExtensionConfig } from "../../core/extension-config";
@@ -115,6 +115,47 @@ describe("ProviderRegistry", () => {
   beforeEach(() => {
     lang.__resetCounters();
     setCucumberAutocompletePresent(false);
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("short-circuits traceability evidence with sequential, case-insensitive reads", async () => {
+    const { config } = makeFakeConfig({
+      enableCodeLens: false,
+      enableStepDefinitionNavigation: false,
+      stepDefinitionPaths: [],
+      testFilePattern: "features/**/*.feature",
+    });
+    Object.defineProperties(config, {
+      traceabilityTestTagPrefix: { get: () => "test_" },
+      traceabilityReqTagPrefix: { get: () => "req_" },
+    });
+    const files = ["one.feature", "two.feature", "three.feature"].map((file) =>
+      vscode.Uri.file(`/workspace/features/${file}`)
+    );
+    const findFiles = vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue(files);
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    const readFile = vi.spyOn(vscode.workspace.fs, "readFile").mockImplementation(async (uri) => {
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      await Promise.resolve();
+      activeReads -= 1;
+      return Buffer.from(uri.fsPath.endsWith("two.feature")
+        ? "@TeSt_APP-1\nScenario: tagged"
+        : "Scenario: untagged");
+    });
+    const registry = new ProviderRegistry(config, stubFeatureParser, stubLogger);
+
+    await expect(registry.hasTraceabilityTags()).resolves.toBe(true);
+
+    expect(findFiles).toHaveBeenCalledWith(
+      "features/**/*.feature",
+      expect.stringContaining("node_modules")
+    );
+    expect(readFile).toHaveBeenCalledTimes(2);
+    expect(maxActiveReads).toBe(1);
+    registry.dispose();
   });
 
   it("registers both providers when both settings are initially enabled", () => {

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type * as vscode from "vscode";
+import * as vscode from "vscode";
 import { activate, deactivate } from "../../extension";
 import { PROMPTED_STATE_KEY } from "../../commands/prompt-worker-count";
 import { Logger } from "../../utils/logger";
@@ -11,6 +11,8 @@ import { SelectedExecutionGateway } from "../../core/execution-engine";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { WorkspaceTrust } from "../../core/workspace-trust";
 import { TestExecutor } from "../../core/test-executor";
+import { PlaywrightBddTestProvider } from "../../test-providers/playwright-bdd-test-provider";
+import { FakeTestController } from "./helpers/fake-test-controller";
 
 const { gatewayArgs, gateways } = vi.hoisted(() => ({
   gatewayArgs: [] as unknown[][],
@@ -42,6 +44,7 @@ interface StubContext {
   workspaceState: StubMemento;
   globalState: StubMemento;
   globalStorageUri: { fsPath: string };
+  extensionUri: { fsPath: string };
   secrets: {
     get: ReturnType<typeof vi.fn>;
     store: ReturnType<typeof vi.fn>;
@@ -67,6 +70,7 @@ function makeStubContext(): StubContext {
     // The Xray metadata cache keys off globalState; a realistic stub keeps activation honest.
     globalState: stubMemento(),
     globalStorageUri: { fsPath: fs.mkdtempSync(path.join(os.tmpdir(), "specwright-extension-")) },
+    extensionUri: { fsPath: process.cwd() },
     secrets: {
       get: vi.fn().mockResolvedValue(undefined),
       store: vi.fn().mockResolvedValue(undefined),
@@ -94,11 +98,49 @@ afterEach(async () => {
 });
 
 describe("activate", () => {
+  it("uses workspace feature discovery instead of unconditional startup activation", () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as {
+      activationEvents: string[];
+    };
+    expect(manifest.activationEvents).toEqual(["workspaceContains:**/*.feature"]);
+  });
+
+  it("does not discover tests while activation wires the provider", async () => {
+    const discover = vi.spyOn(PlaywrightBddTestProvider.prototype, "discoverTests");
+
+    await activate(makeStubContext() as unknown as vscode.ExtensionContext);
+
+    expect(discover).not.toHaveBeenCalled();
+  });
+
+  it("records activation duration as structured logger data", async () => {
+    const info = vi.spyOn(Logger.prototype, "info");
+    vi.spyOn(vscode.tests, "createTestController").mockReturnValue(new FakeTestController() as never);
+
+    await activate(makeStubContext() as unknown as vscode.ExtensionContext);
+
+    expect(info).toHaveBeenCalledWith(
+      "✅ Specwright activated",
+      expect.objectContaining({ durationMs: expect.any(Number) })
+    );
+  });
+
   it("configures discovery on the legacy execution boundary", async () => {
     await activate(makeStubContext() as unknown as vscode.ExtensionContext);
 
     const discovery = gatewayArgs.at(-1)?.[5] as { discover?: unknown } | undefined;
     expect(discovery?.discover).toBeTypeOf("function");
+  });
+
+  it("does not hold extension activation on traceability evidence reconciliation", async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {finish = resolve;});
+    vi.spyOn(TraceabilitySubsystem.prototype, "applyCurrent").mockReturnValue(pending);
+
+    await expect(activate(makeStubContext() as unknown as vscode.ExtensionContext)).resolves.toBeDefined();
+
+    finish();
+    await pending;
   });
 
 
@@ -140,15 +182,13 @@ describe("deactivate", () => {
   it("attempts every later cleanup owner after an early rejection", async () => {
     const context = makeStubContext();
     await activate(context as unknown as vscode.ExtensionContext);
-    const commandAdapter = context.subscriptions.find((subscription) =>
+    expect(context.subscriptions.find((subscription) =>
       (subscription as { id?: unknown }).id === "xray"
-    );
-    expect(commandAdapter).toBeDefined();
+    )).toBeUndefined();
 
     const gatewayDispose = vi.spyOn(SelectedExecutionGateway.prototype, "dispose")
       .mockRejectedValueOnce(new Error("gateway cleanup failed"));
     const traceabilityShutdown = vi.spyOn(TraceabilitySubsystem.prototype, "shutdown");
-    const adapterDispose = vi.spyOn(commandAdapter!, "dispose");
     const trustDispose = vi.spyOn(WorkspaceTrust.prototype, "dispose");
     const executorDispose = vi.spyOn(TestExecutor.prototype, "dispose");
     const logged = vi.spyOn(Logger.prototype, "error");
@@ -158,7 +198,6 @@ describe("deactivate", () => {
 
     expect(gatewayDispose).toHaveBeenCalledOnce();
     expect(traceabilityShutdown).toHaveBeenCalledOnce();
-    expect(adapterDispose).toHaveBeenCalledOnce();
     expect(trustDispose).toHaveBeenCalledOnce();
     expect(executorDispose).toHaveBeenCalledOnce();
     expect(logged).toHaveBeenCalledWith(

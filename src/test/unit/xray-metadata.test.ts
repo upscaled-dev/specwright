@@ -67,6 +67,7 @@ function fakeClient(impl: FakeClient): XrayClient {
 
 interface CapabilityOptions {
   client: XrayClient;
+  cache?: XrayMetadataCache;
   memento?: vscode.Memento;
   config?: ExtensionConfig;
   logger?: Logger;
@@ -82,7 +83,7 @@ const noProjects = (): Promise<JiraProjectSearchResult | undefined> => Promise.r
 function makeCapability(options: CapabilityOptions): XrayMetadataCapability {
   return new XrayMetadataCapability({
     client: options.client,
-    cache: cacheFor(options.memento ?? fakeMemento()),
+    cache: options.cache ?? cacheFor(options.memento ?? fakeMemento()),
     config: options.config ?? fakeConfig(),
     logger: options.logger ?? silentLogger(),
     account: options.account ?? (() => Promise.resolve("account-a")),
@@ -942,6 +943,69 @@ describe("XrayMetadataCapability project directory", () => {
     await pending;
 
     expect(capability.cached().projects).toEqual([]);
+  });
+
+  it("aborts and drains an in-flight directory refresh on dispose", async () => {
+    let signal: AbortSignal | undefined;
+    const capability = makeCapability({
+      client: fakeClient({}),
+      listProjects: (nextSignal) => {
+        signal = nextSignal;
+        return new Promise((resolve) => {
+          nextSignal?.addEventListener("abort", () => resolve(undefined), { once: true });
+        });
+      },
+    });
+    const listing = capability.list();
+    await flush();
+
+    await capability.dispose();
+
+    expect(signal?.aborted).toBe(true);
+    await expect(listing).resolves.toEqual({ projects: [], truncated: false });
+  });
+});
+
+describe("XrayMetadataCapability lifecycle", () => {
+  it("drains an in-flight cache load before disposal completes", async () => {
+    let finishLoad!: () => void;
+    const load = new Promise<undefined>((resolve) => {finishLoad = () => resolve(undefined);});
+    const cache = {
+      load: vi.fn(() => load),
+      saveForAccount: vi.fn(() => Promise.resolve()),
+    } as unknown as XrayMetadataCache;
+    const capability = makeCapability({ client: fakeClient({}), cache });
+    await flush();
+
+    let disposed = false;
+    const disposal = capability.dispose().then(() => {disposed = true;});
+    await flush();
+    expect(disposed).toBe(false);
+
+    finishLoad();
+    await disposal;
+    expect(disposed).toBe(true);
+  });
+
+  it("passes lifecycle cancellation into a sync and drains it on dispose", async () => {
+    let signal: AbortSignal | undefined;
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: (_project, nextSignal) => {
+          signal = nextSignal;
+          return new Promise((resolve) => {
+            nextSignal?.addEventListener("abort", () => resolve(outcome([])), { once: true });
+          });
+        },
+      }),
+    });
+    const syncing = capability.sync({ projectKeys: ["CALC"] });
+    await flush();
+
+    await capability.dispose();
+
+    expect(signal?.aborted).toBe(true);
+    await expect(syncing).resolves.toBeUndefined();
   });
 });
 

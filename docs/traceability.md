@@ -102,7 +102,9 @@ Sync always looks up the test keys already referenced by your local tags. To als
 - `playwrightBddRunner.xray.syncProjectKeys`
 - A project selected in the Coverage Board
 
-The Coverage Board can load a newly selected project automatically when connected, but **Sync Traceability** is the clearest way to refresh it on demand. A remote test is shown as available only after Specwright has completed that project's catalogue sync; an incomplete project catalogue never drives a claim that a test is unlinked. A successful direct lookup can still identify a tagged key that is missing remotely.
+The Coverage Board loads a newly selected project automatically when connected and schedules one quiet, forced project sync after a remote create is confirmed. That post-create sync keeps a newly tagged scenario from remaining **not found on remote** until a manual refresh. **Sync Traceability** remains the on-demand refresh. A remote test is shown as available only after Specwright has completed that project's catalogue sync; an incomplete project catalogue never drives a claim that a test is unlinked. A successful direct lookup can still identify a tagged key that is missing remotely.
+
+The Mapping toolbar keeps **Sync now** available whenever no board mutation or sync is active. Its two columns scroll independently: Untraced is on the left, while Available and Mapped share the right column. Their action rows remain pinned. Available and Mapped can be collapsed, and the board restores those choices after reload.
 
 ## Use the Coverage Board
 
@@ -137,8 +139,10 @@ Confirming an existing test inserts its `@TEST_…` tag into the local feature f
 These actions make remote changes and always ask for confirmation:
 
 - **Create tests** creates one Xray Cucumber test for each selected untraced scenario. The scenario name and its current Gherkin are sent to Xray, then Specwright adds the returned test tag locally. See [Scenario Outlines in Xray](#scenario-outlines-in-xray) for what is left out of the text that is sent.
-- **Create Test Set** and **Create Test Plan** create a remote container for the selected tests. The selected tests must have a synced remote issue ID, so run Sync first if the action says a test cannot be resolved.
+- The Test Set and Test Plan icon pairs create a new container or add the selected tests to an existing one. Hover an icon to see its current action and state. Adding to an existing container asks for its exact key, verifies that it is the expected container type in the selected project, and names the key, project, site, and selected count before writing.
 - **Create Execution** creates an empty remote Test Execution in the selected project. It has no results until you publish a run to it later.
+
+Creating or adding container members requires every selected test to have a synced remote issue ID. If any selected test cannot be resolved, nothing is written and the message names the tests to sync. After an existing-container update, Specwright reports how many tests Xray says it added. A lower count can mean tests were already members or were not accepted; if Xray does not return a readable count, inspect the target rather than assuming zero. A cancelled or interrupted update may still have reached Xray once it was sent, so inspect the exact target before retrying.
 
 A cancelled or partially completed bulk create can leave tests that were already created in Xray. If Specwright cannot apply the matching local tag, the remote test still exists; link it manually from the feature file or the Coverage Board.
 

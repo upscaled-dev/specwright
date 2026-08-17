@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { ExtensionConfig } from "../core/extension-config";
+import { configurationTarget, ExtensionConfig } from "../core/extension-config";
 import { Logger } from "../utils/logger";
 import { normalizeSiteUrl } from "./xray-adapter";
 import { XrayCredentialStore } from "./xray-credential-store";
@@ -11,7 +11,7 @@ import {
   XrayProbeOptions,
 } from "./xray-connection-test";
 import { parseXrayRegion } from "./xray-region";
-import { XraySetupPanel } from "./xray-setup-panel";
+import { XraySetupPanel, type XraySetupSave } from "./xray-setup-panel";
 import type { WorkspaceTrust } from "../core/workspace-trust";
 
 const CONFIG_NAMESPACE = "playwrightBddRunner";
@@ -23,18 +23,17 @@ const COMMAND = {
   connect: "playwrightBddRunner.traceability.connect",
   disconnect: "playwrightBddRunner.traceability.disconnect",
   testConnection: "playwrightBddRunner.traceability.testConnection",
+  setupSaved: "playwrightBddRunner.traceability.setupSaved",
 } as const;
 
-// The setting may be pinned in the workspace; write the edited value back to wherever it is
-// already defined so we don't silently promote a workspace value to Global. An unscoped
-// WorkspaceConfiguration can neither see nor write folder-level values (inspect() without a
-// resource never surfaces workspaceFolderValue), so Workspace and Global are the only targets.
-function siteUrlTarget(wsConfig: vscode.WorkspaceConfiguration): vscode.ConfigurationTarget {
-  const inspected = wsConfig.inspect<string>(SITE_URL_SETTING);
-  if (inspected?.workspaceValue !== undefined) {
-    return vscode.ConfigurationTarget.Workspace;
-  }
-  return vscode.ConfigurationTarget.Global;
+interface StoredHostState {
+  readonly xray: Awaited<ReturnType<XrayCredentialStore["getCredentials"]>>;
+  readonly jira: Awaited<ReturnType<XrayCredentialStore["getJiraCredentials"]>>;
+}
+
+interface StoredSetting<T> {
+  readonly target: vscode.ConfigurationTarget;
+  readonly value: T | undefined;
 }
 
 interface ManageItem extends vscode.QuickPickItem {
@@ -49,10 +48,10 @@ export class XrayConnectionCommands {
     // Call-time supplier: the traceability subsystem is set on the CommandManager after this is
     // constructed, so the test keys must be read when a probe runs, not captured here.
     private readonly knownTestKeys: () => string[],
-    // The single-flighted probe shared with the factory `verify`, so a coincident subsystem verify
-    // and panel verify collapse onto one handshake instead of racing two probe sequences.
+    // Injected so the setup surface owns its cancellation independently from the live adapter.
     private readonly probe: XrayProbe,
-    private readonly workspaceTrust: WorkspaceTrust
+    private readonly workspaceTrust: WorkspaceTrust,
+    private readonly webviewAssetRoot: vscode.Uri
   ) {}
 
   public async manageConnection(): Promise<void> {
@@ -99,24 +98,24 @@ export class XrayConnectionCommands {
     await XraySetupPanel.show({
       workspaceAvailable: () => this.workspaceTrust.available,
       currentSite: () => this.config.xraySiteUrl,
+      currentRegion: () => parseXrayRegion(this.config.xrayApiRegion),
       hasCredentials: (site) => this.credentialStore.hasCredentials(site),
       getCredentials: (site) => this.credentialStore.getCredentials(site),
-      saveConnection: (site, clientId, clientSecret) => this.saveConnection(site, clientId, clientSecret),
+      saveSetup: (input) => this.saveSetup(input),
       hasJiraCredentials: (site) => this.credentialStore.hasJiraCredentials(site),
       getJiraCredentials: (site) => this.credentialStore.getJiraCredentials(site),
-      saveJira: (site, email, token) => this.credentialStore.setJiraCredentials(site, email, token),
-      clearJira: (site) => this.credentialStore.clearJiraCredentials(site),
+      didSave: async () => {await vscode.commands.executeCommand(COMMAND.setupSaved);},
       // The panel renders the outcome inline, so it calls the probe directly, going through the
       // testConnection command would fire the standalone command's toasts on top.
-      probeConnection: (site, signal) => this.workspaceTrust.run(
-        (trusted) => this.probeConnection(site, undefined, trusted),
+      probeConnection: (site, region, signal) => this.workspaceTrust.run(
+        (trusted) => this.probeConnection(site, undefined, trusted, region),
         signal
       ),
-      verifyConnection: (site, signal) => this.workspaceTrust.run(
-        (trusted) => this.probeConnection(site, { authOnly: true }, trusted),
+      verifyConnection: (site, region, signal) => this.workspaceTrust.run(
+        (trusted) => this.probeConnection(site, { authOnly: true }, trusted, region),
         signal
       ),
-    });
+    }, this.webviewAssetRoot);
   }
 
   // Site is the just-saved host when the panel supplies it; otherwise read fresh from the config
@@ -124,9 +123,10 @@ export class XrayConnectionCommands {
   public probeConnection(
     site?: string,
     options?: XrayProbeOptions,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    region = this.freshRegion()
   ): Promise<XrayConnectionOutcome> {
-    return this.probe(this.testDeps(site ?? this.freshSite()), options, signal);
+    return this.probe(this.testDeps(site ?? this.freshSite(), region), options, signal);
   }
 
   private freshSite(): string {
@@ -141,7 +141,20 @@ export class XrayConnectionCommands {
   }
 
   public async saveConnection(site: string, clientId: string, clientSecret: string): Promise<string> {
-    const trimmedSite = site.trim();
+    const jira = normalizeSiteUrl(site) === ""
+      ? undefined
+      : await this.credentialStore.getJiraCredentials(site);
+    return this.saveSetup({
+      site,
+      region: this.freshRegion(),
+      clientId,
+      clientSecret,
+      jira,
+    });
+  }
+
+  public async saveSetup(input: XraySetupSave): Promise<string> {
+    const trimmedSite = input.site.trim();
     if (normalizeSiteUrl(trimmedSite) === "") {
       throw new Error(`Cannot save Xray credentials: ${trimmedSite} is not a valid site host`);
     }
@@ -150,29 +163,72 @@ export class XrayConnectionCommands {
     // current site from this fresh getConfiguration() snapshot so back-to-back saves from the
     // retained panel can't strand the intermediate host's credentials on a stale previous site.
     const currentSite = wsConfig.get<string>(SITE_URL_SETTING, "");
-
-    const target = siteUrlTarget(wsConfig);
-    if (trimmedSite !== currentSite) {
-      await wsConfig.update(SITE_URL_SETTING, trimmedSite, target);
-    }
+    const currentRegion = parseXrayRegion(
+      wsConfig.get<string>(API_REGION_SETTING, "global")
+    );
+    const siteSetting = this.readSetting<string>(wsConfig, SITE_URL_SETTING);
+    const regionSetting = this.readSetting<string>(wsConfig, API_REGION_SETTING);
+    const targetState = await this.readHostState(trimmedSite);
+    const previousState = normalizeSiteUrl(currentSite) === normalizeSiteUrl(trimmedSite)
+      ? targetState
+      : await this.readHostState(currentSite);
+    let siteWritten = false;
+    let regionWritten = false;
     try {
-      await this.credentialStore.setCredentials(trimmedSite, clientId.trim(), clientSecret.trim());
-    } catch (error) {
+      await this.credentialStore.setCredentials(
+        trimmedSite,
+        input.clientId.trim(),
+        input.clientSecret.trim()
+      );
+      if (input.jira) {
+        await this.credentialStore.setJiraCredentials(
+          trimmedSite,
+          input.jira.email.trim(),
+          input.jira.token.trim()
+        );
+      } else if (await this.credentialStore.hasJiraCredentials(trimmedSite)) {
+        await this.credentialStore.clearJiraCredentials(trimmedSite);
+      }
       if (trimmedSite !== currentSite) {
-        await wsConfig.update(SITE_URL_SETTING, currentSite, target);
+        siteWritten = true;
+        await wsConfig.update(SITE_URL_SETTING, trimmedSite, siteSetting.target);
+      }
+      if (input.region !== currentRegion) {
+        regionWritten = true;
+        await wsConfig.update(API_REGION_SETTING, input.region, regionSetting.target);
+      }
+
+      const previousSite = normalizeSiteUrl(currentSite);
+      if (previousSite !== "" && previousSite !== normalizeSiteUrl(trimmedSite)) {
+        await this.credentialStore.clearCredentials(currentSite);
+        this.logger.info(`Removed stored Xray credentials for previous site ${previousSite}`);
+      }
+    } catch (error) {
+      const recoveries: Promise<void>[] = [this.restoreHostState(trimmedSite, targetState)];
+      if (normalizeSiteUrl(currentSite) !== normalizeSiteUrl(trimmedSite)) {
+        recoveries.push(this.restoreHostState(currentSite, previousState));
+      }
+      if (siteWritten) {
+        recoveries.push(Promise.resolve(
+          wsConfig.update(SITE_URL_SETTING, siteSetting.value, siteSetting.target)
+        ));
+      }
+      if (regionWritten) {
+        recoveries.push(Promise.resolve(
+          wsConfig.update(API_REGION_SETTING, regionSetting.value, regionSetting.target)
+        ));
+      }
+      const settled = await Promise.allSettled(recoveries);
+      const recoveryErrors = settled.flatMap((result) => {
+        return result.status === "rejected" ? [result.reason as unknown] : [];
+      });
+      if (recoveryErrors.length > 0) {
+        throw new AggregateError(
+          [error, ...recoveryErrors],
+          "Xray setup failed and its previous state could not be fully restored."
+        );
       }
       throw error;
-    }
-    // One site per workspace (§2): switching hosts must not leave the old host's secrets
-    // stranded in SecretStorage with no command able to reach them.
-    const previousSite = normalizeSiteUrl(currentSite);
-    if (
-      previousSite !== "" &&
-      previousSite !== normalizeSiteUrl(trimmedSite) &&
-      (await this.credentialStore.hasCredentials(currentSite))
-    ) {
-      await this.credentialStore.clearCredentials(currentSite);
-      this.logger.info(`Removed stored Xray credentials for previous site ${previousSite}`);
     }
     return normalizeSiteUrl(trimmedSite);
   }
@@ -200,13 +256,52 @@ export class XrayConnectionCommands {
     await runXrayConnectionTest(this.testDeps(this.freshSite()), signal);
   }
 
-  private testDeps(site: string): XrayConnectionTestDeps {
+  private testDeps(site: string, region = this.freshRegion()): XrayConnectionTestDeps {
     return {
       site,
-      region: this.freshRegion(),
+      region,
       credentialStore: this.credentialStore,
       logger: this.logger,
       knownTestKeys: this.knownTestKeys,
     };
+  }
+
+  private readSetting<T>(
+    config: vscode.WorkspaceConfiguration,
+    setting: string
+  ): StoredSetting<T> {
+    const target = configurationTarget(config, setting);
+    const inspected = config.inspect<T>(setting);
+    return {
+      target,
+      value: target === vscode.ConfigurationTarget.Workspace
+        ? inspected?.workspaceValue
+        : inspected?.globalValue,
+    };
+  }
+
+  private async readHostState(site: string): Promise<StoredHostState> {
+    if (normalizeSiteUrl(site) === "") {
+      return { xray: undefined, jira: undefined };
+    }
+    const [xray, jira] = await Promise.all([
+      this.credentialStore.getCredentials(site),
+      this.credentialStore.getJiraCredentials(site),
+    ]);
+    return { xray, jira };
+  }
+
+  private async restoreHostState(site: string, state: StoredHostState): Promise<void> {
+    if (normalizeSiteUrl(site) === "") {return;}
+    if (state.xray) {
+      await this.credentialStore.setCredentials(site, state.xray.clientId, state.xray.clientSecret);
+    } else {
+      await this.credentialStore.clearCredentials(site);
+    }
+    if (state.jira) {
+      await this.credentialStore.setJiraCredentials(site, state.jira.email, state.jira.token);
+    } else if (await this.credentialStore.hasJiraCredentials(site)) {
+      await this.credentialStore.clearJiraCredentials(site);
+    }
   }
 }

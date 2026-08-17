@@ -128,6 +128,9 @@ describe("uploadJiraAttachments", () => {
     expect(emitted).toContain("non-idempotent-write");
     expect(emitted).toContain('"attempt": 1');
     expect(emitted).toContain('"outcomeCertainty": "failed"');
+    expect(emitted).toContain("Attachment upload failed and remains pending");
+    expect(emitted).not.toContain("/ws/report.zip");
+    expect(emitted).not.toContain(TOKEN);
   });
 
   it("does not replay a 429 because the upload may already have committed", async () => {
@@ -183,18 +186,24 @@ describe("uploadJiraAttachments", () => {
 
   it("fails a file whose bytes cannot be read, without calling fetch", async () => {
     let called = false;
+    const { logger, lines } = capturingLogger();
     const fetchImpl: FetchLike = () => {
       called = true;
       return Promise.resolve(response(200, []));
     };
     const result = await upload({
       fetchImpl,
+      logger,
       readSnapshot: () => {
-        throw new Error("ENOENT");
+        throw new Error(`ENOENT ${TOKEN} /private/customer/report.zip`);
       },
     });
     expect(result.failed).toEqual(["/ws/report.zip"]);
     expect(called).toBe(false);
+    const emitted = lines.join("\n");
+    expect(emitted).toContain("Attachment skipped: evidence snapshot unreadable");
+    expect(emitted).not.toContain(TOKEN);
+    expect(emitted).not.toContain("/private/customer/report.zip");
   });
 
   it("never logs the token", async () => {

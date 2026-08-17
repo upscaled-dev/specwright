@@ -17,7 +17,7 @@ function formatTooltip(lastRunAt: Date | undefined): string {
 }
 
 export class StatusBar implements vscode.Disposable {
-  private readonly item: vscode.StatusBarItem;
+  private item: vscode.StatusBarItem | undefined;
   private readonly subscription: vscode.Disposable;
   private lastRunAt: Date | undefined;
 
@@ -26,44 +26,44 @@ export class StatusBar implements vscode.Disposable {
   }
 
   constructor(source: GatewayEventSource, window: typeof vscode.window = vscode.window) {
-    this.item = window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
-    this.item.command = SHOW_OUTPUT_COMMAND;
-    this.setIdle();
-    this.item.show();
-
-    this.subscription = source.onEvent((event) => this.handleGateway(event));
+    this.subscription = source.onEvent((event) => this.handleGateway(event, window));
   }
 
   public dispose(): void {
     this.subscription.dispose();
-    this.item.dispose();
+    this.item?.dispose();
   }
 
-  private handleGateway(event: ExecutionEvent): void {
+  private handleGateway(event: ExecutionEvent, window: typeof vscode.window): void {
+    if (event.kind === "started") {this.ensureItem(window);}
+    const item = this.item;
+    if (!item) {return;}
     if (event.kind === "started") {
-      this.item.text = "$(loading~spin) Specwright: running…";
-      this.item.tooltip = formatTooltip(this.lastRunAt);
+      item.text = "$(loading~spin) Specwright: running…";
+      item.tooltip = formatTooltip(this.lastRunAt);
       return;
     }
     if (event.kind === "case-finished") {
-      this.item.text = `$(loading~spin) Specwright: ${event.completed}/${event.total}`;
+      item.text = `$(loading~spin) Specwright: ${event.completed}/${event.total}`;
       return;
     }
     if (event.kind !== "finished") {return;}
     this.lastRunAt = new Date();
     const completion = event.completion;
     if (completion.state === "cancelled") {
-      this.item.text = "$(circle-slash) Specwright: cancelled";
+      item.text = "$(circle-slash) Specwright: cancelled";
     } else if (completion.state === "partial" || completion.failed > 0) {
-      this.item.text = `$(error) Specwright: ${completion.passed} passed, ${completion.failed} failed`;
+      item.text = `$(error) Specwright: ${completion.passed} passed, ${completion.failed} failed`;
     } else {
-      this.item.text = `$(check) Specwright: passed ${completion.passed}`;
+      item.text = `$(check) Specwright: passed ${completion.passed}`;
     }
-    this.item.tooltip = formatTooltip(this.lastRunAt);
+    item.tooltip = formatTooltip(this.lastRunAt);
   }
 
-  private setIdle(): void {
-    this.item.text = "$(beaker) Specwright";
-    this.item.tooltip = formatTooltip(this.lastRunAt);
+  private ensureItem(window: typeof vscode.window): void {
+    if (this.item) {return;}
+    this.item = window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+    this.item.command = SHOW_OUTPUT_COMMAND;
+    this.item.show();
   }
 }

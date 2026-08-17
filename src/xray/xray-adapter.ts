@@ -153,7 +153,7 @@ export class XrayAdapter implements TraceabilityAdapter {
     return site && hasExecutionRef(ref.key) ? `https://${site}/browse/${ref.key}` : undefined;
   }
 
-  public dispose(): void {
-    (this.metadata as { dispose?: () => void } | undefined)?.dispose?.();
+  public async dispose(): Promise<void> {
+    await (this.metadata as { dispose?: () => void | Promise<void> } | undefined)?.dispose?.();
   }
 }

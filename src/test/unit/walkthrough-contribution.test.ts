@@ -25,13 +25,11 @@ const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf
 describe("contributes.walkthroughs: Set up Xray", () => {
   const walkthrough = pkg.contributes.walkthroughs?.find((w) => w.id === "specwright.setupXray");
 
-  it("contributes the five §4.4 steps in order", () => {
+  it("merges setup into three steps with real save completion", () => {
     expect(walkthrough?.title).toBe("Set up Xray");
     expect(walkthrough?.steps.map((s) => s.id)).toEqual([
       "specwright.setupXray.site",
-      "specwright.setupXray.apiKey",
       "specwright.setupXray.credentials",
-      "specwright.setupXray.jira",
       "specwright.setupXray.sync",
     ]);
   });
@@ -55,10 +53,58 @@ describe("contributes.walkthroughs: Set up Xray", () => {
         expect(commandIds.has(cmd), `${step.id} links unknown command ${cmd}`).toBe(true);
       }
     }
-    // Steps 1–4 open the setup webview via connect; the last step runs Sync.
+    // Opening setup, saving setup, and syncing are distinct user outcomes.
+    expect(walkthrough!.steps[0]!.description).toContain("command:playwrightBddRunner.traceability.connect");
+    expect(walkthrough!.steps[1]!.completionEvents).toEqual([
+      "onCommand:playwrightBddRunner.traceability.setupSaved",
+    ]);
     expect(walkthrough!.steps.at(-1)!.description).toContain("command:playwrightBddRunner.traceability.sync");
-    for (const step of walkthrough!.steps.slice(0, 4)) {
-      expect(step.description).toContain("command:playwrightBddRunner.traceability.connect");
+  });
+
+  it("uses fictional site data and names every form region", () => {
+    expect(walkthrough!.steps[0]!.description).toContain("acme.atlassian.net");
+    expect(walkthrough!.steps[0]!.description).toContain("Global, US, EU, or AU");
+  });
+});
+
+describe("contributes.walkthroughs: core BDD workflow", () => {
+  const walkthrough = pkg.contributes.walkthroughs?.find((w) => w.id === "specwright.coreWorkflow");
+
+  it("contributes the five core steps in order", () => {
+    expect(walkthrough?.steps.map(({ id }) => id)).toEqual([
+      "specwright.coreWorkflow.diagnose",
+      "specwright.coreWorkflow.testing",
+      "specwright.coreWorkflow.run",
+      "specwright.coreWorkflow.stepDefinition",
+      "specwright.coreWorkflow.steps",
+    ]);
+  });
+
+  it("uses a real contributed command for every action and completion event", () => {
+    const commands = new Set(pkg.contributes.commands.map(({ command }) => command));
+    for (const step of walkthrough!.steps) {
+      const linked = [...step.description.matchAll(/command:([\w.]+)/g)].map((match) => match[1]!);
+      expect(linked.length).toBeGreaterThan(0);
+      expect(linked.every((command) => commands.has(command))).toBe(true);
+      expect(step.completionEvents?.length).toBeGreaterThan(0);
+      expect(step.completionEvents?.every((event) =>
+        commands.has(event.replace("onCommand:", ""))
+      )).toBe(true);
+    }
+  });
+});
+
+describe("walkthrough completion isolation", () => {
+  it("never shares a completion event between steps", () => {
+    const owners = new Map<string, string>();
+    for (const walkthrough of pkg.contributes.walkthroughs ?? []) {
+      for (const step of walkthrough.steps) {
+        for (const event of step.completionEvents ?? []) {
+          expect(owners.get(event), `${event} is shared by ${owners.get(event)} and ${step.id}`)
+            .toBeUndefined();
+          owners.set(event, step.id);
+        }
+      }
     }
   });
 });

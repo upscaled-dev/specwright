@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { RemoteOutcomeUnknownError } from "../../core/workspace-trust";
+import { isRemoteOperationName, REMOTE_OPERATION_NAMES } from "../../core/remote-operation-name";
 import {
   operationIdentity,
   REMOTE_OPERATION_POLICY,
@@ -19,6 +20,8 @@ describe("remote operation policy", () => {
       "xray.test.create": { class: "non-idempotent-write", attempts: 1 },
       "xray.test-set.create": { class: "non-idempotent-write", attempts: 1 },
       "xray.test-plan.create": { class: "non-idempotent-write", attempts: 1 },
+      "xray.test-set.add-tests": { class: "non-idempotent-write", attempts: 1 },
+      "xray.test-plan.add-tests": { class: "non-idempotent-write", attempts: 1 },
       "xray.execution.create": { class: "non-idempotent-write", attempts: 1 },
       "xray.gherkin.update": { class: "non-idempotent-write", attempts: 1 },
       "xray.execution.import-json": { class: "non-idempotent-write", attempts: 1 },
@@ -31,6 +34,9 @@ describe("remote operation policy", () => {
       "jira.profile.read": { class: "read" },
     });
     expect(Object.values(REMOTE_OPERATION_POLICY).every((policy) => policy.attempts > 0)).toBe(true);
+    expect(Object.keys(REMOTE_OPERATION_POLICY).sort()).toEqual([...REMOTE_OPERATION_NAMES].sort());
+    expect(REMOTE_OPERATION_NAMES.every(isRemoteOperationName)).toBe(true);
+    expect(isRemoteOperationName("unknown.operation")).toBe(false);
   });
 
   it("never replays a transient non-idempotent write", async () => {
@@ -42,6 +48,17 @@ describe("remote operation policy", () => {
       abortError: () => new XrayAbortError(),
     })).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("never replays an ambiguous container membership write", async () => {
+    const run = vi.fn(() => Promise.reject(new RetryableRemoteError("response lost")));
+    await expect(runRemoteOperation(run, {
+      identity: operationIdentity("xray.test-set.add-tests", "add-1"),
+      sleep: immediate,
+      random: () => 0,
+      abortError: () => new XrayAbortError(),
+    })).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
+    expect(run).toHaveBeenCalledOnce();
   });
 
   it("honors Retry-After while retrying a read", async () => {

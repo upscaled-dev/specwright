@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { ExtensionConfig } from "../core/extension-config";
+import { configurationTarget, ExtensionConfig } from "../core/extension-config";
 import { FeatureParser } from "../parsers/feature-parser";
 import {
   buildBoardViewModel,
@@ -42,10 +42,14 @@ import { ExecutionAlreadyRunningError, ExecutionFailure } from "../core/executio
 import { ExecutionAdmissionBlockedError } from "../core/execution-admission";
 import type { WorkspaceTrust } from "../core/workspace-trust";
 import { explainWorkspaceTrust } from "../ui/workspace-trust";
+import { BoardOperationState } from "../traceability/board-operation-state";
+import { hasReindexDiagnostic } from "../traceability/provider-warnings";
+import { ProjectSyncScheduler } from "./project-sync-scheduler";
 
 interface SyncRequest {
   readonly announce: boolean;
   readonly explicitKey?: string | undefined;
+  readonly forceProject?: boolean | undefined;
 }
 
 export interface TraceabilityCommandDeps {
@@ -69,13 +73,30 @@ export class TraceabilityCommands {
   private authoringCommands: TraceabilityAuthoringCommands | undefined;
   private connectionCommands: XrayConnectionCommands | undefined;
   private syncInFlight: Promise<void> | undefined;
-  private pendingLoad: string | undefined;
   private readonly boardChange = new vscode.EventEmitter<void>();
+  private readonly operations = new BoardOperationState();
+  private readonly projectSyncs: ProjectSyncScheduler;
 
-  constructor(private readonly logger: Logger, private readonly deps: TraceabilityCommandDeps) {}
+  constructor(private readonly logger: Logger, private readonly deps: TraceabilityCommandDeps) {
+    this.projectSyncs = new ProjectSyncScheduler({
+      onDidChangeActivity: this.operations.onDidChange,
+      canStart: () => !this.operations.mutationActive && this.syncInFlight === undefined,
+      run: (project, force) => {
+        if (force) {
+          return this.syncTraceability({ announce: false, explicitKey: project, forceProject: true });
+        }
+        return this.autoSyncProject(project);
+      },
+      onError: (project, error) => {
+        this.logger.warn("Follow-up traceability sync failed", { project, error: errMsg(error) });
+      },
+    });
+  }
 
   public registerBoardSerializer(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
+      this.operations,
+      this.projectSyncs,
       BoardPanel.registerSerializer(() => {
         try {
           return this.boardDeps();
@@ -101,17 +122,17 @@ export class TraceabilityCommands {
     return this.getLinkCommands().copyIssueKey(...args);
   }
   public linkScenario(...args: unknown[]): Promise<void> {
-    return this.privileged(() => this.getLinkCommands().linkScenario(...args));
+    return this.mutating(() => this.getLinkCommands().linkScenario(...args));
   }
   public runAndPublish(...args: unknown[]): Promise<void> {
-    return this.privileged((signal) => this.getPublishCommands().runAndPublishTrusted(signal, ...args));
+    return this.mutating((signal) => this.getPublishCommands().runAndPublishTrusted(signal, ...args));
   }
   // The view-title button's own command: it names the whole mapped set, which the node command must
   // never infer from an empty argument list. "Whole" means whole within the board's project scope,
   // the same scope the board shows and the sync fetches.
   public runAndPublishAllMapped(): Promise<void> {
     const project = this.selectedProject();
-    return this.privileged((signal) => this.getPublishCommands().runAndPublishSelection({
+    return this.mutating((signal) => this.getPublishCommands().runAndPublishSelection({
       kind: "all-mapped",
       ...(project ? { project } : {}),
     }, "traceability-tree", signal));
@@ -119,7 +140,7 @@ export class TraceabilityCommands {
   public runAndPublishFeature(arg?: unknown): Promise<void> {
     const filePath = commandArgFsPath(arg);
     return filePath
-      ? this.privileged((signal) => this.getPublishCommands().runAndPublishSelection(
+      ? this.mutating((signal) => this.getPublishCommands().runAndPublishSelection(
           { kind: "feature", filePath },
           "explorer",
           signal
@@ -129,14 +150,18 @@ export class TraceabilityCommands {
   public runAndPublishFolder(arg?: unknown): Promise<void> {
     const folderPath = commandArgFsPath(arg);
     return folderPath
-      ? this.privileged((signal) => this.getPublishCommands().runAndPublishSelection(
+      ? this.mutating((signal) => this.getPublishCommands().runAndPublishSelection(
           { kind: "folder", folderPath },
           "explorer",
           signal
         ))
       : Promise.resolve();
   }
-  public async runAndPublishByTagExpression(): Promise<void> {
+  public runAndPublishByTagExpression(): Promise<void> {
+    return this.mutating((signal) => this.runAndPublishTagExpression(signal));
+  }
+
+  private async runAndPublishTagExpression(signal: AbortSignal): Promise<void> {
     const expression = await vscode.window.showInputBox({
       title: "Run and Publish by Tag Expression",
       prompt: "Enter a playwright-bdd tag expression",
@@ -144,14 +169,14 @@ export class TraceabilityCommands {
       validateInput: (value) => (value.trim() === "" ? "A tag expression is required." : undefined),
     });
     if (expression === undefined) {return;}
-    await this.privileged((signal) => this.getPublishCommands().runAndPublishSelection(
+    await this.getPublishCommands().runAndPublishSelection(
       { kind: "tag-expression", expression },
       "palette",
       signal
-    ));
+    );
   }
   public publishLastRun(): Promise<void> {
-    return this.privileged((signal) => this.getPublishCommands().publishLastRun(signal));
+    return this.mutating((signal) => this.getPublishCommands().publishLastRun(signal));
   }
   public clearLocalRunHistory(): Promise<void> {
     return this.getPublishCommands().clearLocalRunHistory();
@@ -162,13 +187,19 @@ export class TraceabilityCommands {
   public testConnection(): Promise<void> {
     return this.privileged((signal) => this.getConnectionCommands().testConnection(signal));
   }
-  public bulkCreateTests(): Promise<void> {return this.privileged(() => this.getAuthoringCommands().bulkCreateTests());}
-  public createTestSet(): Promise<void> {return this.privileged(() => this.getAuthoringCommands().createTestSet());}
-  public createTestPlan(): Promise<void> {return this.privileged(() => this.getAuthoringCommands().createTestPlan());}
-  public createTestExecution(): Promise<void> {return this.privileged(() => this.getAuthoringCommands().createTestExecution());}
+  public bulkCreateTests(): Promise<void> {return this.mutating(() => this.getAuthoringCommands().bulkCreateTests());}
+  public createTestSet(): Promise<void> {return this.mutating(() => this.getAuthoringCommands().createTestSet());}
+  public addToTestSet(): Promise<void> {return this.mutating(() => this.getAuthoringCommands().addToTestSet());}
+  public createTestPlan(): Promise<void> {return this.mutating(() => this.getAuthoringCommands().createTestPlan());}
+  public addToTestPlan(): Promise<void> {return this.mutating(() => this.getAuthoringCommands().addToTestPlan());}
+  public createTestExecution(): Promise<void> {return this.mutating(() => this.getAuthoringCommands().createTestExecution());}
 
   private async privileged(run: (signal: AbortSignal) => Promise<void>): Promise<void> {
     await this.deps.workspaceTrust.run(run);
+  }
+
+  private mutating(run: (signal: AbortSignal) => Promise<void>): Promise<void> {
+    return this.operations.mutation(() => this.privileged(run));
   }
 
   private async boardPrivileged(run: (signal: AbortSignal) => Promise<void>): Promise<void> {
@@ -177,6 +208,10 @@ export class TraceabilityCommands {
     } catch (error) {
       if (!(await explainWorkspaceTrust(error))) {throw error;}
     }
+  }
+
+  private async boardMutation(run: (signal: AbortSignal) => Promise<void>): Promise<void> {
+    await this.operations.mutation(() => this.boardPrivileged(run));
   }
 
   public openBoard(): void {
@@ -235,6 +270,8 @@ export class TraceabilityCommands {
 
   private boardDeps(): BoardPanelDeps {
     const subsystem = this.deps.subsystem();
+    const extensionUri = this.deps.extensionUri();
+    if (!extensionUri) {throw new Error("Coverage Board assets are unavailable.");}
     const roots = (vscode.workspace.workspaceFolders ?? []).map(
       (folder) => folder.uri.fsPath
     );
@@ -242,6 +279,7 @@ export class TraceabilityCommands {
       providerLabel: subsystem?.getActiveAdapter()?.label ?? "Xray",
       logger: this.logger,
       tabIcon: this.boardTabIcon(),
+      webviewAssetRoot: vscode.Uri.joinPath(extensionUri, "dist"),
       buildModel: () => {
         const current = this.deps.subsystem();
         const adapter = current?.getActiveAdapter();
@@ -264,12 +302,15 @@ export class TraceabilityCommands {
           this.deps.publishLedger()?.entriesForSite(this.siteUrl()) ?? []
         ),
       onDidChange: subsystem?.onDidChangeSnapshot ?? this.boardChange.event,
+      onDidChangeActivity: this.operations.onDidChange,
+      mutationActive: () => this.operations.mutationActive,
+      syncActive: () => this.operations.syncActive,
       applyDrop: (scenario, key) =>
-        this.boardPrivileged(() => this.getLinkCommands().applyBoardDrop(scenario, key)),
+        this.boardMutation(() => this.getLinkCommands().applyBoardDrop(scenario, key)),
       applyUnlink: (scenario, key) =>
-        this.boardPrivileged(() => this.getLinkCommands().applyBoardUnlink(scenario, key)),
+        this.boardMutation(() => this.getLinkCommands().applyBoardUnlink(scenario, key)),
       pushText: (scenario, key) => {
-        this.boardPrivileged(() => this.getAuthoringCommands().pushScenarioText(scenario, key))
+        this.boardMutation(() => this.getAuthoringCommands().pushScenarioText(scenario, key))
           .catch((error) => {
             this.logger.warn("Push scenario text from the board failed", {
               error: errMsg(error),
@@ -290,7 +331,7 @@ export class TraceabilityCommands {
           });
       },
       bulkCreate: () => {
-        this.boardPrivileged(() => this.getAuthoringCommands().bulkCreateTests())
+        this.boardMutation(() => this.getAuthoringCommands().bulkCreateTests())
           .catch((error) => {
             this.logger.warn("Bulk create from the board failed", {
               error: errMsg(error),
@@ -298,23 +339,39 @@ export class TraceabilityCommands {
           });
       },
       createTestSet: () => {
-        this.boardPrivileged(() => this.getAuthoringCommands().createTestSet())
+        this.boardMutation(() => this.getAuthoringCommands().createTestSet())
           .catch((error) => {
             this.logger.warn("Creating a test set from the board failed", {
               error: errMsg(error),
             });
           });
       },
+      addToTestSet: () => {
+        this.boardMutation(() => this.getAuthoringCommands().addToTestSet())
+          .catch((error) => {
+            this.logger.warn("Adding tests to a test set from the board failed", {
+              error: errMsg(error),
+            });
+          });
+      },
       createTestPlan: () => {
-        this.boardPrivileged(() => this.getAuthoringCommands().createTestPlan())
+        this.boardMutation(() => this.getAuthoringCommands().createTestPlan())
           .catch((error) => {
             this.logger.warn("Creating a test plan from the board failed", {
               error: errMsg(error),
             });
           });
       },
+      addToTestPlan: () => {
+        this.boardMutation(() => this.getAuthoringCommands().addToTestPlan())
+          .catch((error) => {
+            this.logger.warn("Adding tests to a test plan from the board failed", {
+              error: errMsg(error),
+            });
+          });
+      },
       createTestExecution: () => {
-        this.boardPrivileged(() => this.getAuthoringCommands().createTestExecution())
+        this.boardMutation(() => this.getAuthoringCommands().createTestExecution())
           .catch((error) => {
             this.logger.warn("Creating a test execution from the board failed", {
               error: errMsg(error),
@@ -333,7 +390,7 @@ export class TraceabilityCommands {
         return { runnable, skipped: resolved.skipped };
       },
       runSelected: (testKeys) => {
-        this.boardPrivileged((signal) => this.getPublishCommands().runAndPublishSelected(testKeys, signal))
+        this.boardMutation((signal) => this.getPublishCommands().runAndPublishSelected(testKeys, signal))
           .catch((error) => {
             this.logger.warn("Running selected board tests failed", { error: errMsg(error) });
             if (error instanceof ExecutionAlreadyRunningError) {
@@ -350,7 +407,7 @@ export class TraceabilityCommands {
       },
       publishDelegate: this.getPublishCommands().publishDelegate(),
       startPublish: () => {
-        this.boardPrivileged((signal) => this.getPublishCommands().runPublish(undefined, signal))
+        this.boardMutation((signal) => this.getPublishCommands().runPublish(undefined, signal))
           .catch((error) => {
             this.logger.warn("Publish from the board tab failed", {
               error: errMsg(error),
@@ -418,21 +475,13 @@ export class TraceabilityCommands {
     this.deps.workspaceTrust.require();
     if (this.syncInFlight) {
       if (request.explicitKey !== undefined) {
-        this.pendingLoad = request.explicitKey;
+        this.projectSyncs.enqueue(request.explicitKey, request.forceProject === true);
       }
       return this.syncInFlight;
     }
-    this.syncInFlight = this.runTraceabilitySyncCommand(request).finally(() => {
+    this.syncInFlight = this.operations.sync(() => this.runTraceabilitySyncCommand(request)).finally(() => {
       this.syncInFlight = undefined;
-      const pending = this.pendingLoad;
-      this.pendingLoad = undefined;
-      if (pending !== undefined) {
-        this.autoSyncProject(pending).catch((error) => {
-          this.logger.warn("Follow-up traceability sync failed", {
-            error: errMsg(error),
-          });
-        });
-      }
+      this.projectSyncs.poke();
     });
     return this.syncInFlight;
   }
@@ -444,6 +493,11 @@ export class TraceabilityCommands {
       subsystem.getActiveAdapter()?.metadata?.snapshot().catalogueProjects ?? [];
     if (catalogued.includes(projectKey)) {return Promise.resolve();}
     return this.syncTraceability({ announce: false, explicitKey: projectKey });
+  }
+
+  private scheduleProjectSync(project: string, diagnostics?: Iterable<string>): void {
+    if (diagnostics !== undefined && !hasReindexDiagnostic(diagnostics)) {return;}
+    this.projectSyncs.defer(project, true);
   }
 
   private async runTraceabilitySyncCommand(request: SyncRequest): Promise<void> {
@@ -504,11 +558,11 @@ export class TraceabilityCommands {
 
   public async hideTraceabilityPanel(): Promise<void> {
     const config = vscode.workspace.getConfiguration("playwrightBddRunner");
-    const target =
-      config.inspect<boolean>("traceability.enablePanel")?.workspaceValue !== undefined
-        ? vscode.ConfigurationTarget.Workspace
-        : vscode.ConfigurationTarget.Global;
-    await config.update("traceability.enablePanel", false, target);
+    await config.update(
+      "traceability.enablePanel",
+      false,
+      configurationTarget(config, "traceability.enablePanel")
+    );
   }
 
   public toggleGrouping(): void {
@@ -621,13 +675,18 @@ export class TraceabilityCommands {
         "Xray connection commands are unavailable: credential store or probe not wired."
       );
     }
+    const extensionUri = this.deps.extensionUri();
+    if (!extensionUri) {
+      throw new Error("Xray setup assets are unavailable: extension root not wired.");
+    }
     this.connectionCommands ??= new XrayConnectionCommands(
       this.deps.config,
       credentialStore,
       this.logger,
       () => this.deps.subsystem()?.knownTestKeys() ?? [],
       probe,
-      this.deps.workspaceTrust
+      this.deps.workspaceTrust,
+      vscode.Uri.joinPath(extensionUri, "dist")
     );
     return this.connectionCommands;
   }
@@ -641,6 +700,12 @@ export class TraceabilityCommands {
       board: () => this.board(),
       siteUrl: () => this.siteUrl(),
       workspaceTrust: this.deps.workspaceTrust,
+      scheduleProjectSync: (project, diagnostics) => this.scheduleProjectSync(project, diagnostics),
+      trackReconciliation: (run) => {
+        this.operations.mutation(run).catch((error) => {
+          this.logger.warn("Created-test metadata reconciliation failed", { error: errMsg(error) });
+        });
+      },
     });
     return this.linkCommands;
   }
@@ -666,6 +731,7 @@ export class TraceabilityCommands {
       featureParser: this.deps.featureParser,
       workspaceTrust: this.deps.workspaceTrust,
       attachmentSpoolRoot: this.deps.attachmentSpoolRoot,
+      mutation: (run) => this.operations.mutation(run),
     });
     return this.publishCommands;
   }
@@ -689,6 +755,7 @@ export class TraceabilityCommands {
       siteUrl: () => this.siteUrl(),
       merge: (key) => this.getLinkCommands().mergeCreatedKey(key),
       recordExecution: (key, summary) => this.recordCreatedExecution(key, summary),
+      scheduleProjectSync: (project, diagnostics) => this.scheduleProjectSync(project, diagnostics),
     });
     return this.authoringCommands;
   }

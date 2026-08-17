@@ -45,6 +45,18 @@ export default [
     },
   },
   {
+    files: [
+      "src/test/unit/board-panel.test.ts",
+      "src/test/unit/webview-client.test.ts",
+      "src/test/unit/xray-setup-client.test.ts",
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: "./tsconfig.webview-test.json",
+      },
+    },
+  },
+  {
     files: ["src/**/*.ts", "src/**/*.tsx"],
     ignores: [
       "src/**/*.test.ts",
@@ -216,6 +228,31 @@ export default [
       "no-alert": "error",
       "no-var": "error",
       "prefer-const": "error",
+    },
+  },
+  {
+    files: ["src/webview/**/*.ts"],
+    plugins: {
+      "@typescript-eslint": typescriptEslint,
+    },
+    languageOptions: {
+      parser: tsParser,
+      ecmaVersion: 2022,
+      sourceType: "module",
+      parserOptions: {
+        project: "./tsconfig.webview.json",
+      },
+    },
+  },
+  {
+    files: [
+      "src/test/unit/board-panel.test.ts",
+      "src/test/unit/webview-client.test.ts",
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: "./tsconfig.webview-test.json",
+      },
     },
   },
 ];

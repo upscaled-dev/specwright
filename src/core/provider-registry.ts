@@ -20,6 +20,9 @@ import { FeatureTableFormatter } from "../providers/feature-table-formatter";
 import { BddgenDiagnosticsProvider } from "../providers/bddgen-diagnostics-provider";
 import { StepsTreeDataProvider } from "../providers/steps-tree-data-provider";
 import { isCucumberAutocompletePresent } from "../utils/cucumber-autocomplete-detector";
+import { workspaceExcludeGlob } from "../utils/discovery-excludes";
+import type { ProjectCapabilities } from "./onboarding";
+import { hasTraceabilityTagEvidence } from "./traceability-evidence";
 
 const FEATURE_SELECTORS: vscode.DocumentSelector = [
   { pattern: "**/*.feature", scheme: "file" },
@@ -180,6 +183,23 @@ export class ProviderRegistry implements vscode.Disposable {
   /** Shared step-usage index for the panel commands (insert/export/refresh). */
   public getUsageIndex(): StepUsageIndex {
     return this.ensureUsageIndex();
+  }
+
+  public async projectCapabilities(): Promise<ProjectCapabilities> {
+    const [features, definitions] = await Promise.all([
+      vscode.workspace.findFiles(this.config.testFilePattern, workspaceExcludeGlob()),
+      this.stepResolver.loadAllStepDefs(this.config.stepDefinitionPaths),
+    ]);
+    return {
+      workspace: (vscode.workspace.workspaceFolders?.length ?? 0) > 0,
+      featureFiles: features.length,
+      stepDefinitions: definitions.length,
+      stepDefinitionPaths: this.config.stepDefinitionPaths,
+    };
+  }
+
+  public async hasTraceabilityTags(): Promise<boolean> {
+    return hasTraceabilityTagEvidence(this.config, this.logger);
   }
 
   private ensureUsageIndex(): StepUsageIndex {

@@ -7,13 +7,19 @@ import { BoardSurface, BoardSurfaceDeps } from "./board-surface";
 import { LINK_FRAGMENT, LinkSurface } from "./link-picker-panel";
 import { PUBLISH_FRAGMENT, PublishDialogDelegate, PublishSurface } from "./publish-dialog-panel";
 import { SurfaceHost, SurfaceName } from "./webview-host";
+import {
+  parseClientEnvelope,
+  WEBVIEW_PROTOCOL_VERSION,
+  type ClientMessage,
+  type ClientMessageBySurface,
+  type HostMessageBySurface,
+  type ShellTab,
+} from "../webview/protocol";
 
 const VIEW_TYPE = "playwrightBddRunner.coverageBoard";
 
 // One options object for both entry points, since a restored panel's webview is re-configured rather
 // than trusted: the board is a blank page with scripts off.
-const WEBVIEW_OPTIONS: vscode.WebviewOptions = { enableScripts: true, localResourceRoots: [] };
-
 // The settings a board REBUILD reads: the sync scope and the default project decide the project universe
 // its scope selector coerces against, and the site scopes the ledger rows the Executions tab lists. The
 // publish settings (work type, report globs, attach mode) are deliberately absent: they are read when a
@@ -28,15 +34,13 @@ export function affectsBoard(event: vscode.ConfigurationChangeEvent): boolean {
   return BOARD_SETTINGS.some((setting) => event.affectsConfiguration(setting));
 }
 
-type BoardTab = "mapping" | "matrix" | "executions";
-type ShellTab = BoardTab | "publish" | "link";
-
 export interface BoardPanelDeps extends BoardSurfaceDeps {
   readonly providerLabel: string;
   readonly logger: Logger;
   // The editor tab's icon, one file per theme. Absent in rigs with no extension root to resolve media
   // against, where the tab is not painted anyway.
   readonly tabIcon?: { light: vscode.Uri; dark: vscode.Uri } | undefined;
+  readonly webviewAssetRoot: vscode.Uri;
   // The Publish tab's callbacks: the search/browse/attach delegate the surface calls into, and the
   // command the shell fires when the tab is activated with no publish already underway.
   readonly publishDelegate: PublishDialogDelegate;
@@ -55,8 +59,10 @@ export class BoardPanel {
 
   private readonly disposables: vscode.Disposable[] = [];
   private readonly disposeHandlers: Array<() => void> = [];
-  private readonly surfaceHandlers = new Map<SurfaceName, (message: unknown) => void>();
+  private readonly surfaceHandlers = new Map<SurfaceName, (message: ClientMessage) => void>();
   private readonly queue: object[] = [];
+  private readonly session = createNonce();
+  private revision = 0;
   private ready = false;
   private disposed = false;
   private activeTab: ShellTab = "mapping";
@@ -88,7 +94,8 @@ export class BoardPanel {
     // Beside, not Active: the board is worked alongside the feature file it links, so taking that
     // editor's column would make the user park the board before they could drag anything into a tag.
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "Coverage Board", vscode.ViewColumn.Beside, {
-      ...WEBVIEW_OPTIONS,
+      enableScripts: true,
+      localResourceRoots: [deps.webviewAssetRoot],
       retainContextWhenHidden: true,
     });
     return BoardPanel.adopt(panel, deps);
@@ -118,13 +125,13 @@ export class BoardPanel {
   }
 
   private static adopt(panel: vscode.WebviewPanel, deps: BoardPanelDeps): BoardPanel {
-    panel.webview.options = WEBVIEW_OPTIONS;
+    panel.webview.options = { enableScripts: true, localResourceRoots: [deps.webviewAssetRoot] };
     if (deps.tabIcon) {
       panel.iconPath = deps.tabIcon;
     }
     const instance = new BoardPanel(panel, deps);
     BoardPanel.current = instance;
-    panel.webview.html = renderDocument(deps.providerLabel);
+    panel.webview.html = renderDocument(panel.webview, deps.providerLabel, deps.webviewAssetRoot, instance.session);
     instance.activateTab("mapping");
     return instance;
   }
@@ -171,11 +178,11 @@ export class BoardPanel {
     };
   }
 
-  private hostFor(surface: SurfaceName): SurfaceHost {
+  private hostFor<S extends SurfaceName>(surface: S): SurfaceHost<S> {
     return {
-      post: (message) => this.postRaw({ ...message, surface }),
+      post: (message) => this.postRaw(message, surface),
       onMessage: (handler) => {
-        this.surfaceHandlers.set(surface, handler);
+        this.surfaceHandlers.set(surface, (message) => handler(message as ClientMessageBySurface[S]));
       },
       activate: (target) => this.activateTab(tabFor(target ?? surface)),
       onDidDispose: (handler) => {
@@ -190,16 +197,19 @@ export class BoardPanel {
     if (this.disposed) {
       return;
     }
-    const msg = message as { surface?: SurfaceName; type?: string; tab?: ShellTab };
-    if (msg.surface) {
-      this.surfaceHandlers.get(msg.surface)?.(message);
+    const envelope = parseClientEnvelope(message);
+    if (envelope?.session !== this.session) {return;}
+    const body = envelope.body;
+    if (body.type !== "ready" && envelope.revision !== this.revision) {return;}
+    if (envelope.surface !== "shell") {
+      this.surfaceHandlers.get(envelope.surface)?.(body);
       return;
     }
-    if (msg.type === "ready") {
+    if (body.type === "ready" && envelope.revision === 0) {
       this.hydrate();
-    } else if (msg.type === "tab" && msg.tab) {
-      this.activateTab(msg.tab);
-      if (msg.tab === "publish") {
+    } else if (body.type === "tab") {
+      this.activateTab(body.tab);
+      if (body.tab === "publish") {
         this.publish.onManualActivate();
       }
     }
@@ -207,11 +217,11 @@ export class BoardPanel {
 
   private activateTab(tab: ShellTab): void {
     this.activeTab = tab;
-    this.postRaw({ type: "activate", tab });
+    this.postRaw({ type: "activate", tab }, "shell");
   }
 
   private setLinkTabVisible(visible: boolean, title?: string): void {
-    this.postRaw({ type: "linkTab", visible, ...(title !== undefined ? { title } : {}) });
+    this.postRaw({ type: "linkTab", visible, ...(title !== undefined ? { title } : {}) }, "shell");
     if (!visible && this.activeTab === "link") {
       this.activateTab("mapping");
     }
@@ -219,10 +229,17 @@ export class BoardPanel {
 
   // Outbound posts are held until the webview announces `ready`, then flushed in order, so a render or
   // activation queued during document construction can't race the script load.
-  private postRaw(message: object): void {
+  private postRaw<S extends keyof HostMessageBySurface>(body: HostMessageBySurface[S], surface: S): void {
     if (this.disposed) {
       return;
     }
+    const message = {
+      version: WEBVIEW_PROTOCOL_VERSION,
+      session: this.session,
+      revision: ++this.revision,
+      surface,
+      body,
+    };
     if (!this.ready) {
       this.queue.push(message);
       return;
@@ -237,7 +254,7 @@ export class BoardPanel {
     const first = !this.ready;
     this.ready = true;
     for (const message of this.queue.splice(0)) {
-      this.postRaw(message);
+      Promise.resolve(this.panel.webview.postMessage(message)).catch(() => undefined);
     }
     if (first) {
       return;
@@ -330,69 +347,22 @@ const SHELL_CSS = `
   .sync-strip .bar::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 25%; background: var(--vscode-progressBar-background, var(--vscode-textLink-foreground)); animation: sync-strip-slide 1.6s linear infinite; }
   @keyframes sync-strip-slide { from { transform: translateX(-100%); } to { transform: translateX(400%); } }`;
 
-const ROUTER_SCRIPT = `
-  const vscodeApi = acquireVsCodeApi();
-  const handlers = {};
-  let shellHandler = null;
-  window.__spec = {
-    post: function (surface, msg) { msg.surface = surface; vscodeApi.postMessage(msg); },
-    postShell: function (msg) { vscodeApi.postMessage(msg); },
-    register: function (surface, handler) { handlers[surface] = handler; },
-    registerShell: function (handler) { shellHandler = handler; },
-    // The webview's own display state (which matrix groups are open, how far the executions window is
-    // pulled down), the only thing that survives the host rebuilding this document on a window reload.
-    // One object shared by the fragments, so a write merges rather than replaces.
-    state: function () { return vscodeApi.getState() || {}; },
-    saveState: function (patch) { vscodeApi.setState(Object.assign({}, vscodeApi.getState(), patch)); },
-  };
-  window.addEventListener('message', function (event) {
-    const msg = event.data;
-    if (msg && msg.surface) { const handler = handlers[msg.surface]; if (handler) { handler(msg); } }
-    else if (shellHandler) { shellHandler(msg); }
-  });`;
-
-const SHELL_SCRIPT = `
-  const tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tab'));
-  const panes = Array.prototype.slice.call(document.querySelectorAll('.pane'));
-  const searchBox = document.querySelector('.search');
-  const scopeBox = document.querySelector('.scope');
-  const boardTabs = { mapping: true, matrix: true, executions: true };
-
-  function showTab(tab) {
-    tabButtons.forEach(function (btn) { btn.classList.toggle('active', btn.dataset.tab === tab); });
-    panes.forEach(function (pane) { pane.hidden = pane.dataset.tab !== tab; });
-    if (searchBox) { searchBox.hidden = !boardTabs[tab]; }
-    if (scopeBox) { scopeBox.hidden = !boardTabs[tab]; }
-  }
-
-  tabButtons.forEach(function (btn) {
-    btn.addEventListener('click', function () { window.__spec.postShell({ type: 'tab', tab: btn.dataset.tab }); });
-  });
-
-  window.__spec.registerShell(function (msg) {
-    if (msg.type === 'activate') { showTab(msg.tab); }
-    else if (msg.type === 'linkTab') {
-      const linkBtn = document.querySelector('.tab[data-tab="link"]');
-      if (linkBtn) { linkBtn.hidden = !msg.visible; if (msg.title) { linkBtn.title = msg.title; } }
-    }
-  });
-
-  window.__spec.postShell({ type: 'ready' });`;
-
-function renderDocument(providerLabel: string): string {
+function renderDocument(
+  webview: vscode.Webview,
+  providerLabel: string,
+  assetRoot: vscode.Uri,
+  session: string
+): string {
   const nonce = createNonce();
+  const assetUri = vscode.Uri.joinPath(assetRoot, "coverage-board.js");
+  const scriptUri = typeof webview.asWebviewUri === "function" ? webview.asWebviewUri(assetUri) : assetUri;
   const board = boardFragment(providerLabel);
   const styles = [SHELL_CSS, board.css, PUBLISH_FRAGMENT.css, LINK_FRAGMENT.css].join("\n");
   const panes = [
     board.paneHtml,
-    `    <section id="pane-publish" class="pane" data-tab="publish" hidden>\n      ${PUBLISH_FRAGMENT.paneHtml}\n    </section>`,
-    `    <section id="pane-link" class="pane" data-tab="link" hidden>\n      ${LINK_FRAGMENT.paneHtml}\n    </section>`,
+    `    <section id="pane-publish" class="pane" data-tab="publish" role="tabpanel" aria-labelledby="tab-publish" hidden>\n      ${PUBLISH_FRAGMENT.paneHtml}\n    </section>`,
+    `    <section id="pane-link" class="pane" data-tab="link" role="tabpanel" aria-labelledby="tab-link" hidden>\n      ${LINK_FRAGMENT.paneHtml}\n    </section>`,
   ].join("\n");
-  // Each script gets its own function scope: the fragments share nothing but `window.__spec`, and two
-  // top-level `const`s of the same name across sibling scripts is a parse error that kills the second.
-  const scripts = [ROUTER_SCRIPT, SHELL_SCRIPT, board.script, PUBLISH_FRAGMENT.script, LINK_FRAGMENT.script]
-    .map((script) => `<script nonce="${nonce}">(function () {${script}\n})();</script>`)
-    .join("\n");
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -403,24 +373,24 @@ function renderDocument(providerLabel: string): string {
 <style>${styles}
 </style>
 </head>
-<body>
+<body data-session="${session}">
   <header>
     <h1>Coverage Board</h1>
-    <div class="tabs" role="tablist">
-      <button class="tab" data-tab="mapping" type="button">Mapping</button>
-      <button class="tab" data-tab="matrix" type="button">Matrix</button>
-      <button class="tab" data-tab="executions" type="button">Executions</button>
-      <button class="tab" data-tab="publish" type="button">Publish</button>
-      <button class="tab" data-tab="link" type="button" hidden>Link</button>
+    <div class="tabs" role="tablist" aria-label="Coverage views">
+      <button id="tab-mapping" class="tab" data-tab="mapping" role="tab" aria-controls="pane-mapping" aria-selected="false" tabindex="-1" type="button">Mapping</button>
+      <button id="tab-matrix" class="tab" data-tab="matrix" role="tab" aria-controls="pane-matrix" aria-selected="false" tabindex="-1" type="button">Matrix</button>
+      <button id="tab-executions" class="tab" data-tab="executions" role="tab" aria-controls="pane-executions" aria-selected="false" tabindex="-1" type="button">Executions</button>
+      <button id="tab-publish" class="tab" data-tab="publish" role="tab" aria-controls="pane-publish" aria-selected="false" tabindex="-1" type="button">Publish</button>
+      <button id="tab-link" class="tab" data-tab="link" role="tab" aria-controls="pane-link" aria-selected="false" tabindex="-1" type="button" hidden>Link</button>
     </div>
-    <div class="scope"><select id="scope-select" title="Scope the board to one project"></select></div>
-    <div class="search"><input id="search" type="text" spellcheck="false" autocomplete="off" placeholder="Filter by key, tag, file…"></div>
+    <div class="scope"><select id="scope-select" aria-label="Project scope" title="Scope the board to one project"></select></div>
+    <div class="search"><input id="search" type="text" spellcheck="false" autocomplete="off" aria-label="Filter coverage board" placeholder="Filter by key, tag, file…"></div>
   </header>
   <div id="sync-strip" class="sync-strip" role="status" hidden><span id="sync-strip-text"></span><span class="bar"></span></div>
   <main>
 ${panes}
   </main>
-${scripts}
+<script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
 }

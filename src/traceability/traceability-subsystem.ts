@@ -27,10 +27,13 @@ import { RunResultStore } from "./run-result-store";
 import { MappingPageSizeStore, mappingPageSizeStore } from "./mapping-page-size";
 import { ProjectScopeStore, projectScopeStore } from "./project-scope";
 import { refIdentity } from "./scenario-ref";
+import { resolveTraceabilityPanelEnabled } from "../core/onboarding";
+import { parseXrayRegion } from "../xray/xray-region";
 
 const FALLBACK_PROVIDER_ID = "xray";
 const CONNECTED_CONTEXT_KEY = "playwrightBddRunner.traceability.connected";
 const GROUPING_MODE_KEY = "playwrightBddRunner.traceability.groupingMode";
+const ENABLED_CONTEXT_KEY = "playwrightBddRunner.traceability.enabled";
 
 // One watcher per candidate report path (a brace-glob with a slash inside `{}` does not fire
 // reliably in a VS Code FileSystemWatcher). A create/change/delete on any of these refreshes the
@@ -53,15 +56,21 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   private activeAdapter: TraceabilityAdapter | undefined;
   private activeAdapterId: string | undefined;
   private watcherDisposables: vscode.Disposable[] = [];
+  private evidenceWatcherDisposables: vscode.Disposable[] = [];
+  private evidenceWatcherSignature: string | undefined;
+  private evidenceWatcherGeneration = 0;
   private adapterSubscriptions: vscode.Disposable[] = [];
   private lastSignature: string | undefined;
   private rebuildTimer: ReturnType<typeof setTimeout> | undefined;
-  private rebuildInFlight = false;
   private rebuildPending = false;
+  private rebuildTask: Promise<void> | undefined;
   // Bumped whenever connection state is (re)committed: teardown, rebuild, or a fresh probe. An
   // async probe captures the epoch at entry and only commits if it is still current, so a late
   // resolution (panel already torn down, or a newer probe already landed) discards silently.
   private connectionEpoch = 0;
+  private connectionAbort: AbortController | undefined;
+  private connectionRefreshActive = false;
+  private readonly connectionTasks = new Set<Promise<void>>();
   // Mirrors the value last written to the connected context key, so callers that cannot read a context
   // key back (the board's quiet loads) gate on the same verdict the UI does.
   private connectedState = false;
@@ -95,7 +104,9 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     private readonly playwrightJsonParser: PlaywrightJsonParser,
     private readonly runResultStore: RunResultStore,
     private readonly logger: Logger,
-    private readonly workspaceState: vscode.Memento
+    private readonly workspaceState: vscode.Memento,
+    private readonly hasTraceabilityTags: () => Promise<boolean> = () => Promise.resolve(false),
+    private readonly closeSetupSurface: () => Promise<void> = () => Promise.resolve()
   ) {
     this.configChangeDisposable = config.addChangeListener(() => {
       this.applyCurrent().catch(() => undefined);
@@ -200,7 +211,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // `repair` outcome uses this to guarantee the snapshot reflects the just-inserted tag before it
   // re-classifies.
   public async rebuildNow(): Promise<void> {
-    await this.model?.rebuild();
+    await this.runRebuild();
   }
 
   // Deduped test keys from the offline `@TEST_` tag scan; empty when no model exists (panel off or
@@ -250,13 +261,26 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   }
 
   private async reconcileTraceabilityPanel(epoch: number, signal: AbortSignal): Promise<void> {
-    if (!this.config.enableTraceabilityPanel) {
+    try {
+      await this.reconcileTraceabilityPanelState(epoch, signal);
+    } finally {
+      this.reconcileEvidenceWatcher();
+    }
+  }
+
+  private async reconcileTraceabilityPanelState(epoch: number, signal: AbortSignal): Promise<void> {
+    const enabled = await this.resolvePanelEnabled();
+    if (this.disposed || signal.aborted || epoch !== this.activationEpoch) {return;}
+    if (!enabled) {
+      await this.commitEnabledContext(false);
+      await this.closeSetupSurface();
       await this.teardown();
       return;
     }
     const id = this.resolveProviderId();
     if (!id) {
       await this.teardown();
+      await this.commitEnabledContext(false);
       return;
     }
     // Compute the signature against the still-active adapter when the id is unchanged, so an
@@ -267,11 +291,14 @@ export class TraceabilitySubsystem implements vscode.Disposable {
         ? this.signature(id, this.activeAdapter)
         : undefined;
     if (this.treeView && signature !== undefined && this.lastSignature === signature) {
+      await this.commitEnabledContext(true);
+      this.connectionRefreshActive = true;
       this.queueConnectionRefresh();
       return;
     }
     // A changed signature (provider swap, prefix, or pattern) rebuilds the whole panel so the new
     // adapter's model, capabilities, label, and watchers all take effect without a window reload.
+    await this.commitEnabledContext(false);
     await this.teardown();
     if (this.disposed || signal.aborted || epoch !== this.activationEpoch) {return;}
     const adapter = await this.registry.activate(
@@ -280,6 +307,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       signal
     );
     if (!adapter) {
+      await this.commitEnabledContext(false);
       return;
     }
     if (this.disposed || signal.aborted || epoch !== this.activationEpoch) {
@@ -329,19 +357,29 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       }
       this.setupWatchers();
       this.lastSignature = this.signature(id, adapter);
+      this.connectionRefreshActive = true;
       this.scheduleRebuild();
       this.queueConnectionRefresh();
+      await this.commitEnabledContext(true);
       this.logger.info("Traceability panel enabled");
     } catch (error) {
       await this.teardown();
+      await this.commitEnabledContext(false);
       throw error;
     }
   }
 
   private queueConnectionRefresh(): void {
-    this.refreshConnectionState().catch((error) => {
-      this.logger.warn("Traceability connection refresh failed", { error: String(error) });
-    });
+    if (!this.connectionRefreshActive || this.disposed) {return;}
+    const task = this.refreshConnectionState();
+    this.connectionTasks.add(task);
+    task.then(
+      () => this.connectionTasks.delete(task),
+      (error) => {
+        this.connectionTasks.delete(task);
+        this.logger.warn("Traceability connection refresh failed", { error: String(error) });
+      }
+    );
   }
 
   // Connection state is async (a credential-store read), so context key, tree gating, and the
@@ -350,6 +388,9 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // newest, so any older in-flight probe discards when it resolves.
   private async refreshConnectionState(): Promise<void> {
     const epoch = ++this.connectionEpoch;
+    this.connectionAbort?.abort();
+    const controller = new AbortController();
+    this.connectionAbort = controller;
     if (this.disposed) {
       return;
     }
@@ -375,13 +416,14 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     });
     let result: ConnectionVerifyResult;
     try {
-      result = await connection.verify();
+      result = await connection.verify(controller.signal);
     } catch (error) {
       result = { status: "unreachable", message: errMsg(error) };
     }
     if (this.disposed || epoch !== this.connectionEpoch) {
       return;
     }
+    if (this.connectionAbort === controller) {this.connectionAbort = undefined;}
     this.lastConnection = { state: result.status, label: connection.label, message: result.message };
     this.commitConnectionIndicator();
   }
@@ -426,20 +468,22 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   }
 
   // The active provider id joins the signature so switching traceability.provider forces a rebuild.
-  // The browse URL (siteUrl) is deliberately excluded: it is read live, so editing it must not
-  // tear down watchers or trigger a rescan. Only inputs the model actually consumes belong here.
+  // The browse URL is read live and stays excluded. Xray's API region is captured when its client
+  // is constructed, so changing that input must replace the adapter and its endpoint-bound cache.
   private signature(id: string, adapter: TraceabilityAdapter): string {
     return [
       id,
       this.config.testFilePattern,
       adapter.keyGrammar.testPrefix,
       adapter.keyGrammar.reqPrefix,
+      id === "xray" ? parseXrayRegion(this.config.xrayApiRegion) : "",
     ].join("|");
   }
 
   // The debounced, serialized rebuild request, and the only one a machine-driven trigger should use: a
   // settings edit commits per keystroke, and `rebuildNow` would launch a full discovery for each.
   public scheduleRebuild(): void {
+    if (this.disposed || !this.model || !this.treeView) {return;}
     if (this.rebuildTimer) {clearTimeout(this.rebuildTimer);}
     this.rebuildTimer = setTimeout(() => {
       this.rebuildTimer = undefined;
@@ -453,20 +497,21 @@ export class TraceabilitySubsystem implements vscode.Disposable {
   // awaited before the next starts, the final snapshot is always the newest; a stale run can never
   // overwrite a fresher one.
   private async runRebuild(): Promise<void> {
-    if (this.rebuildInFlight) {
+    if (this.rebuildTask) {
       this.rebuildPending = true;
-      return;
+      return this.rebuildTask;
     }
-    this.rebuildInFlight = true;
-    try {
+    const task = (async () => {
       do {
         this.rebuildPending = false;
         if (this.disposed || !this.model) {return;}
         await this.model.rebuild();
       } while (this.rebuildPending && !this.disposed);
-    } finally {
-      this.rebuildInFlight = false;
-    }
+    })().finally(() => {
+      if (this.rebuildTask === task) {this.rebuildTask = undefined;}
+    });
+    this.rebuildTask = task;
+    return task;
   }
 
   private setupWatchers(): void {
@@ -489,16 +534,69 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     }
   }
 
+  private reconcileEvidenceWatcher(): void {
+    const supportsEvidence = "traceabilityPanelPreference" in
+      (this.config as unknown as Record<string, unknown>);
+    const shouldWatch = !this.disposed && supportsEvidence &&
+      this.config.traceabilityPanelPreference === undefined &&
+      !this.config.hasExplicitXrayConfiguration &&
+      !this.treeView;
+    const signature = shouldWatch
+      ? [
+          this.config.testFilePattern,
+          this.config.traceabilityTestTagPrefix,
+          this.config.traceabilityReqTagPrefix,
+        ].join("|")
+      : undefined;
+    if (signature === this.evidenceWatcherSignature) {return;}
+    this.disposeEvidenceWatcher();
+    if (!signature) {return;}
+
+    const generation = this.evidenceWatcherGeneration;
+    const reconcile = (): void => {
+      if (this.disposed || this.treeView || generation !== this.evidenceWatcherGeneration) {return;}
+      this.applyCurrent().catch(() => undefined);
+    };
+    const watcher = vscode.workspace.createFileSystemWatcher(this.config.testFilePattern);
+    this.evidenceWatcherDisposables.push(
+      watcher,
+      watcher.onDidCreate(reconcile),
+      watcher.onDidChange(reconcile),
+      watcher.onDidDelete(reconcile)
+    );
+    this.evidenceWatcherSignature = signature;
+  }
+
+  private disposeEvidenceWatcher(): void {
+    this.evidenceWatcherGeneration += 1;
+    for (const disposable of this.evidenceWatcherDisposables) {disposable.dispose();}
+    this.evidenceWatcherDisposables = [];
+    this.evidenceWatcherSignature = undefined;
+  }
+
   private async teardown(): Promise<void> {
+    this.connectionRefreshActive = false;
     if (this.rebuildTimer) {
       clearTimeout(this.rebuildTimer);
       this.rebuildTimer = undefined;
     }
     this.rebuildPending = false;
+    this.connectionEpoch += 1;
+    this.connectionAbort?.abort();
+    this.connectionAbort = undefined;
     for (const d of this.adapterSubscriptions) {d.dispose();}
     this.adapterSubscriptions = [];
     for (const d of this.watcherDisposables) {d.dispose();}
     this.watcherDisposables = [];
+    const model = this.model;
+    this.model = undefined;
+    const adapter = this.activeAdapter;
+    this.activeAdapter = undefined;
+    this.activeAdapterId = undefined;
+    await Promise.allSettled([
+      this.rebuildTask,
+      ...this.connectionTasks,
+    ]);
     this.treeView?.dispose();
     this.treeView = undefined;
     this.treeProvider?.dispose();
@@ -507,11 +605,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.tagDiagnostics = undefined;
     this.tagDecorations?.dispose();
     this.tagDecorations = undefined;
-    this.model?.dispose();
-    this.model = undefined;
-    const adapter = this.activeAdapter;
-    this.activeAdapter = undefined;
-    this.activeAdapterId = undefined;
+    model?.dispose();
     if (adapter?.dispose) {
       try {
         await adapter.dispose();
@@ -523,7 +617,6 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.lastSignature = undefined;
     // Bump before committing so an in-flight probe captured under the old epoch can't overwrite
     // this false with a stale true when it later resolves.
-    this.connectionEpoch += 1;
     this.commitConnectedContext(false);
     // An open board reads getSnapshot() (now undefined); signal it so it clears rather than holding
     // the torn-down model's last view.
@@ -537,7 +630,10 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.activationAbort = undefined;
     this.configChangeDisposable.dispose();
     this.runResultSubscription.dispose();
+    this.disposeEvidenceWatcher();
     this.shutdownPromise = this.reconcileTail.then(async () => {
+      await this.commitEnabledContext(false);
+      await this.closeSetupSurface();
       await this.teardown();
       this._onDidChangeSnapshot.dispose();
       // The discovery manager is handed to this subsystem for its exclusive use.
@@ -550,5 +646,41 @@ export class TraceabilitySubsystem implements vscode.Disposable {
     this.shutdown().catch((error) => {
       this.logger.warn("Traceability subsystem shutdown failed", { error: String(error) });
     });
+  }
+
+  private async resolvePanelEnabled(): Promise<boolean> {
+    // Older test doubles predate evidence-based defaults; their boolean remains the whole policy.
+    const supportsEvidence = "traceabilityPanelPreference" in
+      (this.config as unknown as Record<string, unknown>);
+    if (!supportsEvidence) {
+      return this.config.enableTraceabilityPanel;
+    }
+    this.reconcileEvidenceWatcher();
+    const explicit = this.config.traceabilityPanelPreference;
+    if (explicit !== undefined) {
+      return explicit;
+    }
+    if (this.config.hasExplicitXrayConfiguration) {
+      return true;
+    }
+    let tagged = false;
+    try {
+      tagged = await this.hasTraceabilityTags();
+    } catch (error) {
+      this.logger.warn("Traceability tag evidence scan failed", { error: String(error) });
+    }
+    return resolveTraceabilityPanelEnabled({
+      explicit,
+      configured: false,
+      tagged,
+    });
+  }
+
+  private async commitEnabledContext(enabled: boolean): Promise<void> {
+    try {
+      await vscode.commands.executeCommand("setContext", ENABLED_CONTEXT_KEY, enabled);
+    } catch (error) {
+      this.logger.warn("Traceability enabled context update failed", { error: String(error) });
+    }
   }
 }

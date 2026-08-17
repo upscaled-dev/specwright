@@ -100,10 +100,12 @@ export interface TraceabilityPublishCommandDeps {
   readonly featureParser: FeatureParser;
   readonly workspaceTrust: WorkspaceTrust;
   readonly attachmentSpoolRoot: () => string | undefined;
+  readonly mutation: <T>(run: () => Promise<T>) => Promise<T>;
 }
 
 export class TraceabilityPublishCommands {
   private readonly attachmentSpool: AttachmentSpool;
+  private publishInFlight: Promise<void> | undefined;
 
   constructor(private readonly logger: Logger, private readonly deps: TraceabilityPublishCommandDeps) {
     const root = deps.attachmentSpoolRoot();
@@ -204,9 +206,36 @@ export class TraceabilityPublishCommands {
     }
   }
 
-  public async publishLastRun(signal?: AbortSignal): Promise<void> {await this.runPublish(undefined, signal);}
+  public publishLastRun(signal?: AbortSignal): Promise<void> {return this.runPublish(undefined, signal);}
 
-  public async runPublish(preselectId?: string, signal?: AbortSignal): Promise<void> {
+  public runPublish(preselectId?: string, signal?: AbortSignal): Promise<void> {
+    if (this.publishInFlight !== undefined) {
+      return this.publishInFlight;
+    }
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const operation = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    // Install ownership before opening the board: restoring a persisted Publish tab can synchronously
+    // re-enter this command through its activation callback.
+    this.publishInFlight = operation;
+    this.deps.mutation(() => this.runPublishOnce(preselectId, signal)).then(resolve, reject);
+    operation.then(
+      () => this.retirePublish(operation),
+      () => this.retirePublish(operation)
+    );
+    return operation;
+  }
+
+  private retirePublish(operation: Promise<void>): void {
+    if (this.publishInFlight === operation) {
+      this.publishInFlight = undefined;
+    }
+  }
+
+  private async runPublishOnce(preselectId?: string, signal?: AbortSignal): Promise<void> {
     const subsystem = this.deps.subsystem();
     const adapter = subsystem?.getActiveAdapter();
     const publishing = adapter?.resultPublishing;
@@ -220,17 +249,18 @@ export class TraceabilityPublishCommands {
     }
 
     const board = this.deps.board();
+    const flow = board.publish.beginFlow();
     const controller = new AbortController();
     const onAbort = (): void => controller.abort(signal?.reason);
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) {onAbort();}
     const cancelOnClose = board.onDidDispose(() => controller.abort());
-    const site = this.deps.siteUrl();
-    const credentials = await this.deps.credentials();
-    const jiraSearchAvailable = await this.deps.hasJiraCredentials();
     let published = false;
     let succeeded = false;
     try {
+      const site = this.deps.siteUrl();
+      const credentials = await this.deps.credentials();
+      const jiraSearchAvailable = await this.deps.hasJiraCredentials();
       await runPublishFlow({
         ...this.publishRunSources(),
         publishing,
@@ -238,8 +268,8 @@ export class TraceabilityPublishCommands {
         jiraSearchAvailable,
         knownProjectKeys: this.deps.projectUniverse(adapter),
         attachments: () => this.buildPublishAttachments(controller.signal),
-        presentDialog: (model) => board.publish.present(model),
-        presentRetry: (selectedRunId) => board.publish.presentRetry(selectedRunId),
+        presentDialog: (model) => flow.present(model),
+        presentRetry: (selectedRunId) => flow.presentRetry(selectedRunId),
         attachFiles: (executionKey, files, signal, operationId) =>
           this.attachFiles(executionKey, files, signal, operationId),
         sealAttachments: (files) =>
@@ -291,9 +321,9 @@ export class TraceabilityPublishCommands {
     } finally {
       cancelOnClose.dispose();
       signal?.removeEventListener("abort", onAbort);
-      const settled = board.publish.markSettled();
+      const settled = flow.markSettled();
       const refreshed = published && (await this.deps.rebuild("publishing"));
-      if (succeeded && settled && refreshed) {
+      if (succeeded && settled && refreshed && flow.isLatest()) {
         board.showExecutions();
       }
     }
@@ -670,7 +700,7 @@ export class TraceabilityPublishCommands {
           : Promise.reject(new Error("Connect to your test tracker to search."));
       },
       browseFiles: () => this.browsePublishFiles(),
-      attachPending: async (runId) => {
+      attachPending: (runId) => this.deps.mutation(async () => {
         try {
           return await this.attachPendingForRun(runId, this.deps.siteUrl());
         } catch (error) {
@@ -679,7 +709,7 @@ export class TraceabilityPublishCommands {
             ?.find(runId, this.deps.siteUrl())?.pendingAttachments.length ?? 0;
           return { remaining };
         }
-      },
+      }),
       onDidChangeRuns: this.deps.runArtifactStore?.onDidChange ?? this.deps.idleEvent,
       runOptions: () => publishRunOptions(this.publishRunSources()),
     };

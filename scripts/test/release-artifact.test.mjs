@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { load } from "js-yaml";
 import test from "node:test";
 import {
   artifactSet,
@@ -17,28 +18,160 @@ import {
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
+const JOB_PERMISSION_ALLOWLIST = new Map([["ci.yml:promote", [
+  "actions: read",
+  "contents: read",
+  "id-token: write",
+  "attestations: write",
+]]]);
 
 function yamlJob(workflow, name) {
-  const marker = `  ${name}:`;
-  const start = workflow.indexOf(marker);
+  const marker = new RegExp(`^  ["']?${escapeRegex(name)}["']?:\\r?$`, "mu");
+  const match = marker.exec(workflow);
+  const start = match?.index ?? -1;
   assert.notEqual(start, -1, `missing ${name} job`);
-  const following = workflow.slice(start + marker.length);
-  const nextJob = /^  [a-z][a-z0-9_-]*:\r?$/mu.exec(following);
-  return nextJob ? workflow.slice(start, start + marker.length + nextJob.index) : workflow.slice(start);
+  const following = workflow.slice(start + match[0].length);
+  const nextJob = /^  ["']?[a-z][a-z0-9_-]*["']?:\r?$/mu.exec(following);
+  return nextJob ? workflow.slice(start, start + match[0].length + nextJob.index) : workflow.slice(start);
 }
 
 function yamlSteps(job) {
   return job.split(/^      - /gmu).slice(1).map((block) => {
     const [header] = block.split(/\r?\n/u);
     const run = /^        run: \|\r?\n((?:^          .*\r?\n?)*)/mu.exec(block)?.[1] ?? "";
-    return { header, run };
+    return { header, run, source: block };
   });
+}
+
+function workflowSources(workflows = resolve(REPO_ROOT, ".github", "workflows")) {
+  return new Map(readdirSync(workflows)
+    .filter((filename) => /\.ya?ml$/iu.test(filename))
+    .sort()
+    .map((filename) => [filename, readFileSync(resolve(workflows, filename), "utf8")]));
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNodeRun(value) {
+  if (typeof value !== "string") return false;
+  const command = value.split(/\r?\n/u)
+    .map((line) => line.replace(/\s+#.*$/u, ""))
+    .join("\n");
+  return /\b(?:node|npm|npx|corepack|pnpm|yarn)\b/u.test(command);
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function isLocalAction(reference) {
+  if (!reference.startsWith("./")) return false;
+  const relative = reference.slice(2);
+  return relative !== "" && !relative.includes("\\") && !relative.split("/").includes("..") && posix.normalize(relative) === relative && !posix.isAbsolute(relative);
+}
+
+function hasActionVersionComment(stepSource, reference) {
+  const line = new RegExp(`^(?:uses| {8}uses)\\s*:\\s*["']?${escapeRegex(reference)}["']?\\s+#\\s*v\\d+(?:\\.\\d+){0,2}\\s*$`, "mu");
+  return line.test(stepSource);
+}
+
+function assertWorkflowSupplyPolicy(workflows) {
+  assert.ok(workflows.size > 0, "repository has no workflows");
+  for (const [filename, source] of workflows) {
+    const workflow = load(source);
+    assert.ok(isRecord(workflow), `${filename} must contain an object`);
+    assert.deepEqual(workflow.permissions, { contents: "read" }, `${filename} must default to contents: read`);
+    assert.ok(isRecord(workflow.jobs), `${filename} must contain jobs`);
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      assert.ok(isRecord(job), `${filename}: ${name} must be an object`);
+      assert.ok(Number.isInteger(job["timeout-minutes"]) && job["timeout-minutes"] > 0, `${filename}: ${name} needs a timeout`);
+      if (Object.hasOwn(job, "permissions")) {
+        const allowed = JOB_PERMISSION_ALLOWLIST.get(`${filename}:${name}`);
+        assert.ok(allowed, `${filename}: ${name} has no approved job permissions`);
+        assert.deepEqual(
+          job.permissions,
+          Object.fromEntries(allowed.map((line) => line.split(": "))),
+          `${filename}: ${name} must use its approved permissions`
+        );
+      }
+      assert.ok(Array.isArray(job.steps), `${filename}: ${name} must contain steps`);
+      let sourceSteps;
+
+      let checkout = -1;
+      let setupNode = -1;
+      let firstNodeRun = -1;
+      for (const [index, step] of job.steps.entries()) {
+        assert.ok(isRecord(step), `${filename}: ${name} step ${index + 1} must be an object`);
+        if (Object.hasOwn(step, "uses")) {
+          assert.equal(typeof step.uses, "string", `${filename}: ${name} step ${index + 1} uses must be a string`);
+          if (step.uses.startsWith("./")) {
+            assert.ok(isLocalAction(step.uses), `${filename}: ${step.uses} must name a normalized repository-local action`);
+          } else {
+            assert.match(step.uses, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}$/u, `${filename}: ${step.uses} must use an immutable commit SHA`);
+            sourceSteps ??= yamlSteps(yamlJob(source, name));
+            assert.equal(sourceSteps.length, job.steps.length, `${filename}: ${name} source steps must match parsed steps`);
+            assert.ok(hasActionVersionComment(sourceSteps[index].source, step.uses), `${filename}: ${step.uses} must name its version on its uses line`);
+          }
+          if (step.uses.startsWith("actions/checkout@")) checkout = index;
+          if (step.uses.startsWith("actions/setup-node@")) {
+            setupNode = index;
+            assert.ok(isRecord(step.with), `${filename}: ${name} setup-node needs inputs`);
+            assert.equal(step.with["node-version-file"], ".node-version", `${filename}: ${name} setup-node must use .node-version`);
+          }
+        }
+        if (firstNodeRun === -1 && isNodeRun(step.run)) firstNodeRun = index;
+      }
+      if (firstNodeRun !== -1) {
+        assert.ok(checkout >= 0 && checkout < setupNode, `${filename}: ${name} must check out before setting up Node`);
+        assert.ok(setupNode >= 0 && setupNode < firstNodeRun, `${filename}: ${name} must set up Node before running it`);
+      }
+    }
+  }
+}
+
+function assertDependencyAutomation(config) {
+  const parsed = load(config);
+  assert.ok(isRecord(parsed), "Dependabot config must be a YAML object");
+  assert.equal(parsed.version, 2, "Dependabot config must use version 2");
+  assert.ok(Array.isArray(parsed.updates), "Dependabot config needs updates");
+  const matching = (ecosystem) => parsed.updates.filter((update) => isRecord(update)
+    && update["package-ecosystem"] === ecosystem
+    && update.directory === "/"
+    && isRecord(update.schedule)
+    && update.schedule.interval === "weekly"
+    && update.schedule.day === "monday");
+  const npm = matching("npm");
+  const actions = matching("github-actions");
+  assert.ok(npm.length > 0, "npm updates must run weekly");
+  assert.ok(actions.length > 0, "github-actions updates must run weekly");
+  for (const update of [...npm, ...actions]) {
+    const pullRequestLimit = update["open-pull-requests-limit"];
+    assert.ok(
+      pullRequestLimit === undefined || (Number.isInteger(pullRequestLimit) && pullRequestLimit > 0),
+      `${update["package-ecosystem"]} updates must omit open-pull-requests-limit or use a positive integer`
+    );
+    assert.ok(!Array.isArray(update.ignore) || !update.ignore.some((rule) => isRecord(rule)
+      && typeof rule["dependency-name"] === "string"
+      && /^\*+$/u.test(rule["dependency-name"])), `${update["package-ecosystem"]} updates cannot ignore every dependency`);
+  }
+  assert.ok(npm.some((update) => isRecord(update.groups)
+    && isRecord(update.groups["production-dependencies"])
+    && update.groups["production-dependencies"]["dependency-type"] === "production"
+    && isRecord(update.groups["development-dependencies"])
+    && update.groups["development-dependencies"]["dependency-type"] === "development"), "npm updates need production and development groups");
+  assert.ok(actions.some((update) => isRecord(update.groups)
+    && isRecord(update.groups["github-actions"])
+    && Array.isArray(update.groups["github-actions"].patterns)
+    && update.groups["github-actions"].patterns.includes("*")), "github-actions updates need the action group");
 }
 
 function assertImmutablePromotion(promotion, packageScripts) {
   const steps = yamlSteps(promotion);
   assert.deepEqual(steps.map(({ header }) => header), [
-    "uses: actions/checkout@v4",
+    "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2",
+    "uses: actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6 # v4.0.4",
     "name: Validate release tag and source commit",
     "name: Locate successful main candidate",
     "name: Download tested release candidate",
@@ -257,9 +390,212 @@ test("release orchestration keeps artifact gates mandatory and ordered", () => {
   );
 });
 
+test("workflow policy parses discovered YAML semantics", () => {
+  const directory = mkdtempSync(resolve(tmpdir(), "specwright-workflow-test-"));
+  const checkout = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683";
+  const setupNode = "actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6";
+  const write = (filename, source) => writeFileSync(resolve(directory, filename), source);
+  const failure = (source, message, filename = "invalid.yaml") => {
+    write(filename, source);
+    assert.throws(() => assertWorkflowSupplyPolicy(workflowSources(directory)), message);
+    rmSync(resolve(directory, filename), { force: true });
+  };
+  try {
+    write("local.yml", `name: Local
+permissions: { contents: read }
+jobs:
+  local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - { uses: "./local-action" }
+`);
+    write("semantic.yaml", `name: Semantic
+permissions:
+  contents: read
+"jobs":
+  "node":
+    runs-on: ubuntu-latest
+    "timeout-minutes": 1
+    steps:
+      - uses : "${checkout}" # v4.2.2
+      - uses : "${setupNode}" # v4.0.4
+        with: { node-version-file: .node-version }
+      - uses: acme/example/action-path@0123456789abcdef0123456789abcdef01234567 # v1.2.3
+      - run: >-
+          npm test
+`);
+    assert.equal(workflowSources(directory).size, 2);
+    assertWorkflowSupplyPolicy(workflowSources(directory));
+
+    failure(`name: Docker
+permissions: { contents: read }
+jobs:
+  job: { runs-on: ubuntu-latest, timeout-minutes: 1, steps: [{ uses: docker://alpine:3.20 }] }
+`, /must use an immutable commit SHA/u);
+    failure(`name: Mutable
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: "actions/checkout@v4" # v4
+`, /must use an immutable commit SHA/u);
+    failure(`name: Missing comment
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: ${checkout}
+`, /must name its version/u);
+    failure(`name: Timeout
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps: [{ uses: ./local-action }]
+`, /needs a timeout/u);
+    failure(`name: Traversal
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps: [{ uses: ./../outside }]
+`, /normalized repository-local action/u);
+    failure(`name: Detached comment
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: ${checkout}
+      # uses: ${checkout} # v4.2.2
+      - uses: ${setupNode} # v4.0.4
+        with: { node-version-file: .node-version }
+      - run: npm test
+`, /must name its version on its uses line/u);
+    failure(`name: Duplicate action comment
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: ${checkout} # v4.2.2
+      - uses: ${checkout}
+      - uses: ${setupNode} # v4.0.4
+        with: { node-version-file: .node-version }
+      - run: npm test
+`, /must name its version on its uses line/u);
+    failure(`name: Block scalar decoy
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: ${checkout}
+        run: |
+          uses: ${checkout} # v4.2.2
+      - uses: ${setupNode} # v4.0.4
+        with: { node-version-file: .node-version }
+      - run: npm test
+`, /must name its version on its uses line/u);
+    failure(`name: Package runner
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: ${checkout} # v4.2.2
+      - run: corepack pnpm test
+`, /must check out before setting up Node/u);
+    failure(`name: Permissions
+permissions: { contents: read }
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: write-all
+    steps: [{ uses: ./local-action }]
+`, /ci.yml: promote must use its approved permissions/u, "ci.yml");
+    failure(`name: Comment only
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: ${checkout} # v4.2.2
+      # - uses: ${setupNode} # v4.0.4
+      - run: npm test
+`, /must check out before setting up Node/u);
+    failure(`name: Wrong order
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: ${checkout} # v4.2.2
+      - run: npm test
+      - uses: ${setupNode} # v4.0.4
+        with: { node-version-file: .node-version }
+`, /must set up Node before running it/u);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("CI builds the candidate after its gates and promotes it without rebuilding", () => {
-  const workflow = readFileSync(resolve(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const workflows = workflowSources();
+  const workflow = workflows.get("ci.yml");
+  assert.ok(workflow, "missing ci.yml");
+  const dependabot = readFileSync(resolve(REPO_ROOT, ".github", "dependabot.yml"), "utf8");
   const packageJson = JSON.parse(readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"));
+  assertWorkflowSupplyPolicy(workflows);
+  assertDependencyAutomation(dependabot);
+  assert.equal(packageJson.devDependencies["js-yaml"], "4.1.1");
+  assert.equal(readFileSync(resolve(REPO_ROOT, ".node-version"), "utf8").trim(), "24.18.1");
+  assert.match(readFileSync(resolve(REPO_ROOT, ".devcontainer", "Dockerfile"), "utf8"), /^FROM node:24\.18\.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7$/mu);
+  assert.throws(
+    () => assertDependencyAutomation(dependabot.replace("package-ecosystem: github-actions", "package-ecosystem: pip")),
+    /github-actions updates must run weekly/u
+  );
+  assert.throws(
+    () => assertDependencyAutomation(dependabot.replace("version: 2", "version: 1")),
+    /must use version 2/u
+  );
+  assert.throws(
+    () => assertDependencyAutomation(dependabot.replace("dependency-type: production", "dependency-type: direct")),
+    /production and development groups/u
+  );
+  assert.throws(
+    () => assertDependencyAutomation(dependabot.replace("groups:\n", "open-pull-requests-limit: 0\n    groups:\n")),
+    /must omit open-pull-requests-limit or use a positive integer/u
+  );
+  assert.throws(
+    () => assertDependencyAutomation(dependabot.replace("groups:\n", "open-pull-requests-limit: \"0\"\n    groups:\n")),
+    /must omit open-pull-requests-limit or use a positive integer/u
+  );
+  assert.throws(
+    () => assertDependencyAutomation(dependabot.replace("groups:\n", "open-pull-requests-limit: 1.5\n    groups:\n")),
+    /must omit open-pull-requests-limit or use a positive integer/u
+  );
+  assert.throws(
+    () => assertDependencyAutomation(dependabot.replace("labels:\n", "ignore:\n      - dependency-name: \"*\"\n    labels:\n")),
+    /cannot ignore every dependency/u
+  );
+  assert.throws(
+    () => assertDependencyAutomation(dependabot.replace("labels:\n", "ignore:\n      - dependency-name: \"**\"\n    labels:\n")),
+    /cannot ignore every dependency/u
+  );
   assert.match(workflow, /package:\r?\n[\s\S]*?needs: \[quality, integration\]/u);
   assert.match(workflow, /run: npm run package:release[\s\S]*?run: xvfb-run -a npm run test:vsix[\s\S]*?run: npm run verify:release/u);
   assert.match(workflow, /name: specwright-\$\{\{ github\.sha \}\}[\s\S]*?retention-days: 90/u);
@@ -289,15 +625,16 @@ test("CI builds the candidate after its gates and promotes it without rebuilding
   assert.match(promotion, /\/actions\/workflows\/ci\.yml\/runs/u);
   assert.match(promotion, /event=push[\s\S]*?head_sha="\$COMMIT"/u);
   assert.doesNotMatch(promotion, /\.path\s*==/u);
-  assert.match(promotion, /uses: actions\/download-artifact@v4[\s\S]*?github-token:[\s\S]*?run-id:/u);
+  assert.match(promotion, /uses: actions\/download-artifact@[0-9a-f]{40} # v4\.3\.0[\s\S]*?github-token:[\s\S]*?run-id:/u);
   assert.match(promotion, /--commit "\$COMMIT" --version "\$VERSION"/u);
   assert.match(
     promotion,
-    /uses: actions\/attest-build-provenance@v\d+\r?\n\s+with:\r?\n\s+subject-path:/u
+    /uses: actions\/attest-build-provenance@[0-9a-f]{40} # v2\.2\.2\r?\n\s+with:\r?\n\s+subject-path:/u
   );
   assert.match(promotion, /name: specwright-\$\{\{ github\.ref_name \}\}[\s\S]*?retention-days: 90/u);
 
   const ignore = readFileSync(resolve(REPO_ROOT, ".vscodeignore"), "utf8");
+  assert.match(ignore, /^\.node-version$/mu);
   assert.match(ignore, /^\*\*\/\*\.map$/mu);
 });
 

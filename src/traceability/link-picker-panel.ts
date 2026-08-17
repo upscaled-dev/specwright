@@ -1,39 +1,11 @@
 import { LinkedRow, LinkPickerRow, LinkPickerUi } from "./link-picker-flow";
 import { SurfaceFragment, SurfaceHost } from "./webview-host";
+import type { LinkClientMessage, LinkHostMessage } from "../webview/protocol";
 
 export interface LinkPickerPanelOptions {
   readonly title: string;
   readonly searchPlaceholder: string;
 }
-
-interface SearchMessage {
-  type: "search";
-  value: string;
-}
-interface ConfirmMessage {
-  type: "confirm";
-  id: string;
-}
-interface CancelMessage {
-  type: "cancel";
-}
-interface OpenLinkedMessage {
-  type: "openLinked";
-  key: string;
-}
-interface UnlinkMessage {
-  type: "unlink";
-  key: string;
-}
-type LinkIncoming = SearchMessage | ConfirmMessage | CancelMessage | OpenLinkedMessage | UnlinkMessage;
-
-// What a session paints into its pane: the reset that clears it, the two row lists, and the search
-// spinner. Kept as data so the pane can be painted again from scratch.
-type LinkOutgoing =
-  | { type: "reset"; title: string; searchPlaceholder: string }
-  | { type: "rows"; rows: readonly LinkPickerRow[] }
-  | { type: "linked"; rows: readonly LinkedRow[] }
-  | { type: "busy"; busy: boolean };
 
 // One live link-picker session on the board's contextual Link tab. It implements the vscode-free
 // `LinkPickerUi` port so `runLinkPickerFlow` drives it; the webview JS stays thin (render + keyboard +
@@ -42,17 +14,19 @@ type LinkOutgoing =
 class LinkSession implements LinkPickerUi {
   // The last of each message this session put on screen, in the order it first posted them, so a
   // rebuilt webview can be painted back to where the flow left it.
-  private readonly painted = new Map<LinkOutgoing["type"], LinkOutgoing>();
+  private readonly painted = new Map<LinkHostMessage["type"], LinkHostMessage>();
   private searchHandler: ((value: string) => void) | undefined;
   private confirmHandler: ((id: string) => void) | undefined;
   private cancelHandler: (() => void) | undefined;
   private openLinkedHandler: ((key: string) => void) | undefined;
   private unlinkHandler: ((key: string) => void) | undefined;
+  private readonly offeredIds = new Set<string>();
+  private readonly linkedKeys = new Set<string>();
   private settled = false;
   private closed = false;
 
   constructor(
-    private readonly host: SurfaceHost,
+    private readonly host: SurfaceHost<"link">,
     private readonly options: LinkPickerPanelOptions,
     private readonly onClose: () => void
   ) {
@@ -77,10 +51,16 @@ class LinkSession implements LinkPickerUi {
   }
 
   public setRows(rows: readonly LinkPickerRow[]): void {
+    this.offeredIds.clear();
+    rows.forEach((row) => {
+      if (row.kind !== "hint") {this.offeredIds.add(row.id);}
+    });
     this.post({ type: "rows", rows });
   }
 
   public setLinked(rows: readonly LinkedRow[]): void {
+    this.linkedKeys.clear();
+    rows.forEach((row) => this.linkedKeys.add(row.key));
     this.post({ type: "linked", rows });
   }
 
@@ -119,9 +99,9 @@ class LinkSession implements LinkPickerUi {
     this.onClose();
   }
 
-  public handle(message: LinkIncoming): void {
+  public handle(message: LinkClientMessage): void {
     if (message.type === "confirm") {
-      this.fireConfirm(message.id);
+      if (this.offeredIds.has(message.id)) {this.fireConfirm(message.id);}
       return;
     }
     if (message.type === "cancel") {
@@ -134,9 +114,9 @@ class LinkSession implements LinkPickerUi {
     if (message.type === "search") {
       this.searchHandler?.(message.value);
     } else if (message.type === "openLinked") {
-      this.openLinkedHandler?.(message.key);
+      if (this.linkedKeys.has(message.key)) {this.openLinkedHandler?.(message.key);}
     } else if (message.type === "unlink") {
-      this.unlinkHandler?.(message.key);
+      if (this.linkedKeys.has(message.key)) {this.unlinkHandler?.(message.key);}
     }
   }
 
@@ -161,7 +141,7 @@ class LinkSession implements LinkPickerUi {
     return !this.closed && !this.host.isDisposed();
   }
 
-  private post(message: LinkOutgoing): void {
+  private post(message: LinkHostMessage): void {
     if (!this.live()) {
       return;
     }
@@ -179,8 +159,8 @@ class LinkSession implements LinkPickerUi {
 export class LinkSurface {
   private session: LinkSession | undefined;
 
-  constructor(private readonly host: SurfaceHost) {
-    host.onMessage((message) => this.session?.handle(message as LinkIncoming));
+  constructor(private readonly host: SurfaceHost<"link">) {
+    host.onMessage((message) => this.session?.handle(message));
     host.onDidDispose(() => this.session?.fireCancel());
   }
 
@@ -257,182 +237,11 @@ const LINK_PANE = `<h1 id="link-title"></h1>
         <ul id="link-linked" class="linked-list"></ul>
         <h2 class="section-title spaced">Link another test</h2>
       </div>
-      <input id="link-search" type="text" spellcheck="false" autocomplete="off" placeholder="">
-      <ul id="link-results" class="results"></ul>
-      <p class="footer">Enter to confirm · Esc to cancel <span id="link-busy" class="busy" hidden>· Searching…</span></p>`;
-
-const LINK_SCRIPT = `
-  const linkPane = document.getElementById('pane-link');
-  const title = document.getElementById('link-title');
-  const search = document.getElementById('link-search');
-  const results = document.getElementById('link-results');
-  const linkedSection = document.getElementById('link-linked-section');
-  const linkedList = document.getElementById('link-linked');
-  const busy = document.getElementById('link-busy');
-  let rows = [];
-  let linkedRows = [];
-  let highlightedId = null;
-  let highlightedIndex = -1;
-
-  // The "Linked" section sits outside the navigable results list, so its rows are inherently skipped
-  // by the arrow keys and Enter; they are informational and carry only mouse actions.
-  function renderLinked() {
-    linkedSection.hidden = linkedRows.length === 0;
-    linkedList.textContent = '';
-    linkedRows.forEach(function (row) {
-      const li = document.createElement('li');
-      li.className = 'linked-row';
-      const key = document.createElement('span');
-      key.className = 'key';
-      key.textContent = row.key;
-      li.appendChild(key);
-      if (row.remoteMissing) {
-        const warn = document.createElement('span');
-        warn.className = 'warn';
-        warn.textContent = '⚠ not found on remote';
-        li.appendChild(warn);
-      } else if (row.summary) {
-        const summary = document.createElement('span');
-        summary.className = 'summary';
-        summary.textContent = row.summary;
-        li.appendChild(summary);
-      }
-      const actions = document.createElement('span');
-      actions.className = 'actions';
-      const open = document.createElement('button');
-      open.type = 'button';
-      open.textContent = 'Open in Jira';
-      open.addEventListener('click', function () { window.__spec.post('link', { type: 'openLinked', key: row.key }); });
-      const unlink = document.createElement('button');
-      unlink.type = 'button';
-      unlink.textContent = 'Unlink';
-      unlink.addEventListener('click', function () { window.__spec.post('link', { type: 'unlink', key: row.key }); });
-      actions.appendChild(open);
-      actions.appendChild(unlink);
-      li.appendChild(actions);
-      linkedList.appendChild(li);
-    });
-  }
-
-  function navigable() {
-    const out = [];
-    rows.forEach(function (row, index) { if (row.kind !== 'hint') { out.push(index); } });
-    return out;
-  }
-
-  // Preserve the highlight on the same row id across re-renders (so a debounced remote append doesn't
-  // yank it to the top); if that row is gone, clamp to the navigable row nearest the old position.
-  function resolveHighlight() {
-    const nav = navigable();
-    if (nav.length === 0) { highlightedId = null; highlightedIndex = -1; return; }
-    let index = rows.findIndex(function (row) { return row.id === highlightedId; });
-    if (index < 0 || rows[index].kind === 'hint') {
-      const target = highlightedIndex < 0 ? nav[0] : highlightedIndex;
-      index = nav.reduce(function (best, candidate) {
-        return Math.abs(candidate - target) < Math.abs(best - target) ? candidate : best;
-      }, nav[0]);
-    }
-    highlightedIndex = index;
-    highlightedId = rows[index].id;
-  }
-
-  function render() {
-    resolveHighlight();
-    results.textContent = '';
-    rows.forEach(function (row, index) {
-      const li = document.createElement('li');
-      const hint = row.kind === 'hint';
-      li.className = 'row'
-        + (row.kind === 'create' ? ' create' : '')
-        + (hint ? ' hint-row' : '')
-        + (index === highlightedIndex ? ' active' : '');
-      if (hint) {
-        const note = document.createElement('span');
-        note.textContent = row.key;
-        li.appendChild(note);
-      } else if (row.kind === 'create') {
-        const label = document.createElement('span');
-        label.className = 'create-label';
-        label.textContent = row.key;
-        li.appendChild(label);
-      } else {
-        const key = document.createElement('span');
-        key.className = 'key';
-        key.textContent = row.key;
-        li.appendChild(key);
-        if (row.summary) {
-          const summary = document.createElement('span');
-          summary.className = 'summary';
-          summary.textContent = row.summary;
-          li.appendChild(summary);
-        }
-      }
-      if (!hint) {
-        li.addEventListener('click', function () { confirmRow(index); });
-        li.addEventListener('mousemove', function () {
-          if (highlightedId !== row.id) { highlightedId = row.id; highlightedIndex = index; render(); }
-        });
-      }
-      results.appendChild(li);
-    });
-  }
-
-  function confirmRow(index) {
-    const row = rows[index];
-    if (row && row.kind !== 'hint') { window.__spec.post('link', { type: 'confirm', id: row.id }); }
-  }
-
-  function move(delta) {
-    const nav = navigable();
-    if (nav.length === 0) { return; }
-    let pos = nav.indexOf(highlightedIndex);
-    if (pos < 0) { pos = 0; }
-    pos = (pos + delta + nav.length) % nav.length;
-    highlightedIndex = nav[pos];
-    highlightedId = rows[highlightedIndex].id;
-    render();
-    const active = results.children[highlightedIndex];
-    if (active) { active.scrollIntoView({ block: 'nearest' }); }
-  }
-
-  search.addEventListener('input', function () {
-    window.__spec.post('link', { type: 'search', value: search.value });
-  });
-
-  document.addEventListener('keydown', function (event) {
-    if (linkPane.hidden) { return; }
-    if (event.key === 'ArrowDown') { event.preventDefault(); move(1); }
-    else if (event.key === 'ArrowUp') { event.preventDefault(); move(-1); }
-    else if (event.key === 'Enter') { event.preventDefault(); confirmRow(highlightedIndex); }
-    else if (event.key === 'Escape') { event.preventDefault(); window.__spec.post('link', { type: 'cancel' }); }
-  });
-
-  window.__spec.register('link', function (msg) {
-    if (msg.type === 'reset') {
-      title.textContent = msg.title;
-      search.placeholder = msg.searchPlaceholder;
-      search.value = '';
-      rows = [];
-      linkedRows = [];
-      highlightedId = null;
-      highlightedIndex = -1;
-      busy.hidden = true;
-      renderLinked();
-      render();
-      setTimeout(function () { search.focus(); }, 0);
-    } else if (msg.type === 'rows') {
-      rows = msg.rows || [];
-      render();
-    } else if (msg.type === 'linked') {
-      linkedRows = msg.rows || [];
-      renderLinked();
-    } else if (msg.type === 'busy') {
-      busy.hidden = !msg.busy;
-    }
-  });`;
+      <input id="link-search" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="link-results" spellcheck="false" autocomplete="off" placeholder="">
+      <ul id="link-results" class="results" role="listbox"></ul>
+      <p class="footer">Enter to confirm · Esc to cancel <span id="link-busy" class="busy" role="status" aria-live="polite" hidden>· Searching…</span></p>`;
 
 export const LINK_FRAGMENT: SurfaceFragment = {
   css: LINK_CSS,
   paneHtml: LINK_PANE,
-  script: LINK_SCRIPT,
 };

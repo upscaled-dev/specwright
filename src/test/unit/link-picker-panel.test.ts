@@ -2,27 +2,28 @@ import { describe, it, expect } from "vitest";
 import { LinkSurface } from "../../traceability/link-picker-panel";
 import { LinkedRow, LinkPickerRow, LinkPickerUi } from "../../traceability/link-picker-flow";
 import { SurfaceHost, SurfaceName } from "../../traceability/webview-host";
+import type { LinkClientMessage } from "../../webview/protocol";
 
 // A fake SurfaceHost driving LinkSurface in isolation: `receive` delivers an inbound (webview) message
 // to the surface's handler, `posted` records outbound ones, `tabVisible` records setTabVisible calls,
 // `activations` records `activate` targets, and `dispose` fires the onDidDispose seam.
 interface FakeHost {
-  host: SurfaceHost;
+  host: SurfaceHost<"link">;
   posted: Array<{ type: string; [key: string]: unknown }>;
   tabVisible: Array<{ visible: boolean; title: string | undefined }>;
   activations: Array<SurfaceName | undefined>;
-  receive: (message: unknown) => void;
+  receive: (message: LinkClientMessage) => void;
   dispose: () => void;
 }
 
 function fakeHost(): FakeHost {
-  let messageHandler: ((message: unknown) => void) | undefined;
+  let messageHandler: ((message: LinkClientMessage) => void) | undefined;
   let disposeHandler: (() => void) | undefined;
   let disposed = false;
   const posted: Array<{ type: string; [key: string]: unknown }> = [];
   const tabVisible: Array<{ visible: boolean; title: string | undefined }> = [];
   const activations: Array<SurfaceName | undefined> = [];
-  const host: SurfaceHost = {
+  const host: SurfaceHost<"link"> = {
     post: (message) => posted.push(message as { type: string }),
     onMessage: (handler) => {
       messageHandler = handler;
@@ -76,6 +77,7 @@ describe("LinkSurface", () => {
     ui.onSearch((value) => searches.push(value));
     ui.onConfirm((id) => confirms.push(id));
     ui.onCancel(() => { cancels += 1; });
+    ui.setRows([ROW]);
 
     rig.receive({ type: "search", value: "CAL" });
     rig.receive({ type: "confirm", id: "CALC-1" });
@@ -107,6 +109,7 @@ describe("LinkSurface", () => {
     const unlinked: string[] = [];
     ui.onOpenLinked((key) => opened.push(key));
     ui.onUnlink((key) => unlinked.push(key));
+    ui.setLinked(LINKED);
 
     rig.receive({ type: "openLinked", key: "CALC-1" });
     rig.receive({ type: "unlink", key: "CALC-2" });
@@ -122,6 +125,7 @@ describe("LinkSurface", () => {
     ui.onSearch((value) => searches.push(value));
     ui.onOpenLinked(() => { /* informational */ });
     ui.onUnlink(() => { /* informational */ });
+    ui.setLinked(LINKED);
 
     rig.receive({ type: "openLinked", key: "CALC-1" });
     rig.receive({ type: "unlink", key: "CALC-2" });
@@ -175,11 +179,35 @@ describe("LinkSurface", () => {
     const searches: string[] = [];
     ui.onSearch((value) => searches.push(value));
     ui.onConfirm(() => { /* settle */ });
+    ui.setRows([ROW]);
 
     rig.receive({ type: "confirm", id: "CALC-1" });
     rig.receive({ type: "search", value: "late" });
 
     expect(searches).toEqual([]);
+  });
+
+  it("rejects confirm/open/unlink ids that are not in the currently painted rows", () => {
+    const rig = fakeHost();
+    const { ui } = begin(rig);
+    const confirms: string[] = [];
+    const opened: string[] = [];
+    const unlinked: string[] = [];
+    ui.onConfirm((id) => confirms.push(id));
+    ui.onOpenLinked((key) => opened.push(key));
+    ui.onUnlink((key) => unlinked.push(key));
+    ui.setRows([ROW]);
+    ui.setLinked(LINKED);
+
+    rig.receive({ type: "confirm", id: "FORGED-1" });
+    rig.receive({ type: "openLinked", key: "FORGED-2" });
+    rig.receive({ type: "unlink", key: "FORGED-3" });
+
+    expect(confirms).toEqual([]);
+    expect(opened).toEqual([]);
+    expect(unlinked).toEqual([]);
+    rig.receive({ type: "confirm", id: ROW.id });
+    expect(confirms).toEqual([ROW.id]);
   });
 
   it("exposes the Link fragment (title/placeholder scaffolding) for the shell document", () => {

@@ -16,6 +16,8 @@ export async function run(): Promise<void> {
   const api = await extension.activate();
   assert.ok(api.testProvider, "Installed extension did not expose its test provider");
 
+  await vscode.commands.executeCommand("testing.refreshTests");
+
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && api.testProvider.testIdToScenarioMap.size === 0) {
     await new Promise((resolve) => setTimeout(resolve, 50));

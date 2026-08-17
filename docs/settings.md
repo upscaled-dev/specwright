@@ -2,14 +2,13 @@
 
 All settings use the `playwrightBddRunner.*` prefix. Open VS Code Settings with `Cmd+,` on macOS or `Ctrl+,` on Windows and Linux, then search for **Specwright**. You can also add settings to `.vscode/settings.json`.
 
-<!-- Screenshot placeholder: ../images/specwright-settings.png
-Show VS Code Settings filtered to Specwright. Include execution and authoring settings, but no credentials. -->
+The current namespace remains the compatibility surface while a portable settings schema is still pending. There is no alternate namespace or migration to apply. Settings are grouped under Execution, Authoring, Compatibility, and Xray in VS Code's Settings editor; use the tables below to choose a setting without exposing workspace paths or credentials in a screenshot.
 
 Use the defaults first. Most projects only need a change when they use a different package manager, a monorepo, non-standard step directories, or a custom `playwright-bdd` output directory.
 
 Run, debug, generation, credential access, sync, publishing, attachments, and remote authoring require a [trusted workspace](https://code.visualstudio.com/docs/editing/workspaces/workspace-trust). Gherkin editing and navigation remain available without trust. Workspace values for privileged command and integration settings are ignored while the workspace is untrusted.
 
-## Run and discovery settings
+## Execution
 
 | Setting | Default | Use it when… |
 | --- | --- | --- |
@@ -25,20 +24,20 @@ Run, debug, generation, credential access, sync, publishing, attachments, and re
 | `reporter` | `list` | You want a different terminal reporter, several reporters, or a custom reporter module. Specwright still obtains JSON results for mapping. |
 | `useConfigReporters` | `false` | Your Playwright configuration already declares the reporters you want to run. It requires a bare `['json']` entry in that configuration. |
 | `dryRun` | `false` | You want Playwright to list the tests that would run without executing them. |
-| `enableCodeLens` | `true` | You need to hide Run and Debug links in feature files, for example because another extension supplies conflicting CodeLens items. |
 
-## Step discovery and authoring settings
+## Authoring
 
 | Setting | Default | Use it when… |
 | --- | --- | --- |
-| `stepDefinitionPaths` | `features/steps/**/*.ts`, `features/steps/**/*.js`, `tests/steps/**/*.ts`, `steps/**/*.ts` | Your step definitions use another directory or file type. This setting is resource-scoped, so each monorepo package can use its own paths. |
+| `enableCodeLens` | `true` | You need to hide Run and Debug links in feature files, for example because another extension supplies conflicting CodeLens items. |
+| `stepDefinitionPaths` | `features/steps/**/*.{ts,mts,cts,js,mjs,cjs}`, `tests/steps/**/*.{ts,mts,cts,js,mjs,cjs}`, `steps/**/*.{ts,mts,cts,js,mjs,cjs}` | Your step definitions use another directory or file type. The defaults cover `.ts`, `.mts`, `.cts`, `.js`, `.mjs`, and `.cjs` equally in all three roots. This setting is resource-scoped, so each monorepo package can use its own paths. |
 | `stepDefinitionExcludePaths` | empty | Generated or report files look like step definitions. Built-in exclusions already cover `node_modules`, the generated features directory, `playwright-report`, and `test-results`. |
 | `enableStepDefinitionNavigation` | `true` | You need to turn off Go to Definition from a feature step to its matching step definition. |
 | `enableStepDiagnostics` | `true` | You need to turn off missing-step, ambiguous-step, and Scenario Outline diagnostics. |
 | `enableStepsPanel` | `true` | You need to hide the Steps panel and release its index and file watchers. |
 | `collapseMarkdownExportSections` | `false` | You export large step or scenario catalogs and want their collapsible sections closed initially. |
 
-### Compatibility-mode settings
+## Compatibility
 
 The following settings accept `auto`, `on`, or `off` and default to `auto`:
 
@@ -55,13 +54,13 @@ The following settings accept `auto`, `on`, or `off` and default to `auto`:
 
 `auto` enables the feature unless [Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete) is installed. That avoids duplicate completions, hover cards, references, diagnostics, and formatting. Choose `on` to keep both extensions active, or `off` to disable the Specwright feature.
 
-## Xray Cloud traceability settings
+## Xray
 
 Xray support is experimental and available only for Xray Cloud. See [Xray traceability](traceability.md) before enabling remote workflows.
 
 | Setting | Default | Use it when… |
 | --- | --- | --- |
-| `traceability.enablePanel` | `true` | You need to show or hide the Traceability panel. Disabling it also releases its watchers. |
+| `traceability.enablePanel` | `false` | You need to explicitly show or hide the Traceability panel. Existing Xray settings or traceability tags can reveal it automatically unless this setting is explicitly false. Disabling it also releases its watchers. |
 | `traceability.provider` | `xray` | Selects the traceability backend. Xray is currently the only supported value. |
 | `traceability.testTagPrefix` | `TEST_` | Your scenario-to-test tags use another prefix. For example, `@TEST_CALC-1043` maps to `CALC-1043`. |
 | `traceability.reqTagPrefix` | `REQ_` | Your requirement-coverage tags use another prefix. |

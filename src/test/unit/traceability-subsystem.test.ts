@@ -125,6 +125,7 @@ interface TraceabilityConfigState {
   traceabilityTestTagPrefix: string;
   traceabilityReqTagPrefix: string;
   xraySiteUrl: string;
+  xrayApiRegion: string;
   xrayDefaultProjectKey: string;
 }
 
@@ -140,6 +141,7 @@ function makeConfig(initial?: Partial<TraceabilityConfigState>): {
     traceabilityTestTagPrefix: "TEST_",
     traceabilityReqTagPrefix: "REQ_",
     xraySiteUrl: "",
+    xrayApiRegion: "global",
     xrayDefaultProjectKey: "",
     ...initial,
   };
@@ -151,6 +153,7 @@ function makeConfig(initial?: Partial<TraceabilityConfigState>): {
     get traceabilityTestTagPrefix(): string { return state.traceabilityTestTagPrefix; },
     get traceabilityReqTagPrefix(): string { return state.traceabilityReqTagPrefix; },
     get xraySiteUrl(): string { return state.xraySiteUrl; },
+    get xrayApiRegion(): string { return state.xrayApiRegion; },
     get xrayDefaultProjectKey(): string { return state.xrayDefaultProjectKey; },
     addChangeListener(l: () => void): { dispose: () => void } {
       listener = l;
@@ -161,10 +164,14 @@ function makeConfig(initial?: Partial<TraceabilityConfigState>): {
 }
 
 interface FakeWatcher {
-  onDidCreate: () => { dispose: () => void };
-  onDidChange: () => { dispose: () => void };
-  onDidDelete: () => { dispose: () => void };
+  onDidCreate: (listener: () => void) => { dispose: () => void };
+  onDidChange: (listener: () => void) => { dispose: () => void };
+  onDidDelete: (listener: () => void) => { dispose: () => void };
   dispose: ReturnType<typeof vi.fn>;
+  fireCreate: () => void;
+  fireChange: () => void;
+  replayChange: () => void;
+  fireDelete: () => void;
 }
 
 function fakeAdapter(id: string, connection?: ConnectionCapability): TraceabilityAdapter {
@@ -207,7 +214,9 @@ function build(
   adapters?: Record<string, TraceabilityAdapter>,
   logger = Logger.create(),
   connection: ConnectionControl = makeConnection(),
-  memento: vscode.Memento = fakeMemento()
+  memento: vscode.Memento = fakeMemento(),
+  hasTraceabilityTags: () => Promise<boolean> = () => Promise.resolve(false),
+  closeSetupSurface: () => Promise<void> = () => Promise.resolve()
 ): {
   subsystem: TraceabilitySubsystem;
   created: FakeWatcher[];
@@ -215,6 +224,7 @@ function build(
   store: RunResultStore;
   discovery: TestDiscoveryManager;
   memento: vscode.Memento;
+  registry: TraceabilityAdapterRegistry;
 } {
   const registry = registryOf(adapters ?? { xray: fakeAdapter("xray", connection.connection) });
   const store = new RunResultStore();
@@ -227,22 +237,306 @@ function build(
     PlaywrightJsonParser.create(logger),
     store,
     logger,
-    memento
+    memento,
+    hasTraceabilityTags,
+    closeSetupSurface
   );
   subsystem.rebuildDebounceMs = 0;
   const created: FakeWatcher[] = [];
   vi.spyOn(vscode.workspace, "createFileSystemWatcher").mockImplementation(() => {
+    let create: (() => void) | undefined;
+    let change: (() => void) | undefined;
+    let recordedChange: (() => void) | undefined;
+    let deleted: (() => void) | undefined;
     const watcher: FakeWatcher = {
-      onDidCreate: () => ({ dispose: () => {} }),
-      onDidChange: () => ({ dispose: () => {} }),
-      onDidDelete: () => ({ dispose: () => {} }),
+      onDidCreate: (listener) => {create = listener; return { dispose: () => {create = undefined;} };},
+      onDidChange: (listener) => {
+        change = listener;
+        recordedChange = listener;
+        return { dispose: () => {change = undefined;} };
+      },
+      onDidDelete: (listener) => {deleted = listener; return { dispose: () => {deleted = undefined;} };},
       dispose: vi.fn(),
+      fireCreate: () => create?.(),
+      fireChange: () => change?.(),
+      replayChange: () => recordedChange?.(),
+      fireDelete: () => deleted?.(),
     };
     created.push(watcher);
     return watcher as unknown as vscode.FileSystemWatcher;
   });
-  return { subsystem, created, connection, store, discovery, memento };
+  return { subsystem, created, connection, store, discovery, memento, registry };
 }
+
+function evidenceConfig(
+  explicit: boolean | undefined,
+  configured: boolean
+): ExtensionConfig {
+  const { config } = makeConfig({ enableTraceabilityPanel: false });
+  Object.defineProperties(config, {
+    traceabilityPanelPreference: { get: () => explicit },
+    hasExplicitXrayConfiguration: { get: () => configured },
+  });
+  return config;
+}
+
+describe("TraceabilitySubsystem evidence-based activation", () => {
+  beforeEach(() => treeViews.__resetTreeViewCounters());
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps explicit false authoritative without scanning tags", async () => {
+    const tags = vi.fn().mockResolvedValue(true);
+    const { subsystem, created } = build(
+      evidenceConfig(false, true),
+      undefined,
+      Logger.create(),
+      makeConnection(),
+      fakeMemento(),
+      tags
+    );
+
+    await subsystem.applyCurrent();
+
+    expect(subsystem.traceabilityPanelActive).toBe(false);
+    expect(tags).not.toHaveBeenCalled();
+    expect(created).toHaveLength(0);
+    await subsystem.shutdown();
+  });
+
+  it("activates from configuration or tags only when no preference exists", async () => {
+    const configured = build(evidenceConfig(undefined, true));
+    const tagged = build(
+      evidenceConfig(undefined, false),
+      undefined,
+      Logger.create(),
+      makeConnection(),
+      fakeMemento(),
+      () => Promise.resolve(true)
+    );
+
+    await configured.subsystem.applyCurrent();
+    await tagged.subsystem.applyCurrent();
+
+    expect(configured.subsystem.traceabilityPanelActive).toBe(true);
+    expect(tagged.subsystem.traceabilityPanelActive).toBe(true);
+    await configured.subsystem.shutdown();
+    await tagged.subsystem.shutdown();
+  });
+
+  it("reveals the panel when the first traceability tag is added without an explicit preference", async () => {
+    let tagged = false;
+    const tags = vi.fn(() => Promise.resolve(tagged));
+    const { subsystem, created } = build(
+      evidenceConfig(undefined, false),
+      undefined,
+      Logger.create(),
+      makeConnection(),
+      fakeMemento(),
+      tags
+    );
+
+    await subsystem.applyCurrent();
+    expect(subsystem.traceabilityPanelActive).toBe(false);
+    expect(created).toHaveLength(1);
+
+    tagged = true;
+    created[0]!.fireChange();
+    await flush();
+    await flush();
+
+    expect(tags).toHaveBeenCalledTimes(2);
+    expect(subsystem.traceabilityPanelActive).toBe(true);
+    await subsystem.shutdown();
+  });
+
+  it("retires evidence callbacks after activation and leaves saves to the model watcher", async () => {
+    let tagged = false;
+    const tags = vi.fn(() => Promise.resolve(tagged));
+    const connection = makeConnection();
+    const isConnected = vi.spyOn(connection.connection, "isConnected");
+    const { subsystem, created, discovery } = build(
+      evidenceConfig(undefined, false),
+      undefined,
+      Logger.create(),
+      connection,
+      fakeMemento(),
+      tags
+    );
+    const discover = vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
+
+    await subsystem.applyCurrent();
+    const evidenceWatcher = created[0]!;
+    tagged = true;
+    evidenceWatcher.fireChange();
+    await flush();
+    await flush();
+
+    expect(subsystem.traceabilityPanelActive).toBe(true);
+    expect(evidenceWatcher.dispose).toHaveBeenCalledOnce();
+    const evidenceScans = tags.mock.calls.length;
+    const connectionProbes = isConnected.mock.calls.length;
+    const modelRebuilds = discover.mock.calls.length;
+
+    evidenceWatcher.replayChange();
+    evidenceWatcher.replayChange();
+    await flush();
+
+    expect(tags).toHaveBeenCalledTimes(evidenceScans);
+    expect(isConnected).toHaveBeenCalledTimes(connectionProbes);
+    expect(discover).toHaveBeenCalledTimes(modelRebuilds);
+
+    created[1]!.fireChange();
+    await flush();
+    await flush();
+
+    expect(discover.mock.calls.length).toBeGreaterThan(modelRebuilds);
+    await subsystem.shutdown();
+  });
+
+  it("replaces the evidence watcher when the feature pattern changes", async () => {
+    const config = evidenceConfig(undefined, false);
+    let pattern = config.testFilePattern;
+    Object.defineProperty(config, "testFilePattern", { get: () => pattern });
+    const { subsystem, created } = build(config);
+
+    await subsystem.applyCurrent();
+    const first = created[0]!;
+    pattern = "features/**/*.feature";
+    await subsystem.applyCurrent();
+
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect(created).toHaveLength(2);
+    await subsystem.shutdown();
+  });
+
+  it("rejects a retired watcher callback after the same evidence signature is restored", async () => {
+    const config = evidenceConfig(undefined, false);
+    const originalPattern = config.testFilePattern;
+    let pattern = originalPattern;
+    Object.defineProperty(config, "testFilePattern", { get: () => pattern });
+    const tags = vi.fn().mockResolvedValue(false);
+    const connection = makeConnection();
+    const probe = vi.spyOn(connection.connection, "isConnected");
+    const { subsystem, created, discovery, registry } = build(
+      config,
+      undefined,
+      Logger.create(),
+      connection,
+      fakeMemento(),
+      tags
+    );
+    const rebuild = vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
+    const activate = vi.spyOn(registry, "activate");
+
+    await subsystem.applyCurrent();
+    const retired = created[0]!;
+    pattern = "features/**/*.feature";
+    await subsystem.applyCurrent();
+    pattern = originalPattern;
+    await subsystem.applyCurrent();
+    const scans = tags.mock.calls.length;
+
+    retired.replayChange();
+    await flush();
+
+    expect(tags).toHaveBeenCalledTimes(scans);
+    expect(probe).not.toHaveBeenCalled();
+    expect(rebuild).not.toHaveBeenCalled();
+    expect(activate).not.toHaveBeenCalled();
+    await subsystem.shutdown();
+  });
+
+  it("restores evidence monitoring when a config change disables an active implicit panel", async () => {
+    const { config, set } = makeConfig({ enableTraceabilityPanel: false });
+    Object.defineProperties(config, {
+      traceabilityPanelPreference: { get: () => undefined },
+      hasExplicitXrayConfiguration: { get: () => false },
+    });
+    let tagged = true;
+    const { subsystem, created } = build(
+      config,
+      undefined,
+      Logger.create(),
+      makeConnection(),
+      fakeMemento(),
+      () => Promise.resolve(tagged)
+    );
+
+    await subsystem.applyCurrent();
+    const firstEvidenceWatcher = created[0]!;
+    expect(subsystem.traceabilityPanelActive).toBe(true);
+    expect(firstEvidenceWatcher.dispose).toHaveBeenCalledOnce();
+
+    tagged = false;
+    set({ traceabilityTestTagPrefix: "CASE_" });
+    await subsystem.applyCurrent();
+
+    expect(subsystem.traceabilityPanelActive).toBe(false);
+    expect(created.at(-1)).not.toBe(firstEvidenceWatcher);
+    expect(created.at(-1)?.dispose).not.toHaveBeenCalled();
+    await subsystem.shutdown();
+  });
+
+  it("restores evidence monitoring after active adapter replacement fails and can recover", async () => {
+    const { config, set } = makeConfig({ enableTraceabilityPanel: false });
+    Object.defineProperties(config, {
+      traceabilityPanelPreference: { get: () => undefined },
+      hasExplicitXrayConfiguration: { get: () => false },
+    });
+    const adapters = {
+      xray: fakeAdapter("xray"),
+      azure: fakeAdapter("azure"),
+    };
+    const { subsystem, created, registry } = build(
+      config,
+      adapters,
+      Logger.create(),
+      makeConnection(),
+      fakeMemento(),
+      () => Promise.resolve(true)
+    );
+    await subsystem.applyCurrent();
+    expect(subsystem.traceabilityPanelActive).toBe(true);
+
+    const activate = vi.spyOn(registry, "activate").mockRejectedValueOnce(
+      new Error("replacement failed")
+    );
+    set({ traceabilityProvider: "azure" });
+    await subsystem.applyCurrent();
+
+    expect(activate).toHaveBeenCalledOnce();
+    expect(subsystem.traceabilityPanelActive).toBe(false);
+    const restoredWatcher = created.at(-1)!;
+    expect(restoredWatcher.dispose).not.toHaveBeenCalled();
+
+    restoredWatcher.fireChange();
+    await flush();
+    await flush();
+
+    expect(activate).toHaveBeenCalledTimes(2);
+    expect(subsystem.traceabilityPanelActive).toBe(true);
+    expect(restoredWatcher.dispose).toHaveBeenCalledOnce();
+    await subsystem.shutdown();
+  });
+
+  it("never commits the enabled context when provider activation fails", async () => {
+    const execute = vi.spyOn(vscode.commands, "executeCommand");
+    const adapter = fakeAdapter("xray");
+    Object.defineProperty(adapter, "keyGrammar", {
+      get: () => {throw new Error("factory failed");},
+    });
+    const { subsystem } = build(makeConfig().config, { xray: adapter });
+
+    await subsystem.applyCurrent();
+
+    const enabledStates = execute.mock.calls
+      .filter((call) => call[0] === "setContext" && call[1] === "playwrightBddRunner.traceability.enabled")
+      .map((call) => call[2]);
+    expect(enabledStates.at(-1)).toBe(false);
+    expect(enabledStates).not.toContain(true);
+    await subsystem.shutdown();
+  });
+});
 
 describe("TraceabilitySubsystem grouping mode", () => {
   const GROUPING_KEY = "playwrightBddRunner.traceability.groupingMode";
@@ -426,6 +720,89 @@ describe("TraceabilitySubsystem lifecycle", () => {
     await subsystem.shutdown();
   });
 
+  it("waits for in-flight model work before disable completes teardown", async () => {
+    const { config, set } = makeConfig();
+    const { subsystem, created, store } = build(config);
+    await subsystem.applyCurrent();
+    await flush();
+    const model = (subsystem as unknown as { model: TraceabilityModel }).model;
+    let finish!: () => void;
+    const rebuild = vi.spyOn(model, "rebuild").mockImplementation(
+      () => new Promise<void>((resolve) => {finish = resolve;})
+    );
+
+    subsystem.scheduleRebuild();
+    await flush();
+    expect(rebuild).toHaveBeenCalled();
+    set({ enableTraceabilityPanel: false });
+    let disabled = false;
+    const disabling = subsystem.applyCurrent().then(() => {disabled = true;});
+    await flush();
+
+    expect(disabled).toBe(false);
+    store.ingest({ "/ws/during-disable.feature:2": "passed" });
+    subsystem.scheduleRebuild();
+    expect((subsystem as unknown as { rebuildTimer: unknown }).rebuildTimer).toBeUndefined();
+    finish();
+    await disabling;
+    expect(rebuild).toHaveBeenCalledOnce();
+    expect(subsystem.traceabilityPanelActive).toBe(false);
+    expect(created.every(({ dispose }) => dispose.mock.calls.length > 0)).toBe(true);
+    await subsystem.shutdown();
+  });
+
+  it("admits no run-result rebuild timer after the panel is disabled", async () => {
+    const { config, set } = makeConfig();
+    const { subsystem, store } = build(config);
+    await subsystem.applyCurrent();
+    await flush();
+    const model = (subsystem as unknown as { model: TraceabilityModel }).model;
+    const rebuild = vi.spyOn(model, "rebuild");
+
+    set({ enableTraceabilityPanel: false });
+    await subsystem.applyCurrent();
+    const afterDisable = rebuild.mock.calls.length;
+    store.ingest({ "/ws/disabled.feature:1": "passed" });
+    subsystem.scheduleRebuild();
+    await flush();
+
+    expect(rebuild).toHaveBeenCalledTimes(afterDisable);
+    expect((subsystem as unknown as { rebuildTimer: unknown }).rebuildTimer).toBeUndefined();
+    await subsystem.shutdown();
+  });
+
+  it("closes and drains the setup surface before disable completes", async () => {
+    const { config, set } = makeConfig();
+    let finish!: () => void;
+    let closed = false;
+    const firstClose = new Promise<void>((resolve) => {
+      finish = () => {closed = true; resolve();};
+    });
+    const close = vi.fn(() => closed ? Promise.resolve() : firstClose);
+    const { subsystem } = build(
+      config,
+      undefined,
+      Logger.create(),
+      makeConnection(),
+      fakeMemento(),
+      () => Promise.resolve(false),
+      close
+    );
+    await subsystem.applyCurrent();
+
+    set({ enableTraceabilityPanel: false });
+    let disabled = false;
+    const disabling = subsystem.applyCurrent().then(() => {disabled = true;});
+    await flush();
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(disabled).toBe(false);
+    finish();
+    await disabling;
+    expect(disabled).toBe(true);
+    await subsystem.shutdown();
+  });
+
   it("rebuilds watchers when the feature pattern changes", async () => {
     const { config, set, fireChange } = makeConfig();
     const { subsystem, created } = build(config);
@@ -462,6 +839,39 @@ describe("TraceabilitySubsystem lifecycle", () => {
     await subsystem.shutdown();
   });
 
+  it("rejects an explicitly awaited rebuild failure", async () => {
+    const { config } = makeConfig();
+    const { subsystem } = build(config);
+    await subsystem.applyCurrent();
+    await flush();
+    const model = (subsystem as unknown as { model: TraceabilityModel }).model;
+    vi.spyOn(model, "rebuild").mockRejectedValueOnce(new Error("rebuild failed"));
+
+    await expect(subsystem.rebuildNow()).rejects.toThrow("rebuild failed");
+
+    await subsystem.shutdown();
+  });
+
+  it("logs and absorbs a scheduled rebuild failure", async () => {
+    const logger = Logger.create();
+    const warned = vi.spyOn(logger, "warn");
+    const { config } = makeConfig();
+    const { subsystem } = build(config, undefined, logger);
+    await subsystem.applyCurrent();
+    await flush();
+    const model = (subsystem as unknown as { model: TraceabilityModel }).model;
+    vi.spyOn(model, "rebuild").mockRejectedValueOnce(new Error("scheduled failed"));
+
+    subsystem.scheduleRebuild();
+    await flush();
+    await flush();
+
+    expect(warned).toHaveBeenCalledWith("Traceability rebuild failed", {
+      error: "Error: scheduled failed",
+    });
+    await subsystem.shutdown();
+  });
+
   it("does not tear down watchers when only siteUrl changes", async () => {
     const { config, set, fireChange } = makeConfig();
     const { subsystem, created } = build(config);
@@ -478,6 +888,22 @@ describe("TraceabilitySubsystem lifecycle", () => {
       expect(w.dispose).not.toHaveBeenCalled();
     }
     expect(subsystem.traceabilityPanelActive).toBe(true);
+    await subsystem.shutdown();
+  });
+
+  it("disposes and recreates the live adapter when the normalized API region changes", async () => {
+    const { config, set, fireChange } = makeConfig({ xrayApiRegion: "global" });
+    const adapter = { ...fakeAdapter("xray"), dispose: vi.fn() };
+    const { subsystem } = build(config, { xray: adapter });
+    await subsystem.applyCurrent();
+
+    set({ xrayApiRegion: "au" });
+    fireChange();
+    await subsystem.applyCurrent();
+
+    expect(adapter.dispose).toHaveBeenCalledOnce();
+    expect(treeViews.__treeViewCounters.disposeCount).toBe(1);
+    expect(treeViews.__treeViewCounters.createCount).toBe(2);
     await subsystem.shutdown();
   });
 });
@@ -641,9 +1067,9 @@ describe("TraceabilitySubsystem connection state", () => {
     expect(connectedStates(exec).at(-1)).toBe(false);
   });
 
-  it("discards a probe that resolves true after teardown so the context key stays false", async () => {
+  it("drains an admitted connection-state probe and discards its teardown result", async () => {
     const exec = vi.spyOn(vscode.commands, "executeCommand");
-    const { config, set, fireChange } = makeConfig();
+    const { config, set } = makeConfig();
     const deferred = deferredConnection("acme.atlassian.net");
     const { subsystem } = build(config, undefined, Logger.create(), deferred);
 
@@ -651,15 +1077,17 @@ describe("TraceabilitySubsystem connection state", () => {
     await flush();
     expect(deferred.resolvers).toHaveLength(1);
 
-    set({ enableTraceabilityPanel: false });
-    fireChange();
-    await subsystem.applyCurrent();
     exec.mockClear();
+    set({ enableTraceabilityPanel: false });
+    let disabled = false;
+    const disabling = subsystem.applyCurrent().then(() => {disabled = true;});
+    await flush();
+    expect(disabled).toBe(false);
 
     deferred.resolvers[0]!(true);
-    await flush();
+    await disabling;
 
-    expect(connectedStates(exec)).not.toContain(true);
+    expect(connectedStates(exec)).toEqual([false]);
     await subsystem.shutdown();
   });
 
@@ -828,9 +1256,10 @@ describe("TraceabilitySubsystem connection indicator", () => {
     await subsystem.shutdown();
   });
 
-  it("discards a verify that resolves after dispose", async () => {
+  it("keeps disable pending until an admitted verifier settles, then discards its result", async () => {
     const setIndicator = spyIndicator();
-    const { config } = makeConfig();
+    const execute = vi.spyOn(vscode.commands, "executeCommand");
+    const { config, set } = makeConfig();
     const deferred = deferredVerifyConnection("acme.atlassian.net");
     const conn: ConnectionControl = {
       connection: deferred.connection,
@@ -844,13 +1273,27 @@ describe("TraceabilitySubsystem connection indicator", () => {
     await flush();
     expect(deferred.resolvers).toHaveLength(1);
 
-    await subsystem.shutdown();
-    deferred.resolvers[0]!({ status: "ok", message: "too late" });
+    execute.mockClear();
+    set({ enableTraceabilityPanel: false });
+    let disabled = false;
+    const disabling = subsystem.applyCurrent().then(() => {disabled = true;});
     await flush();
+
+    expect(disabled).toBe(false);
+    deferred.fire();
+    await flush();
+    expect(deferred.resolvers).toHaveLength(1);
+
+    deferred.resolvers[0]!({ status: "ok", message: "too late" });
+    await disabling;
 
     const calls = indicatorCalls(setIndicator);
     expect(calls.at(-1)).toEqual({ state: "checking", label: "acme.atlassian.net", message: "Checking connection…" });
     expect(calls).not.toContainEqual({ state: "ok", label: "acme.atlassian.net", message: "too late" });
+    expect(execute.mock.calls
+      .filter((call) => call[0] === "setContext" && call[1] === "playwrightBddRunner.traceability.connected")
+      .map((call) => call[2])).toEqual([false]);
+    await subsystem.shutdown();
   });
 
   it("clears the indicator when the connected adapter's connection has no verify", async () => {

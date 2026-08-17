@@ -7,7 +7,7 @@ import {
   resolveBoardUnlink,
 } from "../traceability/board-data";
 import { BoardPanel } from "../traceability/board-panel";
-import { KeyGrammar, NewTestSpec, TraceabilityAdapter } from "../traceability/contracts";
+import { AuthoredTest, KeyGrammar, NewTestSpec, TraceabilityAdapter } from "../traceability/contracts";
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
 import {
   authorScenarioTest,
@@ -28,6 +28,7 @@ import {
 import { Logger } from "../utils/logger";
 import { errMsg } from "../utils/text";
 import type { WorkspaceTrust } from "../core/workspace-trust";
+import { providerWarnings } from "../traceability/provider-warnings";
 
 const REJECTED_WRITE = "the feature file edit was not applied";
 
@@ -43,6 +44,15 @@ export interface TraceabilityLinkCommandDeps {
   readonly board: () => BoardPanel;
   readonly siteUrl: () => string;
   readonly workspaceTrust: WorkspaceTrust;
+  readonly scheduleProjectSync: (project: string, diagnostics?: Iterable<string>) => void;
+  // A created key's best-effort metadata read stays part of the owning board mutation, so the
+  // project sync queued behind it cannot race and overwrite a newer targeted merge.
+  readonly trackReconciliation: (run: () => Promise<void>) => void;
+}
+
+function* createDiagnostics(test: AuthoredTest | undefined, failure: string | undefined): IterableIterator<string> {
+  if (failure !== undefined) {yield failure;}
+  for (const warning of test?.warnings ?? []) {yield warning;}
 }
 
 function issueKeyFromArg(arg: unknown): string | undefined {
@@ -240,9 +250,14 @@ export class TraceabilityLinkCommands {
       },
     };
     const merge = (key: string): void => this.merge(adapter, key);
+    let authored: AuthoredTest | undefined;
+    let failure: string | undefined;
     try {
       await authorScenarioTest(spec, adapter.label, ui, {
-        createTest: (input, signal) => authoring.createTest(input, signal),
+        createTest: async (input, signal) => {
+          authored = await authoring.createTest(input, signal);
+          return authored;
+        },
         insertTag: async (key) => {
           if ((await this.applyTagInsert(scenario, key, adapter.keyGrammar)) === "rejected") {
             merge(key);
@@ -254,11 +269,26 @@ export class TraceabilityLinkCommands {
         merge,
       });
     } catch (error) {
+      failure = errMsg(error);
       this.logger.error("Create test from scenario failed", { error: errMsg(error) });
       vscode.window.showErrorMessage(
         error instanceof TagWriteRejected
           ? error.message
           : `Could not create the ${adapter.label} test: ${errMsg(error)}`
+      );
+    } finally {
+      const warnings = providerWarnings(authored?.warnings ?? []);
+      if (warnings.count > 0) {
+        this.logger.warn(`${adapter.label} returned warnings creating a test`, {
+          scenario: scenario.name,
+          ...(authored?.key !== undefined ? { key: authored.key } : {}),
+          warnings: warnings.detail,
+          warningsOmitted: warnings.omitted,
+        });
+      }
+      this.deps.scheduleProjectSync(
+        project,
+        authored === undefined ? createDiagnostics(authored, failure) : undefined
       );
     }
   }
@@ -267,12 +297,19 @@ export class TraceabilityLinkCommands {
     this.merge(this.deps.activeAdapter(), key);
   }
 
-  // Fire-and-forget: metadata freshness is best-effort and must never block a create flow.
+  // Best-effort and background to the create flow, but activity-tracked so its later project sync
+  // cannot run concurrently with this targeted metadata commit.
   private merge(adapter: TraceabilityAdapter | undefined, key: string): void {
-    adapter?.remoteSearch?.mergeKeys([key]).catch((error) => {
-      this.logger.warn("Xray metadata merge for a newly created test failed", {
-        error: errMsg(error),
-      });
+    const remoteSearch = adapter?.remoteSearch;
+    if (remoteSearch === undefined) {return;}
+    this.deps.trackReconciliation(async () => {
+      try {
+        await remoteSearch.mergeKeys([key]);
+      } catch (error) {
+        this.logger.warn("Xray metadata merge for a newly created test failed", {
+          error: errMsg(error),
+        });
+      }
     });
   }
 

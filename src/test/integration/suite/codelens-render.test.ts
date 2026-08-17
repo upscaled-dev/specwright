@@ -71,10 +71,13 @@ suite("CodeLens rendering on .feature files", () => {
       "expected a feature-level CodeLens with title containing 'Run Feature File'"
     );
 
-    const hasTagLens = featureLevel.some((l) => l.command?.title?.includes("@") ?? false);
+    const hasTagLens = featureLevel.some((l) =>
+      l.command?.title?.includes("Run by tag") &&
+      l.command.command === "playwrightBddRunner.runFeatureFileWithTags"
+    );
     assert.ok(
       hasTagLens,
-      "expected at least one feature-level tag CodeLens (title containing '@')"
+      "expected the feature-level 'Run by tag' CodeLens"
     );
   });
 

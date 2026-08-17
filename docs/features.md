@@ -2,6 +2,8 @@
 
 Specwright adds Gherkin authoring tools to `.feature` files and connects them to the `playwright-bdd` step definitions in your workspace. Most features work as you type and update when feature or step files change.
 
+Default step discovery covers `.ts`, `.mts`, `.cts`, `.js`, `.mjs`, and `.cjs` files equally under `features/steps`, `tests/steps`, and `steps`.
+
 ## Write feature files
 
 ### Syntax, outline, and snippets
@@ -33,10 +35,7 @@ Run **Format Document** on a `.feature` file to align pipes in step data tables 
 
 ### Missing steps
 
-An unmatched Gherkin step receives a red diagnostic. Choose the lightbulb and select **Create Step Definition** to generate a typed stub for that step. You can also generate definitions for every missing step in the active feature file.
-
-<!-- Screenshot placeholder: ../images/missing-step-quick-fix.png
-Show an unmatched-step diagnostic in a .feature file and the Create Step Definition Code Action. -->
+An unmatched Gherkin step receives a red diagnostic. Choose the lightbulb and select **Create Step Definition** to generate a typed stub for that step. You can also generate definitions for every missing step in the active feature file. The generated stub belongs in a configured step-definition path, so review its location before saving.
 
 ### Ambiguous steps
 
@@ -112,7 +111,7 @@ Set the relevant compatibility-mode setting to:
 - `on` to keep both extensions active.
 - `off` to disable the Specwright feature.
 
-See [Settings](settings.md#compatibility-mode-settings) for the complete list.
+See [Settings](settings.md#compatibility) for the complete list.
 
 ## Xray traceability
 
@@ -121,5 +120,5 @@ The separate **Traceability** panel is for experimental Xray Cloud workflows, in
 ## Next steps
 
 - [Run and debug tests](runs.md)
-- [Configure step discovery and authoring features](settings.md#step-discovery-and-authoring-settings)
+- [Configure step discovery and authoring features](settings.md#authoring)
 - [Troubleshoot missing, ambiguous, or unavailable step features](troubleshooting.md)

@@ -1,6 +1,6 @@
 # Run and debug tests
 
-Specwright discovers `.feature` files and presents their scenarios in VS Code's **Testing** view. You can run or debug the whole workspace, one feature, one scenario, a Scenario Outline, or one Examples row.
+Specwright discovers `.feature` files and presents their scenarios in VS Code's **Testing** view. Discovery starts when the Testing view resolves, when you refresh, or when a run needs tests. It does not perform a full workspace discovery during ordinary startup. You can run or debug the whole workspace, one feature, one scenario, a Scenario Outline, or one Examples row.
 
 ## Before you run
 
@@ -39,7 +39,7 @@ Each Examples row is a first-class item in the Testing view and receives its own
 
 ### Run by tag
 
-Use **Run with @tag** above a feature, or configure a default tag expression with `playwrightBddRunner.tags`. The expression is passed to `bddgen`, so only matching specs are generated.
+Use **Run by tag…** above a tagged feature and enter an expression, or configure a default expression with `playwrightBddRunner.tags`. The expression is passed to `bddgen`, so only matching specs are generated.
 
 ### Run in parallel
 
@@ -53,13 +53,13 @@ Set `playwrightBddRunner.preRunCommand` when a build, fixture setup, or other lo
 
 ## Organize the Testing view
 
-Use **Set Organization Strategy** to switch among:
+Use **Group tests by** to choose:
 
-- Hierarchical by feature
-- By tag
-- By file
-- By scenario type
-- Flat
+- Tags
+- File
+- Scenario type
+- None
+- Feature
 
 The selection changes only the Testing view. It does not move or modify feature files.
 
@@ -80,16 +80,11 @@ The debugger pauses in the generated specification, or in your step definition a
 
 If your project writes generated specs outside `.features-gen`, set `playwrightBddRunner.featuresGenDir` to the matching directory. Step-definition breakpoints still work if a feature-file breakpoint cannot be mapped.
 
-![Debugging a feature with breakpoints](../images/debugging_feature.gif)
-
 ## Read results
 
 While a run is active, the **Test Results** panel streams Playwright and `bddgen` output, marks each completed scenario, and writes lines such as `[127 / 500]`. After the run, it shows the final scenario summary with Gherkin steps, durations, failures, and clickable stack traces.
 
-Specwright keeps only the newest 256 KiB from stdout and stderr as diagnostic tails. The full process output still streams to Test Results. If a tail is truncated, a notice reports its retained and discarded byte counts. A Playwright JSON report larger than 16 MiB stops result ingestion for that run with a specific size-limit message; a workspace report over the limit is skipped for board badges instead of blocking them. Inline report attachments of any size are accepted, and file-based evidence paths are unaffected.
-
-<!-- Screenshot placeholder: ../images/test-results.png
-Show VS Code Test Results for one failed scenario, including a failing Gherkin step and a clickable stack trace. Remove sensitive paths and data. -->
+Specwright keeps only the newest 256 KiB from stdout and stderr as diagnostic tails. The full process output still streams to Test Results. If a tail is truncated, a notice reports its retained and discarded byte counts. A Playwright JSON report larger than 16 MiB stops result ingestion for that run with a specific size-limit message; a workspace report over the limit is skipped for board badges instead of blocking them. File-based reports are parsed in an isolated worker with a 128 MiB old-generation heap limit. Inline attachment bodies are ignored, but their encoded bytes still count toward the whole-report limit; file-based evidence paths are unaffected.
 
 - A retry that eventually passes is reported as passed.
 - If the same scenario runs in multiple Playwright projects, the least successful result is shown.
@@ -108,10 +103,10 @@ Palette run and debug commands use the active `.feature` file. If none is open, 
 
 | Task | Commands |
 | --- | --- |
-| Discover or refresh tests | **Discover Tests**, **Refresh Tests** |
+| Discover tests | **Discover Tests** |
 | Run tests | **Run All Tests**, **Run All Tests in Parallel**, **Run Feature File**, **Run Scenario**, **Run Scenario with Tags**, **Run Feature File with Tags** |
 | Debug tests | **Debug Scenario** |
-| Change the Testing view | **Set Organization Strategy**, **Organize by Tags**, **Organize by File**, **Organize by Scenario Type**, **Flat Organization**, **Hierarchical Organization** |
+| Change the Testing view | **Group tests by**: **Tags**, **File**, **Scenario type**, **None**, or **Feature** |
 | Inspect the extension | **Show Test Output**, **Validate Configuration** |
 
 CodeLens and menu actions continue to pass their exact target. The Testing view and CodeLens are the clearest way to choose an individual Scenario Outline Examples row.
@@ -124,6 +119,6 @@ CodeLens and menu actions continue to pass their exact target. The Testing view 
 
 ## Next steps
 
-- [Configure commands, reports, tags, workers, and output directories](settings.md#run-and-discovery-settings)
+- [Configure commands, reports, tags, workers, and output directories](settings.md#execution)
 - [Write and maintain feature files](features.md)
 - [Troubleshoot runs and debugging](troubleshooting.md)

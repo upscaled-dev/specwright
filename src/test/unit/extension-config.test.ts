@@ -19,11 +19,13 @@ function declaredDefaults(): Record<string, unknown> {
   const packageJson = JSON.parse(
     fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf8")
   ) as {
-    contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
+    contributes: { configuration: Array<{ properties: Record<string, { default?: unknown }> }> };
   };
   const result: Record<string, unknown> = {};
-  for (const [key, schema] of Object.entries(packageJson.contributes.configuration.properties)) {
-    result[key.replace("playwrightBddRunner.", "")] = schema.default;
+  for (const group of packageJson.contributes.configuration) {
+    for (const [key, schema] of Object.entries(group.properties)) {
+      result[key.replace("playwrightBddRunner.", "")] = schema.default;
+    }
   }
   return result;
 }
@@ -80,11 +82,64 @@ describe("ExtensionConfig defaults vs package.json", () => {
     expect(Object.keys(GETTER_FOR_SETTING).sort()).toEqual(Object.keys(declared).sort());
   });
 
+  it("uses the same six-format glob in each default step root", () => {
+    expect(declared["stepDefinitionPaths"]).toEqual([
+      "features/steps/**/*.{ts,mts,cts,js,mjs,cjs}",
+      "tests/steps/**/*.{ts,mts,cts,js,mjs,cjs}",
+      "steps/**/*.{ts,mts,cts,js,mjs,cjs}",
+    ]);
+    expect(config.stepDefinitionPaths).toEqual(declared["stepDefinitionPaths"]);
+  });
+
   for (const [setting, getter] of Object.entries(GETTER_FOR_SETTING)) {
     it(`getter default for "${setting}" matches the declared default`, () => {
       expect(getter(config)).toEqual(declared[setting]);
     });
   }
+});
+
+describe("package.json setting organization", () => {
+  interface SettingSchema {
+    order?: number;
+    enum?: unknown[];
+    enumDescriptions?: string[];
+  }
+  const groups = (JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf8")
+  ) as {
+    contributes: { configuration: Array<{
+      title: string;
+      order?: number;
+      properties: Record<string, SettingSchema>;
+    }> };
+  }).contributes.configuration;
+
+  it("uses the stable Execution, Authoring, Compatibility, and Xray order", () => {
+    expect(groups.map(({ title, order }) => [title, order])).toEqual([
+      ["Specwright: Execution", 10],
+      ["Specwright: Authoring", 20],
+      ["Specwright: Compatibility", 30],
+      ["Specwright: Xray", 40],
+    ]);
+  });
+
+  it("gives every property an explicit increasing order within its group", () => {
+    for (const group of groups) {
+      const orders = Object.values(group.properties).map(({ order }) => order);
+      expect(orders.every((order) => typeof order === "number"), group.title).toBe(true);
+      expect(orders, group.title).toEqual([...orders].sort((a, b) => a! - b!));
+      expect(new Set(orders).size, group.title).toBe(orders.length);
+    }
+  });
+
+  it("aligns enum descriptions with every enum value", () => {
+    for (const group of groups) {
+      for (const [setting, schema] of Object.entries(group.properties)) {
+        if (!schema.enum) {continue;}
+        expect(schema.enumDescriptions, setting).toHaveLength(schema.enum.length);
+      }
+    }
+  });
 });
 
 describe("ExtensionConfig.validate", () => {
@@ -184,6 +239,50 @@ describe("ExtensionConfig xray publish settings", () => {
     expect(ExtensionConfig.create(configured, false).xrayExecutionIssueType).toBe("Sub-Test Execution");
     const blank = configReturning({ "xray.executionIssueType": "   " });
     expect(ExtensionConfig.create(blank, false).xrayExecutionIssueType).toBe("Test Execution");
+  });
+});
+
+describe("ExtensionConfig traceability preference", () => {
+  function inspectedConfig(
+    effective: boolean,
+    inspection: Record<string, unknown>
+  ): vscode.WorkspaceConfiguration {
+    return {
+      get: <T>(key: string, fallback?: T): T | undefined =>
+        key === "traceability.enablePanel" ? (effective as T) : fallback,
+      update: (): Promise<void> => Promise.resolve(),
+      inspect: (key: string): Record<string, unknown> =>
+        key === "traceability.enablePanel" ? { key, ...inspection } : { key },
+    } as unknown as vscode.WorkspaceConfiguration;
+  }
+
+  it("distinguishes the clean-install default from explicit false at supported scopes", () => {
+    const clean = ExtensionConfig.create(inspectedConfig(false, {}), false);
+    const globalFalse = ExtensionConfig.create(
+      inspectedConfig(false, { globalValue: false }),
+      false
+    );
+    const workspaceFalse = ExtensionConfig.create(
+      inspectedConfig(false, { workspaceValue: false }),
+      false
+    );
+
+    expect(clean.traceabilityPanelPreference).toBeUndefined();
+    expect(globalFalse.traceabilityPanelPreference).toBe(false);
+    expect(workspaceFalse.traceabilityPanelPreference).toBe(false);
+  });
+
+  it("detects existing Xray configuration without treating defaults as user settings", () => {
+    const configured = {
+      get: <T>(_key: string, fallback?: T): T | undefined => fallback,
+      update: (): Promise<void> => Promise.resolve(),
+      inspect: (key: string): Record<string, unknown> =>
+        key === "xray.siteUrl" ? { key, workspaceValue: "acme.atlassian.net" } : { key },
+    } as unknown as vscode.WorkspaceConfiguration;
+
+    expect(ExtensionConfig.create(defaultsOnlyConfig(), false).hasExplicitXrayConfiguration)
+      .toBe(false);
+    expect(ExtensionConfig.create(configured, false).hasExplicitXrayConfiguration).toBe(true);
   });
 });
 

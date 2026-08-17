@@ -327,6 +327,24 @@ export interface NewExecutionSpec {
   readonly summary: string;
 }
 
+export type TestContainerKind = "test-set" | "test-plan";
+
+// An existing Test Set / Test Plan resolved by its exact provider key. The read returns the remote
+// issue id because Xray's membership mutations take that id, never the human-facing key.
+export interface TestContainerTarget {
+  readonly kind: TestContainerKind;
+  readonly key: string;
+  readonly issueId: string;
+}
+
+// Xray reports only tests it added, not the container's final membership. `addedTests` is optional at
+// this neutral boundary because an otherwise successful response may carry no readable list; callers
+// must then report the count as unreadable instead of inventing zero.
+export interface AddTestsToContainerResult {
+  readonly addedTests?: readonly string[] | undefined;
+  readonly warning?: string | undefined;
+}
+
 // The authored issue (a test, or one of the containers the seams below create), read back from the SAME
 // create response, no follow-up fetch. `key` is absent only when the response carried no readable key:
 // the issue still exists remotely (and `issueId` may pin it), so the flow surfaces that rather than
@@ -348,6 +366,19 @@ export interface TestAuthoringCapability {
   // calling. A container short of members cannot be repaired from the response.
   createTestSet?(spec: NewContainerSpec, signal?: AbortSignal): Promise<AuthoredTest>;
   createTestPlan?(spec: NewContainerSpec, signal?: AbortSignal): Promise<AuthoredTest>;
+  // Optional existing-container seam. Resolution is type-specific and exact-key; the subsequent
+  // membership write is addressed by the returned issue id and is deliberately one mutation.
+  resolveTestContainer?(
+    kind: TestContainerKind,
+    key: string,
+    signal?: AbortSignal
+  ): Promise<TestContainerTarget | undefined>;
+  addTestsToContainer?(
+    kind: TestContainerKind,
+    issueId: string,
+    testIssueIds: readonly string[],
+    signal?: AbortSignal
+  ): Promise<AddTestsToContainerResult>;
   // Optional: create an empty Test Execution to publish results into later. It takes no members, so it
   // has no issue ids to resolve and no selection to read.
   createTestExecution?(spec: NewExecutionSpec, signal?: AbortSignal): Promise<AuthoredTest>;

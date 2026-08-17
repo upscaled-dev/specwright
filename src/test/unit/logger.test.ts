@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
+import { SupportDiagnostics } from "../../core/support-diagnostics";
 
 function makeChannel(): { lines: string[]; channel: vscode.OutputChannel } {
   const lines: string[] = [];
@@ -131,5 +132,22 @@ describe("Logger", () => {
     const payload = lines.join("\n");
     expect(payload).toContain('"message": "boom"');
     expect(payload).toContain('"stack"');
+  });
+
+  it("contains output channel failures after retaining every level", () => {
+    const channel = { appendLine: (): void => { throw new Error("output unavailable"); }, show: (): void => { throw new Error("show unavailable"); }, dispose: (): void => { throw new Error("dispose unavailable"); } } as unknown as vscode.OutputChannel;
+    const diagnostics = new SupportDiagnostics();
+    const logger = Logger.create(channel, LogLevel.DEBUG, diagnostics);
+    expect(() => { logger.debug("debug"); logger.info("info"); logger.warn("warn"); logger.error("error"); logger.showOutput(); }).not.toThrow();
+    expect(diagnostics.retainedRecords().map(record => record.level)).toEqual(["debug", "info", "warn", "error"]);
+    expect(() => logger.dispose()).not.toThrow();
+  });
+
+  it("falls back when creating the default output channel fails", () => {
+    vi.spyOn(vscode.window, "createOutputChannel").mockImplementation(() => { throw new Error("unavailable"); });
+    const logger = Logger.create();
+    expect(() => { logger.info("retained"); logger.showOutput(); }).not.toThrow();
+    expect(logger.supportDiagnostics.retainedRecords()).toHaveLength(1);
+    expect(() => logger.dispose()).not.toThrow();
   });
 });

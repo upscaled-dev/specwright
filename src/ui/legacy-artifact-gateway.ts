@@ -17,10 +17,12 @@ import type { RunArtifactStore } from "../traceability/run-artifact-store";
 import type { Logger } from "../utils/logger";
 import type { TestExecutor } from "../core/test-executor";
 import {
+  executionClientContext,
   executionClientContextForCapture,
   type ArtifactOwnershipResolver,
   type ClientRunIntent,
 } from "./execution-client-context";
+import { randomUUID } from "node:crypto";
 
 export class LegacyArtifactGateway implements ExecutionGateway {
   private readonly captures = new Map<string, ReturnType<typeof executionClientContextForCapture>>();
@@ -39,8 +41,9 @@ export class LegacyArtifactGateway implements ExecutionGateway {
   public execute(intent: ClientRunIntent, options?: ExecutionOptions): Promise<RunCompletion>;
   public execute(intent: RunIntent, options?: ExecutionOptions): Promise<RunCompletion>;
   public async execute(intent: RunIntent, options?: ExecutionOptions): Promise<RunCompletion> {
-    const prepared = await this.prepare(intent);
-    return intent.mode === "debug" ? this.debug(prepared, options) : this.run(prepared, options);
+    const startedAt = Date.now();
+    const prepared = await this.prepare(intent, startedAt);
+    return this.executeCaptured(prepared, options, intent.mode, startedAt);
   }
 
   public onEvent(listener: (event: ExecutionEvent) => void) {
@@ -54,21 +57,36 @@ export class LegacyArtifactGateway implements ExecutionGateway {
     return this.engine.discover(options);
   }
 
-  public async prepare(intent: RunIntent): Promise<PreparedExecution> {
-    const prepared = await this.engine.prepare(intent);
-    this.captures.set(
-      prepared.operationId,
-      executionClientContextForCapture(intent, this.artifactOwnership)
-    );
-    return prepared;
+  public async prepare(intent: RunIntent, startedAt = Date.now()): Promise<PreparedExecution> {
+    const initiatedBy = executionClientContext(intent)?.initiatedBy ?? "unknown";
+    try {
+      const capture = executionClientContextForCapture(intent, this.artifactOwnership);
+      const prepared = await this.engine.prepare(intent);
+      this.captures.set(prepared.operationId, capture);
+      return prepared;
+    } catch (error) {
+      this.logLifecycle(
+        { operationId: randomUUID(), identity: { engine: "legacy-direct", schemaProfile: "unknown" }, intent },
+        intent.mode,
+        startedAt,
+        "prepare-rejected",
+        "missing",
+        "failed",
+        undefined,
+        undefined,
+        undefined,
+        initiatedBy
+      );
+      throw error;
+    }
   }
 
   public run(prepared: PreparedExecution, options?: ExecutionOptions): Promise<RunCompletion> {
-    return this.executeCaptured(prepared, options, "run");
+    return this.executeCaptured(prepared, options, "run", Date.now());
   }
 
   public debug(prepared: PreparedExecution, options?: ExecutionOptions): Promise<RunCompletion> {
-    return this.executeCaptured(prepared, options, "debug");
+    return this.executeCaptured(prepared, options, "debug", Date.now());
   }
 
   public cancel(prepared?: PreparedExecution): Promise<void> {return this.engine.cancel(prepared);}
@@ -82,7 +100,8 @@ export class LegacyArtifactGateway implements ExecutionGateway {
   private async executeCaptured(
     prepared: PreparedExecution,
     options: ExecutionOptions,
-    mode: "run" | "debug"
+    mode: "run" | "debug",
+    startedAt: number
   ): Promise<RunCompletion> {
     const capture = this.captures.get(prepared.operationId);
     this.captures.delete(prepared.operationId);
@@ -96,17 +115,28 @@ export class LegacyArtifactGateway implements ExecutionGateway {
     if (!capture) {
       try {
         const completion = await this.engine[mode](prepared, forwarded);
+        this.logLifecycle(prepared, mode, startedAt, completion.state, "missing", "confirmed", completion);
         this.emit({ kind: "finished", completion }, options?.onEvent);
         return completion;
       } catch (error) {
         if (error instanceof ExecutionFailure) {
+          this.logLifecycle(prepared, mode, startedAt, error.completion.state, "missing", "failed", error.completion);
           this.emit({ kind: "finished", completion: error.completion }, options?.onEvent);
         }
+        if (!(error instanceof ExecutionFailure)) { this.logLifecycle(prepared, mode, startedAt, "unexpected-rejection", "missing", "failed"); }
         throw error;
       }
     }
-    const handle = this.artifacts.beginBatch(capture.selection, capture.decisions ?? []);
-    const sink = this.executor.registerArtifactSink(handle, this.artifacts);
+    let handle: number;
+    try { handle = this.artifacts.beginBatch(capture.selection, capture.decisions ?? []); }
+    catch (error) { this.logLifecycle(prepared, mode, startedAt, "batch-rejected", "captured", "failed", undefined, capture); throw error; }
+    let sink: { dispose(): void } | undefined;
+    try { sink = this.executor.registerArtifactSink(handle, this.artifacts); }
+    catch (error) {
+      const artifactId = this.seal(handle, "partial");
+      this.logLifecycle(prepared, mode, startedAt, "sink-rejected", "captured", "failed", undefined, capture, artifactId);
+      throw error;
+    }
     try {
       const completion = await this.engine.executeWithArtifactBatch(
         { ...prepared.intent, mode },
@@ -115,19 +145,51 @@ export class LegacyArtifactGateway implements ExecutionGateway {
         capture.artifactOwnership
       );
       const sealed = this.withArtifact(completion, handle);
+      this.logLifecycle(prepared, mode, startedAt, sealed.state, "captured", "confirmed", sealed, capture);
       this.emit({ kind: "finished", completion: sealed }, options?.onEvent);
       return sealed;
     } catch (error) {
       if (error instanceof ExecutionFailure) {
         const sealed = this.withArtifact(error.completion, handle);
+        this.logLifecycle(prepared, mode, startedAt, sealed.state, "captured", "failed", sealed, capture);
         this.emit({ kind: "finished", completion: sealed }, options?.onEvent);
         throw new ExecutionFailure(sealed);
       }
-      this.seal(handle, "partial");
+      const artifactId = this.seal(handle, "partial");
+      this.logLifecycle(prepared, mode, startedAt, "unexpected-rejection", "captured", "failed", undefined, capture, artifactId);
       throw error;
     } finally {
-      sink.dispose();
+      try { sink.dispose(); } catch { /* a sink cannot affect execution */ }
     }
+  }
+
+  private logLifecycle(
+    prepared: PreparedExecution,
+    mode: "run" | "debug",
+    startedAt: number,
+    state: string,
+    captureState: "captured" | "missing",
+    outcomeCertainty: "confirmed" | "failed",
+    completion?: RunCompletion,
+    capture?: ReturnType<typeof executionClientContextForCapture>,
+    artifactId?: string,
+    initiatedBy?: string
+  ): void {
+    try {
+      this.logger.info("Legacy execution lifecycle", {
+        operationId: prepared.operationId,
+        mode,
+        engine: "legacy-direct",
+        schemaProfile: prepared.identity.schemaProfile ?? "unknown",
+        initiatedBy: capture?.initiatedBy ?? initiatedBy ?? "unknown",
+        durationMs: Date.now() - startedAt,
+        state,
+        outcomeCertainty,
+        cancelled: completion?.state === "cancelled",
+        captureState,
+        ...(artifactId ?? completion?.artifactId ? { artifactId: artifactId ?? completion?.artifactId } : {}),
+      });
+    } catch { /* lifecycle diagnostics cannot affect execution */ }
   }
 
   private emit(

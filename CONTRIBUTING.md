@@ -39,7 +39,7 @@ npm run test:integration
 
 Integration tests live under [src/test/integration/](src/test/integration/) and cover what the Vitest `vscode` stub can't reach: real `TestController` behavior, `TestItem` tree population, run-profile registration, and other extension-host APIs. The script compiles the integration suite with a separate [tsconfig.integration.json](tsconfig.integration.json), then launches a real VS Code instance against the fixture workspace at [src/test/integration/fixtures/workspace/](src/test/integration/fixtures/workspace/).
 
-Current suites cover `scenarioByTestId` map population across all 5 organization strategies and Test Explorer run-profile registration.
+Current suites cover `scenarioByTestId` map population across all 5 organization strategies, provider lifecycle and lazy discovery boundaries, Test Explorer run-profile registration, traceability evidence lifecycle, and webview lifecycle behavior.
 
 **First-run cost.** The first invocation downloads a ~210 MB VS Code binary into `.vscode-test/` (gitignored), so expect about a minute of extra wall time on first run. Subsequent runs reuse the cached binary.
 

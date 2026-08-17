@@ -28,6 +28,7 @@ export interface BulkCreateDeps {
 export interface BulkCreateResult {
   readonly created: ReadonlyArray<{ scenario: BulkCreateScenario; key: string }>;
   readonly failed: ReadonlyArray<{ scenario: BulkCreateScenario; reason: string }>;
+  readonly authored: ReadonlyArray<{ scenario: BulkCreateScenario; test: AuthoredTest }>;
 }
 
 const FILE_CHANGED = "the feature file changed during the batch";
@@ -52,6 +53,7 @@ export async function runBulkCreate(
 ): Promise<BulkCreateResult> {
   const created: Array<{ scenario: BulkCreateScenario; key: string }> = [];
   const failed: Array<{ scenario: BulkCreateScenario; reason: string }> = [];
+  const authored: Array<{ scenario: BulkCreateScenario; test: AuthoredTest }> = [];
   for (const [index, scenario] of scenarios.entries()) {
     if (signal.aborted) {
       break;
@@ -66,7 +68,11 @@ export async function runBulkCreate(
       const test = await createAndTagTest(
         { project, summary: scenario.ref.name, gherkin: scenario.gherkin },
         {
-          createTest: (input, abort) => deps.createTest(input, abort),
+          createTest: async (input, abort) => {
+            const test = await deps.createTest(input, abort);
+            authored.push({ scenario, test });
+            return test;
+          },
           insertTag: async (key) => {
             write = await deps.insertTag(scenario, key);
           },
@@ -86,5 +92,5 @@ export async function runBulkCreate(
       failed.push({ scenario, reason: errMsg(error) });
     }
   }
-  return { created, failed };
+  return { created, failed, authored };
 }

@@ -2,6 +2,7 @@ import { AuthoredTest, KeyGrammar, NewTestSpec, RemoteMetadataSnapshot } from ".
 import { keyForPrefix, stateless } from "./tag-extraction";
 import { stripCr } from "../parsers/gherkin-slice";
 import { TAG_TOKEN_PATTERN } from "../parsers/tag-regex";
+import { providerWarnings } from "./provider-warnings";
 
 export interface LinkScenarioPick {
   readonly key: string;
@@ -210,9 +211,9 @@ export async function authorScenarioTest(
   ui: AuthorScenarioTestUi,
   deps: AuthorScenarioTestDeps,
   signal?: AbortSignal
-): Promise<void> {
+): Promise<AuthoredTest | undefined> {
   if (!(await ui.confirm())) {
-    return;
+    return undefined;
   }
   const created = await createAndTagTest(spec, deps, signal);
   if (created.key === undefined) {
@@ -220,8 +221,10 @@ export async function authorScenarioTest(
     ui.error(
       `The ${providerLabel} test was created${idNote} but its key could not be read back, so the tag was not inserted: add it by hand.`
     );
-    return;
+    return created;
   }
   const base = `Created ${created.key} and linked this scenario.`;
-  ui.info(created.warnings.length > 0 ? `${base} Warnings: ${created.warnings.join("; ")}` : base);
+  const warnings = providerWarnings(created.warnings);
+  ui.info(warnings.count > 0 ? `${base} ${warnings.summary} logged.` : base);
+  return created;
 }

@@ -40,6 +40,8 @@ import {
   testExplorerRunIntent,
 } from "./test-explorer-run-plan";
 import { runGatewayTestRequest } from "./gateway-test-run";
+import { isUnderExcludedDir, workspaceExcludeFragments } from "../utils/discovery-excludes";
+import { TestDiscoveryLifecycle } from "./test-discovery-lifecycle";
 
 /**
  * Pull bddgen's "Missing step definitions" block (count + suggested snippets) out of captured
@@ -91,6 +93,12 @@ interface MappedStatusContext {
   readonly live?: LiveTestRunProgress | undefined;
 }
 
+interface FeaturePresentation {
+  readonly filePath: string;
+  readonly item: vscode.TestItem;
+  readonly scenarios: ReadonlyMap<string, Scenario>;
+}
+
 // The palette prefixes commands with the "Specwright" category, so tips must name that form.
 const GENERATE_STEPS_COMMAND = 'Specwright: Generate Missing Step Definitions';
 
@@ -117,32 +125,39 @@ export class PlaywrightBddTestProvider {
   private readonly runProfiles: vscode.TestRunProfile[] = [];
   private fileWatcher: vscode.FileSystemWatcher | undefined;
   private watchedPattern: string | undefined;
+  private watcherGeneration = 0;
   private configChangeSubscription: vscode.Disposable | undefined;
-  private discoveryQueue: Promise<void> = Promise.resolve();
+  private readonly discoveryLifecycle: TestDiscoveryLifecycle;
 
   public static create(
     testController: vscode.TestController,
     context: PlaywrightBddExtensionContext,
-    workspaceState?: vscode.Memento
+    workspaceState?: vscode.Memento,
+    canUseLocalFeaturePresentation: () => boolean = () => false
   ): PlaywrightBddTestProvider {
-    return new PlaywrightBddTestProvider(testController, context, workspaceState);
+    return new PlaywrightBddTestProvider(
+      testController,
+      context,
+      workspaceState,
+      canUseLocalFeaturePresentation
+    );
   }
 
   constructor(
     testController: vscode.TestController,
     context: PlaywrightBddExtensionContext,
-    workspaceState?: vscode.Memento
+    workspaceState?: vscode.Memento,
+    private readonly canUseLocalFeaturePresentation: () => boolean = () => false
   ) {
     this.testController = testController;
     this.discoveredTests = new Map();
     this.context = context;
     this.workspaceState = workspaceState;
+    this.discoveryLifecycle = new TestDiscoveryLifecycle(() => this.performDiscovery());
     // Restore the persisted organization strategy before the first discovery so the tree is
     // built with the user's last choice instead of the default.
     this.restorePersistedStrategy();
     this.setupTestController();
-
-    this.discoverTests().catch(() => { /* surfaced via logger */ });
     this.setupFileWatcher();
   }
 
@@ -150,7 +165,7 @@ export class PlaywrightBddTestProvider {
 
   private setupTestController(): void {
     this.testController.resolveHandler = async (test) => {
-      if (!test) {await this.discoverTests();}
+      if (!test) {await this.ensureDiscovered();}
     };
 
     // Without a refreshHandler the Test Explorer's refresh button and the
@@ -203,31 +218,76 @@ export class PlaywrightBddTestProvider {
   private setupFileWatcher(): void {
     this.createFileWatcher();
     this.configChangeSubscription = this.context.config.addChangeListener(() => {
-      if (this.context.config.testFilePattern !== this.watchedPattern) {
-        this.createFileWatcher();
-      }
+      this.handleConfigurationChange().catch((error) => {
+        this.context.logger.error(`Failed to update feature watcher: ${errMsg(error)}`);
+      });
     });
+  }
+
+  private handleConfigurationChange(): Promise<void> {
+    if (this.context.config.testFilePattern === this.watchedPattern) {return Promise.resolve();}
+    this.discoveryLifecycle.retireExact();
+    this.createFileWatcher();
+    return this.discoveryLifecycle.invalidate().then(() => undefined);
   }
 
   private createFileWatcher(): void {
     this.fileWatcher?.dispose();
     this.watchedPattern = this.context.config.testFilePattern;
+    const generation = ++this.watcherGeneration;
     const watcher = vscode.workspace.createFileSystemWatcher(this.watchedPattern);
-    watcher.onDidCreate((uri) => this.onFeatureFileTouched(uri).catch(() => { /* logged */ }));
-    watcher.onDidChange((uri) => this.onFeatureFileTouched(uri).catch(() => { /* logged */ }));
-    watcher.onDidDelete((uri) => this.onFeatureFileRemoved(uri).catch(() => { /* logged */ }));
+    watcher.onDidCreate((uri) => this.onFeatureFileTouched(generation, uri).catch(() => { /* logged */ }));
+    watcher.onDidChange((uri) => this.onFeatureFileTouched(generation, uri).catch(() => { /* logged */ }));
+    watcher.onDidDelete((uri) => this.onFeatureFileRemoved(generation, uri).catch(() => { /* logged */ }));
     this.fileWatcher = watcher;
   }
 
-  /** Watcher changes always refresh through the selected engine's discovery boundary. */
-  private onFeatureFileTouched(uri: vscode.Uri): Promise<void> {
+  /** Patch the feature-file presentation only when no grouped project state is involved. */
+  private onFeatureFileTouched(generation: number, uri: vscode.Uri): Promise<void> {
+    if (generation !== this.watcherGeneration) {return Promise.resolve();}
     this.dropCachedStatusesFor(uri.fsPath);
-    return this.refreshTests();
+    if (!this.canUpdateFeaturePresentationLocally(uri)) {
+      return this.discoveryLifecycle.invalidate().then(() => undefined);
+    }
+    return this.discoveryLifecycle.runExact(
+      normalizePathKey(uri.fsPath),
+      () => this.supportsLocalFeaturePresentation(uri),
+      () => this.prepareFeaturePresentation(uri),
+      (presentation) => {
+        if (!presentation) {return;}
+        this.removeFeatureFileFromTestController(uri.fsPath);
+        this.installFeaturePresentation(presentation);
+      }
+    );
   }
 
-  private onFeatureFileRemoved(uri: vscode.Uri): Promise<void> {
+  private onFeatureFileRemoved(generation: number, uri: vscode.Uri): Promise<void> {
+    if (generation !== this.watcherGeneration) {return Promise.resolve();}
     this.dropCachedStatusesFor(uri.fsPath);
-    return this.refreshTests();
+    if (!this.canUpdateFeaturePresentationLocally(uri)) {
+      return this.discoveryLifecycle.invalidate().then(() => undefined);
+    }
+    return this.discoveryLifecycle.runExact(
+      normalizePathKey(uri.fsPath),
+      () => this.supportsLocalFeaturePresentation(uri),
+      () => Promise.resolve(undefined),
+      () => this.removeFeatureFileFromTestController(uri.fsPath)
+    );
+  }
+
+  /**
+   * Feature-based rows are one file per root, so a local parse can update only that presentation.
+   * Grouped strategies and excluded paths continue through the execution gateway, which remains the
+   * authority for cross-file and future Core discovery state.
+   */
+  private canUpdateFeaturePresentationLocally(uri: vscode.Uri): boolean {
+    return this.discoveryLifecycle.hasCanonicalPresentation && this.supportsLocalFeaturePresentation(uri);
+  }
+
+  private supportsLocalFeaturePresentation(uri: vscode.Uri): boolean {
+    return this.context.organizationManager.getStrategy().strategyType === "FeatureBasedOrganization"
+      && this.canUseLocalFeaturePresentation()
+      && !isUnderExcludedDir(uri.fsPath, workspaceExcludeFragments());
   }
 
   /**
@@ -250,13 +310,19 @@ export class PlaywrightBddTestProvider {
   // --- Discovery --------------------------------------------------------------
 
   public discoverTests(): Promise<void> {
-    // Serialized: a watcher burst must not interleave one pass's items.replace([]) with
-    // another's items.add(). performDiscovery never rejects, so the chain can't be poisoned.
-    this.discoveryQueue = this.discoveryQueue.then(() => this.performDiscovery());
-    return this.discoveryQueue;
+    return this.discoveryLifecycle.refresh().then(() => undefined);
   }
 
-  private async performDiscovery(): Promise<void> {
+  private ensureDiscovered(): Promise<boolean> {
+    return this.discoveryLifecycle.ensure();
+  }
+
+  public onWorkspaceTrustGranted(): Promise<void> {
+    return this.discoveryLifecycle.retryAfterTrustGrant().then(() => undefined);
+  }
+
+  private async performDiscovery(): Promise<boolean> {
+    const ticket = this.discoveryLifecycle.beginCanonical();
     try {
       await requireExecutionAvailable(this.context.executionGateway);
       const discovery = await this.context.executionGateway.discover({ refresh: true });
@@ -266,25 +332,27 @@ export class PlaywrightBddTestProvider {
         file: vscode.Uri.file(definition.source.path),
       }));
 
-      this.testController.items.replace([]);
-      this.discoveredTests.clear();
-      this.scenarioByTestId.clear();
-
       const organized = this.context.organizationManager.organizeTests(
         allScenarios.map((s) => s.scenario)
       );
       const strategy = this.context.organizationManager.getStrategy().strategyType;
 
-      if (strategy === "FeatureBasedOrganization") {
-        this.buildHierarchicalFeatureView(allScenarios, definitions);
-      } else {
-        this.buildGroupItems(organized);
-      }
-      this.restoreCachedStatuses();
+      return await this.discoveryLifecycle.commitCanonical(ticket, () => {
+        this.testController.items.replace([]);
+        this.discoveredTests.clear();
+        this.scenarioByTestId.clear();
+        if (strategy === "FeatureBasedOrganization") {
+          this.buildHierarchicalFeatureView(allScenarios, definitions);
+        } else {
+          this.buildGroupItems(organized);
+        }
+        this.restoreCachedStatuses();
+      });
     } catch (error) {
       const msg = errMsg(error);
       this.context.logger.error(`Failed to discover tests: ${msg}`);
       vscode.window.showErrorMessage(`Test discovery failed: ${msg}`);
+      return false;
     }
   }
 
@@ -363,9 +431,6 @@ export class PlaywrightBddTestProvider {
 
   public async refreshTests(): Promise<void> {
     try {
-      // No refreshCache() here: discoverTests → performDiscovery already runs with
-      // forceRefresh: true, so calling it would re-sweep every cached pattern a second time on
-      // every watcher event.
       await this.discoverTests();
     } catch (error) {
       const msg = errMsg(error);
@@ -375,16 +440,29 @@ export class PlaywrightBddTestProvider {
   }
 
   public async forceRefreshTestExplorer(): Promise<void> {
-    this.testController.items.replace([]);
-    this.discoveredTests.clear();
-    this.scenarioByTestId.clear();
-    if (this.testController.resolveHandler) {
-      await this.testController.resolveHandler(undefined);
+    await this.refreshTests();
+  }
+
+  private removeFeatureFileFromTestController(fileFsPath: string): void {
+    const normalizedFilePath = normalizePathKey(fileFsPath);
+    for (const [knownPath, item] of this.discoveredTests) {
+      if (normalizePathKey(knownPath) !== normalizedFilePath) {continue;}
+      this.testController.items.delete(item.id);
+      this.discoveredTests.delete(knownPath);
     }
-    try { await vscode.commands.executeCommand("testing.refreshTests"); } catch { /* ignore */ }
+    for (const [testId, scenario] of this.scenarioByTestId) {
+      if (normalizePathKey(scenario.filePath) === normalizedFilePath) {
+        this.scenarioByTestId.delete(testId);
+      }
+    }
   }
 
   public async addFeatureFileToTestController(file: vscode.Uri): Promise<void> {
+    const presentation = await this.prepareFeaturePresentation(file);
+    if (presentation) {this.installFeaturePresentation(presentation);}
+  }
+
+  private async prepareFeaturePresentation(file: vscode.Uri): Promise<FeaturePresentation | undefined> {
     try {
       if (!file?.fsPath) {throw new Error("Invalid file URI provided");}
       const content = await vscode.workspace.fs.readFile(file);
@@ -399,6 +477,7 @@ export class PlaywrightBddTestProvider {
         scenario.filePath = file.fsPath;
       }
 
+      const scenariosByTestId = new Map<string, Scenario>();
       const featureItem = this.testController.createTestItem(file.fsPath, parsed.feature, file);
       featureItem.canResolveChildren = true;
       if (parsed.featureLineNumber && parsed.featureLineNumber > 0) {
@@ -412,26 +491,35 @@ export class PlaywrightBddTestProvider {
         const first = scenarios[0];
         if (!first) {continue;}
         if (scenarios.length === 1 && !first.isScenarioOutline) {
-          featureItem.children.add(this.createScenarioTestItem(file, first));
+          featureItem.children.add(this.createScenarioTestItem(file, first, scenariosByTestId));
         } else if (first.isScenarioOutline) {
           // The outline line keeps the id unique when two outlines share a title in one file.
           const outlineItem = this.createOutlineTestItem(
             file,
             first.outlineName,
             scenarios,
-            `${file.fsPath}${OUTLINE_ID_SEPARATOR}${first.outlineLineNumber}:${first.outlineName}`
+            `${file.fsPath}${OUTLINE_ID_SEPARATOR}${first.outlineLineNumber}:${first.outlineName}`,
+            scenariosByTestId
           );
           featureItem.children.add(outlineItem);
         }
       }
 
-      this.testController.items.add(featureItem);
-      this.discoveredTests.set(file.fsPath, featureItem);
+      return { filePath: file.fsPath, item: featureItem, scenarios: scenariosByTestId };
     } catch (error) {
       this.context.logger.error(
         `Failed to add feature file to test controller: ${errMsg(error)}`,
         { filePath: file.fsPath }
       );
+      return undefined;
+    }
+  }
+
+  private installFeaturePresentation(presentation: FeaturePresentation): void {
+    this.testController.items.add(presentation.item);
+    this.discoveredTests.set(presentation.filePath, presentation.item);
+    for (const [testId, scenario] of presentation.scenarios) {
+      this.scenarioByTestId.set(testId, scenario);
     }
   }
 
@@ -439,7 +527,8 @@ export class PlaywrightBddTestProvider {
     file: vscode.Uri,
     outlineName: string,
     examples: Scenario[],
-    testId: string
+    testId: string,
+    scenariosByTestId: Map<string, Scenario> = this.scenarioByTestId
   ): vscode.TestItem {
     const item = this.testController.createTestItem(testId, `Scenario Outline: ${outlineName}`, file);
     item.canResolveChildren = false;
@@ -449,14 +538,18 @@ export class PlaywrightBddTestProvider {
     if (outlineLine && outlineLine > 0) {
       item.range = new vscode.Range(outlineLine - 1, 0, outlineLine - 1, 0);
     }
-    if (first) {this.scenarioByTestId.set(testId, first);}
+    if (first) {scenariosByTestId.set(testId, first);}
     for (const example of examples) {
-      item.children.add(this.createScenarioTestItem(file, example));
+      item.children.add(this.createScenarioTestItem(file, example, scenariosByTestId));
     }
     return item;
   }
 
-  private createScenarioTestItem(file: vscode.Uri, scenario: Scenario): vscode.TestItem {
+  private createScenarioTestItem(
+    file: vscode.Uri,
+    scenario: Scenario,
+    scenariosByTestId: Map<string, Scenario> = this.scenarioByTestId
+  ): vscode.TestItem {
     const id = `${scenario.filePath}:${scenario.lineNumber}`;
     const item = this.testController.createTestItem(id, scenario.name, file);
     if (scenario.lineNumber > 0) {
@@ -467,7 +560,7 @@ export class PlaywrightBddTestProvider {
     if (scenario.tags && scenario.tags.length > 0) {
       item.description += ` | Tags: ${scenario.tags.join(", ")}`;
     }
-    this.scenarioByTestId.set(id, scenario);
+    scenariosByTestId.set(id, scenario);
     return item;
   }
 
@@ -539,6 +632,7 @@ export class PlaywrightBddTestProvider {
     mode: RunIntent["mode"],
     maxWorkers?: number
   ): Promise<void> {
+    if (!await this.ensureDiscovered()) {return;}
     const roots = requestedTestItems(request, this.testController);
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     const intent = testExplorerRunIntent({
@@ -1305,6 +1399,8 @@ export class PlaywrightBddTestProvider {
 
   public dispose(): void {
     try {
+      this.discoveryLifecycle.dispose();
+      this.watcherGeneration += 1;
       this.fileWatcher?.dispose();
       this.fileWatcher = undefined;
       this.configChangeSubscription?.dispose();

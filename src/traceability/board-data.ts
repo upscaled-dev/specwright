@@ -76,10 +76,8 @@ export interface BoardViewModel {
   readonly available: readonly BoardTestCard[];
   readonly mapped: readonly BoardTestCard[];
   readonly matrix: readonly MatrixRow[];
-  // What the right column says when the available group is empty, and whether that emptiness is worth
-  // offering a sync over (see `availableEmptyState`).
+  // What the right column says when the available group is empty.
   readonly availableEmptyText: string;
-  readonly offerSync: boolean;
   // The projects whose catalogue the last sync fetched whole, carried so scoping to one project can
   // re-decide the empty state for that project alone (see `scopeBoardViewModel`).
   readonly completeProjects: readonly string[];
@@ -90,17 +88,17 @@ export interface BoardViewModel {
 // header's project selector is the fastest way to put one there. With a scope but no catalogue landed,
 // a sync is the fix. A landed catalogue that yields nothing has nothing to offer, and saying every test
 // is mapped would be a lie when the sync catalogued no tests at all.
-function availableEmptyState(
+function availableEmptyText(
   syncScopeResolved: boolean,
   landed: boolean
-): { availableEmptyText: string; offerSync: boolean } {
+): string {
   if (!syncScopeResolved) {
-    return { availableEmptyText: "Pick a project in the header to load its tests.", offerSync: false };
+    return "Pick a project in the header to load its tests.";
   }
   if (!landed) {
-    return { availableEmptyText: "No synced tests yet.", offerSync: true };
+    return "No synced tests yet.";
   }
-  return { availableEmptyText: "No unmapped tests in the last sync.", offerSync: false };
+  return "No unmapped tests in the last sync.";
 }
 
 /**
@@ -340,9 +338,9 @@ export function buildBoardViewModel(
   projectOf?: KeyGrammar["projectOf"]
 ): BoardViewModel {
   const completeProjects = snapshot?.completeProjects ?? [];
-  const emptyState = availableEmptyState(syncScopeResolved, completeProjects.length > 0);
+  const emptyText = availableEmptyText(syncScopeResolved, completeProjects.length > 0);
   if (!snapshot) {
-    return { scenarios: [], available: [], mapped: [], matrix: [], completeProjects, ...emptyState };
+    return { scenarios: [], available: [], mapped: [], matrix: [], completeProjects, availableEmptyText: emptyText };
   }
   const scenarios = snapshot.untraced
     .map((item) => scenarioCard(item, workspaceRoots))
@@ -365,7 +363,7 @@ export function buildBoardViewModel(
     mapped: mappedTestCards(snapshot.links, workspaceRoots, projectOf),
     matrix: matrixRows(snapshot, workspaceRoots, testTagPrefix, projectOf),
     completeProjects,
-    ...emptyState,
+    availableEmptyText: emptyText,
   };
 }
 
@@ -656,7 +654,7 @@ export function scopeBoardViewModel(model: BoardViewModel, project: string | und
     available: model.available.filter(inScope),
     mapped: model.mapped.filter(inScope),
     matrix: model.matrix.filter((row) => row.projects.length === 0 || row.projects.includes(project)),
-    ...availableEmptyState(true, landed),
+    availableEmptyText: availableEmptyText(true, landed),
   };
 }
 
@@ -692,7 +690,6 @@ export function filterBoardViewModel(model: BoardViewModel, query: string): Boar
       [row.requirement, row.test, row.scenario, row.tag, row.result].some((cell) => cell.toLowerCase().includes(needle))
     ),
     availableEmptyText: model.availableEmptyText,
-    offerSync: model.offerSync,
     completeProjects: model.completeProjects,
   };
 }

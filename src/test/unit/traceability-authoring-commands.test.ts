@@ -5,17 +5,21 @@ import { trustedWorkspace } from "./helpers/test-workspace-trust";
 import { scenarioDropId } from "../../traceability/board-data";
 import {
   AuthoredTest,
+  AddTestsToContainerResult,
   AutomationBindingClassification,
   NewContainerSpec,
   NewExecutionSpec,
   NewTestSpec,
   TestCaseMetadata,
+  TestContainerKind,
+  TestContainerTarget,
   TraceabilityAdapter,
 } from "../../traceability/contracts";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import { Logger } from "../../utils/logger";
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
+import { RemoteOutcomeUnknownError } from "../../core/workspace-trust";
 
 const FEATURE = "/ws/a.feature";
 const SOURCE = [
@@ -114,6 +118,7 @@ interface Rig {
   specs: NewTestSpec[];
   merged: string[];
   logger: Logger;
+  recoveries: Array<{ project: string; diagnostics?: readonly string[] }>;
 }
 
 interface RigOptions {
@@ -123,11 +128,13 @@ interface RigOptions {
   credentials?: boolean;
   snapshot?: TraceabilitySnapshot;
   create?: (spec: NewTestSpec) => Promise<AuthoredTest>;
+  scheduleProjectSync?: (project: string, diagnostics?: Iterable<string>) => void;
 }
 
 function rig(options: RigOptions = {}): Rig {
   const specs: NewTestSpec[] = [];
   const merged: string[] = [];
+  const recoveries: Array<{ project: string; diagnostics?: readonly string[] }> = [];
   const create = options.create ?? (() => Promise.resolve<AuthoredTest>({ key: `CALC-${specs.length}`, warnings: [] }));
   const adapter = {
     label: "Xray",
@@ -155,8 +162,12 @@ function rig(options: RigOptions = {}): Rig {
     siteUrl: () => "https://acme.atlassian.net",
     merge: (key) => merged.push(key),
     recordExecution: () => Promise.resolve(),
+    scheduleProjectSync: options.scheduleProjectSync ?? ((project, diagnostics) => recoveries.push({
+      project,
+      ...(diagnostics !== undefined ? { diagnostics: [...diagnostics] } : {}),
+    })),
   };
-  return { commands: new TraceabilityAuthoringCommands(logger, deps), specs, merged, logger };
+  return { commands: new TraceabilityAuthoringCommands(logger, deps), specs, merged, logger, recoveries };
 }
 
 // The board's create runs on a confirmed batch: accept the modal.
@@ -248,6 +259,7 @@ function pushRig(options: PushRigOptions = {}): PushRig {
     siteUrl: () => "acme.atlassian.net",
     merge: () => undefined,
     recordExecution: () => Promise.resolve(),
+    scheduleProjectSync: () => undefined,
   };
   return { commands: new TraceabilityAuthoringCommands(logger, deps), pushes, searched, merged, logger };
 }
@@ -290,9 +302,12 @@ interface ContainerRig {
   plans: NewContainerSpec[];
   executions: NewExecutionSpec[];
   signals: Array<AbortSignal | undefined>;
+  resolved: Array<{ kind: TestContainerKind; key: string }>;
+  additions: Array<{ kind: TestContainerKind; issueId: string; testIssueIds: readonly string[] }>;
   // What the standalone create wrote to the publish ledger.
   recorded: Array<{ key: string; summary: string }>;
   logger: Logger;
+  recoveries: Array<{ project: string; diagnostics?: readonly string[] }>;
 }
 
 interface ContainerRigOptions {
@@ -304,6 +319,14 @@ interface ContainerRigOptions {
   created?: AuthoredTest;
   create?: (signal?: AbortSignal) => Promise<AuthoredTest>;
   recordError?: Error;
+  target?: TestContainerTarget | undefined;
+  resolve?: ((
+    kind: TestContainerKind,
+    key: string,
+    signal?: AbortSignal
+  ) => Promise<TestContainerTarget | undefined>) | undefined;
+  addResult?: AddTestsToContainerResult;
+  add?: ((signal?: AbortSignal) => Promise<AddTestsToContainerResult>) | undefined;
 }
 
 function containerRig(options: ContainerRigOptions = {}): ContainerRig {
@@ -311,12 +334,21 @@ function containerRig(options: ContainerRigOptions = {}): ContainerRig {
   const plans: NewContainerSpec[] = [];
   const executions: NewExecutionSpec[] = [];
   const signals: Array<AbortSignal | undefined> = [];
+  const resolved: Array<{ kind: TestContainerKind; key: string }> = [];
+  const additions: Array<{ kind: TestContainerKind; issueId: string; testIssueIds: readonly string[] }> = [];
   const recorded: Array<{ key: string; summary: string }> = [];
+  const recoveries: Array<{ project: string; diagnostics?: readonly string[] }> = [];
   const created = options.created ?? { key: "CALC-90", issueId: "9000", warnings: [] };
   const create = options.create ?? ((): Promise<AuthoredTest> => Promise.resolve(created));
   const adapter = {
     label: "Xray",
-    keyGrammar: { testPrefix: "TEST_", canonicalizeKey: (key: string) => key.toUpperCase() },
+    keyGrammar: {
+      testPrefix: "TEST_",
+      reqPrefix: "REQ_",
+      keyShape: /^[A-Za-z][A-Za-z0-9_-]*-\d+$/,
+      canonicalizeKey: (key: string) => key.toUpperCase(),
+      projectOf: (key: string) => key.replace(/-\d+$/, ""),
+    },
     testAuthoring: {
       createTest: () => Promise.resolve<AuthoredTest>({ key: "CALC-1", warnings: [] }),
       ...(options.seams === false
@@ -337,6 +369,26 @@ function containerRig(options: ContainerRigOptions = {}): ContainerRig {
               signals.push(signal);
               return create(signal);
             },
+            resolveTestContainer: (kind: TestContainerKind, key: string, signal?: AbortSignal) => {
+              resolved.push({ kind, key });
+              return options.resolve
+                ? options.resolve(kind, key, signal)
+                : Promise.resolve("target" in options
+                  ? options.target
+                  : { kind, key, issueId: kind === "test-set" ? "5000" : "6000" });
+            },
+            addTestsToContainer: (
+              kind: TestContainerKind,
+              issueId: string,
+              testIssueIds: readonly string[],
+              signal?: AbortSignal
+            ) => {
+              additions.push({ kind, issueId, testIssueIds });
+              signals.push(signal);
+              return options.add
+                ? options.add(signal)
+                : Promise.resolve(options.addResult ?? { addedTests: [...testIssueIds] });
+            },
           }),
     },
   } as unknown as TraceabilityAdapter;
@@ -355,14 +407,34 @@ function containerRig(options: ContainerRigOptions = {}): ContainerRig {
       recorded.push({ key, summary });
       return options.recordError ? Promise.reject(options.recordError) : Promise.resolve();
     },
+    scheduleProjectSync: (project, diagnostics) => recoveries.push({
+      project,
+      ...(diagnostics !== undefined ? { diagnostics: [...diagnostics] } : {}),
+    }),
   };
-  return { commands: new TraceabilityAuthoringCommands(logger, deps), sets, plans, executions, signals, recorded, logger };
+  return {
+    commands: new TraceabilityAuthoringCommands(logger, deps),
+    sets,
+    plans,
+    executions,
+    signals,
+    resolved,
+    additions,
+    recorded,
+    logger,
+    recoveries,
+  };
 }
 
 // The name prompt and the modal, both answered: a container create runs on a named, confirmed batch.
 function nameAndConfirm(kind: string, name: string | undefined = "Regression suite"): WarnCalls {
   vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(name as never);
   return vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(`Create ${kind}` as never);
+}
+
+function targetAndConfirm(noun: string, key = "CALC-90"): WarnCalls {
+  vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(key as never);
+  return vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(`Add to ${noun}` as never);
 }
 
 function captureProgressCancel(): () => void {
@@ -458,7 +530,7 @@ describe("TraceabilityAuthoringCommands.bulkCreateTests", () => {
     const workspace = fakeWorkspace();
     acceptConfirm();
     const info = vi.spyOn(vscode.window, "showInformationMessage");
-    const { commands, specs, merged } = rig();
+    const { commands, specs, merged, recoveries } = rig();
 
     await commands.bulkCreateTests();
 
@@ -486,6 +558,7 @@ describe("TraceabilityAuthoringCommands.bulkCreateTests", () => {
       ].join("\n")
     );
     expect(merged).toEqual(["CALC-1", "CALC-2"]);
+    expect(recoveries).toEqual([{ project: "CALC" }]);
     expect(String(info.mock.calls.at(-1)?.[0])).toBe("Created 2 Xray tests.");
   });
 
@@ -668,20 +741,151 @@ describe("TraceabilityAuthoringCommands.bulkCreateTests", () => {
     expect(specs).toHaveLength(1);
   });
 
-  it("reports a refused tag write as a failure, logging the reason and offering the output channel", async () => {
+  it("releases the bulk guard before an optional warning summary settles", async () => {
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(docFor(FEATURE, SOURCE));
+    vi.spyOn(vscode.workspace, "applyEdit").mockResolvedValue(true);
+    const never = new Promise<never>(() => undefined);
+    const warning = "Project CALC may require administrator reindexing";
+    const toast = vi.spyOn(vscode.window, "showWarningMessage").mockImplementation((_message, options) => (
+      (options as { modal?: boolean } | undefined)?.modal
+        ? Promise.resolve("Create tests" as never)
+        : never
+    ));
+    const { commands, specs, logger, recoveries } = rig({
+      selected: [scenarioDropId(LOGIN)],
+      create: () => Promise.resolve({ key: `CALC-${specs.length}`, warnings: [warning] }),
+    });
+    const logged = vi.spyOn(logger, "warn");
+
+    await commands.bulkCreateTests();
+    await commands.bulkCreateTests();
+
+    expect(specs).toHaveLength(2);
+    const summaries = toast.mock.calls.filter((call) => !(call[1] as { modal?: boolean } | undefined)?.modal);
+    expect(String(summaries[0]?.[0])).toBe("Created 1 Xray test, 1 provider warning on 1 remote create.");
+    expect(String(summaries[0]?.[0])).not.toContain(warning);
+    expect(logged).toHaveBeenCalledWith(
+      "Xray returned warnings creating a test",
+      expect.objectContaining({ scenario: "Log in", key: "CALC-1", warnings: warning })
+    );
+    expect(recoveries).toHaveLength(2);
+    expect(recoveries[0]).toEqual({ project: "CALC" });
+  });
+
+  it("reports a refused tag write as a failure while retaining its provider warning", async () => {
     fakeWorkspace();
     acceptConfirm();
     vi.spyOn(vscode.workspace, "applyEdit").mockResolvedValue(false);
     const warn = vi.spyOn(vscode.window, "showWarningMessage");
-    const { commands, logger } = rig({ selected: [scenarioDropId(LOGIN)] });
+    const warning = "Project CALC may require administrator reindexing";
+    const { commands, logger, recoveries } = rig({
+      selected: [scenarioDropId(LOGIN)],
+      create: () => Promise.resolve({ key: "CALC-1", warnings: [warning] }),
+    });
     const logged = vi.spyOn(logger, "warn");
 
     await commands.bulkCreateTests();
 
-    expect(String(warn.mock.calls.at(-1)?.[0])).toBe("Created 0 Xray tests, 1 scenario failed.");
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "Created 0 Xray tests, 1 scenario failed, 1 provider warning on 1 remote create."
+    );
     expect(warn.mock.calls.at(-1)?.[1]).toBe("Show Output");
     expect(logged.mock.calls[0]?.[1]).toMatchObject({ scenario: "Log in" });
     expect(String((logged.mock.calls[0]?.[1] as { reason: string }).reason)).toContain("CALC-1 was created");
+    expect(logged).toHaveBeenCalledWith(
+      "Xray returned warnings creating a test",
+      expect.objectContaining({ scenario: "Log in", key: "CALC-1", warnings: warning })
+    );
+    expect(recoveries).toEqual([{ project: "CALC" }]);
+  });
+
+  it("logs provider warnings from a keyless create without counting it as fully created", async () => {
+    fakeWorkspace();
+    acceptConfirm();
+    const warning = "Project CALC may require administrator reindexing";
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands, logger } = rig({
+      selected: [scenarioDropId(LOGIN)],
+      create: () => Promise.resolve({ issueId: "9000", warnings: [warning] }),
+    });
+    const logged = vi.spyOn(logger, "warn");
+
+    await commands.bulkCreateTests();
+
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "Created 0 Xray tests, 1 scenario failed, 1 provider warning on 1 remote create."
+    );
+    expect(logged).toHaveBeenCalledWith(
+      "Xray returned warnings creating a test",
+      expect.not.objectContaining({ key: expect.anything() })
+    );
+  });
+
+  it("coalesces multiple successful creates into one unconditional project sync request", async () => {
+    fakeWorkspace();
+    acceptConfirm();
+    let calls = 0;
+    const { commands, recoveries } = rig({
+      create: () => Promise.resolve({
+        key: `CALC-${++calls}`,
+        warnings: [`Project CALC reindex diagnostic ${calls}`],
+      }),
+    });
+
+    await commands.bulkCreateTests();
+
+    expect(recoveries).toEqual([{ project: "CALC" }]);
+  });
+
+  it("does not inspect recovery diagnostics once any remote create is confirmed", async () => {
+    fakeWorkspace();
+    acceptConfirm();
+    const warnings = new Proxy(["ordinary warning"], {
+      get: (target, property, receiver) => {
+        if (property === Symbol.iterator || property === "map" || property === "flatMap") {
+          return (): never => {
+            throw new Error("warning collection was enumerated");
+          };
+        }
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    let calls = 0;
+    const unconditional: boolean[] = [];
+    const { commands } = rig({
+      create: () => {
+        calls += 1;
+        return calls === 1
+          ? Promise.resolve({ key: "CALC-1", warnings })
+          : Promise.reject(new Error("Project CALC needs reindexing"));
+      },
+      scheduleProjectSync: (_project, diagnostics) => unconditional.push(diagnostics === undefined),
+    });
+
+    await commands.bulkCreateTests();
+
+    expect(unconditional).toEqual([true]);
+  });
+
+  it("does not quarantine authoring after a reindex-like provider error", async () => {
+    fakeWorkspace();
+    acceptConfirm();
+    let calls = 0;
+    const { commands, specs, recoveries } = rig({
+      selected: [scenarioDropId(LOGIN)],
+      create: () => {
+        calls += 1;
+        return calls === 1
+          ? Promise.reject(new Error("Project CALC must be reindexed"))
+          : Promise.resolve({ key: "CALC-2", warnings: [] });
+      },
+    });
+
+    await commands.bulkCreateTests();
+    await commands.bulkCreateTests();
+
+    expect(specs).toHaveLength(2);
+    expect(recoveries[0]?.diagnostics).toContain("Project CALC must be reindexed");
   });
 
   it("reports the created ones alongside the failed ones when a create rejects", async () => {
@@ -1007,6 +1211,27 @@ describe("TraceabilityAuthoringCommands.pushScenarioText", () => {
     expect(logged.mock.calls[0]?.[1]).toMatchObject({ outcome: "pushed", refreshError: "offline" });
   });
 
+  it("releases the push guard before a completed-work warning settles", async () => {
+    fakeWorkspace();
+    const never = new Promise<never>(() => undefined);
+    vi.spyOn(vscode.window, "showWarningMessage").mockImplementation((_message, options) => (
+      (options as { modal?: boolean } | undefined)?.modal
+        ? Promise.resolve("Push text" as never)
+        : never
+    ));
+    const stale = "Scenario: Log in\n  Given an old step";
+    const { commands, pushes } = pushRig({
+      snapshot: linkSnapshot({ meta: { key: "CALC-1", issueId: "45678", gherkin: stale } }),
+      remote: { key: "CALC-1", issueId: "45678", gherkin: stale },
+      mergeError: new Error("offline"),
+    });
+
+    await commands.pushScenarioText(scenarioDropId(LOGIN), "CALC-1");
+    await commands.pushScenarioText(scenarioDropId(LOGIN), "CALC-1");
+
+    expect(pushes).toHaveLength(2);
+  });
+
   it("says so and writes nothing when the test already matches the scenario", async () => {
     fakeWorkspace();
     acceptPush();
@@ -1222,7 +1447,7 @@ describe("TraceabilityAuthoringCommands container creates", () => {
     );
   });
 
-  it("carries the tracker's warnings into the report and logs them verbatim", async () => {
+  it("counts the tracker's warnings in the toast and logs bounded detail", async () => {
     nameAndConfirm("Test Plan");
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     const { commands, logger } = containerRig({
@@ -1233,9 +1458,25 @@ describe("TraceabilityAuthoringCommands container creates", () => {
     await commands.createTestPlan();
 
     expect(String(info.mock.calls.at(-1)?.[0])).toBe(
-      "Created Test Plan CALC-91 holding 2 tests. Warnings: 45679 is not a test"
+      "Created Test Plan CALC-91 holding 2 tests. 1 provider warning logged."
     );
     expect(logged.mock.calls[0]?.[1]).toMatchObject({ warnings: "45679 is not a test" });
+  });
+
+  it("releases the shared container guard before a successful warning toast settles", async () => {
+    nameAndConfirm("Test Set");
+    const warning = "Project CALC may require administrator reindexing";
+    vi.spyOn(vscode.window, "showInformationMessage").mockImplementation(() => new Promise<never>(() => undefined));
+    const { commands, sets, recoveries } = containerRig({ created: { key: "CALC-90", warnings: [warning] } });
+
+    await commands.createTestSet();
+    await commands.createTestSet();
+
+    expect(sets).toHaveLength(2);
+    expect(recoveries).toEqual([
+      { project: "CALC" },
+      { project: "CALC" },
+    ]);
   });
 
   it("surfaces a failed create as an error and logs it", async () => {
@@ -1347,6 +1588,313 @@ describe("TraceabilityAuthoringCommands container creates", () => {
   });
 });
 
+describe("TraceabilityAuthoringCommands existing containers", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("fails the whole append before any read or mutation and names every test without an issue id", async () => {
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const input = vi.spyOn(vscode.window, "showInputBox");
+    const { commands, resolved, additions } = containerRig({ selected: ["CALC-3", "CALC-1", "CALC-4"] });
+
+    await commands.addToTestSet();
+
+    expect(resolved).toEqual([]);
+    expect(additions).toEqual([]);
+    expect(input).not.toHaveBeenCalled();
+    expect(String(warn.mock.calls[0]?.[0])).toContain("CALC-3, CALC-4");
+  });
+
+  it("rejects malformed and cross-project keys before the target read", async () => {
+    const input = vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("PAY-9" as never);
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands, resolved, additions } = containerRig();
+
+    await commands.addToTestPlan();
+
+    const validate = input.mock.calls[0]?.[0]?.validateInput;
+    expect(validate?.("not a key")).toBe("Enter an exact issue key, such as CALC-123.");
+    expect(validate?.("PAY-9")).toBe("The target must be in project CALC.");
+    expect(String(warn.mock.calls[0]?.[0])).toBe("The target must be in project CALC.");
+    expect(resolved).toEqual([]);
+    expect(additions).toEqual([]);
+  });
+
+  it("requires the exact expected container type before mutation", async () => {
+    targetAndConfirm("Test Set");
+    const { commands, resolved, additions } = containerRig({
+      target: { kind: "test-plan", key: "CALC-90", issueId: "6000" },
+    });
+
+    await commands.addToTestSet();
+
+    expect(resolved).toEqual([{ kind: "test-set", key: "CALC-90" }]);
+    expect(additions).toEqual([]);
+  });
+
+  it("treats a clean missing target as not found and sends no mutation", async () => {
+    targetAndConfirm("Test Plan", "CALC-91");
+    const { commands, resolved, additions } = containerRig({ target: undefined });
+
+    await commands.addToTestPlan();
+
+    expect(resolved).toEqual([{ kind: "test-plan", key: "CALC-91" }]);
+    expect(additions).toEqual([]);
+  });
+
+  it("exits silently when target resolution progress is already cancelled", async () => {
+    const warn = targetAndConfirm("Test Set");
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((_options, task) =>
+      (task as (progress: unknown, token: unknown) => Thenable<unknown>)(
+        { report: () => {} },
+        {
+          isCancellationRequested: true,
+          onCancellationRequested: (listener: () => void) => {
+            listener();
+            return { dispose: () => {} };
+          },
+        }
+      )
+    );
+    const { commands, resolved, additions } = containerRig();
+
+    await commands.addToTestSet();
+
+    expect(resolved).toEqual([]);
+    expect(additions).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("exits silently when target resolution is cancelled in flight", async () => {
+    const warn = targetAndConfirm("Test Plan", "CALC-91");
+    let cancel = (): void => {};
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((_options, task) =>
+      (task as (progress: unknown, token: unknown) => Thenable<unknown>)(
+        { report: () => {} },
+        {
+          isCancellationRequested: false,
+          onCancellationRequested: (listener: () => void) => {
+            cancel = listener;
+            return { dispose: () => {} };
+          },
+        }
+      )
+    );
+    const resolve = vi.fn((_kind: TestContainerKind, _key: string, signal?: AbortSignal) =>
+      new Promise<TestContainerTarget | undefined>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      })
+    );
+    const { commands, additions } = containerRig({ resolve });
+
+    const pending = commands.addToTestPlan();
+    await flush();
+    cancel();
+    await pending;
+
+    expect(resolve).toHaveBeenCalledOnce();
+    expect(additions).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("discards a target returned while its resolution is being cancelled", async () => {
+    const warn = targetAndConfirm("Test Set");
+    let cancel = (): void => {};
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((_options, task) =>
+      (task as (progress: unknown, token: unknown) => Thenable<unknown>)(
+        { report: () => {} },
+        {
+          isCancellationRequested: false,
+          onCancellationRequested: (listener: () => void) => {
+            cancel = listener;
+            return { dispose: () => {} };
+          },
+        }
+      )
+    );
+    const resolve = vi.fn((kind: TestContainerKind, key: string, signal?: AbortSignal) =>
+      new Promise<TestContainerTarget | undefined>((complete) => {
+        signal?.addEventListener("abort", () => complete({ kind, key, issueId: "5000" }), { once: true });
+      })
+    );
+    const { commands, additions } = containerRig({ resolve });
+
+    const pending = commands.addToTestSet();
+    await flush();
+    cancel();
+    await pending;
+
+    expect(resolve).toHaveBeenCalledOnce();
+    expect(additions).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("confirms site, exact key and type, project and count immediately before one mutation", async () => {
+    const confirm = targetAndConfirm("Test Set", "calc-90");
+    const progress = vi.spyOn(vscode.window, "withProgress");
+    const { commands, additions, signals } = containerRig();
+
+    await commands.addToTestSet();
+
+    const modal = modalCall(confirm)!;
+    expect(String(modal[0])).toBe(
+      "Add 2 selected tests to Xray Test Set CALC-90 in project CALC on https://acme.atlassian.net?"
+    );
+    expect(modal[1]).toMatchObject({ modal: true });
+    expect(additions).toEqual([{ kind: "test-set", issueId: "5000", testIssueIds: ["45678", "45679"] }]);
+    expect(signals.at(-1)?.aborted).toBe(false);
+    expect(progress.mock.calls.at(-1)?.[0]).toMatchObject({
+      title: "Adding selected tests to Xray Test Set CALC-90…",
+      cancellable: true,
+    });
+  });
+
+  it("sends no mutation when the target-key prompt or confirmation is dismissed", async () => {
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValueOnce(undefined as never);
+    const first = containerRig();
+    await first.commands.addToTestPlan();
+    expect(first.resolved).toEqual([]);
+    expect(first.additions).toEqual([]);
+
+    vi.restoreAllMocks();
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("CALC-91" as never);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
+    const second = containerRig();
+    await second.commands.addToTestPlan();
+    expect(second.resolved).toEqual([{ kind: "test-plan", key: "CALC-91" }]);
+    expect(second.additions).toEqual([]);
+  });
+
+  it("reports partial acceptance and warnings without treating existing membership as failure", async () => {
+    targetAndConfirm("Test Plan", "CALC-91");
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands, additions, recoveries } = containerRig({
+      addResult: { addedTests: ["45678"], warning: "45679 was already a member" },
+    });
+
+    await commands.addToTestPlan();
+
+    expect(additions).toHaveLength(1);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "Xray reported 1 of 2 selected tests added to Test Plan CALC-91. The others may already be members or may not have been accepted; inspect CALC-91 before retrying. 1 provider warning logged."
+    );
+    expect(recoveries).toEqual([{ project: "CALC", diagnostics: ["45679 was already a member"] }]);
+  });
+
+  it("reports an empty added list as known zero, which may mean existing membership", async () => {
+    targetAndConfirm("Test Set");
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands } = containerRig({ addResult: { addedTests: [] } });
+
+    await commands.addToTestSet();
+
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain("Xray reported 0 of 2 selected tests added");
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain("may already be members");
+  });
+
+  it("reports an unreadable added count honestly and instructs inspection", async () => {
+    targetAndConfirm("Test Set");
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands } = containerRig({ addResult: { warning: "membership changed" } });
+
+    await commands.addToTestSet();
+
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain("did not return a readable added count");
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain("Inspect CALC-90 before retrying");
+    expect(String(warn.mock.calls.at(-1)?.[0])).not.toContain("0 of 2");
+  });
+
+  it("does not retry an ambiguous mutation and tells the user to inspect the exact target", async () => {
+    targetAndConfirm("Test Set");
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const add = vi.fn(() => Promise.reject(new RemoteOutcomeUnknownError("add tests", "op-1")));
+    const { commands } = containerRig({ add });
+
+    await commands.addToTestSet();
+
+    expect(add).toHaveBeenCalledOnce();
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "The request outcome is unknown. Tests may have been added to Test Set CALC-90; inspect CALC-90 before retrying."
+    );
+  });
+
+  it("sends nothing when mutation progress is already cancelled", async () => {
+    targetAndConfirm("Test Set");
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((options, task) => {
+      const cancelled = String(options.title).startsWith("Adding selected tests");
+      return (task as (progress: unknown, token: unknown) => Thenable<unknown>)(
+        { report: () => {} },
+        {
+          isCancellationRequested: cancelled,
+          onCancellationRequested: (listener: () => void) => {
+            if (cancelled) {listener();}
+            return { dispose: () => {} };
+          },
+        }
+      );
+    });
+    const add = vi.fn(() => Promise.resolve({ addedTests: ["45678", "45679"] }));
+    const { commands, additions } = containerRig({ add });
+
+    await commands.addToTestSet();
+
+    expect(add).not.toHaveBeenCalled();
+    expect(additions).toEqual([]);
+  });
+
+  it("marks cancellation after dispatch ambiguous and never retries", async () => {
+    targetAndConfirm("Test Plan", "CALC-91");
+    let cancel = (): void => {};
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((options, task) => {
+      const writing = String(options.title).startsWith("Adding selected tests");
+      return (task as (progress: unknown, token: unknown) => Thenable<unknown>)(
+        { report: () => {} },
+        {
+          isCancellationRequested: false,
+          onCancellationRequested: (listener: () => void) => {
+            if (writing) {cancel = listener;}
+            return { dispose: () => {} };
+          },
+        }
+      );
+    });
+    const add = vi.fn((signal?: AbortSignal) => new Promise<AddTestsToContainerResult>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }));
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands, additions } = containerRig({ add });
+
+    const pending = commands.addToTestPlan();
+    await flush();
+    cancel();
+    await pending;
+
+    expect(add).toHaveBeenCalledOnce();
+    expect(additions).toHaveLength(1);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
+      "Cancelled while waiting for Xray. Tests may still have been added to Test Plan CALC-91; inspect CALC-91 before retrying."
+    );
+  });
+
+  it("shares the create/append guard so a second container action cannot dispatch alongside the first", async () => {
+    targetAndConfirm("Test Set");
+    let release!: () => void;
+    const { commands, additions, sets } = containerRig({
+      add: () => new Promise((resolve) => {release = () => resolve({ addedTests: ["45678", "45679"] });}),
+    });
+
+    const append = commands.addToTestSet();
+    await flush();
+    const create = commands.createTestSet();
+    await flush();
+    expect(additions).toHaveLength(1);
+    expect(sets).toEqual([]);
+
+    release();
+    await Promise.all([append, create]);
+    expect(sets).toEqual([]);
+  });
+});
+
 describe("TraceabilityAuthoringCommands.createTestExecution", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -1451,7 +1999,7 @@ describe("TraceabilityAuthoringCommands.createTestExecution", () => {
     );
   });
 
-  it("carries the tracker's warnings into the report and logs them verbatim", async () => {
+  it("counts the tracker's warnings in the toast and logs bounded detail", async () => {
     nameAndConfirm("Test Execution");
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     const { commands, logger } = containerRig({ created: { key: "XNP-7", warnings: ["summary was trimmed"] } });
@@ -1460,7 +2008,7 @@ describe("TraceabilityAuthoringCommands.createTestExecution", () => {
     await commands.createTestExecution();
 
     expect(String(info.mock.calls.at(-1)?.[0])).toBe(
-      "Created Test Execution XNP-7 in CALC. Warnings: summary was trimmed"
+      "Created Test Execution XNP-7 in CALC. 1 provider warning logged."
     );
     expect(logged.mock.calls[0]?.[1]).toMatchObject({ warnings: "summary was trimmed" });
   });

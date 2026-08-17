@@ -120,33 +120,35 @@ export class XrayMetadataCapability
   // The account the in-memory state belongs to, and an epoch bumped on every credential change.
   private accountStamp: string | undefined;
   private accountEpoch = 0;
+  private readonly lifecycle = new AbortController();
+  private readonly pending = new Set<Promise<unknown>>();
+  private disposed = false;
+  private disposal: Promise<void> | undefined;
 
   constructor(private readonly deps: XrayMetadataDeps) {
     this.now = deps.now ?? ((): number => Date.now());
     this.canonicalizeKey = deps.canonicalizeKey ?? ((key): string => key.toUpperCase());
     this.credentialsSub = deps.onCredentialsChange(() => this.onCredentialsChanged());
-    // Fire-and-forget: loadFromCache swallows and logs its own failures, so nothing here can reject.
-    this.loadFromCache().catch(() => undefined);
+    this.background(this.loadFromCache(this.lifecycle.signal), "cache load");
   }
 
   // Any credential-store change drops the JWT (covers same-account secret rotation) and, if the
   // account actually changed or was cleared, resets and reloads state for the new account.
   public onCredentialsChanged(): void {
+    if (this.disposed) {return;}
     this.deps.client.invalidateAuth();
     this.accountEpoch += 1;
     // The directory is per connection: the next credentials may reach a different set of projects, so
     // the list is dropped rather than aged out.
     this.directory = EMPTY_DIRECTORY;
     this.directoryFetchedAt = undefined;
-    this.reconcileAccount().catch((error) => {
-      this.deps.logger.warn(`Xray metadata account reconcile failed: ${String(error)}`);
-    });
+    this.background(this.reconcileAccount(this.lifecycle.signal), "account reconcile");
   }
 
-  private async reconcileAccount(): Promise<void> {
+  private async reconcileAccount(signal: AbortSignal): Promise<void> {
     const epoch = this.accountEpoch;
     const account = await this.deps.account();
-    if (epoch !== this.accountEpoch) {
+    if (signal.aborted || epoch !== this.accountEpoch) {
       return;
     }
     if (account === this.accountStamp) {
@@ -162,7 +164,7 @@ export class XrayMetadataCapability
       } catch (error) {
         this.deps.logger.warn(`Xray metadata cache load failed: ${String(error)}`);
       }
-      if (epoch !== this.accountEpoch) {
+      if (signal.aborted || epoch !== this.accountEpoch) {
         return;
       }
       if (cached) {
@@ -201,9 +203,14 @@ export class XrayMetadataCapability
     if (!this.directoryStale()) {
       return Promise.resolve(this.directory);
     }
-    this.directoryInFlight ??= this.fetchDirectory(signal).finally(() => {
-      this.directoryInFlight = undefined;
-    });
+    if (!this.directoryInFlight) {
+      const task = this.track(this.fetchDirectory(this.signalFor(signal)));
+      this.directoryInFlight = task;
+      task.then(
+        () => {if (this.directoryInFlight === task) {this.directoryInFlight = undefined;}},
+        () => {if (this.directoryInFlight === task) {this.directoryInFlight = undefined;}}
+      );
+    }
     return this.directoryInFlight;
   }
 
@@ -221,10 +228,11 @@ export class XrayMetadataCapability
     try {
       result = await this.deps.listProjects(signal);
     } catch (error) {
+      if (signal?.aborted) {return this.directory;}
       this.deps.logger.warn(`Jira project directory refresh failed: ${String(error)}`);
     }
     // A credential change during the fetch supersedes it: that connection's list is not this one's.
-    if (epoch !== this.accountEpoch) {
+    if (signal?.aborted || epoch !== this.accountEpoch) {
       return this.directory;
     }
     // Stamped even when the fetch failed or the connection has no Jira access, so a surface repainting
@@ -251,7 +259,11 @@ export class XrayMetadataCapability
   // match to the projects `searchProjects` resolves (or a direct key lookup for a key-shaped input); §5 leniency
   // means an empty `tests` is an honest "no matches", never an invalid query. The JQL carries only
   // the user's search text (a repo tag, not a secret), so logging it at debug is safe.
-  public async search(text: string, signal?: AbortSignal): Promise<RemoteSearchResult> {
+  public search(text: string, signal?: AbortSignal): Promise<RemoteSearchResult> {
+    return this.track(this.searchNow(text, this.signalFor(signal)));
+  }
+
+  private async searchNow(text: string, signal: AbortSignal): Promise<RemoteSearchResult> {
     const jql = buildSearchJql(this.searchProjects(), text);
     if (jql === undefined) {
       return { tests: [], complete: true };
@@ -264,7 +276,11 @@ export class XrayMetadataCapability
   // Additive background merge for a test picked from remote search: fetch its metadata and fold it
   // into the in-memory snapshot without disturbing the catalogue scope (like a key batch). No per-key
   // fallback; `fetchTestsByKeys` batches, and one stale key never poisons it.
-  public async mergeKeys(keys: readonly string[], signal?: AbortSignal): Promise<void> {
+  public mergeKeys(keys: readonly string[], signal?: AbortSignal): Promise<void> {
+    return this.track(this.mergeKeysNow(keys, this.signalFor(signal)));
+  }
+
+  private async mergeKeysNow(keys: readonly string[], signal: AbortSignal): Promise<void> {
     const wanted = dedupe(keys.map((key) => this.canonicalizeKey(key))).filter((key) => key !== "");
     if (wanted.length === 0) {
       return;
@@ -304,7 +320,15 @@ export class XrayMetadataCapability
     this._onDidChange.fire();
   }
 
-  public async sync(scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress): Promise<void> {
+  public sync(scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress): Promise<void> {
+    return this.track(this.syncNow(scope, this.signalFor(signal), onProgress));
+  }
+
+  private async syncNow(
+    scope: SyncScope,
+    signal: AbortSignal,
+    onProgress?: SyncProgress
+  ): Promise<void> {
     if (signal?.aborted) {
       return;
     }
@@ -437,9 +461,10 @@ export class XrayMetadataCapability
     }
   }
 
-  private async loadFromCache(): Promise<void> {
+  private async loadFromCache(signal: AbortSignal): Promise<void> {
     const epoch = this.accountEpoch;
     const account = await this.deps.account();
+    if (signal.aborted) {return;}
     let cached: CachedMetadata | undefined;
     try {
       cached = await this.deps.cache.load();
@@ -448,7 +473,7 @@ export class XrayMetadataCapability
       return;
     }
     // A credential change during the load supersedes it; reconcileAccount owns the state now.
-    if (epoch !== this.accountEpoch) {
+    if (signal.aborted || epoch !== this.accountEpoch) {
       return;
     }
     this.accountStamp = account;
@@ -483,8 +508,38 @@ export class XrayMetadataCapability
     }
   }
 
-  public dispose(): void {
-    this.credentialsSub.dispose();
-    this._onDidChange.dispose();
+  private signalFor(signal?: AbortSignal): AbortSignal {
+    return signal
+      ? AbortSignal.any([this.lifecycle.signal, signal])
+      : this.lifecycle.signal;
+  }
+
+  private track<T>(task: Promise<T>): Promise<T> {
+    this.pending.add(task);
+    task.then(
+      () => this.pending.delete(task),
+      () => this.pending.delete(task)
+    );
+    return task;
+  }
+
+  private background(task: Promise<void>, label: string): void {
+    this.track(task).catch((error) => {
+      if (!this.lifecycle.signal.aborted) {
+        this.deps.logger.warn(`Xray metadata ${label} failed: ${String(error)}`);
+      }
+    });
+  }
+
+  public dispose(): Promise<void> {
+    if (!this.disposal) {
+      this.disposed = true;
+      this.lifecycle.abort();
+      this.credentialsSub.dispose();
+      this.disposal = Promise.allSettled([...this.pending]).then(() => {
+        this._onDidChange.dispose();
+      });
+    }
+    return this.disposal;
   }
 }

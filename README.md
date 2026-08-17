@@ -9,10 +9,6 @@ Write Gherkin scenarios, keep them connected to their step definitions, and run 
 
 ![Run and Debug CodeLens in a feature file](images/running_feature_code_lens.gif)
 
-<!-- GIF placeholder: images/authoring-to-execution.gif
-Show an unmatched Gherkin step being resolved or generated, then run the scenario. Keep the recording
-tight, use a current Specwright build, and do not show personal paths, account names, or external apps. -->
-
 ## What you can do
 
 ### Write better feature files
@@ -28,8 +24,6 @@ Go from a Gherkin step to its TypeScript or JavaScript definition, inspect the m
 Discover features in the Testing view and run a feature, scenario, Scenario Outline, or individual Examples row. Use CodeLens or the Testing view to target an individual scenario or row; editor and Explorer context menus provide file-level actions. Results map back to the feature file as each scenario finishes, so a long run shows useful progress immediately.
 
 Set breakpoints in `.feature` files or step definitions, then use VS Code's normal Debug action. Specwright generates the necessary specs, mirrors supported feature-file breakpoints, and removes the generated breakpoints when the session ends.
-
-![Debug a feature with breakpoints](images/debugging_feature.gif)
 
 ![Run one Scenario Outline Examples row](images/running_example.gif)
 
@@ -53,7 +47,7 @@ The Xray guide clearly identifies actions that only change your workspace, actio
 
 1. Install Specwright from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=upscaled-dev.specwright).
 2. Open a workspace already configured for [`playwright-bdd`](https://vitalets.github.io/playwright-bdd/) with one or more `.feature` files.
-3. Open the **Testing** view. Specwright discovers scenarios automatically.
+3. Open the **Testing** view. Specwright discovers scenarios when the view resolves, when you refresh, or when you start a run.
 4. Choose **Run** or **Debug** for the feature, scenario, outline, or Examples row you need.
 
 Specwright uses your existing `playwright-bdd` and Playwright configuration. If you use a monorepo, another package manager, or custom step paths, follow the [getting started guide](docs/getting-started.md).
@@ -91,7 +85,7 @@ The [compatibility record](docs/compatibility.md) names the exact VS Code, Playw
 
 Specwright can coexist with [Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete). Overlapping authoring features default to an automatic compatibility mode to avoid duplicate suggestions and diagnostics. You can change that behavior in Settings.
 
-Specwright writes diagnostics to a VS Code log output channel. Use **Developer: Set Log Level** to control its detail and **Specwright: Show Test Output** to open it.
+Specwright writes diagnostics to a VS Code log output channel. Use **Developer: Set Log Level** to control its detail and **Specwright: Show Test Output** to open it. For a support report, run **Specwright: Open Support Snapshot**. It previews a redacted JSON snapshot first and copies it only when you choose **Copy Snapshot**.
 
 ## Documentation
 
@@ -131,7 +125,7 @@ Specwright stands on the work of projects and communities that make BDD developm
 
 ### Gherkin ecosystem
 
-[Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete) is an independent VS Code extension for Gherkin authoring. Specwright is designed to coexist with it; see the [compatibility settings](docs/settings.md#compatibility-mode-settings).
+[Cucumber (Gherkin) Full Support](https://marketplace.visualstudio.com/items?itemName=alexkrechik.cucumberautocomplete) is an independent VS Code extension for Gherkin authoring. Specwright is designed to coexist with it; see the [compatibility settings](docs/settings.md#compatibility).
 
 [Gherkin](https://cucumber.io/docs/gherkin/) and the [VS Code Extension API](https://code.visualstudio.com/api) provide the language and platform that make the extension possible.
 

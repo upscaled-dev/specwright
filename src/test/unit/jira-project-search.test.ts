@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
 import {
@@ -264,7 +264,8 @@ describe("fetchJiraIdentity", () => {
 
     await expect(identity(fetchImpl, logger)).resolves.toBe("Jane Tester");
     expect(requestedUrl).toBe(`https://${SITE}/rest/api/3/myself`);
-    expect(lines.join("\n")).toContain("authenticated as Jane Tester");
+    expect(lines.join("\n")).toContain("identity received");
+    expect(lines.join("\n")).not.toContain("Jane Tester");
   });
 
   it("falls back to the account email when the site names no display name", async () => {
@@ -297,5 +298,65 @@ describe("fetchJiraIdentity", () => {
     const fetchImpl: FetchLike = () => Promise.reject(new Error("fetch failed", { cause: new Error("ECONNREFUSED") }));
 
     await expect(identity(fetchImpl, logger)).rejects.toThrow("Could not reach Jira");
+  });
+
+  it("uses one deadline for a stalled body and clears it after the safe failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const { logger } = capturingLogger();
+      const fetchImpl: FetchLike = (_url, init) => Promise.resolve({
+        status: 200, ok: true,
+        text: () => new Promise<string>((_resolve, reject) => {
+          (init.signal as AbortSignal).addEventListener("abort", () => reject(new Error("body stalled")), { once: true });
+        }),
+      } as unknown as Response);
+      const pending = fetchJiraIdentity({ site: SITE, credentials: { email: EMAIL, token: TOKEN }, logger, fetchImpl, sleep: async () => undefined });
+      const rejected = expect(pending).rejects.toThrow("Could not reach Jira");
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejected;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("preserves a caller abort without leaving a deadline timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const { logger } = capturingLogger();
+      const abort = new AbortController();
+      const pending = fetchJiraIdentity({
+        site: SITE, credentials: { email: EMAIL, token: TOKEN }, logger, signal: abort.signal,
+        fetchImpl: (_url, init) => new Promise((_resolve, reject) => (init.signal as AbortSignal).addEventListener("abort", () => reject(abort.signal.reason), { once: true })),
+      });
+      const reason = new Error("caller cancelled");
+      const rejected = expect(pending).rejects.toBe(reason);
+      abort.abort(reason);
+      await rejected;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps one deadline across a retry backoff and a later stalled body", async () => {
+    vi.useFakeTimers();
+    try {
+      const { logger } = capturingLogger();
+      let calls = 0;
+      const fetchImpl: FetchLike = (_url, init) => {
+        calls += 1;
+        if (calls === 1) { return Promise.resolve(response(500, "retry")); }
+        return Promise.resolve({ status: 200, ok: true, text: () => new Promise<string>((_resolve, reject) => {
+          (init.signal as AbortSignal).addEventListener("abort", () => reject(new Error("deadline body")), { once: true });
+        }) } as unknown as Response);
+      };
+      const pending = fetchJiraIdentity({
+        site: SITE, credentials: { email: EMAIL, token: TOKEN }, logger, fetchImpl, random: () => 0,
+        sleep: () => new Promise((resolve) => setTimeout(resolve, 10_000)),
+      });
+      const rejected = expect(pending).rejects.toThrow("Could not reach Jira");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(calls).toBe(2);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await rejected;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 });

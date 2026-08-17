@@ -387,6 +387,15 @@ export function __fireFileWatcher(
   return last ? last.__fire(kind, uri) : Promise.resolve();
 }
 
+/** Fire an earlier watcher generation after it has been replaced. */
+export function __fireFileWatcherAt(
+  index: number,
+  kind: FileWatcherEventKind,
+  uri: { fsPath: string }
+): Promise<void> {
+  return __fileWatchers[index]?.__fire(kind, uri) ?? Promise.resolve();
+}
+
 export function __resetFileWatchers(): void {
   __fileWatchers.length = 0;
 }

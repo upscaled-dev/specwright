@@ -60,6 +60,12 @@ export function graphqlErrorSummaries(body: unknown): string[] {
   });
 }
 
+export function errorShapeVerdict(probe: { readonly status: number; readonly errors: readonly string[] }): string {
+  if (probe.status === 200 && probe.errors.length > 0) { return "expected-error-envelope"; }
+  if (probe.status === 200 && probe.errors.length === 0) { return "unexpected-empty-success"; }
+  return "unexpected-response";
+}
+
 // Describes a JWT for the log without ever emitting it; length and segment count are enough to
 // verify the wire shape.
 export function describeJwt(jwt: string): string {

@@ -19,95 +19,11 @@ import {
 import { MappingPageSizeStore } from "./mapping-page-size";
 import { ProjectScopeStore } from "./project-scope";
 import { SurfaceHost } from "./webview-host";
+import type { BoardClientMessage } from "../webview/protocol";
 
-interface SearchMessage {
-  type: "search";
-  value: string;
-}
 // The three card lists of the Mapping tab, each with its own search box and paginator.
 type MappingSection = "untraced" | "available" | "mapped";
-interface ColumnSearchMessage {
-  type: "columnSearch";
-  section: MappingSection;
-  value: string;
-}
-// A paginator step, never a page number: the webview posts the direction and the host moves its own
-// index, so a stale render can never send the board to a page nobody clicked for.
-interface PageMessage {
-  type: "page";
-  section: MappingSection;
-  step: "prev" | "next";
-}
-interface PageSizeMessage {
-  type: "pageSize";
-  size: number;
-}
-interface DropMessage {
-  type: "drop";
-  scenario: string;
-  key: string;
-}
-interface UnlinkMessage {
-  type: "unlink";
-  scenario: string;
-  key: string;
-}
-interface PushTextMessage {
-  type: "pushText";
-  scenario: string;
-  key: string;
-}
-interface OpenMessage {
-  type: "open";
-  key: string;
-}
-interface SyncMessage {
-  type: "sync";
-}
-interface ScopeMessage {
-  type: "scope";
-  project: string;
-}
-// `target` says which column's checkbox moved: scenario cards and test cards hold separate selections,
-// and a scenario's drop id and a test's key are never compared.
-interface SelectMessage {
-  type: "select";
-  target: "scenario" | "test";
-  id: string;
-  on: boolean;
-}
-interface BulkCreateMessage {
-  type: "bulkCreate";
-}
-interface CreateTestSetMessage {
-  type: "createTestSet";
-}
-interface CreateTestPlanMessage {
-  type: "createTestPlan";
-}
-interface CreateTestExecutionMessage {
-  type: "createTestExecution";
-}
-interface RunSelectedMessage {
-  type: "runSelected";
-}
-type BoardIncoming =
-  | SearchMessage
-  | ColumnSearchMessage
-  | PageMessage
-  | PageSizeMessage
-  | DropMessage
-  | UnlinkMessage
-  | PushTextMessage
-  | OpenMessage
-  | SyncMessage
-  | ScopeMessage
-  | SelectMessage
-  | BulkCreateMessage
-  | CreateTestSetMessage
-  | CreateTestPlanMessage
-  | CreateTestExecutionMessage
-  | RunSelectedMessage;
+type BoardIncoming = BoardClientMessage;
 
 // One handler per message type, so a new board verb is a new line rather than another branch. Exhaustive
 // by construction: a message type with no route is a compile error.
@@ -146,7 +62,6 @@ interface RenderMessage {
   matrix: readonly MatrixGroup[];
   executions: readonly ExecutionRow[];
   availableEmptyText: string;
-  offerSync: boolean;
   // Whether these lists came out of a query. The webview cannot read this off its own search box: a
   // snapshot-driven render can land before the host has processed a keystroke or a clear.
   filtering: boolean;
@@ -157,10 +72,16 @@ interface RenderMessage {
   // create needs a target project; the webview reads `createVerb`, not this.
   scoped: boolean;
   createVerb: CreateVerb;
+  syncVerb: CreateVerb;
+  untracedHelper: string;
   testSetVerb: CreateVerb;
+  addToTestSetVerb: CreateVerb;
   testPlanVerb: CreateVerb;
+  addToTestPlanVerb: CreateVerb;
+  availableHelper: string;
   executionVerb: CreateVerb;
   runSelectedVerb: CreateVerb;
+  mappedHelper: string;
 }
 
 // The sync progress strip above the panes. The host composes the whole line, so the webview only paints
@@ -180,6 +101,9 @@ export interface BoardSurfaceDeps {
   // a live remote query. Rebuilt alongside the model on every refresh.
   buildExecutions(): readonly ExecutionRow[];
   readonly onDidChange: vscode.Event<void>;
+  readonly onDidChangeActivity: vscode.Event<void>;
+  mutationActive(): boolean;
+  syncActive(): boolean;
   applyDrop(scenario: string, key: string): Promise<void>;
   // The unlink seam: the webview posts a test card row's {scenario, key} and the host validates and
   // removes just that `@TEST_` tag, then the snapshot rebuild re-renders (no hand-patching here).
@@ -187,9 +111,8 @@ export interface BoardSurfaceDeps {
   // The push seam: the same {scenario, key} handle, routed to the push command, which owns the fresh
   // remote read, the confirm, the write, and the reporting. Nothing is decided here.
   pushText(scenario: string, key: string): void;
-  // The Sync now button on an empty available group: the same traceability sync the palette runs. A
-  // successful run re-renders through the snapshot rebuild; the settled promise is what repaints after
-  // a failure, so the button never stays stuck on "Syncing".
+  // The persistent Sync now button runs the same traceability sync the palette runs. Its enabled state
+  // is host-owned, and this surface enforces that state again before starting the read.
   runSync(): Promise<void>;
   // The board's own loads, on open and on a project pick. Whether such a load is worth running at all
   // (a reachable tracker, a project no sync has catalogued) is the host's call, not the board's: the
@@ -201,10 +124,12 @@ export interface BoardSurfaceDeps {
   // the confirm, the progress, and the reporting, and reads the same selection this surface holds, so
   // the button and the palette entry run one path.
   bulkCreate(): void;
-  // The test column's two buttons: one remote container holding the checked test cards. Same division of
-  // labour as `bulkCreate`: the command layer owns the summary prompt, the confirm, and the reporting.
+  // The test column's create/add controls either make a container from the checked test cards or add
+  // those cards to an existing one. The command layer owns prompts, confirmation, and reporting.
   createTestSet(): void;
+  addToTestSet(): void;
   createTestPlan(): void;
+  addToTestPlan(): void;
   // The Executions tab's button: one empty remote execution in the scoped project, for a later publish to
   // append to. It reads no selection, so only the scope decides whether it can run.
   createTestExecution(): void;
@@ -264,15 +189,19 @@ export class BoardSurface {
   private readonly selectedTestKeys = new Set<string>();
 
   constructor(
-    private readonly host: SurfaceHost,
+    private readonly host: SurfaceHost<"board">,
     private readonly deps: BoardSurfaceDeps
   ) {
     this.model = deps.buildModel();
     this.executions = deps.buildExecutions();
     this.projects = deps.knownProjects();
-    host.onMessage((message) => this.handle(message as BoardIncoming));
+    host.onMessage((message) => this.handle(message));
     const subscription = deps.onDidChange(() => this.refresh());
-    host.onDidDispose(() => subscription.dispose());
+    const activitySubscription = deps.onDidChangeActivity(() => this.render());
+    host.onDidDispose(() => {
+      subscription.dispose();
+      activitySubscription.dispose();
+    });
     this.render();
     const stored = deps.projectScope.get(this.projects);
     if (stored !== undefined) {
@@ -318,7 +247,9 @@ export class BoardSurface {
     select: (message) => this.toggleSelection(message.target, message.id, message.on),
     bulkCreate: () => this.deps.bulkCreate(),
     createTestSet: () => this.deps.createTestSet(),
+    addToTestSet: () => this.deps.addToTestSet(),
     createTestPlan: () => this.deps.createTestPlan(),
+    addToTestPlan: () => this.deps.addToTestPlan(),
     createTestExecution: () => this.deps.createTestExecution(),
     runSelected: () => this.deps.runSelected([...this.selectedTestKeys]),
   };
@@ -349,6 +280,7 @@ export class BoardSurface {
   }
 
   private syncNow(): void {
+    if (this.deps.mutationActive() || this.deps.syncActive()) {return;}
     this.deps
       .runSync()
       .finally(() => this.render())
@@ -379,7 +311,7 @@ export class BoardSurface {
     this.host.post(message);
   }
 
-  private toggleSelection(target: SelectMessage["target"], id: string, on: boolean): void {
+  private toggleSelection(target: Extract<BoardClientMessage, { type: "select" }>["target"], id: string, on: boolean): void {
     const selection = target === "test" ? this.selectedTestKeys : this.selectedScenarioIds;
     if (on) {
       selection.add(id);
@@ -446,7 +378,7 @@ export class BoardSurface {
     };
   }
 
-  // The two test-column verbs share one state machine, `noun` being the only difference: a container
+  // The two create verbs share one state machine, `noun` being the only difference: a container
   // needs a project to land in and at least one checked test, and a disabled button says which is
   // missing in its tooltip.
   private containerVerb(noun: string, project: string | undefined): CreateVerb {
@@ -466,6 +398,35 @@ export class BoardSurface {
     };
   }
 
+  private appendContainerVerb(noun: string, project: string | undefined): CreateVerb {
+    const label = `Add to existing ${noun}`;
+    if (project === undefined) {
+      return { label, enabled: false, hint: `Pick a project in the header to choose a ${noun}.` };
+    }
+    const count = this.selectedTestKeys.size;
+    if (count === 0) {
+      return { label, enabled: false, hint: `Check the tests you want to add to a ${noun}.` };
+    }
+    const tests = count === 1 ? "1 test" : `${count} tests`;
+    return {
+      label: `${label} with ${tests}`,
+      enabled: true,
+      hint: `Adds the checked ${tests} to an existing ${noun} in ${project}.`,
+    };
+  }
+
+  private availableHelper(project: string | undefined): string {
+    if (project === undefined) {
+      return "Pick a project in the header.";
+    }
+    const count = this.selectedTestKeys.size;
+    if (count === 0) {
+      return `Check tests in ${project}.`;
+    }
+    const tests = count === 1 ? "1 test" : `${count} tests`;
+    return `${tests} checked in ${project}. Choose a Test Set or Test Plan action.`;
+  }
+
   // The Executions verb reads no selection: an empty execution needs only a project to land in, so the
   // scope is the whole of its state.
   private executionVerb(project: string | undefined): CreateVerb {
@@ -478,6 +439,16 @@ export class BoardSurface {
       enabled: true,
       hint: `Creates an empty Test Execution in ${project} for a later publish to append to.`,
     };
+  }
+
+  private syncVerb(): CreateVerb {
+    if (this.deps.syncActive()) {
+      return { label: "Syncing", enabled: false, hint: "A traceability sync is in progress." };
+    }
+    if (this.deps.mutationActive()) {
+      return { label: "Sync now", enabled: false, hint: "Wait for the active board operation to finish." };
+    }
+    return { label: "Sync now", enabled: true, hint: "Refresh traceability from the connected provider." };
   }
 
   private runSelectedVerb(): CreateVerb {
@@ -550,6 +521,8 @@ export class BoardSurface {
       available: available.meta.page,
       mapped: mapped.meta.page,
     };
+    const createVerb = this.createVerb(project);
+    const runSelectedVerb = this.runSelectedVerb();
     const message: RenderMessage = {
       type: "render",
       scenarios: untraced.items,
@@ -564,16 +537,21 @@ export class BoardSurface {
       matrix: groupMatrixRows(filtered.matrix),
       executions: filterExecutionRows(this.executions, this.query),
       availableEmptyText: filtered.availableEmptyText,
-      offerSync: filtered.offerSync,
       filtering: sectionFiltering(this.query, ""),
       projects: this.projects,
       project: project ?? "",
       scoped: project !== undefined,
-      createVerb: this.createVerb(project),
+      createVerb,
+      syncVerb: this.syncVerb(),
+      untracedHelper: createVerb.enabled ? createVerb.label : createVerb.hint,
       testSetVerb: this.containerVerb("Test Set", project),
+      addToTestSetVerb: this.appendContainerVerb("Test Set", project),
       testPlanVerb: this.containerVerb("Test Plan", project),
+      addToTestPlanVerb: this.appendContainerVerb("Test Plan", project),
+      availableHelper: this.availableHelper(project),
       executionVerb: this.executionVerb(project),
-      runSelectedVerb: this.runSelectedVerb(),
+      runSelectedVerb,
+      mappedHelper: runSelectedVerb.hint,
     };
     this.host.post(message);
   }

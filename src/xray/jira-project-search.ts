@@ -93,6 +93,10 @@ export function jiraSecrets(credentials: XrayJiraCredentials): string[] {
   return [credentials.token, basicAuthValue(credentials), credentials.email];
 }
 
+function jiraErrorText(error: unknown, credentials: XrayJiraCredentials): string {
+  return scrubJwtLike(maskValues(errMsg(error), jiraSecrets(credentials)));
+}
+
 interface JiraPage {
   projects: JiraProject[];
   isLast: boolean;
@@ -233,7 +237,7 @@ class JiraProjectSearch {
       if (error instanceof RetryableRemoteError) {
         throw error;
       }
-      throw new RetryableRemoteError(scrubJwtLike(errMsg(error)));
+      throw new RetryableRemoteError(jiraErrorText(error, this.deps.credentials));
     } finally {
       clearTimeout(timer);
       this.deps.signal?.removeEventListener("abort", onAbort);
@@ -261,17 +265,20 @@ export function searchJiraProjects(deps: JiraProjectSearchDeps): Promise<JiraPro
  * server's own words when the site refuses, which is where a missing permission shows up first.
  */
 export async function fetchJiraIdentity(
-  deps: Pick<JiraProjectSearchDeps, "site" | "credentials" | "logger" | "fetchImpl" | "signal">
+  deps: Pick<JiraProjectSearchDeps, "site" | "credentials" | "logger" | "fetchImpl" | "signal" | "sleep" | "random">
 ): Promise<string> {
   if (deps.signal?.aborted) {throw deps.signal.reason ?? new Error("Aborted");}
   const fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
+  const deadline = new AbortController();
+  const deadlineTimer = setTimeout(() => deadline.abort(new Error("Jira identity check timed out")), REQUEST_TIMEOUT_MS);
+  const onAbort = (): void => deadline.abort(deps.signal?.reason);
+  deps.signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const response = await runRemoteOperation(async () => {
       if (deps.signal?.aborted) {throw deps.signal.reason ?? new Error("Aborted");}
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      const onAbort = (): void => controller.abort();
-      deps.signal?.addEventListener("abort", onAbort, { once: true });
+      const onDeadline = (): void => controller.abort(deadline.signal.reason);
+      deadline.signal.addEventListener("abort", onDeadline, { once: true });
       try {
         const fetched = await fetchImpl(`https://${deps.site}/rest/api/3/myself`, {
           method: "GET",
@@ -287,19 +294,18 @@ export async function fetchJiraIdentity(
         }
         return { status: fetched.status, ok: fetched.ok, bodyText };
       } catch (error) {
-        if (deps.signal?.aborted) {throw deps.signal.reason ?? error;}
+        if (deadline.signal.aborted) {throw deadline.signal.reason ?? error;}
         throw error instanceof RetryableRemoteError ? error : new RetryableRemoteError(scrubJwtLike(errMsg(error)));
       } finally {
-        clearTimeout(timer);
-        deps.signal?.removeEventListener("abort", onAbort);
+        deadline.signal.removeEventListener("abort", onDeadline);
       }
     }, {
       identity: operationIdentity("jira.profile.read"),
       logger: deps.logger,
-      signal: deps.signal,
-      sleep: abortableRemoteSleep,
-      random: Math.random,
-      abortError: () => deps.signal?.reason ?? new Error("Aborted"),
+      signal: deadline.signal,
+      sleep: deps.sleep ?? abortableRemoteSleep,
+      random: deps.random ?? Math.random,
+      abortError: () => deadline.signal.reason ?? new Error("Aborted"),
     });
     const { status, ok, bodyText } = response;
     const body = maskValues(bodyText, jiraSecrets(deps.credentials));
@@ -315,13 +321,17 @@ export async function fetchJiraIdentity(
     const parsed = parseBody(bodyText);
     const record = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
     const name = readString(record["displayName"]) ?? readString(record["emailAddress"]) ?? "an unnamed account";
-    deps.logger.info(`GET /rest/api/3/myself → ${status}; authenticated as ${name}`);
+    deps.logger.info(`GET /rest/api/3/myself → ${status}; identity received`);
     return name;
   } catch (error) {
     if (deps.signal?.aborted) {throw deps.signal.reason ?? error;}
-    deps.logger.error(`Jira identity check request error: ${scrubJwtLike(errMsg(error))}`);
+    deps.logger.error(`Jira identity check request error: ${jiraErrorText(error, deps.credentials)}`);
     throw error instanceof JiraAccessError
       ? error
       : new JiraAccessError("Could not reach Jira: check your network connection.");
+  }
+  finally {
+    clearTimeout(deadlineTimer);
+    deps.signal?.removeEventListener("abort", onAbort);
   }
 }

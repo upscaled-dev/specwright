@@ -265,24 +265,22 @@ describe("buildBoardViewModel: test cards", () => {
 
   it("points the empty available group at the project selector when the resolved sync scope is empty, snapshot or not", () => {
     // No sync can help here: no project's catalogue can land without a project scope, so the selector,
-    // not a Sync now button, is the affordance.
-    expect(build(undefined, ROOTS, false)).toMatchObject({ availableEmptyText: SCOPE_HINT, offerSync: false });
+    // not the available-list copy, is the affordance.
+    expect(build(undefined, ROOTS, false)).toMatchObject({ availableEmptyText: SCOPE_HINT });
     expect(build(snapshot({ completeProjects: ["CALC"] }), ROOTS, false)).toMatchObject({
       availableEmptyText: SCOPE_HINT,
-      offerSync: false,
     });
   });
 
-  it("offers a sync when the scope is configured but no complete catalogue has landed", () => {
-    const expected = { availableEmptyText: "No synced tests yet.", offerSync: true };
+  it("describes the unsynced state when the scope is configured but no complete catalogue has landed", () => {
+    const expected = { availableEmptyText: "No synced tests yet." };
     expect(build(undefined, ROOTS, true)).toMatchObject(expected);
     expect(build(snapshot({ completeProjects: [] }), ROOTS, true)).toMatchObject(expected);
   });
 
-  it("offers nothing once a complete sync simply turned up no unmapped tests", () => {
+  it("describes a complete sync that turned up no unmapped tests", () => {
     expect(build(snapshot({ completeProjects: ["CALC"] }), ROOTS, true)).toMatchObject({
       availableEmptyText: "No unmapped tests in the last sync.",
-      offerSync: false,
     });
   });
 });
@@ -414,7 +412,7 @@ describe("scopeBoardViewModel", () => {
   });
 
   // The empty state is re-decided for the scoped project alone. PAY's catalogue never landed, so it has
-  // no orphans to show and must offer a sync, not inherit CALC's authoritative "nothing unmapped".
+  // no orphans to show and must retain its own honest empty copy.
   it("re-decides the available group's empty state for the scoped project", () => {
     const model = buildBoardViewModel(
       snapshot({
@@ -430,12 +428,10 @@ describe("scopeBoardViewModel", () => {
     const calc = scopeBoardViewModel(model, "CALC");
     expect(calc.available).toEqual([]);
     expect(calc.availableEmptyText).toBe("No unmapped tests in the last sync.");
-    expect(calc.offerSync).toBe(false);
 
     const pay = scopeBoardViewModel(model, "PAY");
     expect(pay.available).toEqual([]);
     expect(pay.availableEmptyText).toBe("No synced tests yet.");
-    expect(pay.offerSync).toBe(true);
   });
 
   // The scope selector's keys are uppercased; `completeProjects` is whatever the adapter reported. The
@@ -452,7 +448,6 @@ describe("scopeBoardViewModel", () => {
 
     expect(scopeBoardViewModel(model, "CALC")).toMatchObject({
       availableEmptyText: "No unmapped tests in the last sync.",
-      offerSync: false,
     });
   });
 });
@@ -480,7 +475,6 @@ describe("filterBoardViewModel", () => {
       { requirement: "", test: "PAY-9", scenario: "", tag: "", result: "no coverage", file: "", projects: ["PAY"] },
     ],
     availableEmptyText: "No unmapped tests in the last sync.",
-    offerSync: false,
     completeProjects: ["CALC", "PAY"],
   };
 
@@ -537,8 +531,6 @@ describe("filterBoardViewModel", () => {
     const out = filterBoardViewModel(model, "calc-1");
     expect(out.available).toEqual([]);
     expect(out.availableEmptyText).toBe(model.availableEmptyText);
-    expect(out.offerSync).toBe(false);
-    expect(filterBoardViewModel({ ...model, offerSync: true }, "calc-1").offerSync).toBe(true);
   });
 });
 
