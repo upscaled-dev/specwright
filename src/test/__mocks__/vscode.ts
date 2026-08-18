@@ -65,7 +65,7 @@ const Uri = {
     toString: () => value,
   }),
   joinPath: (base: { fsPath: string }, ...segments: string[]) => {
-    const fsPath = path.join(base.fsPath, ...segments);
+    const fsPath = path.posix.join(base.fsPath, ...segments);
     return { fsPath, scheme: "file", toString: () => `file://${fsPath}` };
   },
 };
