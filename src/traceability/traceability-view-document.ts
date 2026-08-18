@@ -29,7 +29,7 @@ export function renderTraceabilityViewDocument(webview: vscode.Webview, assetRoo
     .tone-skipped>.state-icon{color:var(--vscode-testing-iconSkipped)}
     .tone-pending>.state-icon{color:var(--vscode-testing-iconQueued)}
     .tone-warning>.state-icon{color:var(--vscode-problemsWarningIcon-foreground,var(--vscode-editorWarning-foreground))}
-    .tone-info>.state-icon{color:var(--vscode-testing-iconQueued)}
+    .tone-info>.state-icon{color:var(--vscode-notificationsInfoIcon-foreground,var(--vscode-testing-iconQueued))}
     .label{overflow:hidden;text-overflow:ellipsis}
     .description{color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis}
     .actions{margin-left:auto;display:flex;gap:.2rem}

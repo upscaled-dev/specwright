@@ -76,12 +76,6 @@ const outcomeIcon: Record<RunOutcome, string> = {
   failed: "error",
   skipped: "skip",
 };
-const statusIcon: Record<NormalizedStatus["category"], string> = {
-  passed: "pass",
-  failed: "error",
-  pending: "clock",
-  unknown: "question",
-};
 const outcomeTone: Record<RunOutcome, TraceabilityProjectionRow["tone"]> = {
   passed: "success",
   failed: "error",
@@ -249,7 +243,7 @@ export function projectTraceabilityTree(
     for (const [key, links] of [...byKey].sort((a, b) => a[0].localeCompare(b[0]))) {
       const first = links[0]; const id = rowId("test", key);
       const outcome = worstStatus(links.map((link) => link.lastResult));
-      const icon = first?.remoteMissing ? "warning" : first?.meta?.status ? statusIcon[first.meta.status.category] : outcome ? outcomeIcon[outcome] : "circle-slash";
+      const icon = first?.remoteMissing ? "warning" : "beaker";
       const tone = first?.remoteMissing ? "warning" : first?.meta?.status ? statusTone[first.meta.status.category] : outcome ? outcomeTone[outcome] : "warning";
       const description = first?.remoteMissing ? displayJoin([testDescription(links), "not found on remote"], " · ") : testDescription(links);
       const remoteTooltip = first?.remoteMissing

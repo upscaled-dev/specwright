@@ -84,10 +84,10 @@ describe("traceability tree projection", () => {
     expect(projection.rows.every((candidate) => !candidate.id.includes("workspace"))).toBe(true);
   });
 
-  it("uses project-neutral test descriptions and a no-run dash", () => {
+  it("uses project-neutral test descriptions and warns when nothing has run", () => {
     const link = { ...snapshot.links[0]!, project: undefined, lastResult: undefined };
     const value = { ...snapshot, links: [link] };
-    expect(row(value, "CALC-1")).toMatchObject({ description: "1 scenario", icon: "circle-slash", tone: "warning" });
+    expect(row(value, "CALC-1")).toMatchObject({ description: "1 scenario", icon: "beaker", tone: "warning" });
   });
 
   it("keeps scenario default reveal and inline link/run actions with the local outcome icon", () => {
@@ -108,9 +108,9 @@ describe("traceability tree projection", () => {
 
   it("renders normalized remote status and aggregate local worst outcomes", () => {
     const remote = { ...snapshot.links[0]!, meta: { key: "CALC-1", summary: "Remote", status: { category: "pending" as const, providerValue: "TODO" } } };
-    expect(row({ ...snapshot, links: [remote] }, "CALC-1")).toMatchObject({ description: "Remote", icon: "clock", tone: "pending", tooltip: "CALC-1 · TODO" });
+    expect(row({ ...snapshot, links: [remote] }, "CALC-1")).toMatchObject({ description: "Remote", icon: "beaker", tone: "pending", tooltip: "CALC-1 · TODO" });
     const local = { ...snapshot, links: [{ ...snapshot.links[0]!, lastResult: "passed" as const }, { ...snapshot.links[0]!, scenario: { ...snapshot.links[0]!.scenario, line: 5 }, lastResult: "failed" as const }] };
-    expect(row(local, "CALC-1")).toMatchObject({ icon: "error", tone: "error" });
+    expect(row(local, "CALC-1")).toMatchObject({ icon: "beaker", tone: "error" });
   });
 
   it("lets a remote-missing warning outrank a pass and includes project detail", () => {
