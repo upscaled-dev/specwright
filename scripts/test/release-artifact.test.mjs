@@ -239,7 +239,7 @@ test("packaged Codicons retain their license and inventory records", () => {
     .replaceAll("\r\n", "\n")
     .trim()
     .replace(/^ {4}/gmu, "");
-  const thirdParty = readFileSync(resolve(REPO_ROOT, "THIRD_PARTY_LICENSES.md"), "utf8");
+  const thirdParty = readFileSync(resolve(REPO_ROOT, "THIRD_PARTY_LICENSES.md"), "utf8").replaceAll("\r\n", "\n");
   const projectLicense = readFileSync(resolve(REPO_ROOT, "LICENSE"), "utf8");
   const development = readFileSync(resolve(REPO_ROOT, "docs", "development.md"), "utf8");
   const inventory = JSON.parse(readFileSync(resolve(REPO_ROOT, "scripts", "package-contents.json"), "utf8"));
@@ -638,7 +638,8 @@ test("CI builds the candidate after its gates and promotes it without rebuilding
   const workflows = workflowSources();
   const workflow = workflows.get("ci.yml");
   assert.ok(workflow, "missing ci.yml");
-  const dependabot = readFileSync(resolve(REPO_ROOT, ".github", "dependabot.yml"), "utf8");
+  // Normalized so the mutation probes below can splice on their "\n" anchors after a CRLF checkout.
+  const dependabot = readFileSync(resolve(REPO_ROOT, ".github", "dependabot.yml"), "utf8").replaceAll("\r\n", "\n");
   const packageJson = JSON.parse(readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"));
   assertWorkflowSupplyPolicy(workflows);
   assertDependencyAutomation(dependabot);
