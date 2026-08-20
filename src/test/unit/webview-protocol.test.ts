@@ -12,7 +12,7 @@ function client(surface: SurfaceName | "shell", body: object, overrides: Record<
 }
 
 function boardRender(matrixRows = 1): Extract<BoardHostMessage, { type: "render" }> {
-  const section = { total: 0, filtered: 0, page: 0, pageSize: 25, pageCount: 0, query: "", filtering: false };
+  const section = { total: 0, filtered: 0, page: 0, pageSize: 25, pageCount: 0, query: "", filtering: false, selection: "none" } as const;
   const verb = { label: "Action", enabled: false, hint: "Pick an item" };
   return {
     type: "render", scenarios: [], available: [], mapped: [], sections: { untraced: section, available: section, mapped: section }, pageSize: 25,
@@ -34,6 +34,24 @@ describe("webview protocol", () => {
     expect(parseClientEnvelope(client("link", { type: "confirm", id: "CALC-1", extra: true }))).toBeUndefined();
     expect(parseClientEnvelope(client("publish", { type: "confirm", runId: "run", request: { mode: "append", executionKey: "CALC-1" }, attachments: Array(65).fill("a") }))).toBeDefined();
     expect(parseClientEnvelope(client("publish", { type: "confirm", runId: "run", request: { mode: "append", executionKey: "CALC-1" }, attachments: Array(129).fill("a") }))).toBeUndefined();
+  });
+
+  // The select-all posts an intent, never a key list, so the whole message is one list name and one flag.
+  it("accepts a select-all intent for a known test list only", () => {
+    expect(parseClientEnvelope(client("board", { type: "select-scope", section: "available", on: true }))).toBeDefined();
+    expect(parseClientEnvelope(client("board", { type: "select-scope", section: "mapped", on: false }))).toBeDefined();
+    expect(parseClientEnvelope(client("board", { type: "select-scope", section: "untraced", on: true }))).toBeUndefined();
+    expect(parseClientEnvelope(client("board", { type: "select-scope", section: "everything", on: true }))).toBeUndefined();
+    expect(parseClientEnvelope(client("board", { type: "select-scope", section: "available" }))).toBeUndefined();
+    expect(parseClientEnvelope(client("board", { type: "select-scope", section: "available", on: "yes" }))).toBeUndefined();
+    expect(parseClientEnvelope(client("board", { type: "select-scope", target: "test", section: "available", on: true }))).toBeUndefined();
+    expect(parseClientEnvelope(client("board", { type: "select-scope", section: "available", on: true, keys: ["CALC-1"] }))).toBeUndefined();
+  });
+
+  it("rejects a section meta with an unknown select-all state", () => {
+    const base = boardRender();
+    const body = { ...base, sections: { ...base.sections, available: { ...base.sections.available, selection: "most" } } };
+    expect(isHostEnvelope({ version: 1, session: "session", revision: 2, surface: "board", body }, "session", 1)).toBe(false);
   });
 
   it("rejects malformed, wrong-version, wrong-session and unknown-surface envelopes", () => {

@@ -24,6 +24,7 @@ export type BoardClientMessage =
   | { type: "open"; key: string }
   | { type: "scope"; project: string }
   | { type: "select"; target: "scenario" | "test"; id: string; on: boolean }
+  | { type: "select-scope"; section: "available" | "mapped"; on: boolean }
   | { type: "sync" }
   | { type: "bulkCreate" }
   | { type: "createTestSet" }
@@ -88,6 +89,8 @@ export interface SelectableTestCard {
   readonly selected: boolean;
 }
 
+export type SectionSelection = "none" | "some" | "all";
+
 export interface BoardSectionMeta {
   readonly total: number;
   readonly filtered: number;
@@ -96,6 +99,7 @@ export interface BoardSectionMeta {
   readonly pageCount: number;
   readonly query: string;
   readonly filtering: boolean;
+  readonly selection: SectionSelection;
 }
 
 export interface MatrixRow {
@@ -302,8 +306,12 @@ function validBoard(body: Record<string, unknown>): boolean {
   if (oneOf(body["type"], ["drop", "unlink", "pushText"] as const)) {return exact(body, ["type", "scenario", "key"]) && text(body["scenario"]) && text(body["key"]);}
   if (body["type"] === "open") {return exact(body, ["type", "key"]) && text(body["key"]);}
   if (body["type"] === "scope") {return exact(body, ["type", "project"]) && text(body["project"]);}
-  return body["type"] === "select" && exact(body, ["type", "target", "id", "on"]) &&
-    oneOf(body["target"], ["scenario", "test"] as const) && text(body["id"]) && typeof body["on"] === "boolean";
+  if (body["type"] === "select") {
+    return exact(body, ["type", "target", "id", "on"]) && oneOf(body["target"], ["scenario", "test"] as const) &&
+      text(body["id"]) && typeof body["on"] === "boolean";
+  }
+  return body["type"] === "select-scope" && exact(body, ["type", "section", "on"]) &&
+    oneOf(body["section"], ["available", "mapped"] as const) && typeof body["on"] === "boolean";
 }
 
 function validLink(body: Record<string, unknown>): boolean {
@@ -399,9 +407,10 @@ function validTestCard(value: Record<string, unknown>, budget: ProjectionBudget)
 }
 
 function validSection(value: unknown): boolean {
-  return record(value) && exact(value, ["total", "filtered", "page", "pageSize", "pageCount", "query", "filtering"]) &&
+  return record(value) && exact(value, ["total", "filtered", "page", "pageSize", "pageCount", "query", "filtering", "selection"]) &&
     number(value["total"]) && number(value["filtered"]) && number(value["page"]) && number(value["pageSize"], 1) &&
-    number(value["pageCount"]) && text(value["query"]) && typeof value["filtering"] === "boolean";
+    number(value["pageCount"]) && text(value["query"]) && typeof value["filtering"] === "boolean" &&
+    oneOf(value["selection"], ["none", "some", "all"] as const);
 }
 
 function validMatrixRow(value: Record<string, unknown>, budget: ProjectionBudget): boolean {

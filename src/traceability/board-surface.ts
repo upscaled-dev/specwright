@@ -15,6 +15,7 @@ import {
   paginate,
   scopeBoardViewModel,
   sectionFiltering,
+  sectionSelection,
 } from "./board-data";
 import { MappingPageSizeStore } from "./mapping-page-size";
 import { ProjectScopeStore } from "./project-scope";
@@ -38,6 +39,17 @@ interface SelectableScenarioCard extends BoardScenarioCard {
 }
 interface SelectableTestCard extends BoardTestCard {
   readonly selected: boolean;
+}
+
+// One pass of the board's filters: the scoped, header-searched model the counts and the Matrix read, and
+// each section's cards after its own column search. This is the scope a select-all covers, so it is taken
+// whole rather than off the page the render happens to be showing.
+interface MappingColumns {
+  readonly project: string | undefined;
+  readonly filtered: BoardViewModel;
+  readonly untraced: readonly SelectableScenarioCard[];
+  readonly available: readonly SelectableTestCard[];
+  readonly mapped: readonly SelectableTestCard[];
 }
 
 // A create button's whole state, decided here so the webview only paints it. `hint` is the button's
@@ -238,6 +250,7 @@ export class BoardSurface {
     sync: () => this.syncNow(),
     scope: (message) => this.scopeTo(message.project),
     select: (message) => this.toggleSelection(message.target, message.id, message.on),
+    "select-scope": (message) => this.selectScope(message.section, message.on),
     bulkCreate: () => this.deps.bulkCreate(),
     createTestSet: () => this.deps.createTestSet(),
     addToTestSet: () => this.deps.addToTestSet(),
@@ -311,6 +324,19 @@ export class BoardSurface {
       selection.delete(id);
     }
     // Re-render so the verb's count and enablement follow the checkbox that just changed.
+    this.render();
+  }
+
+  // A test list's select-all. It covers every card the section's own search leaves, the set the
+  // paginator's range totals, not the page on screen; a card that search hides keeps whatever it had.
+  private selectScope(section: Extract<BoardIncoming, { type: "select-scope" }>["section"], on: boolean): void {
+    for (const card of this.columns()[section]) {
+      if (on) {
+        this.selectedTestKeys.add(card.key);
+      } else {
+        this.selectedTestKeys.delete(card.key);
+      }
+    }
     this.render();
   }
 
@@ -444,18 +470,27 @@ export class BoardSurface {
   }
 
   // What a section's meta says beyond its page arithmetic: `total` is the count the header shows, before
-  // the column search but after the header one, and the two flags are the ones the webview must not work
-  // out from its own inputs.
-  private sectionMeta(section: MappingSection, page: BoardPageMeta, total: number): BoardSectionMeta {
+  // the column search but after the header one, and the three flags are the ones the webview must not work
+  // out from its own inputs. `cards` is the section's whole filtered set, so the select-all state answers
+  // for cards the current page does not hold.
+  private sectionMeta(
+    section: MappingSection,
+    page: BoardPageMeta,
+    total: number,
+    cards: readonly { readonly selected: boolean }[]
+  ): BoardSectionMeta {
     return {
       ...page,
       total,
       filtering: sectionFiltering(this.query, this.mapping.query[section]),
       query: this.mapping.query[section],
+      selection: sectionSelection(cards.filter((card) => card.selected).length, cards.length),
     };
   }
 
-  private render(): void {
+  // Header search, then the section's own search. Selection is stamped before the column filter so a
+  // checked card off the page keeps its flag for the verb counts.
+  private columns(): MappingColumns {
     const project = this.deps.projectScope.get(this.projects);
     const scoped = scopeBoardViewModel(this.model, project);
     this.pruneSelection(scoped);
@@ -464,28 +499,26 @@ export class BoardSurface {
       ...card,
       selected: this.selectedTestKeys.has(card.key),
     });
-    // Header search, then the section's own search, then one page of what is left. Selection is stamped
-    // before the column filter so a checked card off the page keeps its flag for the verb counts.
-    const pageSize = this.deps.mappingPageSize.get();
     const scenarios = filtered.scenarios.map((card) => ({
       ...card,
       selected: this.selectedScenarioIds.has(card.dropId),
     }));
-    const untraced = paginate(
-      filterScenarioColumn(scenarios, this.mapping.query.untraced),
-      this.mapping.page.untraced,
-      pageSize
-    );
-    const available = paginate(
-      filterTestColumn(filtered.available.map(checkedTest), this.mapping.query.available),
-      this.mapping.page.available,
-      pageSize
-    );
-    const mapped = paginate(
-      filterTestColumn(filtered.mapped.map(checkedTest), this.mapping.query.mapped),
-      this.mapping.page.mapped,
-      pageSize
-    );
+    return {
+      project,
+      filtered,
+      untraced: filterScenarioColumn(scenarios, this.mapping.query.untraced),
+      available: filterTestColumn(filtered.available.map(checkedTest), this.mapping.query.available),
+      mapped: filterTestColumn(filtered.mapped.map(checkedTest), this.mapping.query.mapped),
+    };
+  }
+
+  private render(): void {
+    const columns = this.columns();
+    const { filtered, project } = columns;
+    const pageSize = this.deps.mappingPageSize.get();
+    const untraced = paginate(columns.untraced, this.mapping.page.untraced, pageSize);
+    const available = paginate(columns.available, this.mapping.page.available, pageSize);
+    const mapped = paginate(columns.mapped, this.mapping.page.mapped, pageSize);
     // Adopt the clamped indexes. A clamp that lived only in the render would resurface the stale index the
     // moment a search cleared and the section grew back.
     this.mapping.page = {
@@ -500,9 +533,9 @@ export class BoardSurface {
       available: available.items,
       mapped: mapped.items,
       sections: {
-        untraced: this.sectionMeta("untraced", untraced.meta, filtered.scenarios.length),
-        available: this.sectionMeta("available", available.meta, filtered.available.length),
-        mapped: this.sectionMeta("mapped", mapped.meta, filtered.mapped.length),
+        untraced: this.sectionMeta("untraced", untraced.meta, filtered.scenarios.length, columns.untraced),
+        available: this.sectionMeta("available", available.meta, filtered.available.length, columns.available),
+        mapped: this.sectionMeta("mapped", mapped.meta, filtered.mapped.length, columns.mapped),
       },
       pageSize,
       matrix: groupMatrixRows(filtered.matrix),

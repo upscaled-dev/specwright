@@ -31,6 +31,7 @@ const BOARD_CSS = `
   .board-pane .verb:hover:enabled { background: var(--vscode-button-hoverBackground); }
   .board-pane .verb:disabled { opacity: 0.55; cursor: default; }
   .board-pane .verbs { position: relative; flex: none; display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.6rem; min-height: 1.5rem; }
+  .board-pane .select-all { flex: none; align-self: center; }
   .board-pane .container-actions { display: flex; gap: 0.25rem; padding-right: 0.15rem; }
   .board-pane .container-actions + .container-actions { padding-left: 0.4rem; border-left: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); }
   .board-pane .mapping-action-controls { flex: none; display: flex; flex-wrap: wrap; gap: 0.4rem; min-width: 0; }
@@ -139,8 +140,12 @@ function containerAction(id: string, label: string, shape: "set" | "plan", actio
   return iconAction(id, label, `${base}${badge}`, command);
 }
 
-function mappingActions(section: "available" | "mapped"): string {
-  return `<span class="container-actions" role="group" aria-label="Test Set actions">${containerAction(`${section}-create-test-set`, "Create Test Set", "set", "create", "createTestSet")}${containerAction(`${section}-add-to-test-set`, "Add to existing Test Set", "set", "add", "addToTestSet")}</span>
+// The list's own toolbar: its select-all box, then the four container actions. The box ships disabled and
+// unchecked; the host decides checked, mixed, or clear over the whole filtered list on every render.
+function mappingActions(section: "available" | "mapped", providerLabel: string): string {
+  const selectAll = escapeHtml(`Select all ${section} ${providerLabel} tests`);
+  return `<input id="${section}-select-all" class="select-all" type="checkbox" disabled aria-label="${selectAll}" aria-controls="${section}-cards">
+            <span class="container-actions" role="group" aria-label="Test Set actions">${containerAction(`${section}-create-test-set`, "Create Test Set", "set", "create", "createTestSet")}${containerAction(`${section}-add-to-test-set`, "Add to existing Test Set", "set", "add", "addToTestSet")}</span>
             <span class="container-actions" role="group" aria-label="Test Plan actions">${containerAction(`${section}-create-test-plan`, "Create Test Plan", "plan", "create", "createTestPlan")}${containerAction(`${section}-add-to-test-plan`, "Add to existing Test Plan", "plan", "add", "addToTestPlan")}</span>`;
 }
 
@@ -156,7 +161,7 @@ function boardPanesHtml(providerLabel: string): string {
   const available = mappingSection({
     id: "available",
     title: `Available ${providerLabel} tests`,
-    verbs: mappingActions("available"),
+    verbs: mappingActions("available", providerLabel),
     placeholder: "Filter by key or summary",
     searchLabel: `Filter available ${providerLabel} tests`,
     collapsible: true,
@@ -165,7 +170,7 @@ function boardPanesHtml(providerLabel: string): string {
   const mapped = mappingSection({
     id: "mapped",
     title: `Mapped ${providerLabel} tests`,
-    verbs: mappingActions("mapped"),
+    verbs: mappingActions("mapped", providerLabel),
     placeholder: "Filter by key or summary",
     searchLabel: `Filter mapped ${providerLabel} tests`,
     collapsible: true,

@@ -137,7 +137,7 @@ async function bridgeBoardSurface(
 }
 
 function boardRender(selected = false): Extract<BoardHostMessage, { type: "render" }> {
-  const section = { total: 1, filtered: 1, page: 0, pageSize: 25, pageCount: 1, query: "", filtering: false };
+  const section = { total: 1, filtered: 1, page: 0, pageSize: 25, pageCount: 1, query: "", filtering: false, selection: "none" } as const;
   const verb = { label: "Action", enabled: true, hint: "" };
   return {
     type: "render",
@@ -300,6 +300,88 @@ describe("coverage board browser client", () => {
       "createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan",
     ]);
     expect(calls.every((call) => JSON.stringify(call.keys) === JSON.stringify(["CALC-1", "CALC-2"]))).toBe(true);
+  });
+
+  it("checks a whole test list from its select-all box, then paints the mixed state back", async () => {
+    const model: BoardViewModel = {
+      scenarios: [],
+      available: [
+        { key: "CALC-1", project: "CALC", pills: [], links: [] },
+        { key: "CALC-2", project: "CALC", pills: [], links: [] },
+      ],
+      mapped: [{
+        key: "CALC-3",
+        project: "CALC",
+        pills: ["1 scenario"],
+        links: [{ name: "Mapped login", location: "features/login.feature:3", unlinkId: "scenario-1" }],
+      }],
+      matrix: [],
+      availableEmptyText: "No unmapped tests in the last sync.",
+      completeProjects: ["CALC"],
+    };
+    const calls: Array<{ action: string; keys: readonly string[] }> = [];
+    const bridge = await bridgeBoardSurface(model, (action, surface) => {
+      calls.push({ action, keys: surface.selectedTests() });
+    });
+    const doc = bridge.client.dom.window.document;
+    const selectAll = doc.getElementById("available-select-all") as HTMLInputElement;
+    // The mixed state is a property, not an attribute, so it is read back off the element itself.
+    const boxState = (id: string): { checked: boolean; indeterminate: boolean } => {
+      const box = doc.getElementById(id) as HTMLInputElement;
+      return { checked: box.checked, indeterminate: box.indeterminate };
+    };
+    const cardChecks = (section: string): boolean[] =>
+      [...doc.querySelectorAll<HTMLInputElement>(`#${section}-cards input[type="checkbox"]`)].map((box) => box.checked);
+    const click = (element: HTMLElement): void => {
+      element.click();
+      bridge.routeClientMessages();
+    };
+
+    click(selectAll);
+
+    expect(bridge.surface.selectedTests()).toEqual(["CALC-1", "CALC-2"]);
+    expect(cardChecks("available")).toEqual([true, true]);
+    expect(cardChecks("mapped")).toEqual([false]);
+    expect(boxState("available-select-all")).toEqual({ checked: true, indeterminate: false });
+    expect(boxState("mapped-select-all")).toEqual({ checked: false, indeterminate: false });
+
+    click(doc.getElementById("mapped-create-test-set")!);
+    expect(calls).toEqual([{ action: "createTestSet", keys: ["CALC-1", "CALC-2"] }]);
+
+    const card = doc.querySelector<HTMLInputElement>('input[aria-label="Select test CALC-2"]')!;
+    card.checked = false;
+    card.dispatchEvent(new bridge.client.dom.window.Event("change", { bubbles: true }));
+    bridge.routeClientMessages();
+    expect(boxState("available-select-all")).toEqual({ checked: false, indeterminate: true });
+
+    click(selectAll);
+    expect(bridge.surface.selectedTests()).toEqual(["CALC-1", "CALC-2"]);
+    expect(boxState("available-select-all")).toEqual({ checked: true, indeterminate: false });
+
+    click(selectAll);
+    expect(bridge.surface.selectedTests()).toEqual([]);
+    expect(cardChecks("available")).toEqual([false, false]);
+    expect(boxState("available-select-all")).toEqual({ checked: false, indeterminate: false });
+
+    click(doc.getElementById("mapped-select-all")!);
+    expect(bridge.surface.selectedTests()).toEqual(["CALC-3"]);
+    expect(cardChecks("mapped")).toEqual([true]);
+    expect(boxState("available-select-all")).toEqual({ checked: false, indeterminate: false });
+
+    // A list its search emptied has nothing to select, so its box goes dead instead of posting an intent
+    // over no cards and ticking itself back off on the answer.
+    const search = doc.getElementById("available-search") as HTMLInputElement;
+    search.value = "nothing matches";
+    search.dispatchEvent(new bridge.client.dom.window.Event("input", { bubbles: true }));
+    bridge.routeClientMessages();
+    const posts = clientBodies(bridge.client, "board").length;
+
+    click(selectAll);
+
+    expect(selectAll.disabled).toBe(true);
+    expect(clientBodies(bridge.client, "board")).toHaveLength(posts);
+    expect(bridge.surface.selectedTests()).toEqual(["CALC-3"]);
+    await expectNoSeriousViolations(bridge.client.dom);
   });
 
   it("ignores malformed, foreign and out-of-order host envelopes before dispatch", async () => {

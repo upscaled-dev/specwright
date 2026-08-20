@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Select Projects to Sync** scopes traceability sync to a chosen set of projects. Pick them from a checkbox list on the command palette or the Traceability panel's connection row; clearing the selection restores the automatic scope.
+- The Coverage Board's test lists gained a select-all checkbox per list. It selects or clears every test matching the list's current filter, and shows a mixed state when only some are selected.
 
 ### Changed
 

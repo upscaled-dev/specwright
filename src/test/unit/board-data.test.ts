@@ -16,6 +16,7 @@ import {
   scenarioDropId,
   scopeBoardViewModel,
   sectionFiltering,
+  sectionSelection,
   syncProgressText,
 } from "../../traceability/board-data";
 import { projectFromKey } from "../../xray/xray-adapter";
@@ -687,10 +688,11 @@ describe("paginate", () => {
       total: columnModel.available.length,
       filtering: sectionFiltering("", "nope"),
       query: "nope",
+      selection: sectionSelection(0, paged.meta.filtered),
     };
 
     expect(paged.items).toEqual([]);
-    expect(meta).toEqual({ total: 2, filtered: 0, page: 0, pageCount: 1, pageSize: 25, filtering: true, query: "nope" });
+    expect(meta).toEqual({ total: 2, filtered: 0, page: 0, pageCount: 1, pageSize: 25, filtering: true, query: "nope", selection: "none" });
   });
 });
 
@@ -712,6 +714,20 @@ describe("sectionFiltering", () => {
 
   it("is true when both are set", () => {
     expect(sectionFiltering("pay", "calc")).toBe(true);
+  });
+});
+
+describe("sectionSelection", () => {
+  it("reads none, mixed, and all off the filtered set", () => {
+    expect(sectionSelection(0, 3)).toBe("none");
+    expect(sectionSelection(1, 3)).toBe("some");
+    expect(sectionSelection(3, 3)).toBe("all");
+  });
+
+  // A list its search emptied has nothing to select, so its box stays clear instead of reading "all" over
+  // no cards and inviting a click that does nothing.
+  it("calls an empty section none, not all", () => {
+    expect(sectionSelection(0, 0)).toBe("none");
   });
 });
 

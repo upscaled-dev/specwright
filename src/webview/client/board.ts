@@ -71,6 +71,10 @@ export function installBoard(): void {
     available: collapsible("available"),
     mapped: collapsible("mapped"),
   };
+  const selectAllBoxes: Record<CollapsibleSection, HTMLInputElement> = {
+    available: element<HTMLInputElement>("available-select-all"),
+    mapped: element<HTMLInputElement>("mapped-select-all"),
+  };
 
   function renderCollapsed(section: CollapsibleSection): void {
     const controls = collapsibleSections[section];
@@ -90,6 +94,14 @@ export function installBoard(): void {
     controls.toggle.dataset["focusKey"] = `${section}-toggle`;
     controls.toggle.addEventListener("click", () => {toggleSection(section);});
     renderCollapsed(section);
+    // The list's select-all posts the box's new state, like a card's own checkbox: a mixed box lands on
+    // checked, so it selects the rest of the list, and a full one clears it. The host owns the scope.
+    const box = selectAllBoxes[section];
+    box.dataset["focusKey"] = `select-all:${section}`;
+    box.dataset["focusFallback"] = `${section}-search`;
+    box.addEventListener("change", () => {
+      window.__spec.post('board', { type: 'select-scope', section, on: box.checked });
+    });
   }
 
   // A scenario card carries kind 'scenario' + its drop id; a test card kind 'test' + its key. A drop is
@@ -387,6 +399,16 @@ export function installBoard(): void {
     mapped: { name: 'mapped', count: mappedCount, cards: mappedCards, search: mappedSearch, paginator: mappedPaginator },
   };
 
+  // A list's select-all box, painted from the host's count over the whole filtered list. The mixed state
+  // has no HTML attribute, so it is set as a property; an empty list has nothing to select, so its box
+  // goes dead rather than toggling itself straight back.
+  function renderSelectAll(section: CollapsibleSection, meta: BoardSectionMeta): void {
+    const box = selectAllBoxes[section];
+    box.checked = meta.selection === 'all';
+    box.indeterminate = meta.selection === 'some';
+    box.disabled = meta.filtered === 0;
+  }
+
   function canRestoreFocus(item: HTMLElement): boolean {
     return !(item instanceof HTMLButtonElement || item instanceof HTMLInputElement || item instanceof HTMLSelectElement) || !item.disabled;
   }
@@ -401,6 +423,8 @@ export function installBoard(): void {
     const availableEmpty = emptyEl(msg.availableEmptyText, sections.available.filtering);
     paintSection(mapping.available, msg.available, sections.available, availableEmpty, (container, cards) => paintTestCards(container, cards, true));
     paintSection(mapping.mapped, msg.mapped, sections.mapped, emptyEl('No mapped tests yet.', sections.mapped.filtering), (container, cards) => paintTestCards(container, cards, false));
+    renderSelectAll('available', sections.available);
+    renderSelectAll('mapped', sections.mapped);
     pageSizeSelect.value = String(msg.pageSize);
     if (focusKey) {
       const candidates = [...document.querySelectorAll<HTMLElement>("[data-focus-key]")];

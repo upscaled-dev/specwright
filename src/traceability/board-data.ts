@@ -726,15 +726,22 @@ export interface BoardPageMeta {
   readonly pageSize: number;
 }
 
+// How much of a section's filtered set is checked, which is what its select-all box paints. "some" is the
+// mixed state, which HTML cannot express, so the webview sets it as a property.
+export type SectionSelection = "none" | "some" | "all";
+
 // What a rendered section carries. `total` is the section's count after the header search but before its
 // column search, the only count the caller knows, so the caller stamps it: the section's header count
 // reads from `total`, the empty condition and the paginator's range label read from `filtered`, and the
-// "no matches" versus "nothing to map" wording reads from `filtering`. `filtering` and `query` are the
-// two things the webview must not work out for itself (see `sectionFiltering`).
+// "no matches" versus "nothing to map" wording reads from `filtering`. `filtering`, `query`, and
+// `selection` are the three things the webview must not work out for itself: the first two would race the
+// render (see `sectionFiltering`), and the last covers the whole filtered set, of which the webview holds
+// one page.
 export interface BoardSectionMeta extends BoardPageMeta {
   readonly total: number;
   readonly filtering: boolean;
   readonly query: string;
+  readonly selection: SectionSelection;
 }
 
 export interface BoardPage<T> {
@@ -769,4 +776,15 @@ export function paginate<T>(items: readonly T[], page: number, pageSize: number)
  */
 export function sectionFiltering(globalQuery: string, columnQuery: string): boolean {
   return globalQuery.trim() !== "" || columnQuery.trim() !== "";
+}
+
+/**
+ * What a section's select-all box reads, over the section's whole filtered set rather than the page on
+ * screen. A section with nothing left to show is "none", since there is nothing to select or clear.
+ */
+export function sectionSelection(checked: number, filtered: number): SectionSelection {
+  if (checked === 0) {
+    return "none";
+  }
+  return checked === filtered ? "all" : "some";
 }

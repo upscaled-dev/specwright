@@ -124,6 +124,17 @@ const MODEL: BoardViewModel = {
   completeProjects: ["CALC", "PAY"],
 };
 
+// Three available tests in one project, two of them matching a "login" column search: enough for a
+// select-all to cover part of a list, and for one page to hold less than the search leaves.
+const LISTS: BoardViewModel = {
+  ...MODEL,
+  available: [
+    { key: "CALC-10", summary: "Login", project: "CALC", pills: [], links: [] },
+    { key: "CALC-11", summary: "Login again", project: "CALC", pills: [], links: [] },
+    { key: "CALC-12", summary: "Checkout", project: "CALC", pills: [], links: [] },
+  ],
+};
+
 const PROJECTS = ["CALC", "PAY"];
 
 // The board's scope store, in memory: the same boundary coercion the memento-backed one does, so a key
@@ -1394,6 +1405,9 @@ describe("BoardPanel", () => {
       expect(panel.webview.html).toContain(`id="${section}-create-test-plan"`);
       expect(panel.webview.html).toContain(`id="${section}-add-to-test-plan"`);
     }
+    expect(panel.webview.html).toContain('<input id="available-select-all" class="select-all" type="checkbox" disabled aria-label="Select all available Xray tests" aria-controls="available-cards">');
+    expect(panel.webview.html).toContain('<input id="mapped-select-all" class="select-all" type="checkbox" disabled aria-label="Select all mapped Xray tests" aria-controls="mapped-cards">');
+    expect(panel.webview.html).toContain(".board-pane .select-all { flex: none; align-self: center; }");
     expect(panel.webview.html).toContain('aria-label="Test Set actions"');
     expect(panel.webview.html).toContain('aria-label="Test Plan actions"');
     expect(panel.webview.html).toContain('class="mapping-action-controls"');
@@ -1524,6 +1538,56 @@ describe("BoardPanel", () => {
 
     expect(lastRender(panel)!.mapped.map((t) => t.selected)).toEqual([true]);
     expect(BoardPanel.selectedTests()).toEqual(["CALC-1"]);
+  });
+
+  // The select-all covers the list's whole filtered set, so a row the paginator is not showing is checked
+  // by the same click as the visible ones, and a test outside the list is left alone.
+  it("checks every test the list's filter leaves, page or no page", async () => {
+    const { panel } = await openReady({
+      buildModel: () => LISTS,
+      projectScope: fakeScope("CALC"),
+      mappingPageSize: { get: () => 1, set: () => undefined },
+    });
+    await receive(panel, { surface: "board", type: "select", target: "test", id: "CALC-1", on: true });
+    await receive(panel, { surface: "board", type: "columnSearch", section: "available", value: "login" });
+
+    await receive(panel, { surface: "board", type: "select-scope", section: "available", on: true });
+
+    expect(BoardPanel.selectedTests()).toEqual(["CALC-1", "CALC-10", "CALC-11"]);
+    expect(lastRender(panel)!.available.map((t) => t.key)).toEqual(["CALC-10"]);
+    expect(lastRender(panel)!.sections.available).toMatchObject({ filtered: 2, selection: "all" });
+  });
+
+  it("clears only what the list's filter leaves, so a checked test outside it survives", async () => {
+    const { panel } = await openReady({ buildModel: () => LISTS, projectScope: fakeScope("CALC") });
+    await receive(panel, { surface: "board", type: "select-scope", section: "available", on: true });
+    expect(BoardPanel.selectedTests()).toEqual(["CALC-10", "CALC-11", "CALC-12"]);
+
+    await receive(panel, { surface: "board", type: "columnSearch", section: "available", value: "login" });
+    await receive(panel, { surface: "board", type: "select-scope", section: "available", on: false });
+
+    expect(BoardPanel.selectedTests()).toEqual(["CALC-12"]);
+    expect(lastRender(panel)!.sections.available).toMatchObject({ filtered: 2, selection: "none" });
+  });
+
+  it("reads each list's select-all state from that list's own filtered set", async () => {
+    const { panel } = await openReady({ buildModel: () => LISTS, projectScope: fakeScope("CALC") });
+    const sections = (): RenderMessage["sections"] => lastRender(panel)!.sections;
+    expect(sections().available.selection).toBe("none");
+    expect(sections().mapped.selection).toBe("none");
+
+    await receive(panel, { surface: "board", type: "select", target: "test", id: "CALC-10", on: true });
+    expect(sections().available.selection).toBe("some");
+
+    await receive(panel, { surface: "board", type: "select-scope", section: "mapped", on: true });
+    expect(sections().mapped.selection).toBe("all");
+    expect(sections().available.selection).toBe("some");
+
+    await receive(panel, { surface: "board", type: "columnSearch", section: "available", value: "CALC-10" });
+    expect(sections().available).toMatchObject({ filtered: 1, selection: "all" });
+
+    await receive(panel, { surface: "board", type: "columnSearch", section: "available", value: "nothing matches" });
+    expect(sections().available).toMatchObject({ filtered: 0, selection: "none" });
   });
 
   it("disables both container verbs under a project with no test checked", async () => {
@@ -1661,9 +1725,9 @@ describe("BoardPanel", () => {
     const render = lastRender(panel)!;
     expect(render.pageSize).toBe(50);
     expect(render.sections).toEqual({
-      untraced: { total: 2, filtered: 2, page: 0, pageCount: 1, pageSize: 50, filtering: false, query: "" },
-      available: { total: 1, filtered: 1, page: 0, pageCount: 1, pageSize: 50, filtering: false, query: "" },
-      mapped: { total: 1, filtered: 1, page: 0, pageCount: 1, pageSize: 50, filtering: false, query: "" },
+      untraced: { total: 2, filtered: 2, page: 0, pageCount: 1, pageSize: 50, filtering: false, query: "", selection: "none" },
+      available: { total: 1, filtered: 1, page: 0, pageCount: 1, pageSize: 50, filtering: false, query: "", selection: "none" },
+      mapped: { total: 1, filtered: 1, page: 0, pageCount: 1, pageSize: 50, filtering: false, query: "", selection: "none" },
     });
   });
 
