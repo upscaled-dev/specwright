@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import type * as vscode from "vscode";
 import {
   normalizeProjectKeys,
+  projectProvenance,
   projectScopeStore,
+  ProjectUniverseSources,
   resolveProjectUniverse,
   resolveSyncProjectKeys,
 } from "../../traceability/project-scope";
@@ -78,16 +80,88 @@ describe("resolveSyncProjectKeys", () => {
       resolveSyncProjectKeys({
         directoryProjects: ["ops"],
         tagDerivedKeys: ["CALC"],
+        catalogueKeys: ["MATH"],
+        defaultKey: "pay",
+        selectedKey: "calc",
+      })
+    ).toEqual(["CALC", "MATH", "PAY"]);
+  });
+
+  // The setting is the user's own answer, so a sync must not widen it behind their back. The board's
+  // ambient selection is exactly the kind of widening this rules out.
+  it("takes a set sync setting as the whole scope", () => {
+    expect(
+      resolveSyncProjectKeys({
+        tagDerivedKeys: ["CALC"],
         syncSettingKeys: ["shop"],
         catalogueKeys: ["MATH"],
         defaultKey: "pay",
         selectedKey: "calc",
       })
-    ).toEqual(["CALC", "MATH", "PAY", "SHOP"]);
+    ).toEqual(["SHOP"]);
+  });
+
+  // A project asked for by name is one fetch, not a scope change, so it rides along and the setting
+  // stays exactly as written. Without this a forced project sync under a pinned list fetches the wrong
+  // project and can never satisfy its own caller.
+  it("lets a project this call names ride along with the setting", () => {
+    expect(
+      resolveSyncProjectKeys({ syncSettingKeys: ["shop"], selectedKey: "calc", explicitKey: "pay" })
+    ).toEqual(["PAY", "SHOP"]);
+  });
+
+  it("takes the named project as one more rung when the setting is empty", () => {
+    expect(resolveSyncProjectKeys({ tagDerivedKeys: ["calc"], explicitKey: "pay" })).toEqual(["CALC", "PAY"]);
+  });
+
+  it("normalizes the chosen keys like every other rung", () => {
+    expect(resolveSyncProjectKeys({ syncSettingKeys: [" pay ", "calc", "CALC", ""] })).toEqual(["CALC", "PAY"]);
+  });
+
+  it("falls back to the ladder when the setting holds nothing usable", () => {
+    expect(resolveSyncProjectKeys({ syncSettingKeys: ["  "], tagDerivedKeys: ["calc"] })).toEqual(["CALC"]);
   });
 
   it("returns nothing when the workspace names no project at all", () => {
     expect(resolveSyncProjectKeys({ directoryProjects: ["OPS", "PAY"] })).toEqual([]);
+  });
+});
+
+describe("projectProvenance", () => {
+  // Required, so a rung added to the interface fails to compile here until this fixture and the label
+  // ladder both account for it.
+  const everyRung: Required<ProjectUniverseSources> = {
+    directoryProjects: ["ops"],
+    tagDerivedKeys: ["calc"],
+    syncSettingKeys: ["shop"],
+    catalogueKeys: ["math"],
+    defaultKey: "pay",
+    selectedKey: "web",
+    explicitKey: "api",
+  };
+
+  it("labels one key per rung, in ladder order", () => {
+    expect([...projectProvenance(everyRung)]).toEqual([
+      ["PAY", "default project"],
+      ["CALC", "referenced by workspace tags"],
+      ["SHOP", "in the sync setting"],
+      ["MATH", "synced earlier"],
+      ["WEB", "board selection"],
+      ["API", "requested for this sync"],
+      ["OPS", "from site directory"],
+    ]);
+  });
+
+  // The guard that keeps a picker honest: a rung added to the universe without a label here would show
+  // the user a project with no reason attached.
+  it("labels every key the universe offers", () => {
+    const labelled = [...projectProvenance(everyRung).keys()].sort((a, b) => a.localeCompare(b));
+    expect(labelled).toEqual(resolveProjectUniverse(everyRung));
+  });
+
+  it("keeps the first rung that offers a key, whatever the rungs below say", () => {
+    const shared = { ...everyRung, tagDerivedKeys: ["pay"], directoryProjects: ["pay"] };
+    expect(projectProvenance(shared).get("PAY")).toBe("default project");
   });
 });
 

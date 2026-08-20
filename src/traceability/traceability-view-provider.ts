@@ -285,6 +285,7 @@ export class TraceabilityViewProvider implements vscode.WebviewViewProvider, vsc
       case "switch-project":
         return vscode.commands.executeCommand(resolveActionCommand(action, node), node);
       case "connect":
+      case "select-sync-projects":
       case "hide":
       case "manage-trust":
         return vscode.commands.executeCommand(resolveActionCommand(action, node));
@@ -316,6 +317,7 @@ function resolveActionCommand(action: TraceabilityActionId, node: TraceabilityNo
     case "run": return "playwrightBddRunner.traceability.runAndPublish";
     case "connect": return "playwrightBddRunner.traceability.connect";
     case "switch-project": return "playwrightBddRunner.traceability.switchDefaultProject";
+    case "select-sync-projects": return "playwrightBddRunner.traceability.selectSyncProjects";
     case "hide": return "playwrightBddRunner.traceability.hidePanel";
     case "manage-trust": return "workbench.trust.manage";
   }

@@ -12,7 +12,7 @@ import {
   SyncScope,
   TestCaseMetadata,
 } from "../traceability/contracts";
-import { normalizeProjectKeys } from "../traceability/project-scope";
+import { resolveSyncProjectKeys } from "../traceability/project-scope";
 import { XrayAbortError, XrayCachePage, XrayClient, XrayFetchOutcome } from "./xray-client";
 import { JiraProjectSearchResult } from "./jira-project-search";
 import { CachedMetadata, CACHE_SCHEMA_VERSION, XrayMetadataCache } from "./xray-metadata-cache";
@@ -247,12 +247,16 @@ export class XrayMetadataCapability
     return this.directory;
   }
 
-  // The projects a remote search may match a summary in: the sync setting union the already-synced
-  // catalogue, which is the widest scope this layer can know (tag-derived keys live in the workspace
-  // model, above it, and reach here only once a sync has catalogued them). Never the project directory,
-  // since a summary match across every accessible project is a crawl, not a search.
+  // The projects a remote search may match a summary in, resolved by the one owner of sync scope: an
+  // explicit setting is the whole scope, otherwise the already-synced catalogue, which is the widest
+  // scope this layer can know (tag-derived keys live in the workspace model, above it, and reach here
+  // only once a sync has catalogued them). Never the project directory, since a summary match across
+  // every accessible project is a crawl, not a search.
   private searchProjects(): string[] {
-    return normalizeProjectKeys([...this.deps.config.xraySyncProjectKeys, ...this.state.catalogueProjects]);
+    return resolveSyncProjectKeys({
+      syncSettingKeys: this.deps.config.xraySyncProjectKeys,
+      catalogueKeys: this.state.catalogueProjects,
+    });
   }
 
   // Remote free-text/key search beyond the synced snapshot. The neutral JQL builder scopes a summary

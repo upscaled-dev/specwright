@@ -51,7 +51,7 @@ describe("traceability tree projection", () => {
     const connection = projection.rows[0]!;
     expect(connection.label).toBe("Xray Cloud");
     expect(connection.description).toContain("project CALC");
-    expect(connection.actions.map((action) => action.id)).toEqual(["connect", "switch-project"]);
+    expect(connection.actions.map((action) => action.id)).toEqual(["connect", "switch-project", "select-sync-projects"]);
     expect(connection.tooltip).toContain("Xray");
   });
 
@@ -169,7 +169,7 @@ describe("traceability tree projection", () => {
   it("explains the default project without adding text when one is unset", () => {
     const set = projectTraceabilityTree(model, "Xray", "test", true, { state: "ok", label: "site", message: "detail", defaultProject: "CALC" }, true).rows[0]!;
     expect(set.description).toContain("project CALC");
-    expect(set.tooltip).toContain("Prefills new tests and executions and joins the sync scope.");
+    expect(set.tooltip).toContain("joins the sync scope while no sync project list is set.");
     expect(projectTraceabilityTree(model, "Xray", "test", true, { state: "ok", label: "site", message: "detail" }, true).rows[0]?.description).not.toContain("project");
   });
 

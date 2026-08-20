@@ -27,6 +27,10 @@ export interface ProjectUniverseSources {
   readonly defaultKey?: string | undefined;
   // The board's current project selection, so picking a project there is enough to have it synced.
   readonly selectedKey?: string | undefined;
+  // One project this call asks for, such as a forced project sync or a project the board just opened.
+  // It names a single fetch rather than the durable scope, so it is the one rung allowed to widen an
+  // explicit sync setting.
+  readonly explicitKey?: string | undefined;
 }
 
 /**
@@ -42,17 +46,57 @@ export function resolveProjectUniverse(sources: ProjectUniverseSources): string[
     ...(sources.catalogueKeys ?? []),
     sources.defaultKey ?? "",
     sources.selectedKey ?? "",
+    sources.explicitKey ?? "",
   ]);
 }
 
 /**
- * The projects one sync fetches a full catalogue for: the same ladder minus the provider directory,
- * since a sync fetches one catalogue per project and covering every accessible project is not a scope.
- * The directory is dropped here rather than left to the caller, so a source bag built for a dropdown
- * cannot leak a site-wide fetch into a sync.
+ * The projects one sync fetches a full catalogue for. A non-empty sync setting is the durable answer:
+ * the user named the scope, so only a project this call asks for by name (`explicitKey`) joins it, and
+ * only for that call. Otherwise the universe ladder minus the provider directory, since a sync fetches
+ * one catalogue per project and covering every accessible project is not a scope. The directory is
+ * dropped here rather than left to the caller, so a source bag built for a dropdown cannot leak a
+ * site-wide fetch into a sync.
  */
 export function resolveSyncProjectKeys(sources: ProjectUniverseSources): string[] {
-  return resolveProjectUniverse({ ...sources, directoryProjects: undefined });
+  const chosen = normalizeProjectKeys(sources.syncSettingKeys ?? []);
+  return chosen.length > 0
+    ? normalizeProjectKeys([...chosen, sources.explicitKey ?? ""])
+    : resolveProjectUniverse({ ...sources, directoryProjects: undefined });
+}
+
+export type ProjectProvenance =
+  | "default project"
+  | "referenced by workspace tags"
+  | "in the sync setting"
+  | "synced earlier"
+  | "board selection"
+  | "requested for this sync"
+  | "from site directory";
+
+/**
+ * Why each project of the universe is on offer, first rung wins. One pass over the ladder, so a surface
+ * labels every key it shows without re-walking the sources per row. Every rung `resolveProjectUniverse`
+ * reads has a label here: a key the user is offered but cannot account for is a worse answer than a
+ * rough one.
+ */
+export function projectProvenance(sources: ProjectUniverseSources): Map<string, ProjectProvenance> {
+  const ladder: ReadonlyArray<readonly [ProjectProvenance, readonly string[]]> = [
+    ["default project", [sources.defaultKey ?? ""]],
+    ["referenced by workspace tags", sources.tagDerivedKeys ?? []],
+    ["in the sync setting", sources.syncSettingKeys ?? []],
+    ["synced earlier", sources.catalogueKeys ?? []],
+    ["board selection", [sources.selectedKey ?? ""]],
+    ["requested for this sync", [sources.explicitKey ?? ""]],
+    ["from site directory", sources.directoryProjects ?? []],
+  ];
+  const labels = new Map<string, ProjectProvenance>();
+  for (const [label, keys] of ladder) {
+    for (const key of normalizeProjectKeys(keys)) {
+      if (!labels.has(key)) {labels.set(key, label);}
+    }
+  }
+  return labels;
 }
 
 // The board's project scope, persisted per workspace. All Projects is the absence of a selection, so

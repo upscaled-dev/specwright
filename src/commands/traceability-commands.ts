@@ -8,11 +8,12 @@ import {
   syncProgressText,
 } from "../traceability/board-data";
 import { affectsBoard, BoardPanel, BoardPanelDeps } from "../traceability/board-panel";
-import { SyncScope, TraceabilityAdapter } from "../traceability/contracts";
+import { ProjectDirectoryCapability, SyncScope, TraceabilityAdapter } from "../traceability/contracts";
 import { NO_MAPPING_PAGE_SIZE } from "../traceability/mapping-page-size";
 import {
   NO_PROJECT_SCOPE,
   ProjectUniverseSources,
+  projectProvenance,
   resolveProjectUniverse,
   resolveSyncProjectKeys,
 } from "../traceability/project-scope";
@@ -247,13 +248,17 @@ export class TraceabilityCommands {
     return subsystem?.projectScope().get(this.projectUniverse(subsystem.getActiveAdapter()));
   }
 
+  // `explicitKey` is what one call asks for by name, so it survives an explicit sync setting; the board's
+  // ambient selection does not.
   private syncProjectKeys(
     adapter: TraceabilityAdapter | undefined,
     explicitKey?: string
   ): string[] {
-    const sources = this.localProjectSources(adapter);
-    const selectedKey = explicitKey ?? this.selectedProject();
-    return resolveSyncProjectKeys({ ...sources, selectedKey });
+    return resolveSyncProjectKeys({
+      ...this.localProjectSources(adapter),
+      selectedKey: this.selectedProject(),
+      explicitKey,
+    });
   }
 
   private boardTabIcon(): { light: vscode.Uri; dark: vscode.Uri } | undefined {
@@ -559,7 +564,7 @@ export class TraceabilityCommands {
     const normalized = chosen.toUpperCase();
     await this.writeDefaultProjectKey(normalized);
     vscode.window.showInformationMessage(
-      `Default project set to ${normalized}. It prefills new tests and executions and joins the sync scope.`
+      `Default project set to ${normalized}. It prefills new tests and executions, and joins the sync scope while no sync project list is set.`
     );
   }
 
@@ -598,7 +603,7 @@ export class TraceabilityCommands {
     const picker = vscode.window.createQuickPick<ProjectItem>();
     picker.title = "Switch Default Project";
     picker.placeholder =
-      "Select the default Jira project (prefills new tests and executions and joins the sync scope)";
+      "Select the default Jira project (prefills new tests and executions, and joins the sync scope while no sync project list is set)";
     picker.items = items;
     const currentItem = items.find((item) => item.key === current);
     if (currentItem) {picker.activeItems = [currentItem];}
@@ -617,7 +622,7 @@ export class TraceabilityCommands {
   private async promptDefaultProjectKey(current: string): Promise<string | undefined> {
     const input = await vscode.window.showInputBox({
       title: "Switch Default Project",
-      prompt: "Jira project key. Prefills new tests and executions and joins the sync scope",
+      prompt: "Jira project key. Prefills new tests and executions, and joins the sync scope while no sync project list is set",
       placeHolder: "e.g. CALC",
       value: current,
       validateInput: (value) =>
@@ -626,6 +631,92 @@ export class TraceabilityCommands {
           : "Enter a project key such as CALC."),
     });
     return input === undefined ? undefined : input.trim();
+  }
+
+  public selectSyncProjects(): Promise<void> {
+    return this.privileged((signal) => this.selectSyncProjectsTrusted(signal));
+  }
+
+  private async selectSyncProjectsTrusted(signal: AbortSignal): Promise<void> {
+    const adapter = this.deps.subsystem()?.getActiveAdapter();
+    // One bag per invocation: the offered list, the boxes to check, and each row's reason all read the
+    // same sources, so the picker cannot contradict itself or the next sync.
+    const listed: ProjectUniverseSources = adapter?.keyGrammar.projectOf
+      ? {
+        directoryProjects: await this.siteProjects(adapter.projectDirectory, signal),
+        ...this.localProjectSources(adapter),
+      }
+      : {};
+    const universe = resolveProjectUniverse(listed);
+    if (universe.length === 0) {
+      vscode.window.showInformationMessage(
+        "No projects to choose from yet. Connect to your tracker, set a default project, or tag a scenario first."
+      );
+      return;
+    }
+    // The board's selection is a rung of the scope, resolved against the list just enumerated rather
+    // than through a second walk of the sources.
+    const sources: ProjectUniverseSources = {
+      ...listed,
+      selectedKey: this.deps.subsystem()?.projectScope().get(universe),
+    };
+    const scoped = new Set(resolveSyncProjectKeys(sources));
+    const provenance = projectProvenance(sources);
+    const picked = await vscode.window.showQuickPick(
+      universe.map((key) => ({
+        label: key,
+        description: provenance.get(key) ?? "",
+        picked: scoped.has(key),
+      })),
+      {
+        title: "Select Projects to Sync",
+        placeHolder: "Projects every traceability sync fetches. Check none to scope it automatically.",
+        canPickMany: true,
+        ignoreFocusOut: true,
+      }
+    );
+    if (picked === undefined) {return;}
+    const keys = picked.map((item) => item.label);
+    // The write is the refresh: the config listeners rebuild the panel and repaint an open board.
+    await this.writeSyncProjectKeys(keys);
+    vscode.window.showInformationMessage(
+      keys.length === 0
+        ? "Sync scope cleared. Tagged projects, the default project, and projects synced earlier are in scope again."
+        : `Sync scope set to ${keys.join(", ")}.`
+    );
+  }
+
+  // Enumerated live, because a cold directory cache would offer only the projects this workspace has
+  // already touched. A failed enumeration is not a dead end: the last known list plus the workspace's
+  // own rungs still open the picker, the same degrade the default-project picker takes.
+  private async siteProjects(
+    directory: ProjectDirectoryCapability | undefined,
+    signal: AbortSignal
+  ): Promise<string[] | undefined> {
+    if (!directory) {return undefined;}
+    try {
+      const listed = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "Loading projects…" },
+        () => directory.list(signal)
+      );
+      return listed.projects.map((project) => project.key);
+    } catch (error) {
+      if (signal.aborted) {throw signal.reason ?? error;}
+      this.logger.warn("Listing projects for the sync picker failed", { error: errMsg(error) });
+      return directory.cached().projects.map((project) => project.key);
+    }
+  }
+
+  // Per repo by construction: which projects this workspace syncs is not an answer to carry into the
+  // next one. A window with no folder open has nowhere to write that, so there it lands in user settings.
+  private async writeSyncProjectKeys(keys: readonly string[]): Promise<void> {
+    const target =
+      vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await vscode.workspace
+      .getConfiguration("playwrightBddRunner")
+      .update("xray.syncProjectKeys", keys, target);
   }
 
   private async writeDefaultProjectKey(key: string): Promise<void> {

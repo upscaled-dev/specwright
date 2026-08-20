@@ -32,7 +32,7 @@ interface ConnectionNode extends ConnectionIndicator { kind: "connection"; }
 interface StateNode { kind: "state"; state: "disconnected" | "empty" | "untrusted"; }
 export type TraceabilityNode = ConnectionNode | SectionNode | FileNode | TestKeyNode | LinkNode | UntracedNode | OrphanNode | InfoNode | StateNode;
 
-export type TraceabilityActionId = "open" | "copy" | "link" | "run" | "connect" | "switch-project" | "hide" | "manage-trust";
+export type TraceabilityActionId = "open" | "copy" | "link" | "run" | "connect" | "switch-project" | "select-sync-projects" | "hide" | "manage-trust";
 export interface TraceabilityAction {
   readonly id: TraceabilityActionId;
   readonly label: string;
@@ -66,6 +66,7 @@ const ACTIONS = {
   run: { id: "run", label: "Run and publish", icon: "play" },
   connect: { id: "connect", label: "Set up connection", icon: "plug" },
   switchProject: { id: "switch-project", label: "Switch default project", icon: "repo-forked" },
+  selectSyncProjects: { id: "select-sync-projects", label: "Select projects to sync", icon: "checklist" },
   hide: { id: "hide", label: "Hide Traceability", icon: "eye-closed" },
   manageTrust: { id: "manage-trust", label: "Manage workspace trust", icon: "shield" },
 } as const satisfies Record<string, TraceabilityAction>;
@@ -189,9 +190,9 @@ export function projectTraceabilityTree(
     const tone = connection.state === "ok" ? "success" : connection.state === "auth-failed" ? "error" : connection.state === "unreachable" ? "warning" : "muted";
     const project = connection.defaultProject ? display(connection.defaultProject) : undefined;
     const tooltip = project
-      ? displayJoin([display(connection.label), text.tooltip, `Default project ${project}. Prefills new tests and executions and joins the sync scope.`], "\n")
+      ? displayJoin([display(connection.label), text.tooltip, `Default project ${project}. Prefills new tests and executions, and joins the sync scope while no sync project list is set.`], "\n")
       : displayJoin([display(connection.label), text.tooltip], "\n");
-    add({ id, label: "Xray Cloud", description: project ? displayJoin([text.description, `project ${project}`], " · ") : text.description, tooltip, icon: connection.state === "ok" ? "cloud" : connection.state === "checking" ? "loading" : connection.state === "auth-failed" ? "key" : "debug-disconnect", tone, expandable: false, actions: [ACTIONS.connect, ACTIONS.switchProject], defaultAction: "connect" }, { kind: "connection", ...connection });
+    add({ id, label: "Xray Cloud", description: project ? displayJoin([text.description, `project ${project}`], " · ") : text.description, tooltip, icon: connection.state === "ok" ? "cloud" : connection.state === "checking" ? "loading" : connection.state === "auth-failed" ? "key" : "debug-disconnect", tone, expandable: false, actions: [ACTIONS.connect, ACTIONS.switchProject, ACTIONS.selectSyncProjects], defaultAction: "connect" }, { kind: "connection", ...connection });
   }
   const addScenario = (link: TraceLink, parentId: string): void => {
     const id = rowId("scenario", `${link.testKey}:${refId(link.scenario)}`);

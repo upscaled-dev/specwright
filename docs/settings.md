@@ -66,7 +66,7 @@ Xray support is experimental and available only for Xray Cloud. See [Xray tracea
 | `traceability.reqTagPrefix` | `REQ_` | Your requirement-coverage tags use another prefix. |
 | `xray.siteUrl` | empty | Sets the Jira/Xray Cloud host, such as `acme.atlassian.net`, for connection and issue links. |
 | `xray.apiRegion` | `global` | Your Xray Cloud tenant is hosted in `us`, `eu`, or `au` rather than the global API region. It must match the tenant's region. |
-| `xray.syncProjectKeys` | empty list | You always want selected project keys included when syncing remote metadata. |
+| `xray.syncProjectKeys` | empty list | You want to pin the sync scope to chosen project keys. When set, it is the whole scope, apart from a project you ask to load or sync by name. **Select Projects to Sync** writes it for you. |
 | `xray.cacheTtlMinutes` | `15` | You need a longer or shorter freshness window for synced metadata. Stale data remains visible until you sync again. |
 | `xray.defaultProjectKey` | empty | You want a project preselected when creating an Xray Test Execution. |
 | `xray.executionIssueType` | `Test Execution` | Your Jira project maps Xray Test Executions to another standard-level work type. |

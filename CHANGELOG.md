@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- **Select Projects to Sync** scopes traceability sync to a chosen set of projects. Pick them from a checkbox list on the command palette or the Traceability panel's connection row; clearing the selection restores the automatic scope.
+
 ### Changed
 
 - Mapped test rows in the Traceability panel now show a flask tinted by status, matching the available-test rows, instead of a status glyph.

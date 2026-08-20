@@ -824,11 +824,11 @@ describe("XrayMetadataCapability.search", () => {
   });
 
   // A project that reached the sync scope through the tag ladder is only in the setting-free catalogue,
-  // so scoping the search to the setting alone would make its tests unfindable.
-  it("scopes the JQL to the synced catalogue as well as the setting", async () => {
+  // so an unset setting must leave the catalogue searchable.
+  it("scopes the JQL to the synced catalogue while the setting is empty", async () => {
     const seen: string[] = [];
     const capability = makeCapability({
-      config: fakeConfig(15, ["SHOP"]),
+      config: fakeConfig(15, []),
       client: fakeClient({
         fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1" }])),
         searchTests: (jql) => {
@@ -841,7 +841,28 @@ describe("XrayMetadataCapability.search", () => {
 
     await capability.search("login");
 
-    expect(seen).toEqual(['project in ("CALC", "SHOP") AND summary ~ "login*"']);
+    expect(seen).toEqual(['project = "CALC" AND summary ~ "login*"']);
+  });
+
+  // The chosen scope is exclusive everywhere, so an earlier sync's catalogue cannot widen it back.
+  it("keeps a set sync setting as the whole search scope, catalogue included", async () => {
+    const seen: string[] = [];
+    const capability = makeCapability({
+      config: fakeConfig(15, ["SHOP"]),
+      client: fakeClient({
+        fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1" }])),
+        searchTests: (jql) => {
+          seen.push(jql);
+          return Promise.resolve(outcome([]));
+        },
+      }),
+    });
+    await capability.sync({ projectKeys: ["CALC"] });
+    expect(capability.snapshot().catalogueProjects).toContain("CALC");
+
+    await capability.search("login");
+
+    expect(seen).toEqual(['project = "SHOP" AND summary ~ "login*"']);
   });
 });
 

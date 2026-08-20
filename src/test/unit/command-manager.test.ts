@@ -1055,6 +1055,7 @@ describe("command contributions ↔ handler registrations parity", () => {
       "playwrightBddRunner.traceability.testConnection",
       "playwrightBddRunner.traceability.toggleGrouping",
       "playwrightBddRunner.traceability.switchDefaultProject",
+      "playwrightBddRunner.traceability.selectSyncProjects",
       "playwrightBddRunner.traceability.clearLocalRunHistory",
       "playwrightBddRunner.traceability.bulkCreateTests",
       "playwrightBddRunner.traceability.createTestSet",
@@ -2017,7 +2018,26 @@ describe("traceability sync command handler", () => {
     expect(errorToast).toHaveBeenCalled();
   });
 
-  it("scopes the sync to the tags, the setting and the already-synced catalogue, never the provider directory", async () => {
+  it("scopes the sync to the tags and the already-synced catalogue, never the provider directory", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const subsystem = syncSubsystem({
+      sync,
+      testKeys: ["CALC-1"],
+      tagDerived: ["CALC"],
+      catalogueProjects: ["MATH"],
+      directory: ["OPS"],
+    });
+
+    await runSyncOn(managerFor(subsystem));
+
+    expect(sync).toHaveBeenCalledWith(
+      { testKeys: ["CALC-1"], projectKeys: ["CALC", "MATH"] },
+      expect.anything(),
+      expect.anything()
+    );
+  });
+
+  it("fetches the chosen projects and nothing else once the setting names the scope", async () => {
     const sync = vi.fn(() => Promise.resolve());
     const subsystem = syncSubsystem({
       sync,
@@ -2030,7 +2050,7 @@ describe("traceability sync command handler", () => {
     await runSyncOn(managerFor(subsystem, { "xray.syncProjectKeys": ["shop"] }));
 
     expect(sync).toHaveBeenCalledWith(
-      { testKeys: ["CALC-1"], projectKeys: ["CALC", "MATH", "SHOP"] },
+      { testKeys: ["CALC-1"], projectKeys: ["SHOP"] },
       expect.anything(),
       expect.anything()
     );
@@ -2164,6 +2184,24 @@ describe("traceability sync command handler", () => {
 
     expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["CALC", "PAY"] }, expect.anything(), expect.anything());
     expect(info).not.toHaveBeenCalled();
+  });
+
+  // A pinned list is the durable scope, not a cage: the project the board just opened is fetched for
+  // this run, and nothing else joins it. Without that rung the load can never catalogue its project,
+  // so the board would ask for it again on every repaint.
+  it("loads a board's project under a pinned list without widening the pinned scope", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const mgr = managerFor(syncSubsystem({ sync, tagDerived: ["CALC"] }), {
+      "xray.syncProjectKeys": ["SHOP"],
+    });
+
+    await boardLoads(mgr).autoSync("PAY");
+
+    expect(sync).toHaveBeenCalledWith(
+      { testKeys: [], projectKeys: ["PAY", "SHOP"] },
+      expect.anything(),
+      expect.anything()
+    );
   });
 
   it("loads nothing for a project an earlier sync already catalogued", async () => {

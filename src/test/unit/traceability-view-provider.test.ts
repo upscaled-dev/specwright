@@ -544,6 +544,7 @@ describe("TraceabilityViewProvider", () => {
     expect(commands).toContain("playwrightBddRunner.traceability.runAndPublish");
     expect(commands).toContain("playwrightBddRunner.traceability.connect");
     expect(commands).toContain("playwrightBddRunner.traceability.switchDefaultProject");
+    expect(commands).toContain("playwrightBddRunner.traceability.selectSyncProjects");
     const open = execute.mock.calls.find(([command]) => command === "vscode.open")!;
     expect(open[1]).toMatchObject({ fsPath: "/workspace/a.feature" });
     expect(open[2]).toMatchObject({ selection: new vscode.Range(0, 0, 0, 0) });

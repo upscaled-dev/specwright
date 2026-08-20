@@ -1,11 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import * as vscode from "vscode";
 import { CommandManager } from "../../commands/command-manager";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { JiraAccessError, searchJiraProjects } from "../../xray/jira-project-search";
 import { captureHandlers, makeContext } from "./helpers/command-manager-harness";
+import { NO_PROJECT_SCOPE } from "../../traceability/project-scope";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 
 vi.mock("../../xray/jira-project-search", async (importOriginal) => {
@@ -23,6 +24,28 @@ interface Pkg {
 const pkg = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, "../../../package.json"), "utf-8")
 ) as Pkg;
+
+interface Update {
+  key: string;
+  value: unknown;
+  target: vscode.ConfigurationTarget;
+}
+
+// One stub serves the config reads (ExtensionConfig captures the configuration at construction) and the
+// write-back capture, so it must be installed before the manager is built.
+function stubConfig(values: Record<string, unknown>, inspected: Record<string, unknown> = {}): Update[] {
+  const updates: Update[] = [];
+  const wsConfig = {
+    get: (key: string, dflt?: unknown): unknown => (key in values ? values[key] : dflt),
+    inspect: (): Record<string, unknown> => inspected,
+    update: (key: string, value: unknown, target: vscode.ConfigurationTarget): Promise<void> => {
+      updates.push({ key, value, target });
+      return Promise.resolve();
+    },
+  } as unknown as vscode.WorkspaceConfiguration;
+  vi.spyOn(vscode.workspace, "getConfiguration").mockReturnValue(wsConfig);
+  return updates;
+}
 
 describe("traceability grouping toggle contributions", () => {
   const CMD = "playwrightBddRunner.traceability.toggleGrouping";
@@ -119,30 +142,10 @@ describe("traceability switch-default-project contributions", () => {
 });
 
 describe("switchDefaultProject command handler", () => {
-  interface Update {
-    key: string;
-    value: unknown;
-    target: vscode.ConfigurationTarget;
-  }
-
-  function stubWorkspaceConfig(inspected: Record<string, unknown>): Update[] {
-    const updates: Update[] = [];
-    const wsConfig = {
-      get: (_key: string, dflt?: unknown): unknown => dflt,
-      inspect: (): Record<string, unknown> => inspected,
-      update: (key: string, value: unknown, target: vscode.ConfigurationTarget): Promise<void> => {
-        updates.push({ key, value, target });
-        return Promise.resolve();
-      },
-    } as unknown as vscode.WorkspaceConfiguration;
-    vi.spyOn(vscode.workspace, "getConfiguration").mockReturnValue(wsConfig);
-    return updates;
-  }
-
   afterEach(() => vi.restoreAllMocks());
 
   it("writes the uppercased key to Global via the input box when no Jira credentials exist", async () => {
-    const updates = stubWorkspaceConfig({});
+    const updates = stubConfig({}, {});
     vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("calc");
     const handlers = captureHandlers(makeContext());
     await handlers.get("playwrightBddRunner.traceability.switchDefaultProject")!();
@@ -152,7 +155,7 @@ describe("switchDefaultProject command handler", () => {
   });
 
   it("writes the key back to the Workspace when the setting is pinned there", async () => {
-    const updates = stubWorkspaceConfig({ workspaceValue: "OLD" });
+    const updates = stubConfig({}, { workspaceValue: "OLD" });
     vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("new");
     const handlers = captureHandlers(makeContext());
     await handlers.get("playwrightBddRunner.traceability.switchDefaultProject")!();
@@ -164,7 +167,7 @@ describe("switchDefaultProject command handler", () => {
   });
 
   it("writes nothing when the input box is cancelled", async () => {
-    const updates = stubWorkspaceConfig({});
+    const updates = stubConfig({}, {});
     vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined);
     const handlers = captureHandlers(makeContext());
     await handlers.get("playwrightBddRunner.traceability.switchDefaultProject")!();
@@ -175,12 +178,6 @@ describe("switchDefaultProject command handler", () => {
 describe("switchDefaultProject: Jira project QuickPick branch", () => {
   const CMD = "playwrightBddRunner.traceability.switchDefaultProject";
   const mockSearch = vi.mocked(searchJiraProjects);
-
-  interface Update {
-    key: string;
-    value: unknown;
-    target: vscode.ConfigurationTarget;
-  }
 
   interface DriveablePick {
     title: string;
@@ -196,22 +193,6 @@ describe("switchDefaultProject: Jira project QuickPick branch", () => {
     __quickPicks: DriveablePick[];
     __resetQuickPicks: () => void;
   };
-
-  // One stub serves both the config reads (site + current default, captured by ExtensionConfig at
-  // construction) and the write-back capture, so it must be installed before the manager is built.
-  function stubConfig(values: Record<string, unknown>, inspected: Record<string, unknown> = {}): Update[] {
-    const updates: Update[] = [];
-    const wsConfig = {
-      get: (key: string, dflt?: unknown): unknown => (key in values ? values[key] : dflt),
-      inspect: (): Record<string, unknown> => inspected,
-      update: (key: string, value: unknown, target: vscode.ConfigurationTarget): Promise<void> => {
-        updates.push({ key, value, target });
-        return Promise.resolve();
-      },
-    } as unknown as vscode.WorkspaceConfiguration;
-    vi.spyOn(vscode.workspace, "getConfiguration").mockReturnValue(wsConfig);
-    return updates;
-  }
 
   function withJira(): Map<string, (...a: unknown[]) => Promise<void>> {
     const store = {
@@ -305,5 +286,236 @@ describe("switchDefaultProject: Jira project QuickPick branch", () => {
     expect(updates).toEqual([
       { key: "xray.defaultProjectKey", value: "PAY", target: vscode.ConfigurationTarget.Global },
     ]);
+  });
+});
+
+describe("traceability select-sync-projects contributions", () => {
+  const CMD = "playwrightBddRunner.traceability.selectSyncProjects";
+
+  it("declares the command under Specwright with the checklist icon", () => {
+    const command = pkg.contributes.commands.find((c) => c.command === CMD);
+    expect(command?.category).toBe("Specwright");
+    expect(command?.icon).toBe("$(checklist)");
+  });
+
+  it("gates the palette entry on the traceability panel being enabled", () => {
+    const palette = pkg.contributes.menus["commandPalette"]!;
+    expect(palette.find((e) => e.command === CMD)?.when).toBe(
+      "playwrightBddRunner.traceability.enabled"
+    );
+  });
+
+  it("keeps the command out of native item menus", () => {
+    expect(pkg.contributes.menus["view/item/context"]!.filter((e) => e.command === CMD)).toEqual([]);
+  });
+});
+
+describe("selectSyncProjects command handler", () => {
+  const CMD = "playwrightBddRunner.traceability.selectSyncProjects";
+
+  interface PickItem {
+    label: string;
+    description: string;
+    picked: boolean;
+  }
+
+  const directoryOf = (keys: readonly string[]): unknown => ({
+    projects: keys.map((key) => ({ key, name: key })),
+    truncated: false,
+  });
+
+  // Only what the picker reads: the ladder rungs and the grammar that says the provider has projects.
+  // The directory cache starts cold, as it is before any surface has enumerated the site, so a test that
+  // sees a directory project saw it come off the live list.
+  function subsystemWith(ladder: {
+    tagDerived?: string[];
+    catalogue?: string[];
+    directory?: string[];
+    cachedDirectory?: string[];
+    directoryFails?: boolean;
+  }): TraceabilitySubsystem {
+    return {
+      traceabilityPanelActive: true,
+      getActiveAdapter: () => ({
+        label: "Xray",
+        keyGrammar: { testPrefix: "TEST_", projectOf: (key: string) => key.split("-")[0] },
+        metadata: { snapshot: () => ({ catalogueProjects: ladder.catalogue ?? [] }) },
+        projectDirectory: {
+          cached: () => directoryOf(ladder.cachedDirectory ?? []),
+          list: () =>
+            (ladder.directoryFails
+              ? Promise.reject(new Error("the site is unreachable"))
+              : Promise.resolve(directoryOf(ladder.directory ?? []))),
+        },
+      }),
+      tagDerivedProjectKeys: () => ladder.tagDerived ?? [],
+      projectScope: () => NO_PROJECT_SCOPE,
+    } as unknown as TraceabilitySubsystem;
+  }
+
+  function pickerItems(calls: ReadonlyArray<ReadonlyArray<unknown>>): PickItem[] {
+    return (calls[0]?.[0] ?? []) as PickItem[];
+  }
+
+  const workspace = vscode.workspace as { workspaceFolders: unknown };
+
+  beforeEach(() => {
+    workspace.workspaceFolders = [{ uri: vscode.Uri.file("/ws") }];
+  });
+
+  afterEach(() => {
+    workspace.workspaceFolders = undefined;
+    vi.restoreAllMocks();
+  });
+
+  // The site rung comes off a live enumeration, so a workspace that has never opened the board still
+  // sees every project it could pin.
+  it("offers every known project, says where each came from, and checks the ones in scope today", async () => {
+    stubConfig({ "xray.defaultProjectKey": "PAY" });
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const handlers = captureHandlers(makeContext(), (manager) =>
+      manager.setTraceabilitySubsystem(
+        subsystemWith({ tagDerived: ["CALC"], catalogue: ["MATH"], directory: ["OPS"] })
+      )
+    );
+
+    await handlers.get(CMD)!();
+
+    expect(pickerItems(quickPick.mock.calls)).toEqual([
+      { label: "CALC", description: "referenced by workspace tags", picked: true },
+      { label: "MATH", description: "synced earlier", picked: true },
+      { label: "OPS", description: "from site directory", picked: false },
+      { label: "PAY", description: "default project", picked: true },
+    ]);
+    expect(quickPick.mock.calls[0]?.[1]).toMatchObject({
+      canPickMany: true,
+      ignoreFocusOut: true,
+      title: "Select Projects to Sync",
+    });
+  });
+
+  it("still opens on the last known projects when the site cannot be enumerated", async () => {
+    stubConfig({ "xray.defaultProjectKey": "PAY" });
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const handlers = captureHandlers(makeContext(), (manager) =>
+      manager.setTraceabilitySubsystem(
+        subsystemWith({ cachedDirectory: ["OPS"], directoryFails: true })
+      )
+    );
+
+    await handlers.get(CMD)!();
+
+    expect(pickerItems(quickPick.mock.calls).map((item) => item.label)).toEqual(["OPS", "PAY"]);
+  });
+
+  it("writes exactly the checked set when the user accepts the picker unchanged", async () => {
+    const updates = stubConfig({ "xray.defaultProjectKey": "PAY" });
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockImplementation(
+      ((items: PickItem[]) => Promise.resolve(items.filter((item) => item.picked))) as never
+    );
+    const handlers = captureHandlers(makeContext(), (manager) =>
+      manager.setTraceabilitySubsystem(
+        subsystemWith({ tagDerived: ["CALC"], catalogue: ["MATH"], directory: ["OPS"] })
+      )
+    );
+
+    await handlers.get(CMD)!();
+
+    const checked = pickerItems(quickPick.mock.calls).filter((item) => item.picked).map((item) => item.label);
+    expect(checked).toEqual(["CALC", "MATH", "PAY"]);
+    expect(updates).toEqual([
+      { key: "xray.syncProjectKeys", value: checked, target: vscode.ConfigurationTarget.Workspace },
+    ]);
+  });
+
+  it("checks only the setting's projects once it names the scope", async () => {
+    stubConfig({ "xray.defaultProjectKey": "PAY", "xray.syncProjectKeys": ["math"] });
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const handlers = captureHandlers(makeContext(), (manager) =>
+      manager.setTraceabilitySubsystem(subsystemWith({ tagDerived: ["CALC"], catalogue: ["MATH"] }))
+    );
+
+    await handlers.get(CMD)!();
+
+    expect(pickerItems(quickPick.mock.calls).filter((item) => item.picked).map((item) => item.label)).toEqual(["MATH"]);
+  });
+
+  // The scope belongs to the repo, so it lands in the workspace even when nothing is pinned there yet:
+  // a list chosen for one checkout must not follow the user into the next one.
+  it("writes the checked projects to the workspace rather than the user's settings", async () => {
+    const updates = stubConfig({ "xray.defaultProjectKey": "PAY" });
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue([
+      { label: "CALC", description: "referenced by workspace tags", picked: true },
+      { label: "OPS", description: "from site directory", picked: false },
+    ] as never);
+    const handlers = captureHandlers(makeContext(), (manager) =>
+      manager.setTraceabilitySubsystem(subsystemWith({ tagDerived: ["CALC"], directory: ["OPS"] }))
+    );
+
+    await handlers.get(CMD)!();
+
+    expect(updates).toEqual([
+      {
+        key: "xray.syncProjectKeys",
+        value: ["CALC", "OPS"],
+        target: vscode.ConfigurationTarget.Workspace,
+      },
+    ]);
+  });
+
+  it("writes an empty list when every box is cleared, which restores the derived scope", async () => {
+    const updates = stubConfig({ "xray.defaultProjectKey": "PAY", "xray.syncProjectKeys": ["PAY"] });
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue([] as never);
+    const handlers = captureHandlers(makeContext(), (manager) =>
+      manager.setTraceabilitySubsystem(subsystemWith({}))
+    );
+
+    await handlers.get(CMD)!();
+
+    expect(updates).toEqual([
+      { key: "xray.syncProjectKeys", value: [], target: vscode.ConfigurationTarget.Workspace },
+    ]);
+  });
+
+  it("falls back to the user's settings when no folder is open to hold the list", async () => {
+    workspace.workspaceFolders = undefined;
+    const updates = stubConfig({ "xray.defaultProjectKey": "PAY" });
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue([
+      { label: "PAY", description: "default project", picked: true },
+    ] as never);
+    const handlers = captureHandlers(makeContext(), (manager) =>
+      manager.setTraceabilitySubsystem(subsystemWith({}))
+    );
+
+    await handlers.get(CMD)!();
+
+    expect(updates).toEqual([
+      { key: "xray.syncProjectKeys", value: ["PAY"], target: vscode.ConfigurationTarget.Global },
+    ]);
+  });
+
+  it("writes nothing when the picker is dismissed", async () => {
+    const updates = stubConfig({ "xray.defaultProjectKey": "PAY" });
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const handlers = captureHandlers(makeContext(), (manager) =>
+      manager.setTraceabilitySubsystem(subsystemWith({ tagDerived: ["CALC"] }))
+    );
+
+    await handlers.get(CMD)!();
+
+    expect(updates).toEqual([]);
+  });
+
+  it("names the way out instead of opening an empty picker", async () => {
+    const updates = stubConfig({});
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick");
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const handlers = captureHandlers(makeContext());
+
+    await handlers.get(CMD)!();
+
+    expect(quickPick).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    expect(String(info.mock.calls[0]?.[0])).toContain("No projects to choose from yet");
   });
 });
