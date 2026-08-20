@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Mapped test rows in the Traceability panel now show a flask tinted by status, matching the available-test rows, instead of a status glyph.
 
+### Fixed
+
+- A Windows run blocked by an unconfirmed process tree now unblocks itself once those processes are gone. Specwright records each leftover process with the instant it started and re-checks the live process table, so ending them in Task Manager is enough and a restart is no longer required.
+
 ## [0.5.0] - 2026-08-17
 ### Added
 

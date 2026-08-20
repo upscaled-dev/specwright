@@ -12,6 +12,7 @@ import {
   type AdmissionStore,
   type TerminationLease,
 } from "../../core/execution-admission";
+import { readProcessTable, type ProcessMember } from "../../core/windows-process-tree";
 
 const BOOT_A = "win32:41";
 const BOOT_B = "win32:42";
@@ -40,6 +41,25 @@ const windowsLease = (kind: "windows-tree" | "debug-session"): TerminationLease 
   bootId: BOOT_A,
   ...(kind === "windows-tree" ? { pid: 41 } : {}),
 });
+
+const ROOT = { pid: 4242, creationDate: 1_000 };
+
+const identifiedLease = (
+  survivors: readonly ProcessMember[] | "unconfirmable" = [ROOT]
+): TerminationLease => ({
+  kind: "windows-tree",
+  pid: ROOT.pid,
+  root: ROOT,
+  survivors,
+  failure: "termination unconfirmed",
+  bootId: BOOT_A,
+});
+
+const runningTree = [
+  { pid: 4242, parentPid: 1, creationDate: 1_000 },
+  { pid: 4343, parentPid: 4242, creationDate: 2_000 },
+];
+const otherProcesses = [{ pid: 900, parentPid: 1, creationDate: 5 }];
 
 describe("ExecutionAdmission", () => {
   it("survives reconstruction on the same boot", async () => {
@@ -124,6 +144,175 @@ describe("ExecutionAdmission", () => {
       expect(store.records).toHaveLength(0);
     }
   );
+
+  it("clears an identified Windows lease once the survivor probe finds nothing left", async () => {
+    const store = new MemoryStore();
+    store.records.set("lease", identifiedLease());
+    const processTable = vi.fn(() => Promise.resolve(otherProcesses));
+
+    const admission = new ExecutionAdmission(store, { bootId: () => BOOT_A, processTable });
+
+    await expect(admission.ensureAvailable()).resolves.toBeUndefined();
+    expect(store.records).toHaveLength(0);
+  });
+
+  it("keeps an identified Windows lease while its tree is still running", async () => {
+    const store = new MemoryStore();
+    store.records.set("lease", identifiedLease());
+    const admission = new ExecutionAdmission(store, {
+      bootId: () => BOOT_A,
+      processTable: () => Promise.resolve(runningTree),
+    });
+
+    await expect(admission.ensureAvailable()).rejects.toMatchObject({
+      recovery: expect.stringContaining("End the leftover processes in Task Manager"),
+    });
+    expect(store.records).toHaveLength(1);
+  });
+
+  it.each([
+    ["cannot be read", () => Promise.resolve(undefined)],
+    // PowerShell answers an unusable CIM query with an empty table.
+    ["answers with no rows", () => readProcessTable(() => Promise.resolve(""))],
+  ])("keeps an identified Windows lease when the process table %s", async (_reason, processTable) => {
+    const store = new MemoryStore();
+    store.records.set("lease", identifiedLease());
+    const admission = new ExecutionAdmission(store, { bootId: () => BOOT_A, processTable });
+
+    await expect(admission.ensureAvailable()).rejects.toBeInstanceOf(ExecutionAdmissionBlockedError);
+    expect(store.records).toHaveLength(1);
+  });
+
+  it("blames the leftover processes, not the storage, when the probe itself fails", async () => {
+    const store = new MemoryStore();
+    store.records.set("lease", identifiedLease());
+    const admission = new ExecutionAdmission(store, {
+      bootId: () => BOOT_A,
+      processTable: () => Promise.reject(new Error("access denied")),
+    });
+
+    await expect(admission.ensureAvailable()).rejects.toMatchObject({
+      message: expect.stringContaining("could not be checked"),
+      recovery: expect.stringContaining("End the leftover processes in Task Manager"),
+    });
+    expect(store.records).toHaveLength(1);
+  });
+
+  it("reads the process table once for every identified lease in one pass", async () => {
+    const store = new MemoryStore();
+    store.records.set("first", identifiedLease());
+    store.records.set("second", identifiedLease([{ pid: 4444, creationDate: 3_000 }]));
+    const processTable = vi.fn(() => Promise.resolve(otherProcesses));
+
+    const admission = new ExecutionAdmission(store, { bootId: () => BOOT_A, processTable });
+
+    await expect(admission.ensureAvailable()).resolves.toBeUndefined();
+    expect(processTable).toHaveBeenCalledTimes(1);
+    expect(store.records).toHaveLength(0);
+  });
+
+  it("blocks until the last recorded member exits, not merely the root", async () => {
+    const store = new MemoryStore();
+    store.records.set("lease", identifiedLease([ROOT, { pid: 4343, creationDate: 2_000 }]));
+    // The root is already gone; the descendant it spawned is what still holds the port.
+    let table = [{ pid: 4343, parentPid: 1, creationDate: 2_000 }];
+    const admission = new ExecutionAdmission(store, {
+      bootId: () => BOOT_A,
+      processTable: () => Promise.resolve(table),
+    });
+
+    await expect(admission.ensureAvailable()).rejects.toMatchObject({
+      recovery: expect.stringContaining("End the leftover processes in Task Manager"),
+    });
+    expect(store.records).toHaveLength(1);
+
+    table = otherProcesses;
+    await expect(admission.ensureAvailable()).resolves.toBeUndefined();
+    expect(store.records).toHaveLength(0);
+  });
+
+  it("keeps a member with no recorded creation instant blocked while its pid runs", async () => {
+    const store = new MemoryStore();
+    store.records.set("lease", identifiedLease([{ pid: 4343 }]));
+    let table = runningTree;
+    const admission = new ExecutionAdmission(store, {
+      bootId: () => BOOT_A,
+      processTable: () => Promise.resolve(table),
+    });
+
+    await expect(admission.ensureAvailable()).rejects.toBeInstanceOf(ExecutionAdmissionBlockedError);
+
+    table = otherProcesses;
+    await expect(admission.ensureAvailable()).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ["a tree too large to record", identifiedLease("unconfirmable")],
+    ["a record that names only its root", windowsLease("windows-tree")],
+  ])("leaves %s on the reboot path", async (_case, lease) => {
+    const store = new MemoryStore();
+    store.records.set("lease", lease);
+    const processTable = vi.fn(() => Promise.resolve(otherProcesses));
+
+    await expect(new ExecutionAdmission(store, { bootId: () => BOOT_A, processTable })
+      .ensureAvailable()).rejects.toMatchObject({
+      recovery: expect.stringContaining("Restart the computer"),
+    });
+    expect(processTable).not.toHaveBeenCalled();
+    expect(store.records).toHaveLength(1);
+
+    await expect(new ExecutionAdmission(store, { bootId: () => BOOT_B, processTable })
+      .ensureAvailable()).resolves.toBeUndefined();
+    expect(store.records).toHaveLength(0);
+  });
+
+  it("keeps the probe guidance for an identified lease with no readable boot identity", async () => {
+    const store = new MemoryStore();
+    store.records.set("lease", { ...identifiedLease(), bootId: undefined });
+    let table = runningTree;
+    const admission = new ExecutionAdmission(store, {
+      bootId: () => undefined,
+      processTable: () => Promise.resolve(table),
+    });
+
+    await expect(admission.ensureAvailable()).rejects.toMatchObject({
+      recovery: expect.stringContaining("End the leftover processes in Task Manager"),
+    });
+
+    table = otherProcesses;
+    await expect(admission.ensureAvailable()).resolves.toBeUndefined();
+  });
+
+  it("clears an identified Windows lease on a new boot without probing", async () => {
+    const store = new MemoryStore();
+    store.records.set("lease", identifiedLease());
+    const processTable = vi.fn(() => Promise.resolve(runningTree));
+
+    const admission = new ExecutionAdmission(store, { bootId: () => BOOT_B, processTable });
+
+    await expect(admission.ensureAvailable()).resolves.toBeUndefined();
+    expect(processTable).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { root: { pid: 0, creationDate: 1_000 } },
+    { root: { pid: 4242 } },
+    { root: 4242 },
+    { root: null },
+    { survivors: [{ pid: 0, creationDate: 1_000 }] },
+    { survivors: [{ pid: 4242, creationDate: "1000" }] },
+    { survivors: [{ creationDate: 1_000 }] },
+    { survivors: ["4242"] },
+    { survivors: "unknown" },
+    { survivors: 4242 },
+  ])("treats a malformed persisted process identity %s as corruption", async (fields) => {
+    const store = new MemoryStore();
+    store.records.set("lease", { ...identifiedLease(), ...fields });
+
+    await expect(new ExecutionAdmission(store, { bootId: () => BOOT_A }).ensureAvailable())
+      .rejects.toMatchObject({ message: expect.stringContaining("record lease is corrupt") });
+    expect(store.records).toHaveLength(1);
+  });
 
   it("keeps a Windows lease locked when the current boot identity is unavailable", async () => {
     const store = new MemoryStore();

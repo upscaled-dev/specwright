@@ -32,6 +32,7 @@ import type {
   RunIntent,
 } from "../../core/run-contracts";
 import { LegacyDirectExecutionGateway } from "../../core/execution-gateway";
+import { ExecutionAdmissionBlockedError } from "../../core/execution-admission";
 import { LegacyExecutionDiscovery } from "../../core/legacy-discovery";
 import { LegacyArtifactGateway } from "../../ui/legacy-artifact-gateway";
 import { executionClientContext } from "../../ui/execution-client-context";
@@ -375,6 +376,34 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
     expect(gateway.prepare).not.toHaveBeenCalled();
     expect(gateway.run).not.toHaveBeenCalled();
+  });
+
+  it("tells the user how to recover when admission blocks discovery", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const blocked = new ExecutionAdmissionBlockedError({
+      kind: "windows-tree",
+      pid: 4242,
+      survivors: [{ pid: 4242, creationDate: 1_000 }],
+      failure: "the tree is still running",
+      bootId: "win32:41",
+    });
+    const gateway = testGateway(() => Promise.reject(new Error("unused")));
+    gateway.discover = vi.fn(() => Promise.reject(blocked));
+    const shown: unknown[] = [];
+    const original = vscode.window.showErrorMessage;
+    (vscode.window as { showErrorMessage: unknown }).showErrorMessage = (message: unknown) => {
+      shown.push(message);
+      return Promise.resolve(undefined);
+    };
+
+    try {
+      await buildProvider(shell, gateway).provider.discoverTests();
+    } finally {
+      (vscode.window as { showErrorMessage: unknown }).showErrorMessage = original;
+    }
+
+    expect(shown).toEqual([`${blocked.message} ${blocked.recovery}`]);
+    expect(String(shown[0])).toContain("End the leftover processes in Task Manager");
   });
 
   it("writes one run summary for a multi-root selection", async () => {

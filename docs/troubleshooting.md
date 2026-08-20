@@ -208,9 +208,12 @@ For a POSIX process-group block, terminate and confirm every leftover
 Playwright or debug process before retrying. If termination cannot be
 confirmed, use the reboot-first storage repair below.
 
-A Windows process-tree or debug-session block cannot be cleared merely by
-closing a process after its termination was already unconfirmed. If its record
-has a boot identity, restart the computer and retry.
+A Windows process-tree block records each leftover process together with the
+instant it started, and re-checks the live process table on every attempt. End
+those processes in Task Manager and run again; no restart is needed. A
+debug-session block still clears only after a restart, as does a process-tree
+block whose leftovers could not be recorded, which the message calls out by
+asking for a restart instead.
 
 For unconfirmed POSIX termination, an absent or unreadable boot identity, or a
 message that identifies admission storage, use **Developer: Open User Data

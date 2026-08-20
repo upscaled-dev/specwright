@@ -3,6 +3,13 @@ import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import {
+  readProcessTable,
+  survivingMembers,
+  type ProcessEntry,
+  type ProcessIdentity,
+  type ProcessMember,
+} from "./windows-process-tree";
 
 const BOOT_ID_TIMEOUT_MS = 1_500;
 const MAX_ADMISSION_ENTRIES = 256;
@@ -10,6 +17,9 @@ const MAX_ADMISSION_RECORDS = 64;
 const MAX_ADMISSION_RECORD_BYTES = 16_384;
 const REBOOT =
   "Restart the computer to terminate any leftover Playwright or debug processes, then try again.";
+const END_LEFTOVER_PROCESSES =
+  "End the leftover processes in Task Manager, then run again. If they cannot be ended, restart " +
+  "the computer to terminate them, then try again.";
 const STORAGE_REPAIR =
   "Restart the computer to terminate any leftover Playwright or debug processes. Then, while " +
   "every VS Code window is closed, move the execution-admission directory out of this extension's " +
@@ -36,6 +46,14 @@ export type TerminationLease =
   | {
       readonly kind: "windows-tree";
       readonly pid?: number | undefined;
+      /** The spawned root pinned to its creation instant. Diagnostic. */
+      readonly root?: ProcessIdentity | undefined;
+      /**
+       * The tree members that were never proven gone. The lease clears once a fresh process table
+       * shows none of them. "unconfirmable" records a tree that could not be enumerated or was too
+       * large to record, which only a reboot clears, as does an absent field on a legacy record.
+       */
+      readonly survivors?: readonly ProcessMember[] | "unconfirmable" | undefined;
       readonly failure: string;
       readonly bootId?: string | undefined;
       readonly systemUptime?: number | undefined;
@@ -68,6 +86,7 @@ export interface AdmissionStore {
 export interface ExecutionAdmissionOptions {
   readonly bootId?: (() => string | undefined) | undefined;
   readonly processGroupExists?: ((pgid: number) => boolean) | undefined;
+  readonly processTable?: (() => Promise<readonly ProcessEntry[] | undefined>) | undefined;
 }
 
 function commandOutput(command: string, args: readonly string[]): string | undefined {
@@ -166,6 +185,38 @@ function isFiniteNonNegative(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+function isPid(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) > 0;
+}
+
+function readsAsIdentity(value: unknown): boolean {
+  if (value === undefined) {return true;}
+  if (typeof value !== "object" || value === null) {return false;}
+  const candidate = value as Record<string, unknown>;
+  return isPid(candidate["pid"]) && isFiniteNonNegative(candidate["creationDate"]);
+}
+
+function readsAsMember(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {return false;}
+  const candidate = value as Record<string, unknown>;
+  const creationDate = candidate["creationDate"];
+  return isPid(candidate["pid"]) &&
+    (creationDate === undefined || isFiniteNonNegative(creationDate));
+}
+
+function readsAsSurvivors(value: unknown): boolean {
+  return value === undefined ||
+    value === "unconfirmable" ||
+    (Array.isArray(value) && value.every(readsAsMember));
+}
+
+/** The identities a fresh process table can prove gone; only such a lease clears without a reboot. */
+function clearableIdentities(lease: TerminationLease): readonly ProcessMember[] | undefined {
+  return lease.kind === "windows-tree" && Array.isArray(lease.survivors)
+    ? lease.survivors
+    : undefined;
+}
+
 function readLease(value: unknown): TerminationLease | undefined {
   if (typeof value !== "object" || value === null) {return undefined;}
   const candidate = value as Record<string, unknown>;
@@ -178,12 +229,12 @@ function readLease(value: unknown): TerminationLease | undefined {
     return undefined;
   }
   if (candidate["kind"] === "posix-group") {
-    return Number.isInteger(candidate["pgid"]) && (candidate["pgid"] as number) > 0
-      ? candidate as TerminationLease
-      : undefined;
+    return isPid(candidate["pgid"]) ? candidate as TerminationLease : undefined;
   }
   if (candidate["kind"] === "windows-tree") {
-    return candidate["pid"] === undefined || (Number.isInteger(candidate["pid"]) && (candidate["pid"] as number) > 0)
+    return (candidate["pid"] === undefined || isPid(candidate["pid"])) &&
+      readsAsIdentity(candidate["root"]) &&
+      readsAsSurvivors(candidate["survivors"])
       ? candidate as TerminationLease
       : undefined;
   }
@@ -293,7 +344,24 @@ export class FileAdmissionStore implements AdmissionStore {
   }
 }
 
-type AdmissionRecovery = "process" | "reboot" | "repair";
+type AdmissionRecovery = "process" | "windows-tree" | "reboot" | "repair";
+
+const RECOVERY_TEXT: Record<AdmissionRecovery, string> = {
+  process: "Terminate and confirm every leftover Playwright or debug process, then try again. " +
+    `If termination cannot be confirmed, ${STORAGE_REPAIR}`,
+  // A lease that carries the identities it could not prove gone re-probes the process table on
+  // every attempt, so ending those processes is enough to unblock it.
+  "windows-tree": END_LEFTOVER_PROCESSES,
+  reboot: `${REBOOT} ${REPAIR_AFTER_REBOOT}`,
+  repair: STORAGE_REPAIR,
+};
+
+function recoveryPolicy(lease: TerminationLease | undefined): AdmissionRecovery {
+  if (lease === undefined) {return "repair";}
+  if (lease.kind === "posix-group") {return "process";}
+  if (clearableIdentities(lease) !== undefined) {return "windows-tree";}
+  return isCanonicalBootId(lease.bootId) ? "reboot" : "repair";
+}
 
 export class ExecutionAdmissionBlockedError extends Error {
   public readonly lease: TerminationLease | undefined;
@@ -304,15 +372,7 @@ export class ExecutionAdmissionBlockedError extends Error {
     super(`Test execution remains blocked: ${lease?.failure ?? blocker}`);
     this.name = "ExecutionAdmissionBlockedError";
     this.lease = lease;
-    const policy = recovery ?? (lease?.kind === "posix-group"
-      ? "process"
-      : !isCanonicalBootId(lease?.bootId) ? "repair" : "reboot");
-    this.recovery = policy === "process"
-      ? `Terminate and confirm every leftover Playwright or debug process, then try again. ` +
-        `If termination cannot be confirmed, ${STORAGE_REPAIR}`
-      : policy === "reboot"
-        ? `${REBOOT} ${REPAIR_AFTER_REBOOT}`
-        : STORAGE_REPAIR;
+    this.recovery = RECOVERY_TEXT[recovery ?? recoveryPolicy(lease)];
   }
 }
 
@@ -328,6 +388,7 @@ export class ExecutionAdmission {
   private readonly localLeases = new Map<string, TerminationLease>();
   private readonly bootId: () => string | undefined;
   private readonly groupExists: (pgid: number) => boolean;
+  private readonly processTable: () => Promise<readonly ProcessEntry[] | undefined>;
 
   constructor(
     private readonly store?: AdmissionStore,
@@ -339,6 +400,7 @@ export class ExecutionAdmission {
       return isCanonicalBootId(value) ? value : undefined;
     };
     this.groupExists = options.processGroupExists ?? defaultProcessGroupExists;
+    this.processTable = options.processTable ?? readProcessTable;
   }
 
   public get blocked(): boolean {
@@ -349,7 +411,10 @@ export class ExecutionAdmission {
     await this.recover();
     const lease = this.leases.values().next().value;
     if (lease !== undefined) {
+      // A lease carrying identities keeps its own guidance: the probe clears it whatever the boot
+      // identity does. Only a lease with nothing to probe falls back to the storage repair.
       const recovery = lease.kind !== "posix-group" &&
+        clearableIdentities(lease) === undefined &&
         (!isCanonicalBootId(lease.bootId) || this.bootId() === undefined)
         ? "repair"
         : undefined;
@@ -368,7 +433,7 @@ export class ExecutionAdmission {
     }
   }
 
-  public async recover(): Promise<void> {
+  private async persistedLeases(): Promise<Map<string, TerminationLease>> {
     let records: readonly AdmissionRecord[];
     try {
       records = await this.store?.readAll() ?? [];
@@ -387,9 +452,30 @@ export class ExecutionAdmission {
       }
       persisted.set(record.id, lease);
     }
+    return persisted;
+  }
+
+  public async recover(): Promise<void> {
+    const persisted = await this.persistedLeases();
     this.leases = new Map([...persisted, ...this.localLeases]);
+    // One table fetch answers every windows-tree lease in this pass.
+    let snapshot: { readonly rows: readonly ProcessEntry[] | undefined } | undefined;
+    const processTable = async (): Promise<readonly ProcessEntry[] | undefined> => {
+      snapshot ??= { rows: await this.processTable() };
+      return snapshot.rows;
+    };
     for (const [id, lease] of this.leases) {
-      if (!this.canClear(lease)) {continue;}
+      let clearable: boolean;
+      try {
+        clearable = await this.canClear(lease, processTable);
+      } catch (error) {
+        // The probe failed, not the storage, so the guidance stays with the leftover processes.
+        throw new ExecutionAdmissionBlockedError(
+          `its termination lease could not be checked (${errorMessage(error)}); execution remains blocked`,
+          clearableIdentities(lease) === undefined ? undefined : "windows-tree"
+        );
+      }
+      if (!clearable) {continue;}
       try {
         if (persisted.has(id)) {await this.store?.remove(id);}
         this.leases.delete(id);
@@ -402,12 +488,20 @@ export class ExecutionAdmission {
     }
   }
 
-  private canClear(lease: TerminationLease): boolean {
+  private async canClear(
+    lease: TerminationLease,
+    processTable: () => Promise<readonly ProcessEntry[] | undefined>
+  ): Promise<boolean> {
     if (lease.kind === "posix-group") {return !this.groupExists(lease.pgid);}
     const currentBootId = this.bootId();
-    return isCanonicalBootId(lease.bootId) &&
+    const rebooted = isCanonicalBootId(lease.bootId) &&
       currentBootId !== undefined &&
       lease.bootId !== currentBootId;
+    const identities = clearableIdentities(lease);
+    if (rebooted || identities === undefined) {return rebooted;}
+    // An unreadable table leaves the identities unproven, which keeps the lease.
+    const rows = await processTable();
+    return rows !== undefined && survivingMembers(rows, identities).length === 0;
   }
 }
 

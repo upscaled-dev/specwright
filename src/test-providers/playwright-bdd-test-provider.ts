@@ -12,6 +12,7 @@ import {
   PlaywrightBddExtensionContext,
 } from "../types";
 import { errMsg } from "../utils/text";
+import { ExecutionAdmissionBlockedError } from "../core/execution-admission";
 import type { TestDiscoveryManager } from "../core/test-discovery-manager";
 import type { TestOrganizationManager } from "../core/test-organization";
 import {
@@ -351,7 +352,9 @@ export class PlaywrightBddTestProvider {
     } catch (error) {
       const msg = errMsg(error);
       this.context.logger.error(`Failed to discover tests: ${msg}`);
-      vscode.window.showErrorMessage(`Test discovery failed: ${msg}`);
+      vscode.window.showErrorMessage(error instanceof ExecutionAdmissionBlockedError
+        ? `${error.message} ${error.recovery}`
+        : `Test discovery failed: ${msg}`);
       return false;
     }
   }
