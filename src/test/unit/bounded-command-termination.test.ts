@@ -36,7 +36,6 @@ const RUNNING_TREE: readonly ProcessEntry[] = [
 ];
 // The budget the runner keeps for the whole confirm-and-retry sequence.
 const WINDOWS_TERMINATION_BUDGET_MS = 8_000;
-const BOOT = "win32:41";
 
 /** Serializes like the durable store, so a dropped undefined field shows up in the read-back. */
 class JsonStore implements AdmissionStore {
@@ -401,9 +400,11 @@ describe("runBoundedCommand cancellation", () => {
     const lease = (await run.result).terminationLease;
     if (lease === undefined) {throw new Error("the surviving tree produced no lease");}
 
+    // The admission runs in the same boot session that wrote the lease, whatever boot identity
+    // this host can resolve, so nothing but the identity probe can clear it.
     let table: readonly ProcessEntry[] = RUNNING_TREE;
     const admission = new ExecutionAdmission(undefined, {
-      bootId: () => BOOT,
+      bootId: () => lease.bootId,
       processTable: () => Promise.resolve(table),
     });
     await admission.block(lease);
@@ -431,11 +432,12 @@ describe("runBoundedCommand cancellation", () => {
     if (lease === undefined) {throw new Error("the surviving tree produced no lease");}
 
     const store = new JsonStore();
-    await new ExecutionAdmission(store, { bootId: () => BOOT }).block(lease);
+    await new ExecutionAdmission(store).block(lease);
 
     let table: readonly ProcessEntry[] = [{ pid: 4343, parentPid: 1, creationDate: 9_999 }];
     const reopened = new ExecutionAdmission(store, {
-      bootId: () => BOOT,
+      // Same boot session as the writer; only the identity probe may clear.
+      bootId: () => lease.bootId,
       processTable: () => Promise.resolve(table),
     });
 
