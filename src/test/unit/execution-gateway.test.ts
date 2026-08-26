@@ -700,7 +700,9 @@ describe("LegacyDirectExecutionGateway", () => {
         onEvent: (event) => {
           if (event.kind !== "output") {return;}
           streamed += event.text;
-          if (streamed.includes("stderr-tail")) {tailsWritten();}
+          // Both markers, not just the later write: the two pipes have no cross-ordering
+          // guarantee, and on darwin queued stdout chunks can trail the stderr tail.
+          if (streamed.includes("stdout-tail") && streamed.includes("stderr-tail")) {tailsWritten();}
         },
       });
       if (cancels) {
