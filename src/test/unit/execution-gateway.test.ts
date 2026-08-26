@@ -646,12 +646,12 @@ describe("LegacyDirectExecutionGateway", () => {
   });
 
   it.each([
-    ["complete", "", undefined],
-    ["partial", "process.exitCode=7", undefined],
-    ["cancelled", "setInterval(() => {}, 1000)", 100],
+    ["complete", "", false],
+    ["partial", "process.exitCode=7", false],
+    ["cancelled", "setInterval(() => {}, 1000)", true],
   ] as const)(
     "uses one real runner-owned output tail for a %s run",
-    async (expectedState, ending, abortDelay) => {
+    async (expectedState, ending, cancels) => {
       const bytes = EXECUTION_LIMITS.outputTailBytesPerStream + 4096;
       const command = nodeCommand(
         `process.stdout.write("o".repeat(${bytes})+"stdout-tail");` +
@@ -687,11 +687,28 @@ describe("LegacyDirectExecutionGateway", () => {
         trustedWorkspace()
       );
       const abort = new AbortController();
+      let tailsWritten: () => void = () => undefined;
+      const wroteBothTails = new Promise<void>((resolve) => {tailsWritten = resolve;});
+      let streamed = "";
       const pending = gateway.execute({
         mode: "run",
         targets: [{ kind: "suite" }],
-      }, { signal: abort.signal });
-      if (abortDelay !== undefined) {setTimeout(() => abort.abort(), abortDelay);}
+      }, {
+        signal: abort.signal,
+        // Watching the gateway's own event stream rather than wrapping progress.onOutput: that
+        // handler is the capture's WeakMap key, and a wrapper would start a second tail.
+        onEvent: (event) => {
+          if (event.kind !== "output") {return;}
+          streamed += event.text;
+          if (streamed.includes("stderr-tail")) {tailsWritten();}
+        },
+      });
+      if (cancels) {
+        // Cancel only once both tails are on the wire. A fixed delay raced a cold child's first
+        // write, which failed the tail assertions below rather than the budget.
+        await Promise.race([wroteBothTails, pending.catch(() => undefined)]);
+        abort.abort();
+      }
 
       let completion;
       try {
@@ -710,7 +727,11 @@ describe("LegacyDirectExecutionGateway", () => {
         (2 * EXECUTION_LIMITS.outputTailBytesPerStream) + 240
       );
     },
-    10_000
+    // A ceiling shared by all three rows but sized for the cancelled one, which aborts a real child
+    // and must clear the Windows termination ladder: WINDOWS_TERMINATION_BUDGET_MS (private to
+    // bounded-command-runner.ts) plus an in-flight kill's TERMINATION_GRACE_MS. The other two rows
+    // settle in milliseconds regardless.
+    40_000
   );
 
   it("captures all reported rows for a declaration-line outline intent", async () => {

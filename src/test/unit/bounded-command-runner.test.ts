@@ -166,29 +166,60 @@ describe("runBoundedCommand", () => {
     );
     expect(Buffer.byteLength(result.output)).toBeLessThan(bytes);
     expect(Buffer.byteLength(result.error)).toBeLessThan(bytes);
-  });
+    // A real spawn writing half a megabyte pays node's start-up and, on Windows, the exit grace
+    // that drains inherited handles; the 5s default leaves a slow runner no room.
+  }, 20_000);
+
+  // The flood must outlast every termination path, so a Stop starved by the writes settles at the
+  // child's own end and fails the budget below instead of hanging to the suite timeout.
+  const FLOOD_LIFETIME_MS = 30_000;
+  // Above the Windows termination ladder's worst case and far below FLOOD_LIFETIME_MS. The ladder's
+  // WINDOWS_TERMINATION_BUDGET_MS is private to bounded-command-runner.ts, so this cannot be
+  // derived: keep it above that budget plus the TERMINATION_GRACE_MS an in-flight kill adds to it.
+  const CANCEL_SETTLE_BUDGET_MS = 20_000;
+  // The exit timer is armed by the first write rather than at boot, so the margin between a starved
+  // cancellation and CANCEL_SETTLE_BUDGET_MS does not shrink with a cold child's start-up.
+  const FLOODING_CHILD =
+    "let armed = false;" +
+    "setInterval(() => {" +
+    ' process.stdout.write("x".repeat(65536));' +
+    " if (armed) { return; }" +
+    " armed = true;" +
+    ` setTimeout(() => process.exit(0), ${FLOOD_LIFETIME_MS});` +
+    "}, 0);";
 
   it("keeps cancellation responsive while output is heavy", async () => {
     const controller = new AbortController();
-    const started = Date.now();
+    let chunkArrived: () => void = () => undefined;
+    const flooding = new Promise<void>((resolve) => {chunkArrived = resolve;});
     const pending = runBoundedCommand({
-      command: nodeCommand(
-        'setInterval(() => { process.stdout.write("x".repeat(65536)); }, 0);'
-      ),
+      command: nodeCommand(FLOODING_CHILD),
       workingDir: process.cwd(),
       logger,
       signal: controller.signal,
+      onOutput: () => {chunkArrived();},
     });
 
-    setTimeout(() => controller.abort(), 100);
+    // Cancel only once the writes are provably under way, so Stop really does race the flood. A
+    // child that died before its first chunk settles `pending` instead, which keeps that failure on
+    // the result assertions rather than hanging until the suite timeout.
+    await Promise.race([flooding, pending]);
+    const abortedAt = Date.now();
+    controller.abort();
     const result = await pending;
+    const settleMs = Date.now() - abortedAt;
 
     expect(result).toMatchObject({ success: false, error: "Cancelled", returnCode: 130 });
-    expect(Date.now() - started).toBeLessThan(4_000);
+    // This child is shell-less and childless, so taskkill's verdict on the root covers the whole
+    // tree and "Cancelled" does mean it is gone. Do not copy that reading into a shell-spawned
+    // test: terminateWindowsTree also returns undefined when no identity could be read and taskkill
+    // merely exited 0, having probed nothing.
+    expect(result.terminationFailure).toBeUndefined();
+    expect(settleMs).toBeLessThan(CANCEL_SETTLE_BUDGET_MS);
     expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(
       EXECUTION_LIMITS.outputTailBytesPerStream + 120
     );
-  }, 10_000);
+  }, 45_000);
 
   it("preserves a UTF-8 code point split across process chunks", async () => {
     let streamed = "";
@@ -258,5 +289,6 @@ describe("runBoundedCommand", () => {
 
     expect(second.error).toBe("second");
     expect(capture.format()).toBe("firstsecond");
-  });
+    // Two sequential real spawns pay node's start-up twice, and on Windows the exit grace twice.
+  }, 20_000);
 });
