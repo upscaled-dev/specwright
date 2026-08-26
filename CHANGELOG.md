@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.5.1] - 2026-08-26
 ### Added
 
 - **Select Projects to Sync** scopes traceability sync to a chosen set of projects. Pick them from a checkbox list on the command palette or the Traceability panel's connection row; clearing the selection restores the automatic scope.
