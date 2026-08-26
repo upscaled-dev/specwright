@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
-import { TestExecutor, ShellRunner, withJsonReporter } from "../../core/test-executor";
+import { TestExecutor, RunOutputResult, ShellRunner, withJsonReporter } from "../../core/test-executor";
 import { ExtensionConfig } from "../../core/extension-config";
 import { Logger } from "../../utils/logger";
 import { normalizePathKey, PlaywrightJsonParser } from "../../utils/playwright-json-parser";
@@ -1863,32 +1863,82 @@ describe("TestExecutor debug watchdog (pnpm session teardown wedge)", () => {
 });
 
 describe("TestExecutor cancellation", () => {
-  // A node process that keeps its event loop alive for 10s, the shape of a `playwright test` run
-  // that must be killed when the user hits Stop. Exercised through the REAL spawn runner (no
-  // injected shell) via the pre-run hook, so spawnCommand's abort/kill path is what's under test.
-  const longLived = 'node -e "setTimeout(()=>{},10000)"';
+  // The child must outlive every termination path, so settling before it can only mean the tree was
+  // killed rather than waited out.
+  const CHILD_LIFETIME_MS = 30_000;
+  // Above the Windows termination ladder's worst case and far below CHILD_LIFETIME_MS. The ladder's
+  // WINDOWS_TERMINATION_BUDGET_MS is private to bounded-command-runner.ts, so this cannot be
+  // derived: keep it above that budget plus the TERMINATION_GRACE_MS an in-flight kill adds to it.
+  const SETTLE_BUDGET_MS = 20_000;
+  // A node process that keeps its event loop alive, the shape of a `playwright test` run that must
+  // be killed when the user hits Stop. Exercised through the REAL spawn runner (no injected shell)
+  // via the pre-run hook, so spawnCommand's abort/kill path is what's under test.
+  const longLived = `node -e "setTimeout(()=>{},${CHILD_LIFETIME_MS})"`;
+  // The same child as a script file, announcing its own pid beside itself so the kill can be checked
+  // against the process rather than against the executor's verdict. Computing the pid path from
+  // __dirname keeps it out of both the shell command line and JS string escapes.
+  const ANNOUNCE_SCRIPT = [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    'fs.writeFileSync(path.join(__dirname, "child.pid"), process.pid + "\\n");',
+    `setTimeout(() => {}, ${CHILD_LIFETIME_MS});`,
+  ].join("\n");
+
+  const readAnnouncedPid = (pidPath: string): number => {
+    const written = fs.readFileSync(pidPath, "utf8");
+    // The terminator marks a complete write; a torn read would name the wrong process.
+    if (!written.endsWith("\n")) { throw new Error(`pid file is incomplete: ${written}`); }
+    return Number(written.trim());
+  };
+  const stillRunning = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  };
 
   it("kills the spawned tree and settles as Cancelled when the signal aborts mid-run", async () => {
-    const config = makeConfig({ preRunCommand: longLived });
-    const { executor } = makeExecutor(config, undefined as unknown as ShellRunner);
+    const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "cancel-tree-"));
     const controller = new AbortController();
+    let pending: Promise<RunOutputResult> | undefined;
+    try {
+      const script = nodePath.join(tmpDir, "announce.js");
+      fs.writeFileSync(script, ANNOUNCE_SCRIPT);
+      const config = makeConfig({ preRunCommand: `node "${script}"` });
+      const { executor } = makeExecutor(config, undefined as unknown as ShellRunner);
 
-    const start = Date.now();
-    const pending = executor.runScenarioWithOutput({
-      filePath: "/tmp/x.feature",
-      signal: controller.signal,
-    });
-    // Let the child spawn, then hit Stop.
-    await new Promise((r) => setTimeout(r, 300));
-    controller.abort();
-    const result = await pending;
-    const elapsed = Date.now() - start;
+      pending = executor.runScenarioWithOutput({
+        filePath: "/tmp/x.feature",
+        signal: controller.signal,
+      });
+      // Hit Stop only once the child has proven it is running, so the abort always lands mid-run.
+      const childPid = await vi.waitFor(
+        () => readAnnouncedPid(nodePath.join(tmpDir, "child.pid")),
+        { timeout: 15_000, interval: 50 }
+      );
+      const abortedAt = Date.now();
+      controller.abort();
+      const result = await pending;
+      const settleMs = Date.now() - abortedAt;
 
-    expect(result.success).toBe(false);
-    expect(result.error).toBe("Cancelled");
-    // Would hang ~10s if the process weren't killed; the kill+grace settles it fast.
-    expect(elapsed).toBeLessThan(4000);
-  }, 15_000);
+      expect(result.success).toBe(false);
+      // A termination the runner could not confirm replaces this error and closes admission instead.
+      expect(result.error).toBe("Cancelled");
+      expect(result.admissionUnsafe).toBeUndefined();
+      expect(settleMs).toBeLessThan(SETTLE_BUDGET_MS);
+      // Independent of the runner's own verdict: the announced process is gone.
+      await vi.waitFor(() => expect(stillRunning(childPid)).toBe(false), { timeout: 5_000, interval: 50 });
+    } finally {
+      // Aborting twice is a no-op, so a failed assertion still takes the child down with it.
+      controller.abort();
+      await pending?.catch(() => undefined);
+      // The directory holds a file written by a process we force-kill; Windows can hold its handles
+      // briefly after the kill, so retry the removal.
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  }, 50_000);
 
   it("resolves immediately with Cancelled when the signal is already aborted", async () => {
     const config = makeConfig({ preRunCommand: longLived });
