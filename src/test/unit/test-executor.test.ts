@@ -1870,6 +1870,12 @@ describe("TestExecutor cancellation", () => {
   // WINDOWS_TERMINATION_BUDGET_MS is private to bounded-command-runner.ts, so this cannot be
   // derived: keep it above that budget plus the TERMINATION_GRACE_MS an in-flight kill adds to it.
   const SETTLE_BUDGET_MS = 20_000;
+  // Every message the Windows ladder emits when it cannot clear the tree: the confirmation window
+  // elapsing, an unreadable process table, a taskkill failure, and survivors ("left N processes
+  // running"). It deliberately excludes unconfirmedTermination's "Process termination" catch-all,
+  // which production reaches only from a thrown defect, and the POSIX process-group message, which
+  // belongs to the strict branch.
+  const UNCONFIRMED_TERMINATION = /^Process-tree termination /;
   // A node process that keeps its event loop alive, the shape of a `playwright test` run that must
   // be killed when the user hits Stop. Exercised through the REAL spawn runner (no injected shell)
   // via the pre-run hook, so spawnCommand's abort/kill path is what's under test.
@@ -1924,11 +1930,22 @@ describe("TestExecutor cancellation", () => {
       const settleMs = Date.now() - abortedAt;
 
       expect(result.success).toBe(false);
-      // A termination the runner could not confirm replaces this error and closes admission instead.
-      expect(result.error).toBe("Cancelled");
-      expect(result.admissionUnsafe).toBeUndefined();
+      // A Windows ladder that cannot confirm the kill inside its budget fails closed by design, and
+      // a slow runner reaches that legitimately. Either verdict is accepted, neither half-applied.
+      if (process.platform === "win32" && result.error !== "Cancelled") {
+        expect(result.error).toMatch(UNCONFIRMED_TERMINATION);
+        expect(result.infrastructureFailure).toBe(result.error);
+        expect(result.admissionUnsafe).toBe(true);
+        expect(result.terminationLease).toBeDefined();
+      } else {
+        expect(result.error).toBe("Cancelled");
+        expect(result.infrastructureFailure).toBeUndefined();
+        expect(result.admissionUnsafe).toBeUndefined();
+        expect(result.terminationLease).toBeUndefined();
+      }
       expect(settleMs).toBeLessThan(SETTLE_BUDGET_MS);
-      // Independent of the runner's own verdict: the announced process is gone.
+      // Unconditional under either verdict: only the bookkeeping is allowed to be inconclusive, the
+      // announced process still has to be gone.
       await vi.waitFor(() => expect(stillRunning(childPid)).toBe(false), { timeout: 5_000, interval: 50 });
     } finally {
       // Aborting twice is a no-op, so a failed assertion still takes the child down with it.

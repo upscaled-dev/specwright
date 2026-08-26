@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -177,9 +177,11 @@ describe("runBoundedCommand", () => {
   // WINDOWS_TERMINATION_BUDGET_MS is private to bounded-command-runner.ts, so this cannot be
   // derived: keep it above that budget plus the TERMINATION_GRACE_MS an in-flight kill adds to it.
   const CANCEL_SETTLE_BUDGET_MS = 20_000;
-  // The exit timer is armed by the first write rather than at boot, so the margin between a starved
-  // cancellation and CANCEL_SETTLE_BUDGET_MS does not shrink with a cold child's start-up.
+  // The child announces its pid on its first write so the kill can be checked against the process
+  // itself. The exit timer is armed by the first flood write rather than at boot, so the margin
+  // between a starved cancellation and CANCEL_SETTLE_BUDGET_MS does not shrink with a cold start.
   const FLOODING_CHILD =
+    'process.stdout.write(process.pid + "\\n");' +
     "let armed = false;" +
     "setInterval(() => {" +
     ' process.stdout.write("x".repeat(65536));' +
@@ -188,16 +190,38 @@ describe("runBoundedCommand", () => {
     ` setTimeout(() => process.exit(0), ${FLOOD_LIFETIME_MS});` +
     "}, 0);";
 
+  const stillRunning = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  };
+
   it("keeps cancellation responsive while output is heavy", async () => {
     const controller = new AbortController();
     let chunkArrived: () => void = () => undefined;
     const flooding = new Promise<void>((resolve) => {chunkArrived = resolve;});
+    let childPid = 0;
+    let announced = "";
     const pending = runBoundedCommand({
       command: nodeCommand(FLOODING_CHILD),
       workingDir: process.cwd(),
       logger,
       signal: controller.signal,
-      onOutput: () => {chunkArrived();},
+      onOutput: (_stream, text) => {
+        // Stop accumulating once the pid line is complete; the flood that follows is unbounded.
+        if (childPid > 0) {
+          chunkArrived();
+          return;
+        }
+        announced += text;
+        const end = announced.indexOf("\n");
+        if (end < 0) {return;}
+        childPid = Number(announced.slice(0, end));
+        if (announced.length > end + 1) {chunkArrived();}
+      },
     });
 
     // Cancel only once the writes are provably under way, so Stop really does race the flood. A
@@ -209,16 +233,32 @@ describe("runBoundedCommand", () => {
     const result = await pending;
     const settleMs = Date.now() - abortedAt;
 
-    expect(result).toMatchObject({ success: false, error: "Cancelled", returnCode: 130 });
-    // This child is shell-less and childless, so taskkill's verdict on the root covers the whole
-    // tree and "Cancelled" does mean it is gone. Do not copy that reading into a shell-spawned
-    // test: terminateWindowsTree also returns undefined when no identity could be read and taskkill
-    // merely exited 0, having probed nothing.
-    expect(result.terminationFailure).toBeUndefined();
+    expect(result.success).toBe(false);
+    // A Windows ladder that cannot confirm the kill inside its budget fails closed by design, and a
+    // slow runner reaches that legitimately. Either verdict is accepted, neither half-applied.
+    if (process.platform === "win32" && result.error !== "Cancelled") {
+      expect(result.error).toMatch(/^Process-tree termination /);
+      expect(result.terminationFailure).toBe(result.error);
+      expect(result.terminationLease).toBeDefined();
+      expect(result.returnCode).toBe(1);
+    } else {
+      // This child is shell-less and childless, so taskkill's verdict on the root covers the whole
+      // tree and "Cancelled" does mean it is gone. Do not copy that reading into a shell-spawned
+      // test: terminateWindowsTree also returns undefined when no identity could be read and
+      // taskkill merely exited 0, having probed nothing.
+      expect(result.error).toBe("Cancelled");
+      expect(result.terminationFailure).toBeUndefined();
+      expect(result.terminationLease).toBeUndefined();
+      expect(result.returnCode).toBe(130);
+    }
     expect(settleMs).toBeLessThan(CANCEL_SETTLE_BUDGET_MS);
     expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(
       EXECUTION_LIMITS.outputTailBytesPerStream + 120
     );
+    // Unconditional under either verdict: only the bookkeeping may be inconclusive, the flood child
+    // still has to be gone. The fail-closed branch carries no kill evidence of its own.
+    expect(childPid).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(stillRunning(childPid)).toBe(false), { timeout: 5_000, interval: 50 });
   }, 45_000);
 
   it("preserves a UTF-8 code point split across process chunks", async () => {
