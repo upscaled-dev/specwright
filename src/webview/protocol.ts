@@ -26,6 +26,7 @@ export type BoardClientMessage =
   | { type: "select"; target: "scenario" | "test"; id: string; on: boolean }
   | { type: "select-scope"; section: "available" | "mapped"; on: boolean }
   | { type: "sync" }
+  | { type: "selectSyncProjects" }
   | { type: "bulkCreate" }
   | { type: "createTestSet" }
   | { type: "addToTestSet" }
@@ -298,7 +299,7 @@ function validShell(body: Record<string, unknown>): boolean {
 
 function validBoard(body: Record<string, unknown>): boolean {
   const section = ["untraced", "available", "mapped"] as const;
-  if (noArgs(body, ["sync", "bulkCreate", "createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan", "createTestExecution"])) {return true;}
+  if (noArgs(body, ["sync", "selectSyncProjects", "bulkCreate", "createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan", "createTestExecution"])) {return true;}
   if (body["type"] === "search") {return exact(body, ["type", "value"]) && text(body["value"]);}
   if (body["type"] === "columnSearch") {return exact(body, ["type", "section", "value"]) && oneOf(body["section"], section) && text(body["value"]);}
   if (body["type"] === "page") {return exact(body, ["type", "section", "step"]) && oneOf(body["section"], section) && oneOf(body["step"], ["prev", "next"] as const);}

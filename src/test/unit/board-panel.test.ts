@@ -222,6 +222,7 @@ function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     applyUnlink: () => Promise.resolve(),
     pushText: () => undefined,
     runSync: () => Promise.resolve(),
+    selectSyncProjects: () => undefined,
     autoSync: () => Promise.resolve(),
     openExecution: () => undefined,
     bulkCreate: () => undefined,
@@ -417,12 +418,13 @@ describe("BoardPanel", () => {
     expect(html).not.toContain("drag to link");
   });
 
-  // Eleven verb buttons across two panes, nine compact Mapping actions plus text Sync and Execution verbs.
+  // Twelve verb buttons across two panes, nine compact Mapping actions plus the text Sync now, Sync scope,
+  // and Execution verbs.
   it("skins every board button with the one verb class, each inside a verbs row", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
 
-    expect(html.split('class="verb"').length - 1).toBe(2);
+    expect(html.split('class="verb"').length - 1).toBe(3);
     expect(html.split('class="verb icon-verb"').length - 1).toBe(9);
     expect(html).not.toContain('class="create-tests"');
     expect(html.split('<div class="verbs mapping-actions">').length - 1).toBe(3);
@@ -899,6 +901,18 @@ describe("BoardPanel", () => {
     expect(runSync).toHaveBeenCalledOnce();
   });
 
+  it("opens the sync scope picker from the Scope button next to Sync now", async () => {
+    const selectSyncProjects = vi.fn();
+    BoardPanel.open(deps({ selectSyncProjects }));
+    const panel = win.__webviewPanels[0]!;
+    const client = await connectBrowserClient(panel);
+
+    client.dom.window.document.querySelector<HTMLButtonElement>("#sync-scope")!.click();
+    await client.flushInbound();
+
+    expect(selectSyncProjects).toHaveBeenCalledOnce();
+  });
+
   it("rejects a current sync action while a mutation owns the board", async () => {
     const runSync = vi.fn(() => Promise.resolve());
     const { panel } = await openReady({ runSync, mutationActive: () => true });
@@ -907,6 +921,22 @@ describe("BoardPanel", () => {
 
     expect(runSync).not.toHaveBeenCalled();
     expect(lastRender(panel)?.syncVerb).toMatchObject({ enabled: false, label: "Sync now" });
+  });
+
+  it("keeps the scope picker shut while a sync, then a mutation, owns the board", async () => {
+    const selectSyncProjects = vi.fn();
+    let syncing = true;
+    const { panel } = await openReady({
+      selectSyncProjects,
+      syncActive: () => syncing,
+      mutationActive: () => !syncing,
+    });
+
+    await receive(panel, { surface: "board", type: "selectSyncProjects" });
+    syncing = false;
+    await receive(panel, { surface: "board", type: "selectSyncProjects" });
+
+    expect(selectSyncProjects).not.toHaveBeenCalled();
   });
 
   it("paints an open board disabled during a mutation and re-enables from the activity event", async () => {

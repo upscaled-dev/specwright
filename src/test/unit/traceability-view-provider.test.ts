@@ -683,7 +683,11 @@ describe("TraceabilityViewProvider", () => {
     const session = (provider as unknown as { session: string }).session;
     receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
-    const chunk = posts.find((message) => (message as { body: { type: string } }).body.type === "chunk") as { body: { generation: number; rows: Array<{ id: string; label: string; actions: Array<{ id: string }> }> } };
+    const chunk = posts.find((message) => (message as { body: { type: string } }).body.type === "chunk") as { body: { generation: number; rows: Array<{ id: string; label: string; view: string; actions: Array<{ id: string }> }> } };
+    // The connection row carries the sync-scope action, so it is pinned to every tab; the rest of the
+    // workspace projection stays on the Workspace tab.
+    expect(chunk.body.rows.find((row) => row.label === "Xray Cloud")?.view).toBe("all");
+    expect(chunk.body.rows.find((row) => row.label === "Untraced scenarios")?.view).toBe("workspace");
     const revision = (provider as unknown as { revision: number }).revision;
     for (const candidate of chunk.body.rows) {
       for (const action of candidate.actions) {

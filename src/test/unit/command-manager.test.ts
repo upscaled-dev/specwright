@@ -2255,6 +2255,19 @@ describe("traceability sync command handler", () => {
     expect(sync).toHaveBeenCalledTimes(1);
   });
 
+  it("wires the board's Sync scope button to the same project picker the palette opens", async () => {
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const mgr = managerFor(syncSubsystem({ tagDerived: ["CALC"] }));
+
+    traceabilityBoardDeps(mgr).selectSyncProjects();
+    await flush();
+
+    expect(quickPick).toHaveBeenCalledWith(
+      [expect.objectContaining({ label: "CALC" })],
+      expect.objectContaining({ title: "Select Projects to Sync", canPickMany: true })
+    );
+  });
+
   it("reports a finished sync as an information toast, zero tests included", async () => {
     const info = vi.spyOn(vscode.window, "showInformationMessage");
 

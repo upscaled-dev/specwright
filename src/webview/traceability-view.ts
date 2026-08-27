@@ -102,7 +102,7 @@ function isExpanded(id: string): boolean {
 }
 
 function refreshVisible(): void {
-  const viewRows = rows.filter((row) => (row.view ?? "workspace") === activeView);
+  const viewRows = rows.filter((row) => row.view === "all" || (row.view ?? "workspace") === activeView);
   rowById = new Map(viewRows.map((row) => [row.id, row]));
   depthById = new Map();
   for (const row of viewRows) {

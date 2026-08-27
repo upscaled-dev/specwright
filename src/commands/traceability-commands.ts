@@ -320,6 +320,14 @@ export class TraceabilityCommands {
           });
       },
       runSync: () => this.boardPrivileged(() => this.syncTraceability()),
+      selectSyncProjects: () => {
+        this.boardPrivileged((signal) => this.selectSyncProjectsTrusted(signal))
+          .catch((error) => {
+            this.logger.warn("Selecting sync projects from the board failed", {
+              error: errMsg(error),
+            });
+          });
+      },
       autoSync: (projectKey) => this.autoSyncProject(projectKey),
       openExecution: (key) => {
         const adapter =

@@ -47,6 +47,7 @@ export function installBoard(): void {
   const mappedPaginator = element<HTMLElement>('mapped-paginator');
   const pageSizeSelect = element<HTMLSelectElement>('page-size-select');
   const syncNow = element<HTMLButtonElement>('sync-now');
+  const syncScope = element<HTMLButtonElement>('sync-scope');
   const syncStrip = element<HTMLElement>('sync-strip');
   const syncStripText = element<HTMLElement>('sync-strip-text');
   const tables = installBoardTables();
@@ -448,6 +449,7 @@ export function installBoard(): void {
   mappedSearch.addEventListener('input', () => { window.__spec.post('board', { type: 'columnSearch', section: 'mapped', value: mappedSearch.value }); });
   pageSizeSelect.addEventListener('change', () => { window.__spec.post('board', { type: 'pageSize', size: Number(pageSizeSelect.value) }); });
   syncNow.addEventListener('click', () => { window.__spec.post('board', { type: 'sync' }); });
+  syncScope.addEventListener('click', () => { window.__spec.post('board', { type: 'selectSyncProjects' }); });
   createTests.addEventListener('click', () => { window.__spec.post('board', { type: 'bulkCreate' }); });
   for (const button of mappingActionButtons) {
     const action = mappingAction(button.dataset['mappingAction']);
@@ -466,6 +468,9 @@ export function installBoard(): void {
       }
       renderVerb(createExecution, msg.executionVerb, 'Create Execution');
       renderVerb(syncNow, msg.syncVerb, 'Sync now');
+      // The picker and the sync share one admission, so the strip's two buttons go dead together rather
+      // than leaving Sync scope live for a click the host would drop.
+      syncScope.disabled = !msg.syncVerb.enabled;
       scenarioActionHelper.textContent = msg.untracedHelper;
       for (const helper of mappingActionHelpers) {helper.textContent = msg.mappingHelper;}
       renderMapping(msg);

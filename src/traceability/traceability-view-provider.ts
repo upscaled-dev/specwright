@@ -172,7 +172,7 @@ export class TraceabilityViewProvider implements vscode.WebviewViewProvider, vsc
     this.organizationSnapshot = organizationSnapshot;
     const organization = projectTraceabilityOrganization(organizationSnapshot, this.model?.snapshot);
     const rows = [
-      ...workspace.rows.map((row) => ({ ...row, view: "workspace" as const })),
+      ...workspace.rows.map((row) => ({ ...row, view: row.view ?? ("workspace" as const) })),
       ...organization.rows,
     ];
     const nodes = new Map<string, TraceabilityNode | OrganizationNode>(workspace.nodes);

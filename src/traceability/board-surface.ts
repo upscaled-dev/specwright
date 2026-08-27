@@ -124,6 +124,9 @@ export interface BoardSurfaceDeps {
   // The persistent Sync now button runs the same traceability sync the palette runs. Its enabled state
   // is host-owned, and this surface enforces that state again before starting the read.
   runSync(): Promise<void>;
+  // The scope button opens the same Select Projects to Sync picker the palette opens. The command layer
+  // owns the list, the write, and the reporting; the board only asks for it.
+  selectSyncProjects(): void;
   // The board's own loads, on open and on a project pick. Whether such a load is worth running at all
   // (a reachable tracker, a project no sync has catalogued) is the host's call, not the board's: the
   // board only says which project it is looking at, and the host keeps the run quiet.
@@ -144,9 +147,8 @@ export interface BoardSurfaceDeps {
   // append to. It reads no selection, so only the scope decides whether it can run.
   createTestExecution(): void;
   // The scope selector's options, read on the same beat as the model: a sync's new catalogue projects
-  // appear with the snapshot that carries them. A settings edit alone does not repaint the board, so the
-  // list can lag a just-changed sync scope until the next rebuild. That staleness is the price of one
-  // refresh path, not an oversight.
+  // appear with the snapshot that carries them, and a sync-scope or default-project edit reaches the
+  // list through the board rebuild `affectsBoard` schedules.
   knownProjects(): readonly string[];
   // Where the selection lives between sessions; it also owns coercing a key that has left `knownProjects`
   // back to All Projects.
@@ -248,6 +250,12 @@ export class BoardSurface {
     pushText: (message) => this.deps.pushText(message.scenario, message.key),
     open: (message) => this.deps.openExecution(message.key),
     sync: () => this.syncNow(),
+    // The picker writes the sync scope the next fetch reads, so it takes the same admission Sync now
+    // takes rather than opening over a run that is already reading with the old scope.
+    selectSyncProjects: () => {
+      if (this.deps.mutationActive() || this.deps.syncActive()) {return;}
+      this.deps.selectSyncProjects();
+    },
     scope: (message) => this.scopeTo(message.project),
     select: (message) => this.toggleSelection(message.target, message.id, message.on),
     "select-scope": (message) => this.selectScope(message.section, message.on),

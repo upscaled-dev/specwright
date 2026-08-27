@@ -24,7 +24,7 @@ export interface TraceabilityWireRow {
   readonly expandable: boolean;
   readonly actions: readonly { readonly id: string; readonly label: string; readonly icon: string }[];
   readonly defaultAction?: string;
-  readonly view?: "workspace" | "repository" | "test-sets";
+  readonly view?: "workspace" | "repository" | "test-sets" | "all";
 }
 
 export interface TraceabilityRunPreview {
@@ -160,7 +160,7 @@ function row(value: unknown): boolean {
     && (value["description"] === undefined || text(value["description"], TRACEABILITY_DISPLAY_TEXT_LIMIT))
     && (value["tooltip"] === undefined || text(value["tooltip"], TRACEABILITY_DISPLAY_TEXT_LIMIT))
     && (value["tone"] === undefined || ["success", "error", "skipped", "pending", "unknown", "warning", "info", "muted"].includes(value["tone"] as string))
-    && (value["view"] === undefined || ["workspace", "repository", "test-sets"].includes(value["view"] as string))
+    && (value["view"] === undefined || ["workspace", "repository", "test-sets", "all"].includes(value["view"] as string))
     && (defaultAction === undefined
       || text(defaultAction, ACTION_LIMIT)
         && actions.some((candidate) => object(candidate) && candidate["id"] === defaultAction));

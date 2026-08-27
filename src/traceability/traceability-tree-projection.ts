@@ -51,7 +51,9 @@ export interface TraceabilityProjectionRow {
   readonly expandable: boolean;
   readonly actions: readonly TraceabilityAction[];
   readonly defaultAction?: TraceabilityAction["id"] | undefined;
-  readonly view?: "workspace" | "repository" | "test-sets" | undefined;
+  // Which tab shows the row. "all" pins it to every tab, which is how the connection row and its actions
+  // stay reachable outside the Workspace tab.
+  readonly view?: "workspace" | "repository" | "test-sets" | "all" | undefined;
 }
 
 export interface TraceabilityProjection {
@@ -193,7 +195,7 @@ export function projectTraceabilityTree(
     const tooltip = project
       ? displayJoin([boundedTraceabilityText(connection.label), text.tooltip, `Default project ${project}. Prefills new tests and executions, and joins the sync scope while no sync project list is set.`], "\n")
       : displayJoin([boundedTraceabilityText(connection.label), text.tooltip], "\n");
-    add({ id, label: "Xray Cloud", description: project ? displayJoin([text.description, `project ${project}`], " · ") : text.description, tooltip, icon: connection.state === "ok" ? "cloud" : connection.state === "checking" ? "loading" : connection.state === "auth-failed" ? "key" : "debug-disconnect", tone, expandable: false, actions: [TRACEABILITY_ACTIONS.connect, TRACEABILITY_ACTIONS.switchProject, TRACEABILITY_ACTIONS.selectSyncProjects], defaultAction: "connect" }, { kind: "connection", ...connection });
+    add({ id, view: "all", label: "Xray Cloud", description: project ? displayJoin([text.description, `project ${project}`], " · ") : text.description, tooltip, icon: connection.state === "ok" ? "cloud" : connection.state === "checking" ? "loading" : connection.state === "auth-failed" ? "key" : "debug-disconnect", tone, expandable: false, actions: [TRACEABILITY_ACTIONS.connect, TRACEABILITY_ACTIONS.switchProject, TRACEABILITY_ACTIONS.selectSyncProjects], defaultAction: "connect" }, { kind: "connection", ...connection });
   }
   const addScenario = (link: TraceLink, parentId: string): void => {
     const id = traceabilityRowId("scenario", `${link.testKey}:${refId(link.scenario)}`);

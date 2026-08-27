@@ -607,6 +607,35 @@ describe("traceability view client", () => {
     expect(view.messages.slice(1).map((message) => (message as { body: { action: string } }).body.action)).toEqual(["connect", "open", "open", "open"]);
   });
 
+  it("keeps an all-views row and its actions on every tab while the rest stay on their own", async () => {
+    const view = await rig();
+    const selectSyncProjects = { id: "select-sync-projects", label: "Select projects to sync", icon: "checklist" } as const;
+    const rows: readonly TraceabilityWireRow[] = [
+      { id: "connection", view: "all", label: "Xray Cloud", icon: "cloud", expandable: false, actions: [selectSyncProjects] },
+      { id: "workspace-row", view: "workspace", label: "Mapped scenario", icon: "circle-outline", expandable: false, actions: [] },
+      { id: "repository-row", view: "repository", label: "SHOP repository", icon: "repo", expandable: false, actions: [] },
+      { id: "test-set-row", view: "test-sets", label: "SHOP-301", icon: "folder", expandable: false, actions: [] },
+    ];
+    view.send({ type: "begin", generation: 1, state: "ready", total: rows.length });
+    view.send({ type: "chunk", generation: 1, offset: 0, rows });
+    view.send({ type: "end", generation: 1 });
+    const shownIds = (): string[] => [...view.dom.window.document.querySelectorAll<HTMLElement>("[role=treeitem]")].map((row) => row.dataset["id"] ?? "");
+    const scopeAction = (): HTMLButtonElement | null =>
+      view.dom.window.document.querySelector<HTMLButtonElement>('[data-id="connection"] .actions button[title="Select projects to sync"]');
+
+    expect(shownIds()).toEqual(["connection", "workspace-row"]);
+    expect(scopeAction()).not.toBeNull();
+
+    view.dom.window.document.querySelector<HTMLButtonElement>('[data-view="repository"]')?.click();
+    expect(shownIds()).toEqual(["connection", "repository-row"]);
+    expect(scopeAction()).not.toBeNull();
+
+    view.dom.window.document.querySelector<HTMLButtonElement>('[data-view="test-sets"]')?.click();
+    expect(shownIds()).toEqual(["connection", "test-set-row"]);
+    scopeAction()?.click();
+    expect(view.messages.at(-1)).toMatchObject({ body: { type: "action", id: "connection", action: "select-sync-projects" } });
+  });
+
   it("defaults returning and new roots while preserving an explicit collapse across grouping changes", async () => {
     const view = await rig();
     const send = (generation: number, rows: readonly TraceabilityWireRow[]): void => {

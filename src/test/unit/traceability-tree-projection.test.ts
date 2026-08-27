@@ -53,6 +53,8 @@ describe("traceability tree projection", () => {
     expect(connection.description).toContain("project CALC");
     expect(connection.actions.map((action) => action.id)).toEqual(["connect", "switch-project", "select-sync-projects"]);
     expect(connection.tooltip).toContain("Xray");
+    expect(connection.view).toBe("all");
+    expect(projection.rows.slice(1).every((row) => row.view === undefined)).toBe(true);
   });
 
   it("keeps complete-project orphan gating and empty section guidance", () => {

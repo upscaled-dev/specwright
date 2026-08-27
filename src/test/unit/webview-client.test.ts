@@ -110,6 +110,7 @@ async function bridgeBoardSurface(
     applyUnlink: () => Promise.resolve(),
     pushText: () => undefined,
     runSync: () => Promise.resolve(),
+    selectSyncProjects: () => undefined,
     autoSync: () => Promise.resolve(),
     openExecution: () => undefined,
     bulkCreate: () => undefined,
@@ -485,7 +486,12 @@ describe("coverage board browser client", () => {
       sections: { ...changed.sections, available: { ...changed.sections.available, total: 7 } },
     });
     expect(client.dom.window.document.getElementById("available-count")?.textContent).toBe("(7)");
-    expect(client.dom.window.document.getElementById("sync-now")).not.toBeNull();
+    const syncButtons = (): boolean[] => ["sync-now", "sync-scope"]
+      .map((id) => (client.dom.window.document.getElementById(id) as HTMLButtonElement).disabled);
+    expect(syncButtons()).toEqual([false, false]);
+    // Sync now and Sync scope share the host's admission, so a sync in progress takes both.
+    client.send("board", { ...changed, syncVerb: { label: "Syncing", enabled: false, hint: "A traceability sync is in progress." } });
+    expect(syncButtons()).toEqual([true, true]);
     await expectNoSeriousViolations(client.dom);
 
     const restored = await rig(client.state);
