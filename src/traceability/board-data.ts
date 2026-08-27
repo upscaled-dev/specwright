@@ -696,7 +696,7 @@ export function filterBoardViewModel(model: BoardViewModel, query: string): Boar
 }
 
 // The Mapping tab's per-column searches, one per section, filtering only what is already loaded (a test
-// that was never synced is not findable here; Sync now is). They run after `filterBoardViewModel`, so a
+// that was never synced is not findable here; a sync is). They run after `filterBoardViewModel`, so a
 // column query and the header query compose AND-wise. Both are deliberately narrower than the header
 // predicate, which is what lets one column be searched while the other stays put: the untraced column
 // matches a scenario's name, and both test groups match a key or a summary, since a user pastes

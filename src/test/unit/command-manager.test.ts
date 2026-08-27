@@ -1944,7 +1944,7 @@ describe("traceability sync command handler", () => {
   const runSyncOn = (mgr: CommandManager): Promise<void> =>
     traceabilityCommands(mgr).syncTraceability();
 
-  // The board's two ways into the sync: the Sync now button and the quiet per-project load.
+  // The board's two ways into the sync: the Sync button and the quiet per-project load.
   const boardLoads = (mgr: CommandManager): { runSync: () => Promise<void>; autoSync: (key: string) => Promise<void> } =>
     traceabilityBoardDeps(mgr);
 
@@ -2107,8 +2107,8 @@ describe("traceability sync command handler", () => {
   });
 
   // A directory-only project sits on no rung, so once its quiet load fails the board can only get it
-  // through Sync now naming it. Without that the selection is stranded and the board never fills.
-  it("names the board's working project on Sync now, even after its quiet load failed", async () => {
+  // through Sync naming it. Without that the selection is stranded and the board never fills.
+  it("names the board's working project on Sync, even after its quiet load failed", async () => {
     let failNext = true;
     const sync = vi.fn(() => {
       if (failNext) {
@@ -2292,7 +2292,7 @@ describe("traceability sync command handler", () => {
     expect(info).not.toHaveBeenCalled();
   });
 
-  it("wires the board's Sync now button to the serialized sync, so two clicks share one run", async () => {
+  it("wires the board's Sync button to the serialized sync, so two clicks share one run", async () => {
     let resolveSync!: () => void;
     const sync = vi.fn(() => new Promise<void>((resolve) => { resolveSync = resolve; }));
     const mgr = managerFor(syncSubsystem({ sync }));
@@ -2307,7 +2307,7 @@ describe("traceability sync command handler", () => {
     expect(sync).toHaveBeenCalledTimes(1);
   });
 
-  it("wires the board's Sync scope button to the same project picker the palette opens", async () => {
+  it("wires the board's Select sync projects button to the same project picker the palette opens", async () => {
     const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
     const mgr = managerFor(syncSubsystem({ tagDerived: ["CALC"] }));
 

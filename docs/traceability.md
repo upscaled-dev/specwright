@@ -114,7 +114,7 @@ To choose the catalogues yourself, run **Specwright: Select Projects to Sync** f
 
 The Coverage Board loads a newly selected project automatically when connected and schedules one quiet, forced project sync after a remote create is confirmed. Both still work under a pinned list: a sync asked for one project by name fetches that project for that run only, and the pinned list stays as written. That post-create sync keeps a newly tagged scenario from remaining **not found on remote** until a manual refresh. **Sync Traceability** remains the on-demand refresh. A remote test is shown as available only after Specwright has completed that project's catalogue sync; an incomplete project catalogue never drives a claim that a test is unlinked. A successful direct lookup can still identify a tagged key that is missing remotely.
 
-The Mapping toolbar keeps **Sync now** available whenever no board mutation or sync is active. Its two columns scroll independently: Untraced is on the left, while Available and Mapped share the right column. Their action rows remain pinned. Available and Mapped can be collapsed, and the board restores those choices after reload.
+The Mapping toolbar keeps **Sync** available whenever no board mutation or sync is active. Its two columns scroll independently: Untraced is on the left, while Available and Mapped share the right column. Their action rows remain pinned. Available and Mapped can be collapsed, and the board restores those choices after reload.
 
 ## Use the Coverage Board
 
@@ -127,7 +127,7 @@ Run **Specwright: Open Coverage Board** from the Command Palette or the Traceabi
 | **Executions** | Groups this workspace's local create and publish activity under each Test Execution. Expand or collapse a parent to inspect its history. This is not a complete list of executions in Jira. |
 | **Publish** | Select a completed local run and create a new Test Execution or append results to an existing one. |
 
-Use the **View project** selector at the top of the board to choose the project the board works in. It narrows what the board shows, loads that project, and is the target for create and publish actions. It leaves the standing sync scope alone, and every sync fetches it alongside that scope. Use **Sync scope** in the Mapping toolbar to change the standing list.
+Use the **View project** selector at the top of the board to choose the project the board works in. It narrows what the board shows, loads that project, and is the target for create and publish actions. It leaves the standing sync scope alone, and every sync fetches it alongside that scope. Use **Select sync projects...** in the Mapping toolbar to change the standing list.
 
 ![Coverage Board Mapping tab](../images/mapping-xray.png)
 

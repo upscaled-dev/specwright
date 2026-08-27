@@ -383,7 +383,7 @@ function renderDocument(
       <button id="tab-publish" class="tab" data-tab="publish" role="tab" aria-controls="pane-publish" aria-selected="false" tabindex="-1" type="button">Publish</button>
       <button id="tab-link" class="tab" data-tab="link" role="tab" aria-controls="pane-link" aria-selected="false" tabindex="-1" type="button" hidden>Link</button>
     </div>
-    <div class="scope"><select id="scope-select" aria-label="View project" title="The project the board works in. Filters the board, loads that project, and targets create and publish. Every sync fetches it alongside the Sync scope list."></select></div>
+    <div class="scope"><select id="scope-select" aria-label="View project" title="The project the board works in. Filters the board, loads that project, and targets create and publish. Every sync fetches it alongside the selected sync projects."></select></div>
     <div class="search"><input id="search" type="text" spellcheck="false" autocomplete="off" aria-label="Filter coverage board" placeholder="Filter by key, tag, file…"></div>
   </header>
   <div id="sync-strip" class="sync-strip" role="status" hidden><span id="sync-strip-text"></span><span class="bar"></span></div>

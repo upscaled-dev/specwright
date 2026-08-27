@@ -418,8 +418,8 @@ describe("BoardPanel", () => {
     expect(html).not.toContain("drag to link");
   });
 
-  // Twelve verb buttons across two panes, nine compact Mapping actions plus the text Sync now, Sync scope,
-  // and Execution verbs.
+  // Twelve verb buttons across two panes, nine compact Mapping actions plus the text Sync, Select sync
+  // projects, and Execution verbs.
   it("skins every board button with the one verb class, each inside a verbs row", () => {
     BoardPanel.open(deps());
     const html = win.__webviewPanels[0]!.webview.html;
@@ -459,7 +459,7 @@ describe("BoardPanel", () => {
     expect(html).not.toContain("acquireVsCodeApi()");
     expect(html).not.toContain("unsafe-eval");
     expect(html).toContain('role="tablist" aria-label="Coverage views"');
-    expect(html).toContain('id="scope-select" aria-label="View project" title="The project the board works in. Filters the board, loads that project, and targets create and publish. Every sync fetches it alongside the Sync scope list."');
+    expect(html).toContain('id="scope-select" aria-label="View project" title="The project the board works in. Filters the board, loads that project, and targets create and publish. Every sync fetches it alongside the selected sync projects."');
     expect(html).toContain('id="search" type="text" spellcheck="false" autocomplete="off" aria-label="Filter coverage board"');
     expect(win.__webviewPanels[0]!.webview.options.localResourceRoots.map((uri) => uri.toString())).toEqual([
       vscode.Uri.file("/extension/dist").toString(),
@@ -901,7 +901,7 @@ describe("BoardPanel", () => {
     expect(runSync).toHaveBeenCalledOnce();
   });
 
-  it("opens the sync scope picker from the Scope button next to Sync now", async () => {
+  it("opens the sync scope picker from the button next to Sync", async () => {
     const selectSyncProjects = vi.fn();
     BoardPanel.open(deps({ selectSyncProjects }));
     const panel = win.__webviewPanels[0]!;
@@ -920,7 +920,7 @@ describe("BoardPanel", () => {
     await receive(panel, { surface: "board", type: "sync" });
 
     expect(runSync).not.toHaveBeenCalled();
-    expect(lastRender(panel)?.syncVerb).toMatchObject({ enabled: false, label: "Sync now" });
+    expect(lastRender(panel)?.syncVerb).toMatchObject({ enabled: false, label: "Sync" });
   });
 
   it("keeps the scope picker shut while a sync, then a mutation, owns the board", async () => {
@@ -951,7 +951,7 @@ describe("BoardPanel", () => {
     active = false;
     activity.fire();
 
-    expect(lastRender(panel)?.syncVerb).toMatchObject({ enabled: true, label: "Sync now" });
+    expect(lastRender(panel)?.syncVerb).toMatchObject({ enabled: true, label: "Sync" });
   });
 
   it("repaints once a sync settles, even when it rejects, so the button never strands the group", async () => {
@@ -980,7 +980,7 @@ describe("BoardPanel", () => {
     expect(panel.webview.html.match(/id="sync-now"/g)).toHaveLength(1);
   });
 
-  it("marks a render as filtering only while a query is active, so a filtered-empty group keeps its Sync now off", async () => {
+  it("marks a render as filtering only while a query is active, so a filtered-empty group keeps its Sync off", async () => {
     const { panel } = await openReady();
     expect(lastRender(panel)!.filtering).toBe(false);
 

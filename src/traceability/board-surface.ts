@@ -121,7 +121,7 @@ export interface BoardSurfaceDeps {
   // The push seam: the same {scenario, key} handle, routed to the push command, which owns the fresh
   // remote read, the confirm, the write, and the reporting. Nothing is decided here.
   pushText(scenario: string, key: string): void;
-  // The persistent Sync now button runs the same traceability sync the palette runs. Its enabled state
+  // The persistent Sync button runs the same traceability sync the palette runs. Its enabled state
   // is host-owned, and this surface enforces that state again before starting the read.
   runSync(): Promise<void>;
   // The scope button opens the same Select Projects to Sync picker the palette opens. The command layer
@@ -250,8 +250,8 @@ export class BoardSurface {
     pushText: (message) => this.deps.pushText(message.scenario, message.key),
     open: (message) => this.deps.openExecution(message.key),
     sync: () => this.syncNow(),
-    // The picker writes the sync scope the next fetch reads, so it takes the same admission Sync now
-    // takes rather than opening over a run that is already reading with the old scope.
+    // The picker writes the sync scope the next fetch reads, so it takes the same admission Sync takes
+    // rather than opening over a run that is already reading with the old scope.
     selectSyncProjects: () => {
       if (this.deps.mutationActive() || this.deps.syncActive()) {return;}
       this.deps.selectSyncProjects();
@@ -472,9 +472,9 @@ export class BoardSurface {
       return { label: "Syncing", enabled: false, hint: "A traceability sync is in progress." };
     }
     if (this.deps.mutationActive()) {
-      return { label: "Sync now", enabled: false, hint: "Wait for the active board operation to finish." };
+      return { label: "Sync", enabled: false, hint: "Wait for the active board operation to finish." };
     }
-    return { label: "Sync now", enabled: true, hint: "Refresh traceability from the connected provider." };
+    return { label: "Sync", enabled: true, hint: "Refresh traceability from the connected provider." };
   }
 
   // What a section's meta says beyond its page arithmetic: `total` is the count the header shows, before

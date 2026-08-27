@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
-- **Sync scope** sits next to Sync now in the Coverage Board's Mapping toolbar. It opens the same Select Projects to Sync list as the command palette, so the projects a sync fetches can be changed without leaving the board.
+- **Select sync projects...** sits next to Sync in the Coverage Board's Mapping toolbar. It opens the same Select Projects to Sync list as the command palette, so the projects a sync fetches can be changed without leaving the board.
 
 ### Changed
 

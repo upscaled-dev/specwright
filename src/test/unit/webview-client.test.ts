@@ -147,7 +147,7 @@ function boardRender(selected = false): Extract<BoardHostMessage, { type: "rende
     mapped: [], sections: { untraced: section, available: section, mapped: { ...section, total: 0, filtered: 0, pageCount: 0 } },
     pageSize: 25, matrix: [], executions: [], availableEmptyText: "No tests",
     filtering: false, projects: ["CALC"], project: "CALC", scoped: true,
-    createVerb: verb, syncVerb: { label: "Sync now", enabled: true, hint: "" }, untracedHelper: "", testSetVerb: verb, addToTestSetVerb: verb,
+    createVerb: verb, syncVerb: { label: "Sync", enabled: true, hint: "" }, untracedHelper: "", testSetVerb: verb, addToTestSetVerb: verb,
     testPlanVerb: verb, addToTestPlanVerb: verb, mappingHelper: "", executionVerb: verb,
   };
 }
@@ -449,7 +449,7 @@ describe("coverage board browser client", () => {
     client.send("board", emptyAvailable);
     const sync = client.dom.window.document.querySelector<HTMLButtonElement>('[data-focus-key="sync"]')!;
     sync.focus();
-    client.send("board", { ...emptyAvailable, syncVerb: { label: "Sync now", enabled: false, hint: "A mutation is active." } });
+    client.send("board", { ...emptyAvailable, syncVerb: { label: "Sync", enabled: false, hint: "A mutation is active." } });
     expect(client.dom.window.document.activeElement?.getAttribute("data-focus-key")).toBe("page-size");
 
     const paged = {
@@ -489,7 +489,7 @@ describe("coverage board browser client", () => {
     const syncButtons = (): boolean[] => ["sync-now", "sync-scope"]
       .map((id) => (client.dom.window.document.getElementById(id) as HTMLButtonElement).disabled);
     expect(syncButtons()).toEqual([false, false]);
-    // Sync now and Sync scope share the host's admission, so a sync in progress takes both.
+    // Sync and Select sync projects share the host's admission, so a sync in progress takes both.
     client.send("board", { ...changed, syncVerb: { label: "Syncing", enabled: false, hint: "A traceability sync is in progress." } });
     expect(syncButtons()).toEqual([true, true]);
     await expectNoSeriousViolations(client.dom);

@@ -26,7 +26,7 @@ export interface ProjectUniverseSources {
   readonly catalogueKeys?: readonly string[] | undefined;
   readonly defaultKey?: string | undefined;
   // One project this call asks for, such as a forced project sync, the project the board just opened, or
-  // the one its Sync now is working in. It names a single fetch rather than the durable scope, so it is
+  // the one its Sync is working in. It names a single fetch rather than the durable scope, so it is
   // the one rung allowed to widen an explicit sync setting.
   readonly explicitKey?: string | undefined;
 }

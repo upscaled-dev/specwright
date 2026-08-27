@@ -454,9 +454,9 @@ export class TraceabilityCommands {
     await this.refreshBoard("creating an execution");
   }
 
-  // Every sync fetches the standing Sync scope list plus the project the board is working in, named for
+  // Every sync fetches the selected sync projects plus the project the board is working in, named for
   // that run. Defaulted here rather than at each entry point, so the palette, the view title, and the
-  // board's Sync now cannot drift, and a selection on no rung is never stranded by a failed load. A call
+  // board's Sync cannot drift, and a selection on no rung is never stranded by a failed load. A call
   // that already names a project keeps its own.
   public syncTraceability(request: SyncRequest = { announce: true }): Promise<void> {
     this.deps.workspaceTrust.require();
@@ -689,8 +689,8 @@ export class TraceabilityCommands {
     await this.writeSyncProjectKeys(keys);
     vscode.window.showInformationMessage(
       keys.length === 0
-        ? "Sync scope cleared. Tagged projects, the default project, and projects synced earlier are in scope again."
-        : `Sync scope set to ${keys.join(", ")}.`
+        ? "Sync project list cleared. Tagged projects, the default project, and projects synced earlier are fetched again."
+        : `Syncs will fetch ${keys.join(", ")}.`
     );
   }
 
