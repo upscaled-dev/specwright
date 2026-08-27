@@ -2542,6 +2542,21 @@ describe("traceability runAndPublish: preflight batch flow", () => {
     expect(info).toHaveBeenCalledWith("No mapped scenarios were selected. Nothing was run.");
   });
 
+  it("reports an organization selection whose sealed refs no longer map, sealing no run", async () => {
+    const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const removed: ScenarioRef = { filePath: "/ws/removed.feature", line: 2, name: "Removed", kind: "scenario" };
+
+    await traceabilityCommands(mgr).runAndPublish({
+      kind: "organizationRun",
+      selection: { kind: "test-set", testSetKey: "SHOP-301", scenarios: [removed] },
+    });
+
+    expect(runScenarioWithOutput).not.toHaveBeenCalled();
+    expect(store.latest()).toBeUndefined();
+    expect(info).toHaveBeenCalledWith("This selection has no scenarios mapped in this workspace. Nothing was run.");
+  });
+
   it("keeps a single selected tree row on the single-scenario path", async () => {
     const { mgr, store, runScenarioWithOutput } = harness([READY_LINK]);
     const node = { kind: "link", link: READY_LINK };

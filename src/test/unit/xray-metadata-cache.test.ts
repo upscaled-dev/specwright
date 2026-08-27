@@ -54,8 +54,8 @@ describe("metadataCacheStorageKey", () => {
     ).toBe(`traceability:xray:eu.xray.cloud.getxray.app:client-42:wsh:${CACHE_SCHEMA_VERSION}`);
   });
 
-  it("is at schema version 4: the bump that orphans v3 entries stored with whole-sync completeness", () => {
-    expect(CACHE_SCHEMA_VERSION).toBe(4);
+  it("is at schema version 5: the bump that adds repository folder placement", () => {
+    expect(CACHE_SCHEMA_VERSION).toBe(5);
   });
 });
 

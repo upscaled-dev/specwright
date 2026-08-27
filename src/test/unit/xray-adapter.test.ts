@@ -328,6 +328,89 @@ describe("createXrayAdapterFactory verify", () => {
   });
 });
 
+describe("createXrayAdapterFactory organization sync", () => {
+  it("reuses the authoritative catalogued project when a later sync omits projectKeys", async () => {
+    const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
+    await store.setCredentials("acme.atlassian.net", "account-a", "secret-a");
+    const queries: string[] = [];
+    vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve({ status: 200, ok: true, headers: new Headers(), text: () => Promise.resolve(JSON.stringify("token")) } as Response);
+      }
+      const query = (JSON.parse(String(init.body)) as { query: string }).query;
+      queries.push(query);
+      const body = query.includes("getTestSets")
+        ? { data: { getTestSets: { total: 0, results: [] } } }
+        : { data: { getTests: { total: 0, results: [] } } };
+      return Promise.resolve({ status: 200, ok: true, headers: new Headers(), text: () => Promise.resolve(JSON.stringify(body)) } as Response);
+    });
+    const factory = createXrayAdapterFactory(
+      store,
+      recordingProbe({ ok: true, stage: "ok", site: "acme.atlassian.net", message: "Connected" }).probe,
+      fakeMemento(),
+      NOOP_PUBLISH_SUPPORT,
+      trustedWorkspace()
+    );
+    const adapter = factory.create({
+      config: configWith({ "xray.siteUrl": "acme.atlassian.net", "xray.apiRegion": "global" }),
+      logger: Logger.create(),
+    });
+    await adapter.metadata?.sync({ projectKeys: ["SHOP"] });
+    queries.length = 0;
+
+    await adapter.metadata?.sync({ testKeys: ["SHOP-1"] });
+
+    expect(queries.some((query) => query.includes("getTestSets") && query.includes("SHOP"))).toBe(true);
+    await adapter.dispose?.();
+  });
+
+  it("commits the metadata sync and reports the organization sync that failed after it", async () => {
+    const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
+    await store.setCredentials("acme.atlassian.net", "account-a", "secret-a");
+    let accountUnavailable = true;
+    const credentialStore = {
+      getCredentials: (site: string) => (accountUnavailable
+        ? Promise.reject(new Error("secret storage unavailable"))
+        : store.getCredentials(site)),
+      getJiraCredentials: (site: string) => store.getJiraCredentials(site),
+      onDidChange: store.onDidChange,
+    } as unknown as XrayCredentialStore;
+    vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve({ status: 200, ok: true, headers: new Headers(), text: () => Promise.resolve(JSON.stringify("token")) } as Response);
+      }
+      // The organization sync runs once the catalogue has landed, so failing the account read from
+      // here reaches its lookup only.
+      accountUnavailable = (JSON.parse(String(init.body)) as { query: string }).query.includes("getTests");
+      return Promise.resolve({
+        status: 200, ok: true, headers: new Headers(),
+        text: () => Promise.resolve(JSON.stringify({ data: { getTests: { total: 0, results: [] } } })),
+      } as Response);
+    });
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn");
+    const factory = createXrayAdapterFactory(
+      credentialStore,
+      recordingProbe({ ok: true, stage: "ok", site: "acme.atlassian.net", message: "Connected" }).probe,
+      fakeMemento(),
+      NOOP_PUBLISH_SUPPORT,
+      trustedWorkspace()
+    );
+    const adapter = factory.create({
+      config: configWith({ "xray.siteUrl": "acme.atlassian.net", "xray.apiRegion": "global" }),
+      logger,
+    });
+    accountUnavailable = false;
+
+    await expect(adapter.metadata!.sync({ projectKeys: ["SHOP"] })).resolves.toBeUndefined();
+
+    expect(adapter.metadata!.snapshot().catalogueProjects).toEqual(["SHOP"]);
+    expect(adapter.organization!.snapshot()).toMatchObject({ testSetProjects: [], syncedAt: undefined });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Xray organization sync failed"));
+    await adapter.dispose?.();
+  });
+});
+
 describe("classifyXrayBinding", () => {
   it("treats a Gherkin target as compatible", () => {
     expect(classifyXrayBinding({ key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } })).toBe("compatible");

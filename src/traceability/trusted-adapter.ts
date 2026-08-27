@@ -5,6 +5,7 @@ import type {
   ConnectionCapability,
   CoverageCapability,
   MetadataCapability,
+  OrganizationCapability,
   ProjectDirectoryCapability,
   RemoteSearchCapability,
   ResultPublishingCapability,
@@ -97,6 +98,20 @@ function projectsOf(
     : undefined;
 }
 
+function organizationOf(
+  capability: OrganizationCapability | undefined,
+  trust: WorkspaceTrust
+): OrganizationCapability | undefined {
+  return capability
+    ? {
+        onDidChange: capability.onDidChange,
+        snapshot: () => capability.snapshot(),
+        sync: (projects, signal) => trust.run((trusted) => capability.sync(projects, trusted), signal),
+        refreshTestSet: (key, signal) => trust.run((trusted) => capability.refreshTestSet(key, trusted), signal),
+      }
+    : undefined;
+}
+
 function authoringOf(
   capability: TestAuthoringCapability | undefined,
   trust: WorkspaceTrust
@@ -172,6 +187,7 @@ export function trustedAdapter(
     automationBinding: bindingOf(adapter.automationBinding, trust),
     remoteSearch: searchOf(adapter.remoteSearch, trust),
     projectDirectory: projectsOf(adapter.projectDirectory, trust),
+    organization: organizationOf(adapter.organization, trust),
     testAuthoring: authoringOf(adapter.testAuthoring, trust),
     resultPublishing: publishingOf(adapter.resultPublishing, trust),
     attachments: attachmentsOf(adapter.attachments, trust),

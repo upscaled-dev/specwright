@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- **The Traceability panel now has Workspace, Repository, and Test Sets tabs.** Workspace keeps the existing by-test or by-feature-file mapping, untraced scenarios, available tests, and run badges. Repository mirrors each synced project's read-only Xray Test Repository folders, showing how many remote tests a folder holds and how many of them are mapped locally. Test Sets lists read-only remote Test Sets with their summary, remote member count, locally runnable count, remote-only count, and their members. The filter and the row actions apply to the tab you are on, and the panel reopens on the tab you left.
+- **Sync Traceability now caches the Test Repository and Test Set catalogues** for the projects already in your sync scope, under the same site, account, and workspace as the rest of the cache. An ordinary sync bounds how much it loads and reports how many projects it left out instead of presenting partial coverage as complete. A membership list too large to load exactly is marked incomplete, and member details from an earlier sync stay visible marked as last-known. The first sync after this release refetches the remote catalogue so it carries each test's repository folder.
+- **Run folder and publish** and **Run Set and publish** run the mapped scenarios a Repository folder or a Test Set holds. A folder covers itself and every folder beneath it, without duplicates. A Test Set is refreshed to its exact membership first, then a confirmation names the remote, locally runnable, and remote-only counts and lists the members it found. Confirming runs only the mapped local scenarios shown, through the same preflight, local run, and Publish workflow as any other batch. Remote-only tests never run locally, an incomplete catalogue offers no run at all, and nothing runs if the refresh fails, is cancelled, stays incomplete, or leaves no local scenarios. Specwright never starts a run inside Xray.
+
+### Changed
+
+- Multi-selection in the Traceability panel is now limited to 128 rows, matching the number of members a run confirmation lists.
 
 ## [0.5.1] - 2026-08-26
 ### Added

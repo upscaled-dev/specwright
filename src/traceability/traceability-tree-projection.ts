@@ -2,6 +2,7 @@ import { toWorkspaceRelative } from "../utils/workspace-path";
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { NormalizedStatus } from "./contracts";
+import { TRACEABILITY_DISPLAY_TEXT_LIMIT, boundedTraceabilityText } from "../webview/traceability-view-protocol";
 import {
   RunOutcome,
   ScenarioRef,
@@ -32,7 +33,7 @@ interface ConnectionNode extends ConnectionIndicator { kind: "connection"; }
 interface StateNode { kind: "state"; state: "disconnected" | "empty" | "untrusted"; }
 export type TraceabilityNode = ConnectionNode | SectionNode | FileNode | TestKeyNode | LinkNode | UntracedNode | OrphanNode | InfoNode | StateNode;
 
-export type TraceabilityActionId = "open" | "copy" | "link" | "run" | "connect" | "switch-project" | "select-sync-projects" | "hide" | "manage-trust";
+export type TraceabilityActionId = "open" | "copy" | "link" | "run" | "preview-run" | "connect" | "switch-project" | "select-sync-projects" | "hide" | "manage-trust";
 export interface TraceabilityAction {
   readonly id: TraceabilityActionId;
   readonly label: string;
@@ -50,6 +51,7 @@ export interface TraceabilityProjectionRow {
   readonly expandable: boolean;
   readonly actions: readonly TraceabilityAction[];
   readonly defaultAction?: TraceabilityAction["id"] | undefined;
+  readonly view?: "workspace" | "repository" | "test-sets" | undefined;
 }
 
 export interface TraceabilityProjection {
@@ -58,7 +60,7 @@ export interface TraceabilityProjection {
   readonly nodes: ReadonlyMap<string, TraceabilityNode>;
 }
 
-const ACTIONS = {
+export const TRACEABILITY_ACTIONS = {
   openLocal: { id: "open", label: "Open", icon: "go-to-file" },
   openRemote: { id: "open", label: "Open in tracker", icon: "link-external" },
   copy: { id: "copy", label: "Copy key", icon: "copy" },
@@ -70,7 +72,7 @@ const ACTIONS = {
   hide: { id: "hide", label: "Hide Traceability", icon: "eye-closed" },
   manageTrust: { id: "manage-trust", label: "Manage workspace trust", icon: "shield" },
 } as const satisfies Record<string, TraceabilityAction>;
-const DISPLAY_TEXT_LIMIT = 4_096;
+const DISPLAY_TEXT_LIMIT = TRACEABILITY_DISPLAY_TEXT_LIMIT;
 
 const outcomeIcon: Record<RunOutcome, string> = {
   passed: "pass",
@@ -90,14 +92,13 @@ const statusTone: Record<NormalizedStatus["category"], TraceabilityProjectionRow
 };
 
 // The browser receives stable opaque identities only. Paths and scenario text stay in the host map.
-function rowId(kind: string, value: string): string {
+export function traceabilityRowId(kind: string, value: string): string {
   return `${kind}:${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 }
-function display(value: string): string { return value.slice(0, DISPLAY_TEXT_LIMIT); }
 function displayJoin(values: readonly string[], separator: string): string {
   let result = "";
   for (const value of values) {
-    const next = display(value);
+    const next = boundedTraceabilityText(value);
     const prefix = result ? separator : "";
     if (result.length + prefix.length + next.length > DISPLAY_TEXT_LIMIT) {
       return result || next.slice(0, DISPLAY_TEXT_LIMIT);
@@ -108,7 +109,7 @@ function displayJoin(values: readonly string[], separator: string): string {
 }
 function displayPath(filePath: string): string {
   const relative = toWorkspaceRelative(filePath);
-  return display(path.isAbsolute(relative) ? path.basename(relative) : relative);
+  return boundedTraceabilityText(path.isAbsolute(relative) ? path.basename(relative) : relative);
 }
 function reqDescription(reqKeys: readonly string[]): string { return reqKeys.length ? displayJoin(["REQ ", displayJoin(reqKeys, ", ")], "") : ""; }
 function refId(ref: ScenarioRef): string { return `${ref.filePath}:${ref.line}:${ref.name}`; }
@@ -126,14 +127,14 @@ function aggregateIterations(links: readonly TraceLink[]): { passed: number; tot
 function testDescription(links: readonly TraceLink[]): string {
   const first = links[0];
   const count = links.length === 1 ? "1 scenario" : `${links.length} scenarios`;
-  const base = first?.meta?.summary ? display(first.meta.summary) : first?.project ? displayJoin([first.project, count], " · ") : count;
+  const base = first?.meta?.summary ? boundedTraceabilityText(first.meta.summary) : first?.project ? displayJoin([first.project, count], " · ") : count;
   const iterations = aggregateIterations(links);
   return iterations ? displayJoin([base, `${iterations.passed}/${iterations.total}`], " · ") : base;
 }
 
 function connectionDescription(indicator: ConnectionIndicator): { description: string; tooltip: string } {
   const base = indicator.state === "ok" ? "Connected" : indicator.state === "checking" ? "Checking…" : indicator.state === "auth-failed" ? "Authentication failed" : "Unreachable";
-  if (!indicator.sync) { return { description: base, tooltip: display(indicator.message) }; }
+  if (!indicator.sync) { return { description: base, tooltip: boundedTraceabilityText(indicator.message) }; }
   const ago = formatSyncedAgo(Date.now() - indicator.sync.syncedAt);
   const description = indicator.state === "unreachable"
     ? `Unreachable · showing data synced ${ago}`
@@ -149,11 +150,11 @@ export function formatSyncedAgo(elapsedMs: number): string {
 }
 
 function stateProjection(state: "disconnected" | "empty" | "untrusted"): TraceabilityProjection {
-  const id = rowId("state", state);
+  const id = traceabilityRowId("state", state);
   const row: TraceabilityProjectionRow = state === "disconnected"
-    ? { id, label: "Set up Xray", description: "Set up Xray integration to map scenarios and publish results.", tooltip: "Set up Xray integration to map scenarios and publish results.", icon: "plug", tone: "info", expandable: false, actions: [ACTIONS.connect, ACTIONS.hide], defaultAction: "connect" }
+    ? { id, label: "Set up Xray", description: "Set up Xray integration to map scenarios and publish results.", tooltip: "Set up Xray integration to map scenarios and publish results.", icon: "plug", tone: "info", expandable: false, actions: [TRACEABILITY_ACTIONS.connect, TRACEABILITY_ACTIONS.hide], defaultAction: "connect" }
     : state === "untrusted"
-      ? { id, label: "Workspace trust required", description: "Traceability stays offline while this workspace is untrusted.", tooltip: "Trust this workspace before connecting to Xray or reading traceability data.", icon: "shield", tone: "warning", expandable: false, actions: [ACTIONS.manageTrust], defaultAction: "manage-trust" }
+      ? { id, label: "Workspace trust required", description: "Traceability stays offline while this workspace is untrusted.", tooltip: "Trust this workspace before connecting to Xray or reading traceability data.", icon: "shield", tone: "warning", expandable: false, actions: [TRACEABILITY_ACTIONS.manageTrust], defaultAction: "manage-trust" }
       : { id, label: "No Xray-tagged scenarios found yet.", description: "Add @TEST_KEY tags to scenarios. Local mappings update automatically.", tooltip: "Add @TEST_KEY tags to scenarios. Local mappings update automatically.", icon: "info", tone: "muted", expandable: false, actions: [] };
   return { state, rows: [row], nodes: new Map([[id, { kind: "state", state }]]) };
 }
@@ -174,7 +175,7 @@ export function projectTraceabilityTree(
   if (snapshot.links.length === 0 && snapshot.untraced.length === 0) {
     return stateProjection("empty");
   }
-  const label = display(providerLabel);
+  const label = boundedTraceabilityText(providerLabel);
   const rows: TraceabilityProjectionRow[] = [];
   const nodes = new Map<string, TraceabilityNode>();
   const add = (row: TraceabilityProjectionRow, node: TraceabilityNode): void => {
@@ -186,37 +187,37 @@ export function projectTraceabilityTree(
   };
   if (connection) {
     const text = connectionDescription(connection);
-    const id = rowId("connection", "current");
+    const id = traceabilityRowId("connection", "current");
     const tone = connection.state === "ok" ? "success" : connection.state === "auth-failed" ? "error" : connection.state === "unreachable" ? "warning" : "muted";
-    const project = connection.defaultProject ? display(connection.defaultProject) : undefined;
+    const project = connection.defaultProject ? boundedTraceabilityText(connection.defaultProject) : undefined;
     const tooltip = project
-      ? displayJoin([display(connection.label), text.tooltip, `Default project ${project}. Prefills new tests and executions, and joins the sync scope while no sync project list is set.`], "\n")
-      : displayJoin([display(connection.label), text.tooltip], "\n");
-    add({ id, label: "Xray Cloud", description: project ? displayJoin([text.description, `project ${project}`], " · ") : text.description, tooltip, icon: connection.state === "ok" ? "cloud" : connection.state === "checking" ? "loading" : connection.state === "auth-failed" ? "key" : "debug-disconnect", tone, expandable: false, actions: [ACTIONS.connect, ACTIONS.switchProject, ACTIONS.selectSyncProjects], defaultAction: "connect" }, { kind: "connection", ...connection });
+      ? displayJoin([boundedTraceabilityText(connection.label), text.tooltip, `Default project ${project}. Prefills new tests and executions, and joins the sync scope while no sync project list is set.`], "\n")
+      : displayJoin([boundedTraceabilityText(connection.label), text.tooltip], "\n");
+    add({ id, label: "Xray Cloud", description: project ? displayJoin([text.description, `project ${project}`], " · ") : text.description, tooltip, icon: connection.state === "ok" ? "cloud" : connection.state === "checking" ? "loading" : connection.state === "auth-failed" ? "key" : "debug-disconnect", tone, expandable: false, actions: [TRACEABILITY_ACTIONS.connect, TRACEABILITY_ACTIONS.switchProject, TRACEABILITY_ACTIONS.selectSyncProjects], defaultAction: "connect" }, { kind: "connection", ...connection });
   }
   const addScenario = (link: TraceLink, parentId: string): void => {
-    const id = rowId("scenario", `${link.testKey}:${refId(link.scenario)}`);
+    const id = traceabilityRowId("scenario", `${link.testKey}:${refId(link.scenario)}`);
     const description = displayJoin([reqDescription(link.reqKeys), link.drift ? "drift" : ""].filter(Boolean), " · ");
-    const scenario = display(link.scenario.name);
-    add({ id, parentId, label: scenario, description, tooltip: link.drift ? displayJoin([scenario, "The remote test text differs from this scenario."], "\n") : scenario, icon: link.lastResult ? outcomeIcon[link.lastResult] : "circle-outline", tone: link.lastResult ? outcomeTone[link.lastResult] : "muted", expandable: false, actions: [ACTIONS.openLocal, ACTIONS.link, ACTIONS.run], defaultAction: "open" }, { kind: "link", link });
+    const scenario = boundedTraceabilityText(link.scenario.name);
+    add({ id, parentId, label: scenario, description, tooltip: link.drift ? displayJoin([scenario, "The remote test text differs from this scenario."], "\n") : scenario, icon: link.lastResult ? outcomeIcon[link.lastResult] : "circle-outline", tone: link.lastResult ? outcomeTone[link.lastResult] : "muted", expandable: false, actions: [TRACEABILITY_ACTIONS.openLocal, TRACEABILITY_ACTIONS.link, TRACEABILITY_ACTIONS.run], defaultAction: "open" }, { kind: "link", link });
   };
   const addUntraced = (item: UntracedScenario, parentId: string): void => {
-    const id = rowId("untraced", refId(item.scenario));
+    const id = traceabilityRowId("untraced", refId(item.scenario));
     const descriptions = item.scenario.kind === "outline" && item.examples !== undefined ? [item.examples === 1 ? "1 example" : `${item.examples} examples`] : [];
     const req = reqDescription(item.reqKeys); if (req) { descriptions.push(req); }
-    const scenario = display(item.scenario.name);
-    add({ id, parentId, label: scenario, description: displayJoin(descriptions, " · "), tooltip: scenario, icon: "circle-large-outline", tone: "muted", expandable: false, actions: [ACTIONS.openLocal, ACTIONS.link], defaultAction: "open" }, { kind: "untraced", item });
+    const scenario = boundedTraceabilityText(item.scenario.name);
+    add({ id, parentId, label: scenario, description: displayJoin(descriptions, " · "), tooltip: scenario, icon: "circle-large-outline", tone: "muted", expandable: false, actions: [TRACEABILITY_ACTIONS.openLocal, TRACEABILITY_ACTIONS.link], defaultAction: "open" }, { kind: "untraced", item });
   };
   const addOrphans = (parentId?: string): void => {
-    const section = parentId ?? rowId("section", "orphan");
+    const section = parentId ?? traceabilityRowId("section", "orphan");
     const projects = displayJoin(snapshot.completeProjects, ", ");
     if (!parentId) { add({ id: section, label: displayJoin(["Available", label, "tests"], " "), description: displayJoin([String(snapshot.orphans.length), `in ${projects}`], " "), icon: "folder", expandable: true, actions: [] }, { kind: "section", section: "orphan" }); }
-    if (!snapshot.orphans.length) { const id = rowId("info", "orphan"); const message = displayJoin(["No available", label, "tests in", `${projects}.`], " "); add({ id, parentId: section, label: message, icon: "info", expandable: false, actions: [] }, { kind: "info", label: message }); return; }
+    if (!snapshot.orphans.length) { const id = traceabilityRowId("info", "orphan"); const message = displayJoin(["No available", label, "tests in", `${projects}.`], " "); add({ id, parentId: section, label: message, icon: "info", expandable: false, actions: [] }, { kind: "info", label: message }); return; }
     for (const orphan of [...snapshot.orphans].sort((a, b) => a.testKey.localeCompare(b.testKey))) {
-      const id = rowId("orphan", orphan.testKey);
-      const key = display(orphan.testKey);
-      const summary = orphan.meta.summary ? display(orphan.meta.summary) : undefined;
-      add({ id, parentId: section, label: key, description: summary, tooltip: summary ? displayJoin([key, summary], " · ") : key, icon: "beaker", tone: "info", expandable: false, actions: [ACTIONS.openRemote, ACTIONS.copy], defaultAction: "open" }, { kind: "orphan", testKey: orphan.testKey, summary: orphan.meta.summary });
+      const id = traceabilityRowId("orphan", orphan.testKey);
+      const key = boundedTraceabilityText(orphan.testKey);
+      const summary = orphan.meta.summary ? boundedTraceabilityText(orphan.meta.summary) : undefined;
+      add({ id, parentId: section, label: key, description: summary, tooltip: summary ? displayJoin([key, summary], " · ") : key, icon: "beaker", tone: "info", expandable: false, actions: [TRACEABILITY_ACTIONS.openRemote, TRACEABILITY_ACTIONS.copy], defaultAction: "open" }, { kind: "orphan", testKey: orphan.testKey, summary: orphan.meta.summary });
     }
   };
   if (grouping === "file") {
@@ -224,34 +225,34 @@ export function projectTraceabilityTree(
     for (const item of snapshot.untraced) { const value = files.get(item.scenario.filePath) ?? { untraced: 0, links: [], items: [] }; value.untraced++; value.items.push(item); files.set(item.scenario.filePath, value); }
     for (const link of snapshot.links) { const value = files.get(link.scenario.filePath) ?? { untraced: 0, links: [], items: [] }; value.links.push(link); files.set(link.scenario.filePath, value); }
     for (const [filePath, value] of [...files].sort((a, b) => (a[1].untraced ? 0 : 1) - (b[1].untraced ? 0 : 1) || toWorkspaceRelative(a[0]).localeCompare(toWorkspaceRelative(b[0])))) {
-      const id = rowId("file", filePath);
+      const id = traceabilityRowId("file", filePath);
       const relPath = displayPath(filePath);
-      add({ id, label: relPath, description: value.untraced ? `${value.untraced} untraced` : undefined, tooltip: relPath, icon: "file", expandable: true, actions: [ACTIONS.run] }, { kind: "file", filePath, relPath, untracedCount: value.untraced });
+      add({ id, label: relPath, description: value.untraced ? `${value.untraced} untraced` : undefined, tooltip: relPath, icon: "file", expandable: true, actions: [TRACEABILITY_ACTIONS.run] }, { kind: "file", filePath, relPath, untracedCount: value.untraced });
       value.items.sort((a, b) => a.scenario.line - b.scenario.line).forEach((item) => addUntraced(item, id));
       value.links.sort((a, b) => a.scenario.line - b.scenario.line).forEach((link) => addScenario(link, id));
     }
     if (snapshot.completeProjects.length) { addOrphans(); }
   } else {
-    const untracedId = rowId("section", "untraced");
+    const untracedId = traceabilityRowId("section", "untraced");
     add({ id: untracedId, label: "Untraced scenarios", description: String(snapshot.untraced.length), icon: "folder", expandable: true, actions: [] }, { kind: "section", section: "untraced" });
-    if (!snapshot.untraced.length) { const message = displayJoin(["Every scenario is mapped to a", label, "test."], " "); add({ id: rowId("info", "untraced"), parentId: untracedId, label: message, icon: "info", expandable: false, actions: [] }, { kind: "info", label: message }); }
+    if (!snapshot.untraced.length) { const message = displayJoin(["Every scenario is mapped to a", label, "test."], " "); add({ id: traceabilityRowId("info", "untraced"), parentId: untracedId, label: message, icon: "info", expandable: false, actions: [] }, { kind: "info", label: message }); }
     else { [...snapshot.untraced].sort((a, b) => a.scenario.name.localeCompare(b.scenario.name)).forEach((item) => addUntraced(item, untracedId)); }
-    const coveredId = rowId("section", "covered");
+    const coveredId = traceabilityRowId("section", "covered");
     const byKey = new Map<string, TraceLink[]>();
     for (const link of snapshot.links) { const items = byKey.get(link.testKey) ?? []; items.push(link); byKey.set(link.testKey, items); }
     add({ id: coveredId, label: "Mapped tests", description: String(byKey.size), icon: "folder", expandable: true, actions: [] }, { kind: "section", section: "covered" });
-    if (!byKey.size) { const message = displayJoin(["No scenarios are mapped to a", label, "test yet."], " "); add({ id: rowId("info", "covered"), parentId: coveredId, label: message, icon: "info", expandable: false, actions: [] }, { kind: "info", label: message }); }
+    if (!byKey.size) { const message = displayJoin(["No scenarios are mapped to a", label, "test yet."], " "); add({ id: traceabilityRowId("info", "covered"), parentId: coveredId, label: message, icon: "info", expandable: false, actions: [] }, { kind: "info", label: message }); }
     for (const [key, links] of [...byKey].sort((a, b) => a[0].localeCompare(b[0]))) {
-      const first = links[0]; const id = rowId("test", key);
+      const first = links[0]; const id = traceabilityRowId("test", key);
       const outcome = worstStatus(links.map((link) => link.lastResult));
       const icon = first?.remoteMissing ? "warning" : "beaker";
       const tone = first?.remoteMissing ? "warning" : first?.meta?.status ? statusTone[first.meta.status.category] : outcome ? outcomeTone[outcome] : "warning";
       const description = first?.remoteMissing ? displayJoin([testDescription(links), "not found on remote"], " · ") : testDescription(links);
       const remoteTooltip = first?.remoteMissing
-        ? displayJoin([`${display(key)} was not found${first.project ? ` in project ${display(first.project)}` : ""} on the connected site.`, "The tag may be stale, mistyped, or reference a Jira issue that is not a test."], " ")
+        ? displayJoin([`${boundedTraceabilityText(key)} was not found${first.project ? ` in project ${boundedTraceabilityText(first.project)}` : ""} on the connected site.`, "The tag may be stale, mistyped, or reference a Jira issue that is not a test."], " ")
         : undefined;
-      const displayedKey = display(key);
-      add({ id, parentId: coveredId, label: displayedKey, description, tooltip: remoteTooltip ?? (first?.meta?.status ? displayJoin([displayedKey, first.meta.status.providerValue], " · ") : displayedKey), icon, tone, expandable: true, actions: [ACTIONS.openRemote, ACTIONS.copy] }, { kind: "testKey", testKey: key, project: first?.project, links });
+      const displayedKey = boundedTraceabilityText(key);
+      add({ id, parentId: coveredId, label: displayedKey, description, tooltip: remoteTooltip ?? (first?.meta?.status ? displayJoin([displayedKey, first.meta.status.providerValue], " · ") : displayedKey), icon, tone, expandable: true, actions: [TRACEABILITY_ACTIONS.openRemote, TRACEABILITY_ACTIONS.copy] }, { kind: "testKey", testKey: key, project: first?.project, links });
       links.forEach((link) => addScenario(link, id));
     }
     if (snapshot.completeProjects.length) { addOrphans(); }

@@ -1,0 +1,759 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Specwright Traceability views prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --canvas: #111318;
+      --panel: #181b21;
+      --panel-raised: #20242c;
+      --panel-hover: #282d37;
+      --border: #343a46;
+      --text: #e4e7ec;
+      --muted: #9299a7;
+      --faint: #686f7d;
+      --accent: #64a7ff;
+      --accent-strong: #0e639c;
+      --success: #62c073;
+      --warning: #d7a84f;
+      --danger: #f06a73;
+      --badge: #303744;
+      --shadow: 0 24px 70px rgb(0 0 0 / 42%);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at 20% 0%, rgb(51 83 123 / 22%), transparent 38rem),
+        var(--canvas);
+      color: var(--text);
+    }
+
+    button, input { font: inherit; }
+
+    button { color: inherit; }
+
+    .prototype {
+      width: min(100%, 470px);
+      height: min(860px, calc(100vh - 32px));
+      min-height: 640px;
+      margin: 16px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+    }
+
+    .titlebar {
+      height: 42px;
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .titlebar h1 {
+      margin: 0;
+      flex: 1;
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .icon-button,
+    .row-action,
+    .disclosure {
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .icon-button {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 4px;
+      color: var(--muted);
+    }
+
+    .icon-button:hover { background: var(--panel-hover); color: var(--text); }
+
+    .tabs {
+      flex: none;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      padding: 0 10px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tab {
+      position: relative;
+      height: 42px;
+      padding: 0 5px;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .tab:hover { color: var(--text); }
+
+    .tab[aria-selected="true"] { color: var(--text); }
+
+    .tab[aria-selected="true"]::after {
+      content: "";
+      position: absolute;
+      right: 8px;
+      bottom: -1px;
+      left: 8px;
+      height: 2px;
+      background: var(--accent);
+    }
+
+    .toolbar {
+      flex: none;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .search {
+      min-width: 0;
+      height: 30px;
+      padding: 0 9px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      outline: 0;
+      background: #11141a;
+      color: var(--text);
+    }
+
+    .search:focus { border-color: var(--accent); }
+
+    .project {
+      height: 30px;
+      padding: 0 9px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--panel-raised);
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .content {
+      min-height: 0;
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .view {
+      display: none;
+      height: 100%;
+      overflow: auto;
+      padding-bottom: 16px;
+    }
+
+    .view.active { display: block; }
+
+    .connection {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 10px;
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-raised);
+      font-size: 12px;
+    }
+
+    .connection-copy { min-width: 0; flex: 1; }
+    .connection-copy strong { display: block; font-size: 12px; }
+    .connection-copy span { color: var(--muted); }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      flex: none;
+      border-radius: 999px;
+      background: var(--success);
+      box-shadow: 0 0 0 3px rgb(98 192 115 / 12%);
+    }
+
+    .section-label {
+      margin: 15px 12px 6px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .tree-row,
+    .set-card {
+      border-top: 1px solid transparent;
+      border-bottom: 1px solid transparent;
+    }
+
+    .tree-row {
+      min-height: 34px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 10px;
+      font-size: 12px;
+    }
+
+    .tree-row:hover { background: var(--panel-hover); }
+    .tree-row.depth-1 { padding-left: 28px; }
+    .tree-row.depth-2 { padding-left: 48px; }
+    .tree-row.depth-3 { padding-left: 68px; }
+
+    .disclosure {
+      width: 14px;
+      padding: 0;
+      color: var(--muted);
+      line-height: 1;
+    }
+
+    .disclosure[aria-expanded="true"] { transform: rotate(90deg); }
+
+    .row-icon {
+      width: 16px;
+      flex: none;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .row-main { min-width: 0; flex: 1; }
+    .row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .key { color: var(--accent); font-family: "SFMono-Regular", Consolas, monospace; }
+    .row-meta { color: var(--muted); font-size: 11px; }
+
+    .pill {
+      flex: none;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: var(--badge);
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .pill.success { background: rgb(98 192 115 / 15%); color: var(--success); }
+    .pill.warning { background: rgb(215 168 79 / 14%); color: var(--warning); }
+    .pill.danger { background: rgb(240 106 115 / 14%); color: var(--danger); }
+
+    .folder-children[hidden],
+    .set-members[hidden] { display: none; }
+
+    .set-list { padding: 2px 10px 10px; }
+
+    .set-card {
+      margin-top: 8px;
+      overflow: hidden;
+      border-color: var(--border);
+      border-radius: 6px;
+      background: var(--panel-raised);
+    }
+
+    .set-head {
+      min-height: 64px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 8px;
+      padding: 9px;
+    }
+
+    .set-head:hover { background: var(--panel-hover); }
+
+    .set-summary {
+      min-width: 0;
+      margin-top: 3px;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .set-stats {
+      display: flex;
+      gap: 5px;
+      margin-top: 6px;
+    }
+
+    .run-button,
+    .primary,
+    .secondary {
+      border: 0;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .run-button {
+      padding: 6px 8px;
+      background: transparent;
+      color: var(--accent);
+      font-size: 11px;
+    }
+
+    .run-button:hover { background: rgb(100 167 255 / 12%); }
+
+    .set-members { border-top: 1px solid var(--border); }
+    .set-members .tree-row { padding-left: 34px; }
+
+    .notice {
+      margin: 8px 10px 4px;
+      padding: 9px 10px;
+      border-left: 2px solid var(--accent);
+      background: rgb(100 167 255 / 8%);
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .scrim {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: end;
+      background: rgb(0 0 0 / 46%);
+      z-index: 4;
+    }
+
+    .scrim.open { display: flex; }
+
+    .run-sheet {
+      width: 100%;
+      max-height: 82%;
+      overflow: auto;
+      padding: 14px;
+      border-top: 1px solid var(--border);
+      background: #20242c;
+      box-shadow: 0 -18px 44px rgb(0 0 0 / 38%);
+    }
+
+    .sheet-kicker {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .run-sheet h2 { margin: 5px 0 2px; font-size: 16px; }
+    .run-sheet > p { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .summary-stat {
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--panel);
+    }
+
+    .summary-stat strong { display: block; font-size: 17px; }
+    .summary-stat span { color: var(--muted); font-size: 10px; }
+
+    .run-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+    }
+
+    .run-list li {
+      display: grid;
+      grid-template-columns: 16px 1fr auto;
+      gap: 7px;
+      align-items: center;
+      padding: 7px 8px;
+      font-size: 11px;
+    }
+
+    .run-list li + li { border-top: 1px solid var(--border); }
+    .run-list .remote-only { color: var(--muted); }
+
+    .sheet-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .primary, .secondary { padding: 7px 11px; font-size: 12px; }
+    .primary { background: var(--accent-strong); color: white; }
+    .primary:hover { background: #1177bb; }
+    .secondary { background: var(--badge); }
+    .secondary:hover { background: var(--panel-hover); }
+
+    .running .primary { pointer-events: none; opacity: .7; }
+
+    .progress {
+      height: 2px;
+      margin: 10px 0 0;
+      overflow: hidden;
+      display: none;
+      background: var(--border);
+    }
+
+    .running .progress { display: block; }
+
+    .progress::after {
+      content: "";
+      display: block;
+      width: 42%;
+      height: 100%;
+      background: var(--accent);
+      animation: progress 1.1s ease-in-out infinite;
+    }
+
+    @keyframes progress {
+      from { transform: translateX(-100%); }
+      to { transform: translateX(340%); }
+    }
+
+    .toast {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      left: 10px;
+      z-index: 6;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: #2a3039;
+      box-shadow: 0 8px 28px rgb(0 0 0 / 45%);
+      font-size: 12px;
+    }
+
+    .toast.show { display: flex; }
+    .toast strong { color: var(--success); }
+
+    .empty-filter {
+      display: none;
+      padding: 32px 16px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 12px;
+    }
+
+    @media (max-width: 420px) {
+      body { display: block; }
+      .prototype { width: 100%; height: 100vh; min-height: 0; margin: 0; border: 0; border-radius: 0; }
+      .tab { font-size: 11px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="prototype" aria-label="Traceability panel prototype">
+    <header class="titlebar">
+      <h1>Traceability</h1>
+      <button class="icon-button" type="button" title="Sync with Xray" aria-label="Sync with Xray">↻</button>
+      <button class="icon-button" type="button" title="More actions" aria-label="More actions">•••</button>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="Traceability views">
+      <button class="tab" id="tab-workspace" role="tab" aria-selected="true" aria-controls="view-workspace" data-view="workspace">Workspace</button>
+      <button class="tab" id="tab-repository" role="tab" aria-selected="false" aria-controls="view-repository" data-view="repository">Repository</button>
+      <button class="tab" id="tab-sets" role="tab" aria-selected="false" aria-controls="view-sets" data-view="sets">Test Sets</button>
+    </nav>
+
+    <div class="toolbar">
+      <input class="search" id="filter" type="search" placeholder="Filter workspace" aria-label="Filter current view">
+      <button class="project" type="button" title="Current Xray project">SHOP ▾</button>
+    </div>
+
+    <section class="content">
+      <div class="view active" id="view-workspace" role="tabpanel" aria-labelledby="tab-workspace">
+        <div class="connection">
+          <span class="status-dot" aria-hidden="true"></span>
+          <div class="connection-copy">
+            <strong>Xray Cloud</strong>
+            <span>Connected · synced just now</span>
+          </div>
+          <span class="pill">SHOP</span>
+        </div>
+
+        <div class="section-label">Mapped tests · 4</div>
+        <div class="filterable" data-search="SHOP-101 add item to cart">
+          <div class="tree-row depth-1">
+            <button class="disclosure" type="button" aria-expanded="true">›</button>
+            <span class="row-icon">◇</span>
+            <div class="row-main"><div class="row-title"><span class="key">SHOP-101</span> Add item to cart</div></div>
+            <span class="pill success">passed</span>
+          </div>
+          <div class="folder-children">
+            <div class="tree-row depth-2"><span class="row-icon">✓</span><div class="row-main"><div class="row-title">Add an in-stock product</div><div class="row-meta">cart/add-item.feature:12</div></div></div>
+          </div>
+        </div>
+        <div class="filterable" data-search="SHOP-102 reject sold out item">
+          <div class="tree-row depth-1">
+            <button class="disclosure" type="button" aria-expanded="false">›</button>
+            <span class="row-icon">◇</span>
+            <div class="row-main"><div class="row-title"><span class="key">SHOP-102</span> Reject sold-out item</div></div>
+            <span class="pill warning">todo</span>
+          </div>
+          <div class="folder-children" hidden><div class="tree-row depth-2"><span class="row-icon">○</span><div class="row-main"><div class="row-title">Sold-out stock cannot be added</div></div></div></div>
+        </div>
+        <div class="filterable" data-search="SHOP-117 checkout guest customer">
+          <div class="tree-row depth-1"><span class="row-icon">◇</span><div class="row-main"><div class="row-title"><span class="key">SHOP-117</span> Checkout as guest</div><div class="row-meta">1 scenario</div></div><span class="pill danger">failed</span></div>
+        </div>
+        <div class="filterable" data-search="SHOP-124 saved card payment">
+          <div class="tree-row depth-1"><span class="row-icon">◇</span><div class="row-main"><div class="row-title"><span class="key">SHOP-124</span> Pay with saved card</div><div class="row-meta">1 scenario · 3/3 examples</div></div><span class="pill success">passed</span></div>
+        </div>
+
+        <div class="section-label">Untraced scenarios · 1</div>
+        <div class="filterable tree-row depth-1" data-search="remove coupon"><span class="row-icon">○</span><div class="row-main"><div class="row-title">Remove an applied coupon</div><div class="row-meta">checkout/coupons.feature:41</div></div><span class="pill">untraced</span></div>
+        <div class="empty-filter">No workspace tests match this filter.</div>
+      </div>
+
+      <div class="view" id="view-repository" role="tabpanel" aria-labelledby="tab-repository">
+        <div class="notice">Mirrors the Xray Test Repository for SHOP. Folder runs include mapped tests in descendant folders.</div>
+        <div class="section-label">Test Repository · 14 tests</div>
+
+        <div class="filterable" data-search="checkout smoke payment saved card guest">
+          <div class="tree-row depth-1">
+            <button class="disclosure" type="button" aria-expanded="true">›</button>
+            <span class="row-icon">▱</span>
+            <div class="row-main"><div class="row-title">Checkout</div><div class="row-meta">7 tests · 4 mapped locally</div></div>
+            <button class="run-button" type="button" data-run-folder="Checkout">Run</button>
+          </div>
+          <div class="folder-children">
+            <div class="tree-row depth-2"><button class="disclosure" type="button" aria-expanded="true">›</button><span class="row-icon">▱</span><div class="row-main"><div class="row-title">Smoke</div><div class="row-meta">4 tests · 3 mapped locally</div></div><button class="run-button" type="button" data-run-folder="Checkout / Smoke">Run</button></div>
+            <div class="folder-children">
+              <div class="tree-row depth-3"><span class="row-icon">◇</span><div class="row-main"><div class="row-title"><span class="key">SHOP-117</span> Checkout as guest</div></div><span class="pill danger">mapped</span></div>
+              <div class="tree-row depth-3"><span class="row-icon">◇</span><div class="row-main"><div class="row-title"><span class="key">SHOP-124</span> Pay with saved card</div></div><span class="pill success">mapped</span></div>
+              <div class="tree-row depth-3"><span class="row-icon">◇</span><div class="row-main"><div class="row-title"><span class="key">SHOP-130</span> Payment confirmation email</div></div><span class="pill">remote only</span></div>
+            </div>
+            <div class="tree-row depth-2"><button class="disclosure" type="button" aria-expanded="false">›</button><span class="row-icon">▱</span><div class="row-main"><div class="row-title">Promotions</div><div class="row-meta">3 tests · 1 mapped locally</div></div><button class="run-button" type="button" data-run-folder="Checkout / Promotions">Run</button></div>
+          </div>
+        </div>
+
+        <div class="filterable" data-search="catalog product search">
+          <div class="tree-row depth-1"><button class="disclosure" type="button" aria-expanded="false">›</button><span class="row-icon">▱</span><div class="row-main"><div class="row-title">Catalog</div><div class="row-meta">3 tests · 0 mapped locally</div></div><span class="pill">remote only</span></div>
+        </div>
+        <div class="filterable" data-search="cart add item stock">
+          <div class="tree-row depth-1"><button class="disclosure" type="button" aria-expanded="false">›</button><span class="row-icon">▱</span><div class="row-main"><div class="row-title">Cart</div><div class="row-meta">4 tests · 2 mapped locally</div></div><button class="run-button" type="button" data-run-folder="Cart">Run</button></div>
+        </div>
+        <div class="empty-filter">No repository folders match this filter.</div>
+      </div>
+
+      <div class="view" id="view-sets" role="tabpanel" aria-labelledby="tab-sets">
+        <div class="notice">A Test Set is an explicit remote membership list. Running a set uses only members mapped to scenarios in this workspace.</div>
+        <div class="section-label">Test Sets · 3</div>
+        <div class="set-list">
+          <article class="set-card filterable" data-search="SHOP-301 checkout smoke guest saved card inventory confirmation">
+            <div class="set-head">
+              <button class="disclosure" type="button" aria-expanded="true">›</button>
+              <div class="row-main">
+                <div class="row-title"><span class="key">SHOP-301</span> Checkout smoke</div>
+                <div class="set-summary">Critical checkout path before every release</div>
+                <div class="set-stats"><span class="pill success">3 runnable</span><span class="pill">1 remote only</span></div>
+              </div>
+              <button class="run-button" type="button" data-run-set="SHOP-301">▶ Run set</button>
+            </div>
+            <div class="set-members">
+              <div class="tree-row"><span class="row-icon">✓</span><div class="row-main"><div class="row-title"><span class="key">SHOP-101</span> Add item to cart</div></div><span class="pill success">mapped</span></div>
+              <div class="tree-row"><span class="row-icon">✓</span><div class="row-main"><div class="row-title"><span class="key">SHOP-117</span> Checkout as guest</div></div><span class="pill success">mapped</span></div>
+              <div class="tree-row"><span class="row-icon">✓</span><div class="row-main"><div class="row-title"><span class="key">SHOP-124</span> Pay with saved card</div></div><span class="pill success">mapped</span></div>
+              <div class="tree-row"><span class="row-icon">−</span><div class="row-main"><div class="row-title"><span class="key">SHOP-130</span> Payment confirmation email</div></div><span class="pill">remote only</span></div>
+            </div>
+          </article>
+
+          <article class="set-card filterable" data-search="SHOP-318 cart regression stock coupons">
+            <div class="set-head">
+              <button class="disclosure" type="button" aria-expanded="false">›</button>
+              <div class="row-main">
+                <div class="row-title"><span class="key">SHOP-318</span> Cart regression</div>
+                <div class="set-summary">Cart, stock, quantity, and coupon coverage</div>
+                <div class="set-stats"><span class="pill success">2 runnable</span><span class="pill">3 remote only</span></div>
+              </div>
+              <button class="run-button" type="button" data-run-set="SHOP-318">▶ Run set</button>
+            </div>
+            <div class="set-members" hidden>
+              <div class="tree-row"><span class="row-icon">✓</span><div class="row-main"><div class="row-title"><span class="key">SHOP-101</span> Add item to cart</div></div><span class="pill success">mapped</span></div>
+              <div class="tree-row"><span class="row-icon">✓</span><div class="row-main"><div class="row-title"><span class="key">SHOP-102</span> Reject sold-out item</div></div><span class="pill success">mapped</span></div>
+              <div class="tree-row"><span class="row-icon">−</span><div class="row-main"><div class="row-title"><span class="key">SHOP-151</span> Update cart quantity</div></div><span class="pill">remote only</span></div>
+            </div>
+          </article>
+
+          <article class="set-card filterable" data-search="SHOP-330 full release regression">
+            <div class="set-head">
+              <button class="disclosure" type="button" aria-expanded="false">›</button>
+              <div class="row-main">
+                <div class="row-title"><span class="key">SHOP-330</span> Full release regression</div>
+                <div class="set-summary">Complete release candidate verification</div>
+                <div class="set-stats"><span class="pill success">4 runnable</span><span class="pill">10 remote only</span></div>
+              </div>
+              <button class="run-button" type="button" data-run-set="SHOP-330">▶ Run set</button>
+            </div>
+            <div class="set-members" hidden>
+              <div class="tree-row"><span class="row-icon">✓</span><div class="row-main"><div class="row-title">All four mapped workspace tests</div></div><span class="pill success">mapped</span></div>
+              <div class="tree-row"><span class="row-icon">−</span><div class="row-main"><div class="row-title">Ten remote tests without local mappings</div></div><span class="pill">remote only</span></div>
+            </div>
+          </article>
+        </div>
+        <div class="empty-filter">No Test Sets match this filter.</div>
+      </div>
+
+      <div class="scrim" id="run-scrim" aria-hidden="true">
+        <section class="run-sheet" role="dialog" aria-modal="true" aria-labelledby="run-title">
+          <div class="sheet-kicker">Run and publish</div>
+          <h2 id="run-title">SHOP-301 · Checkout smoke</h2>
+          <p>Only tests mapped to this workspace will run.</p>
+          <div class="summary-grid">
+            <div class="summary-stat"><strong>4</strong><span>remote members</span></div>
+            <div class="summary-stat"><strong>3</strong><span>runnable locally</span></div>
+            <div class="summary-stat"><strong>1</strong><span>remote only</span></div>
+          </div>
+          <ul class="run-list">
+            <li><span>✓</span><span><span class="key">SHOP-101</span> Add item to cart</span><span class="pill success">run</span></li>
+            <li><span>✓</span><span><span class="key">SHOP-117</span> Checkout as guest</span><span class="pill success">run</span></li>
+            <li><span>✓</span><span><span class="key">SHOP-124</span> Pay with saved card</span><span class="pill success">run</span></li>
+            <li class="remote-only"><span>−</span><span><span class="key">SHOP-130</span> Payment confirmation email</span><span class="pill">skip</span></li>
+          </ul>
+          <div class="progress" aria-hidden="true"></div>
+          <div class="sheet-actions">
+            <button class="secondary" id="cancel-run" type="button">Cancel</button>
+            <button class="primary" id="confirm-run" type="button">Run 3 scenarios</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="toast" id="toast" role="status"><strong>✓ Complete</strong><span>3 scenarios ran and are ready to publish.</span></div>
+    </section>
+  </main>
+
+  <script>
+    const labels = {
+      workspace: "Filter workspace",
+      repository: "Filter repository",
+      sets: "Filter Test Sets"
+    };
+
+    const tabs = [...document.querySelectorAll(".tab")];
+    const views = [...document.querySelectorAll(".view")];
+    const filter = document.querySelector("#filter");
+    const scrim = document.querySelector("#run-scrim");
+    const sheet = document.querySelector(".run-sheet");
+    const toast = document.querySelector("#toast");
+
+    function activeView() {
+      return document.querySelector(".view.active");
+    }
+
+    function filterCurrentView() {
+      const view = activeView();
+      const query = filter.value.trim().toLowerCase();
+      const items = [...view.querySelectorAll(".filterable")];
+      let shown = 0;
+      for (const item of items) {
+        const match = !query || item.dataset.search.toLowerCase().includes(query);
+        item.hidden = !match;
+        if (match) shown += 1;
+      }
+      const empty = view.querySelector(".empty-filter");
+      if (empty) empty.style.display = shown === 0 ? "block" : "none";
+    }
+
+    for (const tab of tabs) {
+      tab.addEventListener("click", () => {
+        for (const candidate of tabs) candidate.setAttribute("aria-selected", String(candidate === tab));
+        for (const view of views) view.classList.toggle("active", view.id === `view-${tab.dataset.view}`);
+        filter.value = "";
+        filter.placeholder = labels[tab.dataset.view];
+        filterCurrentView();
+      });
+    }
+
+    filter.addEventListener("input", filterCurrentView);
+
+    document.addEventListener("click", (event) => {
+      const disclosure = event.target.closest(".disclosure");
+      if (!disclosure) return;
+      const expanded = disclosure.getAttribute("aria-expanded") === "true";
+      disclosure.setAttribute("aria-expanded", String(!expanded));
+      const owner = disclosure.closest(".set-card") || disclosure.closest(".filterable") || disclosure.parentElement;
+      const children = owner.querySelector(":scope > .set-members, :scope > .folder-children")
+        || disclosure.parentElement.nextElementSibling;
+      if (children) children.hidden = expanded;
+    });
+
+    document.querySelectorAll("[data-run-set]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        scrim.classList.add("open");
+        scrim.setAttribute("aria-hidden", "false");
+        document.querySelector("#confirm-run").focus();
+      });
+    });
+
+    document.querySelectorAll("[data-run-folder]").forEach((button) => {
+      button.addEventListener("click", () => {
+        toast.querySelector("strong").textContent = "Prototype";
+        toast.querySelector("span").textContent = `${button.dataset.runFolder}: folder run would use the same mapped-test preview.`;
+        toast.classList.add("show");
+        window.setTimeout(() => toast.classList.remove("show"), 3200);
+      });
+    });
+
+    function closeSheet() {
+      scrim.classList.remove("open");
+      scrim.setAttribute("aria-hidden", "true");
+      sheet.classList.remove("running");
+    }
+
+    document.querySelector("#cancel-run").addEventListener("click", closeSheet);
+    scrim.addEventListener("click", (event) => { if (event.target === scrim) closeSheet(); });
+
+    document.querySelector("#confirm-run").addEventListener("click", () => {
+      sheet.classList.add("running");
+      document.querySelector("#confirm-run").textContent = "Running...";
+      window.setTimeout(() => {
+        closeSheet();
+        document.querySelector("#confirm-run").textContent = "Run 3 scenarios";
+        toast.querySelector("strong").textContent = "✓ Complete";
+        toast.querySelector("span").textContent = "3 scenarios ran and are ready to publish.";
+        toast.classList.add("show");
+        window.setTimeout(() => toast.classList.remove("show"), 3600);
+      }, 1400);
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && scrim.classList.contains("open")) closeSheet();
+    });
+  </script>
+</body>
+</html>

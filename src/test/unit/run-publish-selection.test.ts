@@ -79,6 +79,14 @@ describe("treeBatchSelection", () => {
       skipped: 0,
     });
   });
+
+  it("preserves host-owned organization identity and exact scenarios without widening", () => {
+    const selection = { kind: "test-set" as const, testSetKey: "SHOP-301", scenarios: [A, B] };
+    expect(treeBatchSelection([{ kind: "organizationRun", selection }], snapshot)).toEqual({ selection, skipped: 0 });
+    expect(treeBatchSelection([{ kind: "organizationRun", selection: { ...selection, scenarios: [] } }], snapshot)).toEqual({
+      selection: { kind: "multi-select", scenarios: [] }, skipped: 0,
+    });
+  });
 });
 
 describe("executionTargets", () => {

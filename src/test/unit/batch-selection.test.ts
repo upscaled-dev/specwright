@@ -198,6 +198,15 @@ describe("resolveBatchSelection", () => {
       { kind: "scenario", ref: B1 },
     ]);
   });
+
+  it("keeps an organization selection to its confirmed mapped scenarios and never adds later mappings", () => {
+    const selection = { kind: "test-set" as const, testSetKey: "CALC-100", scenarios: [A1, A1, B1] };
+    expect(resolveBatchSelection(selection, SNAP)).toEqual({
+      scenarios: [A1, B1],
+      invocations: [{ kind: "scenario", ref: A1 }, { kind: "scenario", ref: B1 }],
+    });
+    expect(resolveBatchSelection({ ...selection, scenarios: [] }, SNAP)).toEqual({ scenarios: [], invocations: [] });
+  });
 });
 
 describe("batchSelectionFromScenarios", () => {

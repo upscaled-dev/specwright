@@ -79,6 +79,7 @@ function testsPage(keys: string[], total = keys.length): unknown {
           gherkin: `Scenario: ${key}\n  Given a step`,
           status: { name: "PASS", color: "#0f0", final: true },
           testType: { name: "Cucumber", kind: "Gherkin" },
+          folder: { name: "Smoke", path: "/Checkout/Smoke" },
           coverableIssues: { results: [{ jira: { key: `${key}-REQ` } }] },
         })),
       },
@@ -115,6 +116,7 @@ describe("XrayClient.fetchTestsByKeys", () => {
     expect(record.gherkin).toContain("Given a step");
     expect(record.coverageKeys).toEqual(["CALC-1-REQ"]);
     expect(record.testType).toEqual({ name: "Cucumber", kind: "Gherkin" });
+    expect(record.repositoryFolder).toEqual({ name: "Smoke", path: "/Checkout/Smoke" });
   });
 
   it("chunks more than 100 keys into separate flat key-in batches with limit 100", async () => {

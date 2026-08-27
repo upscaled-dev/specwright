@@ -1,7 +1,7 @@
 import type { Memento } from "vscode";
-import { ConnectionVerifyResult, TestAuthoringCapability } from "../traceability/contracts";
+import { ConnectionVerifyResult, MetadataCapability, TestAuthoringCapability } from "../traceability/contracts";
 import { TraceabilityAdapterFactory } from "../traceability/adapter-registry";
-import { canonicalizeXrayKey, normalizeSiteUrl, XrayAdapter } from "./xray-adapter";
+import { canonicalizeXrayKey, normalizeSiteUrl, projectFromKey, XrayAdapter } from "./xray-adapter";
 import { XrayClient } from "./xray-client";
 import { JiraProjectSearchResult, searchJiraProjects } from "./jira-project-search";
 import { XrayMetadataCapability } from "./xray-metadata";
@@ -14,6 +14,11 @@ import { createXrayResultPublishing } from "./xray-result-publishing";
 import type { WorkspaceTrust } from "../core/workspace-trust";
 import { trustedAdapter } from "../traceability/trusted-adapter";
 import { currentAdapterVersions } from "../traceability/adapter-contract";
+import {
+  XrayOrganizationCache,
+  XrayOrganizationCapability,
+  XrayOrganizationReader,
+} from "./xray-organization";
 
 // The extension-side wiring the publish capability's create path needs: resolve a scenario's current
 // step text (FeatureParser) and the owning workspace root for the cucumber `uri` relativization.
@@ -55,6 +60,7 @@ export function createXrayAdapterFactory(
       "automationBinding",
       "remoteSearch",
       "projectDirectory",
+      "organization",
       "testAuthoring",
       "resultPublishing"
     ),
@@ -80,11 +86,12 @@ export function createXrayAdapterFactory(
       // Account = the non-secret client id, read from SecretStorage per §7 (never a hashed secret).
       const account = async (): Promise<string | undefined> =>
         (await credentialStore.getCredentials(ctx.config.xraySiteUrl))?.clientId;
-      const cache = new XrayMetadataCache(memento, {
+      const cacheIdentity = {
         endpoint: new URL(xrayBaseUrl(region)).host,
         account,
         workspaceId: currentWorkspaceId(),
-      });
+      };
+      const cache = new XrayMetadataCache(memento, cacheIdentity);
       // The project directory rides the Jira REST credentials, which are optional: without them the
       // connection can still read Xray, so "no Jira access" is an empty directory, not a failure.
       const listProjects = async (signal?: AbortSignal): Promise<JiraProjectSearchResult | undefined> => {
@@ -95,7 +102,7 @@ export function createXrayAdapterFactory(
         }
         return searchJiraProjects({ site, credentials, logger: ctx.logger, ...(signal ? { signal } : {}) });
       };
-      const metadata = new XrayMetadataCapability({
+      const baseMetadata = new XrayMetadataCapability({
         client,
         cache,
         config: ctx.config,
@@ -107,6 +114,34 @@ export function createXrayAdapterFactory(
         listProjects,
         canonicalizeKey: canonicalizeXrayKey,
       });
+      const organization = new XrayOrganizationCapability({
+        reader: new XrayOrganizationReader(client),
+        metadata: baseMetadata,
+        cache: new XrayOrganizationCache(memento, cacheIdentity),
+        config: ctx.config,
+        logger: ctx.logger,
+        account,
+        onCredentialsChange: credentialStore.onDidChange,
+        projectOf: projectFromKey,
+      });
+      const metadata: MetadataCapability & { dispose(): Promise<void> } = {
+        onDidChange: baseMetadata.onDidChange,
+        snapshot: () => baseMetadata.snapshot(),
+        sync: async (scope, signal, progress) => {
+          const priorProjects = baseMetadata.snapshot().catalogueProjects;
+          await baseMetadata.sync(scope, signal, progress);
+          const catalogued = baseMetadata.snapshot().catalogueProjects;
+          const projects = catalogued.length > 0 ? catalogued : priorProjects;
+          // The organization catalogue rides along with the metadata sync it follows. Its failure is
+          // reported and left unsynced rather than failing a sync whose metadata already committed.
+          if (!signal?.aborted && projects.length > 0) {
+            await organization.sync(projects, signal).catch((error: unknown) => {
+              ctx.logger.warn(`Xray organization sync failed: ${String(error)}`);
+            });
+          }
+        },
+        dispose: () => baseMetadata.dispose(),
+      };
       const resultPublishing = createXrayResultPublishing({
         transport: client,
         site: () => normalizeSiteUrl(ctx.config.xraySiteUrl),
@@ -138,10 +173,11 @@ export function createXrayAdapterFactory(
         credentialStore,
         verify,
         metadata,
-        remoteSearch: metadata,
+        remoteSearch: baseMetadata,
         resultPublishing,
         testAuthoring,
-        projectDirectory: metadata,
+        projectDirectory: baseMetadata,
+        organization,
       });
       return trustedAdapter(adapter, workspaceTrust);
     },

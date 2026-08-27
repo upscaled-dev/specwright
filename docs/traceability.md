@@ -85,7 +85,13 @@ Changing a local tag updates the local mapping automatically. It does not requir
 
 ## Review mapping and sync remote data
 
-Open the **Specwright** view in the Activity Bar, then open **Traceability**. The panel can group data by test or by feature file and shows:
+Open the **Specwright** view in the Activity Bar, then open **Traceability**. Its three tabs separate local mapping from remote organization:
+
+- **Workspace** contains the existing by-test or by-feature-file grouping, local mappings, untraced scenarios, available remote tests, and run badges.
+- **Repository** mirrors each synced project's read-only Xray Test Repository folders. A folder preview includes mapped scenarios from that folder and every descendant folder, with duplicates removed. A partial or empty catalogue has no run action.
+- **Test Sets** lists read-only remote Test Sets with their summary, remote member count, locally runnable scenario count, remote-only count, and expandable members.
+
+Workspace shows:
 
 - **Untraced scenarios:** local scenarios without a valid test tag.
 - **Mapped tests:** local scenarios grouped by their Xray test key.
@@ -93,6 +99,8 @@ Open the **Specwright** view in the Activity Bar, then open **Traceability**. Th
 - Local run badges, plus synced remote summaries and status where available.
 
 The panel keeps the last synced snapshot locally. It does not continually poll Xray. When the cache reaches `playwrightBddRunner.xray.cacheTtlMinutes`, it is marked stale; it remains display-only until you run **Specwright: Sync Traceability** again.
+
+Repository and Test Set reads use the same project sync scope and offline cache identity as metadata: Xray endpoint, account, and workspace. An ordinary sync intentionally bounds projects and Test Set hydration, and reports omitted projects instead of implying complete coverage. Large membership lists are marked incomplete instead of being presented as exact. Previously cached member details can remain visible after a partial sync, but are marked last-known and incomplete. Choosing **Run Set and publish** refreshes that one Test Set to exact membership before showing confirmation. If refresh fails, is cancelled, remains incomplete, exceeds the supported limit, or resolves to no local scenarios, nothing runs.
 
 ![Traceability panel with mapped tests, untraced scenarios, and local result badges](../images/traceability.png)
 
@@ -158,6 +166,8 @@ Push is available only for a synced Gherkin-compatible Xray test with a remote i
 ## Run locally and publish results
 
 The Traceability view has an always-visible filter and inline row actions. Cmd/Ctrl-click mapped scenario rows to select a batch, then use **Run and publish** on one selected row. A single row runs one scenario; the Traceability toolbar's **Run All Mapped Scenarios and Publish** runs all mapped scenarios. The Command Palette offers **Run and Publish by Tag Expression**. Specwright runs the batch through your local Playwright configuration, then opens the Publish workflow.
+
+Repository folder and Test Set runs show a confirmation with remote, runnable-local, and remote-only counts. Confirmation seals only the named folder or Test Set identity and the exact mapped local scenarios shown. Remote-only tests never execute locally, and an empty selection is never widened to another scope. After confirmation, these runs use the same preflight, local execution, immutable run artifact, and publish workflow as Workspace runs. Specwright never starts a server-side Xray run.
 
 Before running, Specwright checks for unmapped scenarios, invalid or duplicate mappings, and known incompatible Xray test types. You can repair a mapping, run all flagged scenarios locally, or exclude flagged scenarios from the batch. An explicitly excluded or unmapped result is not sent to Xray. If you choose **Run all locally** and later choose Publish, review the publishable-result summary carefully: a result that still has a usable test mapping can remain eligible for publishing. To guarantee a flagged result stays local, exclude it or cancel the batch.
 

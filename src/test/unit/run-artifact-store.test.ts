@@ -188,6 +188,18 @@ describe("ArtifactBuilder", () => {
     expect(typeof art.id).toBe("string");
     expect(typeof art.createdAt).toBe("number");
   });
+
+  it("seals Test Set identity with only the exact mapped scenario refs", () => {
+    const selection: BatchSelection = {
+      kind: "test-set",
+      testSetKey: "SHOP-301",
+      scenarios: [{ filePath: "/ws/a.feature", line: 3, name: "S", kind: "scenario" }],
+    };
+    const artifact = new ArtifactBuilder(selection).seal("complete");
+
+    expect(artifact.selection).toEqual(selection);
+    expect(artifact.selection).not.toHaveProperty("memberKeys");
+  });
 });
 
 describe("RunArtifactStore", () => {

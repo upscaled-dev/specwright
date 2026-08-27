@@ -333,7 +333,7 @@ export class TraceabilitySubsystem implements vscode.Disposable {
       );
       this.model = model;
       this.adapterSubscriptions.push(model.onDidChange(() => this._onDidChangeSnapshot.fire()));
-      this.traceabilityView?.attach(model, adapter.label, this.groupingStore().get());
+      this.traceabilityView?.attach(model, adapter.label, this.groupingStore().get(), adapter.organization);
       this.panelAttached = true;
       // Grammar-driven tag diagnostics are offline (no connection needed) and rebuild with the panel
       // on any prefix/provider change, so they always lint against the active adapter's grammar.

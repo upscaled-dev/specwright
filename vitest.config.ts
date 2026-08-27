@@ -14,7 +14,7 @@ export default defineConfig({
     environment: "node",
     coverage: {
       provider: "v8",
-      reporter: ["text", "html"],
+      reporter: ["text", "html", "json-summary"],
       include: ["src/**/*.ts"],
       exclude: ["src/test/**", "src/extension.ts"],
       thresholds: {

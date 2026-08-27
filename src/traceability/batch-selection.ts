@@ -128,6 +128,21 @@ function mappedScenarioRefs(snapshot: TraceabilitySnapshot): ScenarioRef[] {
   return refs;
 }
 
+function organizationScenarios(
+  refs: readonly ScenarioRef[],
+  snapshot: TraceabilitySnapshot,
+  canonical: (ref: ScenarioRef) => ScenarioRef
+): ScenarioRef[] {
+  const linked = new Set(snapshot.links.map((link) => refIdentity(link.scenario)));
+  const seen = new Set<string>();
+  return refs.map(canonical).filter((ref) => {
+    const id = refIdentity(ref);
+    if (!linked.has(id) || seen.has(id)) {return false;}
+    seen.add(id);
+    return true;
+  });
+}
+
 function pathFilterInvocation(target: string, tagExpression?: string): BatchInvocation {
   return { kind: "path-filter", target, ...(tagExpression ? { tagExpression } : {}) };
 }
@@ -198,6 +213,11 @@ export function resolveBatchSelection(
         scenarios,
         invocations: scenarios.map((ref) => ({ kind: "scenario", ref })),
       };
+    }
+    case "repository-folder":
+    case "test-set": {
+      const scenarios = organizationScenarios(selection.scenarios, snapshot, canonical);
+      return { scenarios, invocations: scenarios.map((ref) => ({ kind: "scenario", ref })) };
     }
     case "test-plan-derived": {
       const planKeys = new Set(options.planTestKeys ?? []);

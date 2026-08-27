@@ -4,35 +4,42 @@ import {
   IntegrationAdapterError,
   type IntegrationAdapterCapability,
 } from "./adapter-contract";
-import type {
-  AdapterEvent,
-  AttachmentCapability,
-  AuthoredTest,
-  AddTestsToContainerResult,
-  AutomationBindingCapability,
-  AutomationBindingClassification,
-  ConnectionCapability,
-  ConnectionVerifyResult,
-  CoverageCapability,
-  DisposableLike,
-  ExternalRef,
-  KeyGrammar,
-  MetadataCapability,
-  NormalizedStatus,
-  ProjectDirectory,
-  ProjectDirectoryCapability,
-  PublishOutcome,
-  PublishTarget,
-  RemoteMetadataSnapshot,
-  RemoteSearchCapability,
-  RemoteSearchResult,
-  RequirementRef,
-  ResultPublishingCapability,
-  SyncProgress,
-  TestAuthoringCapability,
-  TestContainerTarget,
-  TestCaseMetadata,
-  TraceabilityAdapter,
+import {
+  ORGANIZATION_ITEM_LIMIT,
+  type AdapterEvent,
+  type AttachmentCapability,
+  type AuthoredTest,
+  type AddTestsToContainerResult,
+  type AutomationBindingCapability,
+  type AutomationBindingClassification,
+  type ConnectionCapability,
+  type ConnectionVerifyResult,
+  type CoverageCapability,
+  type DisposableLike,
+  type ExternalRef,
+  type KeyGrammar,
+  type MetadataCapability,
+  type OrganizationCapability,
+  type OrganizationSnapshot,
+  type RepositoryProject,
+  type NormalizedStatus,
+  type ProjectDirectory,
+  type ProjectDirectoryCapability,
+  type PublishOutcome,
+  type PublishTarget,
+  type RemoteMetadataSnapshot,
+  type RemoteTestSet,
+  type RemoteSearchCapability,
+  type RemoteSearchResult,
+  type RequirementRef,
+  type ResultPublishingCapability,
+  type SyncProgress,
+  type TestAuthoringCapability,
+  type TestContainerTarget,
+  type TestCaseMetadata,
+  type TestSetRefreshResult,
+  type TestSetProject,
+  type TraceabilityAdapter,
 } from "./contracts";
 
 interface AdapterState {
@@ -218,11 +225,13 @@ function normalizedStatus(value: unknown, budget: ValidationBudget): value is No
 function testMetadata(value: unknown, budget: ValidationBudget): value is TestCaseMetadata {
   if (!object(value, budget) || !nonEmptyText(value["key"], budget)) {return false;}
   const testType = value["testType"];
+  const folder = value["repositoryFolder"];
   return optional(value["issueId"], budget, text)
     && optional(value["summary"], budget, text)
     && optional(value["status"], budget, normalizedStatus)
     && optional(value["gherkin"], budget, text)
     && optional(value["coverageKeys"], budget, texts)
+    && (folder === undefined || (object(folder, budget) && text(folder["name"], budget) && text(folder["path"], budget)))
     && (testType === undefined
       || (object(testType, budget) && text(testType["name"], budget) && text(testType["kind"], budget)));
 }
@@ -287,6 +296,118 @@ function directory(value: unknown, budget: ValidationBudget): value is ProjectDi
       object(project, nested) && text(project["key"], nested) && text(project["name"], nested)
     )
     && boolean(value["truncated"], budget);
+}
+
+function testSet(value: unknown, budget: ValidationBudget): boolean {
+  if (!(object(value, budget)
+    && nonEmptyText(value["key"], budget)
+    && nonEmptyText(value["issueId"], budget)
+    && optional(value["summary"], budget, text)
+    && optional(value["description"], budget, text)
+    && budget.array(value["members"], (member, nested): member is { key: string; summary?: string } =>
+      object(member, nested) && nonEmptyText(member["key"], nested) && optional(member["summary"], nested, text)
+    )
+    && nonNegativeInteger(value["remoteMemberCount"], budget)
+    && boolean(value["membershipComplete"], budget)
+    && boolean(value["truncated"], budget)
+    && optional(value["membersLastKnown"], budget, boolean)
+    && texts(value["errors"], budget))) {
+    return false;
+  }
+  const members = value["members"] as readonly { readonly key: string }[];
+  const remote = value["remoteMemberCount"] as number;
+  const complete = value["membershipComplete"] as boolean;
+  const truncated = value["truncated"] as boolean;
+  const errors = value["errors"] as readonly string[];
+  const lastKnown = value["membersLastKnown"] as boolean | undefined;
+  const unique = new Set(members.map((member) => member.key));
+  return unique.size === members.length
+    && (remote >= members.length || lastKnown === true)
+    && (!complete || remote === members.length && !truncated)
+    && (!truncated || !complete && (remote > members.length || lastKnown === true))
+    && (complete || truncated || errors.length > 0)
+    && (!lastKnown || !complete);
+}
+
+function nonNegativeInteger(value: unknown, budget: ValidationBudget): value is number {
+  return budget.item() && Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function organizationSnapshot(value: unknown, budget: ValidationBudget): value is OrganizationSnapshot {
+  if (!(object(value, budget)
+    && budget.array(value["repositories"], (project, nested): project is RepositoryProject => {
+      if (!(object(project, nested)
+        && nonEmptyText(project["projectKey"], nested)
+        && nested.array(project["tests"], testMetadata)
+        && boolean(project["complete"], nested)
+        && boolean(project["truncated"], nested)
+        && texts(project["errors"], nested))) {return false;}
+      return !(project["complete"] && project["truncated"]);
+    })
+    && budget.array(value["testSetProjects"], (project, nested): project is TestSetProject => {
+      if (!(object(project, nested)
+        && nonEmptyText(project["projectKey"], nested)
+        && nested.array(project["testSets"], (set, inner): set is RemoteTestSet => testSet(set, inner))
+        && boolean(project["complete"], nested)
+        && boolean(project["truncated"], nested)
+        && texts(project["errors"], nested))) {return false;}
+      return !(project["complete"] && project["truncated"]);
+    })
+    && optional(value["syncedAt"], budget, finiteNumber)
+    && boolean(value["stale"], budget)
+    && nonNegativeInteger(value["omittedTestSetProjectCount"], budget)
+    && nonNegativeInteger(value["omittedRepositoryProjectCount"], budget))) {
+    return false;
+  }
+  const repositories = value["repositories"] as readonly RepositoryProject[];
+  const testSetProjects = value["testSetProjects"] as readonly TestSetProject[];
+  const repositoryKeys = repositories.map((project) => project.projectKey);
+  const testSetProjectKeys = testSetProjects.map((project) => project.projectKey);
+  const repositoryTestKeys = repositories.flatMap((project) => project.tests.map((test) => test.key));
+  const testSetKeys = testSetProjects.flatMap((project) => project.testSets.map((set) => set.key));
+  const identitiesUnique = new Set(repositoryKeys).size === repositoryKeys.length
+    && new Set(testSetProjectKeys).size === testSetProjectKeys.length
+    && new Set(repositoryTestKeys).size === repositoryTestKeys.length
+    && new Set(testSetKeys).size === testSetKeys.length;
+  const items = repositories.reduce((total, project) => total + 1 + project.tests.length, 0)
+    + testSetProjects.reduce((total, project) => total + 1 + project.testSets.reduce((sets, set) => sets + 1 + set.members.length, 0), 0);
+  return identitiesUnique && items <= ORGANIZATION_ITEM_LIMIT;
+}
+
+function refreshResult(value: unknown, budget: ValidationBudget): value is TestSetRefreshResult {
+  if (!(object(value, budget)
+    && text(value["status"], budget)
+    && ["complete", "incomplete", "failed"].includes(value["status"])
+    && optional(value["testSet"], budget, (set, nested): set is RemoteTestSet => testSet(set, nested)))) {
+    return false;
+  }
+  const set = value["testSet"] as RemoteTestSet | undefined;
+  return value["status"] !== "complete" || set?.membershipComplete === true && !set.truncated;
+}
+
+function organizationOf(
+  adapterId: string,
+  state: AdapterState,
+  source: OrganizationCapability,
+  reporter: BoundaryReporter
+): OrganizationCapability {
+  const read = source.snapshot.bind(source);
+  const sync = source.sync.bind(source);
+  const refresh = source.refreshTestSet.bind(source);
+  const changes = eventOf(adapterId, state, "organization.onDidChange", source.onDidChange, voidEvent, reporter);
+  return {
+    onDidChange: (listener) => changes(() => {
+      checked(adapterId, state, "organization.onDidChange snapshot", read, organizationSnapshot);
+      listener();
+    }),
+    snapshot: () => checked(adapterId, state, "organization.snapshot response", read, organizationSnapshot),
+    sync: (projects, signal) => completed(
+      adapterId, state, "organization.sync", () => sync(projects, signalFor(state, signal))
+    ),
+    refreshTestSet: (key, signal) => accepted(
+      adapterId, state, "organization.refreshTestSet", () => refresh(key, signalFor(state, signal)), refreshResult
+    ),
+  };
 }
 
 function target(value: unknown, budget: ValidationBudget): value is PublishTarget {
@@ -631,6 +752,7 @@ const REQUIRED_CAPABILITY_MEMBERS: Readonly<Record<IntegrationAdapterCapability,
   automationBinding: ["classify", "bind"],
   remoteSearch: ["search", "mergeKeys"],
   projectDirectory: ["cached", "list"],
+  organization: ["onDidChange", "snapshot", "sync", "refreshTestSet"],
   testAuthoring: ["createTest"],
   resultPublishing: ["searchTargets", "publish"],
   attachments: ["attach"],
@@ -720,6 +842,7 @@ export function validatedAdapter(
     automationBinding: adapter.automationBinding ? bindingOf(adapterId, state, adapter.automationBinding) : undefined,
     remoteSearch: adapter.remoteSearch ? searchOf(adapterId, state, adapter.remoteSearch) : undefined,
     projectDirectory: adapter.projectDirectory ? projectsOf(adapterId, state, adapter.projectDirectory) : undefined,
+    organization: adapter.organization ? organizationOf(adapterId, state, adapter.organization, reporter) : undefined,
     testAuthoring: adapter.testAuthoring ? authoringOf(adapterId, state, adapter.testAuthoring) : undefined,
     resultPublishing: adapter.resultPublishing ? publishingOf(adapterId, state, adapter.resultPublishing) : undefined,
     attachments: adapter.attachments ? attachmentsOf(adapterId, state, adapter.attachments) : undefined,

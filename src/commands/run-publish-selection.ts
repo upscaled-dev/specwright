@@ -18,6 +18,10 @@ export function treeBatchSelection(
   const nodes = [args[0], ...(Array.isArray(args[1]) ? args[1] : [])]
     .filter((node, index, all) => node !== undefined && all.indexOf(node) === index);
   const only = nodes.length === 1 ? nodes[0] as { kind?: unknown; filePath?: unknown } : undefined;
+  const organization = only as { kind?: unknown; selection?: unknown } | undefined;
+  if (organization?.kind === "organizationRun" && isOrganizationSelection(organization.selection)) {
+    return { selection: organization.selection, skipped: 0 };
+  }
   if (only?.kind === "file" && typeof only.filePath === "string") {
     return { selection: { kind: "feature", filePath: only.filePath }, skipped: 0 };
   }
@@ -52,6 +56,25 @@ export function treeBatchSelection(
     return true;
   });
   return { selection: batchSelectionFromScenarios(scenarios), skipped: skipped.size };
+}
+
+function isOrganizationSelection(value: unknown): value is Extract<BatchSelection, { kind: "repository-folder" | "test-set" }> {
+  if (typeof value !== "object" || value === null) {return false;}
+  const selection = value as { kind?: unknown; projectKey?: unknown; folderPath?: unknown; testSetKey?: unknown; scenarios?: unknown };
+  const identity = selection.kind === "repository-folder"
+    ? typeof selection.projectKey === "string" && typeof selection.folderPath === "string"
+    : selection.kind === "test-set" && typeof selection.testSetKey === "string";
+  return identity
+    && Array.isArray(selection.scenarios)
+    && selection.scenarios.length > 0
+    && selection.scenarios.every((scenario) => {
+      if (typeof scenario !== "object" || scenario === null) {return false;}
+      const ref = scenario as { filePath?: unknown; line?: unknown; name?: unknown; kind?: unknown };
+      return typeof ref.filePath === "string"
+        && Number.isSafeInteger(ref.line)
+        && typeof ref.name === "string"
+        && ["scenario", "outline", "examplesBlock"].includes(String(ref.kind));
+    });
 }
 
 export function executionTargets(invocations: readonly BatchInvocation[]): RunTarget[] {

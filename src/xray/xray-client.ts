@@ -65,6 +65,7 @@ export interface XrayTestRecord {
   // Xray's `testType { name kind }` (kind ∈ Gherkin/Steps/Unstructured). The automation-binding
   // hook reads `kind` to classify preflight compatibility (Gherkin-only).
   readonly testType?: { readonly name: string; readonly kind: string } | undefined;
+  readonly repositoryFolder?: { readonly name: string; readonly path: string } | undefined;
 }
 
 // The result of fetching one or more scopes. `complete` is false when any page failed or pagination
@@ -233,6 +234,7 @@ interface RawTest {
   gherkin?: unknown;
   status?: { name?: unknown; color?: unknown } | null;
   testType?: { name?: unknown; kind?: unknown } | null;
+  folder?: { name?: unknown; path?: unknown } | null;
   jira?: { key?: unknown; summary?: unknown } | null;
   coverableIssues?: { results?: Array<{ jira?: { key?: unknown } | null } | null> | null } | null;
 }
@@ -250,6 +252,7 @@ function toTestRecord(raw: RawTest | null): XrayTestRecord | undefined {
     gherkin?: string;
     coverageKeys?: string[];
     testType?: { name: string; kind: string };
+    repositoryFolder?: { name: string; path: string };
   } = { key };
   const issueId = readString(raw?.issueId);
   if (issueId !== undefined) {
@@ -266,6 +269,10 @@ function toTestRecord(raw: RawTest | null): XrayTestRecord | undefined {
   const testTypeKind = readString(raw?.testType?.kind);
   if (testTypeKind !== undefined) {
     record.testType = { name: readString(raw?.testType?.name) ?? testTypeKind, kind: testTypeKind };
+  }
+  const folderPath = readString(raw?.folder?.path);
+  if (folderPath !== undefined) {
+    record.repositoryFolder = { name: readString(raw?.folder?.name) ?? folderPath, path: folderPath };
   }
   const gherkin = readString(raw?.gherkin);
   if (gherkin !== undefined) {
@@ -320,7 +327,7 @@ function pageTermination(jql: string, start: number, page: TestPage): PageTermin
 }
 
 function testsQuery(jql: string, start: number): string {
-  return `{ getTests(jql: ${JSON.stringify(jql)}, limit: ${PAGE_LIMIT}, start: ${start}) { total results { issueId gherkin testType { name kind } status { name color final } jira(fields: ["key", "summary"]) coverableIssues(limit: ${COVERABLE_LIMIT}) { results { jira(fields: ["key"]) } } } } }`;
+  return `{ getTests(jql: ${JSON.stringify(jql)}, limit: ${PAGE_LIMIT}, start: ${start}) { total results { issueId gherkin folder { name path } testType { name kind } status { name color final } jira(fields: ["key", "summary"]) coverableIssues(limit: ${COVERABLE_LIMIT}) { results { jira(fields: ["key"]) } } } } }`;
 }
 
 export interface XrayCreateTestSpec {
@@ -456,6 +463,12 @@ export class XrayClient {
       }
     }
     return outcome;
+  }
+
+  // Focused provider extensions can share the authenticated, retried, timeout-bounded read path
+  // without growing this transport with their query and parser details.
+  public readGraphql(query: string, signal?: AbortSignal): Promise<unknown> {
+    return this.graphql(query, operationIdentity("xray.graphql.read"), signal, true);
   }
 
   public fetchProjectCatalogue(

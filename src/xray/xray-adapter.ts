@@ -7,6 +7,7 @@ import {
   ExternalRef,
   KeyGrammar,
   MetadataCapability,
+  OrganizationCapability,
   NotSupportedError,
   ProjectDirectoryCapability,
   RemoteSearchCapability,
@@ -106,6 +107,7 @@ interface XrayAdapterCapabilities {
   resultPublishing?: ResultPublishingCapability;
   testAuthoring?: TestAuthoringCapability;
   projectDirectory?: ProjectDirectoryCapability;
+  organization?: OrganizationCapability;
 }
 
 export class XrayAdapter implements TraceabilityAdapter {
@@ -115,6 +117,7 @@ export class XrayAdapter implements TraceabilityAdapter {
   public readonly metadata: MetadataCapability | undefined;
   public readonly remoteSearch: RemoteSearchCapability | undefined;
   public readonly projectDirectory: ProjectDirectoryCapability | undefined;
+  public readonly organization: OrganizationCapability | undefined;
   public readonly testAuthoring: TestAuthoringCapability | undefined;
   public readonly resultPublishing: ResultPublishingCapability | undefined;
   // Offline classification is always available (no network); it degrades to `unknown` on a partial
@@ -134,6 +137,7 @@ export class XrayAdapter implements TraceabilityAdapter {
     this.resultPublishing = capabilities.resultPublishing;
     this.testAuthoring = capabilities.testAuthoring;
     this.projectDirectory = capabilities.projectDirectory;
+    this.organization = capabilities.organization;
   }
 
   public get keyGrammar(): KeyGrammar {
@@ -154,6 +158,9 @@ export class XrayAdapter implements TraceabilityAdapter {
   }
 
   public async dispose(): Promise<void> {
-    await (this.metadata as { dispose?: () => void | Promise<void> } | undefined)?.dispose?.();
+    const resources = new Set<unknown>([this.metadata, this.organization]);
+    await Promise.all([...resources].map((resource) =>
+      Promise.resolve((resource as { dispose?: () => void | Promise<void> } | undefined)?.dispose?.())
+    ));
   }
 }

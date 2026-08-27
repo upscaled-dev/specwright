@@ -130,11 +130,19 @@ export class TraceabilityPublishCommands {
         `${resolved.skipped} untraced ${plural(resolved.skipped, "scenario was", "scenarios were")} skipped.`
       );
     }
-    if (resolved.selection.kind === "multi-select" && resolved.selection.scenarios.length === 0) {
+    const selection = resolved.selection;
+    if (selection.kind === "multi-select" && selection.scenarios.length === 0) {
       vscode.window.showInformationMessage("No mapped scenarios were selected. Nothing was run.");
       return;
     }
-    await this.runAndPublishSelection(resolved.selection, "traceability-tree", signal);
+    // A sealed Repository folder or Test Set carries the refs it saw; the mappings they name can be
+    // gone by the time the user confirms, and an empty batch would still seal a run artifact.
+    if ((selection.kind === "repository-folder" || selection.kind === "test-set")
+      && resolveBatchSelection(selection, snapshot).scenarios.length === 0) {
+      vscode.window.showInformationMessage("This selection has no scenarios mapped in this workspace. Nothing was run.");
+      return;
+    }
+    await this.runAndPublishSelection(selection, "traceability-tree", signal);
   }
 
   public async runAndPublishSelection(

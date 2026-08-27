@@ -18,6 +18,7 @@ export const INTEGRATION_ADAPTER_CAPABILITIES = [
   "automationBinding",
   "remoteSearch",
   "projectDirectory",
+  "organization",
   "testAuthoring",
   "resultPublishing",
   "attachments",

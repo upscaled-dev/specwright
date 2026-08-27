@@ -1,8 +1,11 @@
 import {
   parseTraceabilityHostEnvelope,
+  TRACEABILITY_SELECTION_LIMIT,
   TRACEABILITY_VIEW_PROTOCOL_VERSION,
   type TraceabilityWireRow,
 } from "./traceability-view-protocol";
+import { createTraceabilityPreviewDialog } from "./traceability-preview-dialog";
+import { installTraceabilityTabs, type TraceabilityViewTab } from "./traceability-view-tabs";
 import {
   pageSize,
   revealIndex,
@@ -11,12 +14,19 @@ import {
   visibleWindow,
 } from "./traceability-tree-navigation";
 
-const SELECTION_LIMIT = 256;
+const SELECTION_LIMIT = TRACEABILITY_SELECTION_LIMIT;
 const FILTER_LIMIT = 4_096;
 const COLLAPSED_ROOT_LIMIT = 512;
 const filter = document.getElementById("filter") as HTMLInputElement;
 const tree = document.getElementById("tree") as HTMLElement;
 const status = document.getElementById("status") as HTMLElement | null;
+const tabs = [...document.querySelectorAll<HTMLButtonElement>("#tabs [role=tab]")];
+const previewDialog = document.getElementById("preview") as HTMLDialogElement;
+const previewTitle = document.getElementById("preview-title") as HTMLElement;
+const previewSummary = document.getElementById("preview-summary") as HTMLElement;
+const previewMembers = document.getElementById("preview-members") as HTMLElement;
+const cancelPreview = document.getElementById("cancel-preview") as HTMLButtonElement;
+const confirmPreview = document.getElementById("confirm-preview") as HTMLButtonElement;
 const vscode = acquireVsCodeApi();
 const session = document.body.dataset["session"] ?? "";
 
@@ -37,8 +47,13 @@ let siblingPositionById = new Map<string, number>();
 let siblingCountById = new Map<string, number>();
 let rootIds = new Set<string>();
 let filterPersistTimer: ReturnType<typeof setTimeout> | undefined;
+// Focus and the range anchor belong to the tab that owns their row; the selection spans all tabs.
+const focusByView = new Map<TraceabilityViewTab, string>();
+const anchorByView = new Map<TraceabilityViewTab, string>();
 
 const restored = vscode.getState();
+const restoredView = restored?.["view"];
+let activeView: TraceabilityViewTab = restoredView === "repository" || restoredView === "test-sets" ? restoredView : "workspace";
 let query = typeof restored?.["filter"] === "string" ? restored["filter"].slice(0, FILTER_LIMIT) : "";
 const expanded = new Set<string>(strings(restored?.["expanded"]));
 const collapsedRoots = new Set<string>(strings(restored?.["collapsedRoots"]).slice(-COLLAPSED_ROOT_LIMIT));
@@ -57,8 +72,19 @@ function post(body: unknown): void {
   }
 }
 
+const preview = createTraceabilityPreviewDialog({
+  dialog: previewDialog,
+  title: previewTitle,
+  summary: previewSummary,
+  members: previewMembers,
+  cancel: cancelPreview,
+  confirm: confirmPreview,
+  post,
+  generation: () => generation,
+});
+
 function persist(): void {
-  vscode.setState({ filter: query, expanded: [...expanded], collapsedRoots: [...collapsedRoots], selected: [...selected] });
+  vscode.setState({ view: activeView, filter: query, expanded: [...expanded], collapsedRoots: [...collapsedRoots], selected: [...selected] });
 }
 
 function persistFilter(): void {
@@ -76,11 +102,13 @@ function isExpanded(id: string): boolean {
 }
 
 function refreshVisible(): void {
-  rowById = new Map(rows.map((row) => [row.id, row]));
+  const viewRows = rows.filter((row) => (row.view ?? "workspace") === activeView);
+  rowById = new Map(viewRows.map((row) => [row.id, row]));
   depthById = new Map();
-  for (const row of rows) {
+  for (const row of viewRows) {
     depthById.set(row.id, row.parentId ? (depthById.get(row.parentId) ?? 0) + 1 : 1);
   }
+  rootIds = new Set(viewRows.filter((row) => row.expandable && row.parentId === undefined).map((row) => row.id));
 
   if (state !== "ready") {
     shown = [];
@@ -89,7 +117,7 @@ function refreshVisible(): void {
 
   const needle = query.trim().toLocaleLowerCase();
   const matches = new Set<string>();
-  for (const row of rows) {
+  for (const row of viewRows) {
     const content = `${row.label} ${row.description ?? ""} ${row.tooltip ?? ""}`.toLocaleLowerCase();
     if (!needle || content.includes(needle)) {
       let current: TraceabilityWireRow | undefined = row;
@@ -100,7 +128,7 @@ function refreshVisible(): void {
     }
   }
 
-  shown = rows.filter((row) => {
+  shown = viewRows.filter((row) => {
     if (needle) {
       return matches.has(row.id);
     }
@@ -136,8 +164,9 @@ function refreshVisible(): void {
     }
   }
 
-  selected = new Set([...selected].filter((id) => rowById.has(id)).slice(0, SELECTION_LIMIT));
-  if (selectionAnchorId && !rowById.has(selectionAnchorId)) {
+  const known = new Set(rows.map((row) => row.id));
+  selected = new Set([...selected].filter((id) => known.has(id)).slice(0, SELECTION_LIMIT));
+  if (selectionAnchorId && !known.has(selectionAnchorId)) {
     selectionAnchorId = selected.values().next().value;
   }
   if (!shown.some((row) => row.id === focusId)) {
@@ -147,6 +176,22 @@ function refreshVisible(): void {
     selectionAnchorId = focusId;
   }
 }
+
+function selectView(view: TraceabilityViewTab): void {
+  if (view !== activeView) {
+    if (focusId) {focusByView.set(activeView, focusId);}
+    if (selectionAnchorId) {anchorByView.set(activeView, selectionAnchorId);}
+    activeView = view;
+    focusId = focusByView.get(view);
+    selectionAnchorId = anchorByView.get(view);
+  }
+  filter.placeholder = activeView === "workspace" ? "Filter workspace" : activeView === "repository" ? "Filter repository" : "Filter Test Sets";
+  refreshVisible();
+  tree.scrollTop = 0;
+  persist();
+  render();
+}
+installTraceabilityTabs(tabs, activeView, selectView);
 
 function defaultAction(row: TraceabilityWireRow): string | undefined {
   return row.defaultAction;
@@ -354,7 +399,7 @@ function select(id: string, event: MouseEvent): boolean {
     } else if (selected.size < SELECTION_LIMIT) {
       selected.add(id);
     } else {
-      announce("Selection is limited to 256 rows.");
+      announce(`Selection is limited to ${SELECTION_LIMIT} rows.`);
     }
     selectionAnchorId = id;
   } else {
@@ -438,7 +483,7 @@ function keydown(event: KeyboardEvent, row: TraceabilityWireRow): void {
     } else if (selected.size < SELECTION_LIMIT) {
       selected.add(row.id);
     } else {
-      announce("Selection is limited to 256 rows.");
+      announce(`Selection is limited to ${SELECTION_LIMIT} rows.`);
     }
     selectionAnchorId = row.id;
     persist();
@@ -499,12 +544,17 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     if (body.generation <= generation) {
       return;
     }
+    preview.close();
     incoming = [];
     incomingGeneration = body.generation;
     incomingTotal = body.total;
     incomingState = body.state;
     tree.setAttribute("aria-busy", "true");
     tree.setAttribute("aria-disabled", "true");
+    return;
+  }
+  if (body.type === "preview") {
+    if (body.generation === generation && incoming === undefined) {preview.show(body.preview);}
     return;
   }
   if (body.type === "chunk") {
@@ -526,15 +576,14 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     tree.removeAttribute("aria-disabled");
     if (state === "ready") {
       const currentIds = new Set(rows.map((row) => row.id));
-      rootIds = new Set(rows.filter((row) => row.expandable && row.parentId === undefined).map((row) => row.id));
       for (const id of expanded) {
         if (!currentIds.has(id)) {
           expanded.delete(id);
         }
       }
-      for (const id of rootIds) { expanded.delete(id); }
     }
     refreshVisible();
+    for (const id of rootIds) {expanded.delete(id);}
     persist();
     render();
     return;

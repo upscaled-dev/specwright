@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
 import * as vscode from "vscode";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { buildBoardViewModel } from "../../traceability/board-data";
@@ -21,6 +21,20 @@ import { TraceabilityViewProvider } from "../../traceability/traceability-view-p
 import { Logger } from "../../utils/logger";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { TRACEABILITY_VIEW_PROTOCOL_VERSION, type TraceabilityHostBody, type TraceabilityWireRow } from "../../webview/traceability-view-protocol";
+import { XrayClient, type FetchLike } from "../../xray/xray-client";
+import { XrayMetadataCapability } from "../../xray/xray-metadata";
+import { XrayMetadataCache } from "../../xray/xray-metadata-cache";
+import {
+  XrayOrganizationCache,
+  XrayOrganizationCapability,
+  XrayOrganizationReader,
+} from "../../xray/xray-organization";
+import type { ExtensionConfig } from "../../core/extension-config";
+import { TraceabilityPublishCommands, type TraceabilityPublishCommandDeps } from "../../commands/traceability-publish-commands";
+import type { ExecutionGateway, RunIntent } from "../../core/run-contracts";
+import { WorkspaceTrust } from "../../core/workspace-trust";
+import { ArtifactBuilder, RunArtifactStore } from "../../traceability/run-artifact-store";
+import { executionClientContext } from "../../ui/execution-client-context";
 
 const OPEN = { id: "open", label: "Open", icon: "go-to-file" } as const;
 const OPEN_REMOTE = { id: "open", label: "Open in tracker", icon: "link-external" } as const;
@@ -118,7 +132,243 @@ function focusCommittedGeneration(provider: TraceabilityViewProvider): Promise<v
   });
 }
 
+function memoryMemento(): vscode.Memento {
+  const values = new Map<string, unknown>();
+  return {
+    get: <T>(key: string): T | undefined => values.get(key) as T | undefined,
+    update: (key: string, value: unknown): Promise<void> => {values.set(key, value); return Promise.resolve();},
+    keys: (): readonly string[] => [...values.keys()],
+  } as unknown as vscode.Memento;
+}
+
+function jsonResponse(body: unknown): Response {
+  return { status: 200, ok: true, text: () => Promise.resolve(JSON.stringify(body)) } as Response;
+}
+
+function mutation(dom: JSDOM, ready: () => boolean): Promise<void> {
+  if (ready()) {return Promise.resolve();}
+  return new Promise((resolve) => {
+    const observer = new dom.window.MutationObserver(() => {
+      if (ready()) {observer.disconnect(); resolve();}
+    });
+    observer.observe(dom.window.document, { attributes: true, childList: true, subtree: true });
+  });
+}
+
 describe("traceability view client", () => {
+  it("restores the active tab, supports roving keyboard navigation, and closes stale previews on a new generation", async () => {
+    const view = await rig({ view: "test-sets" });
+    const tabs = [...view.dom.window.document.querySelectorAll<HTMLButtonElement>("[role=tab]")];
+    const selected = (): HTMLButtonElement | undefined => tabs.find((tab) => tab.getAttribute("aria-selected") === "true");
+    expect(selected()?.textContent).toBe("Test Sets");
+    expect(selected()?.tabIndex).toBe(0);
+    expect(tabs.filter((tab) => tab.tabIndex === 0)).toHaveLength(1);
+
+    selected()?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    expect(selected()?.textContent).toBe("Repository");
+    expect(view.dom.window.document.activeElement?.textContent).toBe("Repository");
+    selected()?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    expect(selected()?.textContent).toBe("Workspace");
+    selected()?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    expect(selected()?.textContent).toBe("Test Sets");
+
+    view.send({
+      type: "preview", generation: 0,
+      preview: { previewId: "old", title: "Old preview", remoteMembers: 1, runnable: 1, remoteOnly: 0, members: [{ label: "SHOP-1", mapped: true }], displayTruncated: false },
+    });
+    expect(view.dom.window.document.getElementById("preview")?.hasAttribute("open")).toBe(true);
+    view.dom.window.document.getElementById("cancel-preview")?.click();
+    expect(view.messages.at(-1)).toMatchObject({ body: { type: "cancel-preview", previewId: "old" } });
+    expect(view.dom.window.document.getElementById("preview")?.hasAttribute("open")).toBe(false);
+    view.send({
+      type: "preview", generation: 0,
+      preview: { previewId: "escape", title: "Escape preview", remoteMembers: 1, runnable: 1, remoteOnly: 0, members: [{ label: "SHOP-1", mapped: true }], displayTruncated: false },
+    });
+    view.dom.window.document.getElementById("preview")?.dispatchEvent(new view.dom.window.Event("cancel", { cancelable: true }));
+    expect(view.messages.at(-1)).toMatchObject({ body: { type: "cancel-preview", previewId: "escape" } });
+    expect(view.dom.window.document.getElementById("preview")?.hasAttribute("open")).toBe(false);
+    view.send({
+      type: "preview", generation: 0,
+      preview: { previewId: "stale", title: "Stale preview", remoteMembers: 1, runnable: 1, remoteOnly: 0, members: [{ label: "SHOP-1", mapped: true }], displayTruncated: false },
+    });
+    view.send({ type: "begin", generation: 1, state: "ready", total: 0 });
+    expect(view.dom.window.document.getElementById("preview")?.hasAttribute("open")).toBe(false);
+  });
+
+  it("renders and confirms exact SHOP-301 and nested repository runs through the production Xray and bundled-client path", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "traceability-organization-client-"));
+    const feature = path.join(root, "checkout.feature");
+    fs.writeFileSync(feature, [
+      "Feature: Checkout",
+      "", "@TEST_SHOP-101", "Scenario: Add item to cart", "  Given an item",
+      "", "@TEST_SHOP-117", "Scenario: Checkout as guest", "  Given a guest",
+      "", "@TEST_SHOP-124", "Scenario: Pay with saved card", "  Given a saved card",
+    ].join("\n"), "utf8");
+    const remoteTests = [
+      ["SHOP-101", "Add item to cart"],
+      ["SHOP-117", "Checkout as guest"],
+      ["SHOP-124", "Pay with saved card"],
+      ["SHOP-130", "Payment confirmation email"],
+    ] as const;
+    const fetchImpl: FetchLike = (_url, init) => {
+      if (!init.body || !String(init.body).includes("query")) {return Promise.resolve(jsonResponse("token"));}
+      const query = (JSON.parse(String(init.body)) as { query: string }).query;
+      if (query.includes("getTestSets")) {
+        return Promise.resolve(jsonResponse({ data: { getTestSets: { total: 1, results: [{
+          issueId: "301", jira: { key: "SHOP-301", summary: "Checkout smoke", description: "Critical checkout path" },
+          tests: { total: 4, results: remoteTests.map(([key, summary]) => ({ jira: { key, summary } })) },
+        }] } } }));
+      }
+      return Promise.resolve(jsonResponse({ data: { getTests: { total: 4, results: remoteTests.map(([key, summary]) => ({
+        issueId: `${key}-id`, jira: { key, summary }, folder: { name: "Smoke", path: "/Checkout/Smoke" },
+        testType: { name: "Cucumber", kind: "Gherkin" }, status: { name: "TODO" }, coverableIssues: { results: [] },
+      })) } } }));
+    };
+    const logger = Logger.create();
+    const client = new XrayClient({
+      region: "global", logger, credentials: () => Promise.resolve({ clientId: "account-a", clientSecret: "secret" }), fetchImpl,
+      sleep: () => Promise.resolve(), random: () => 0,
+    });
+    const state = memoryMemento();
+    const account = (): Promise<string> => Promise.resolve("account-a");
+    const identity = { endpoint: "xray.cloud.getxray.app", account, workspaceId: "ws" };
+    const changed = new vscode.EventEmitter<void>();
+    const config = { xrayCacheTtlMinutes: 15, xraySyncProjectKeys: ["SHOP"] } as unknown as ExtensionConfig;
+    const metadata = new XrayMetadataCapability({
+      client, cache: new XrayMetadataCache(state, identity), config, logger, account,
+      onCredentialsChange: changed.event, listProjects: () => Promise.resolve(undefined),
+    });
+    const reader = new XrayOrganizationReader(client);
+    const organizationCache = new XrayOrganizationCache(state, identity);
+    const organization = new XrayOrganizationCapability({
+      reader, metadata, cache: organizationCache, config, logger, account,
+      onCredentialsChange: changed.event, projectOf: (key) => key.replace(/-\d+$/u, ""),
+    });
+    const discovery = { discoverTestFiles: () => Promise.resolve([feature]), dispose: () => undefined } as unknown as TestDiscoveryManager;
+    const adapter: TraceabilityAdapter = {
+      id: "xray", label: "Xray",
+      keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: /^[A-Z]+-\d+$/u, canonicalizeKey: (key) => key.toUpperCase(), projectOf: (key) => key.replace(/-\d+$/u, "") },
+      browseUrl: () => undefined, metadata, organization,
+    };
+    const model = new TraceabilityModel(FeatureParser.create(logger), discovery, PlaywrightJsonParser.create(logger), adapter, new RunResultStore(), logger);
+    let cachedOrganization: XrayOrganizationCapability | undefined;
+    try {
+      await metadata.sync({ projectKeys: ["SHOP"] });
+      await organization.sync(["SHOP"]);
+      organization.dispose();
+      cachedOrganization = new XrayOrganizationCapability({
+        reader, metadata, cache: organizationCache, config, logger, account,
+        onCredentialsChange: changed.event, projectOf: (key) => key.replace(/-\d+$/u, ""),
+      });
+      await new Promise<void>((resolve) => {
+        if (cachedOrganization?.snapshot().testSetProjects.length) {resolve(); return;}
+        const subscription = cachedOrganization?.onDidChange(() => {subscription?.dispose(); resolve();});
+      });
+      await model.rebuild();
+      const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), logger);
+      provider.attach(model, "Xray", "test", cachedOrganization);
+      provider.setConnected(true);
+      const mounted = await mountProviderClient(provider);
+      await focusCommittedGeneration(provider);
+      const document = mounted.dom.window.document;
+      document.querySelector<HTMLButtonElement>('[data-view="test-sets"]')?.click();
+      expect(document.getElementById("tree")?.textContent).toContain("SHOP-301");
+      expect(document.getElementById("tree")?.textContent).toContain("4 remote members · 3 runnable locally · 1 remote only");
+
+      const intents: RunIntent[] = [];
+      const artifacts = [] as ReturnType<ArtifactBuilder["seal"]>[];
+      const artifactStore = new RunArtifactStore(memoryMemento(), logger);
+      const identity = { engine: "core-client" as const, schemaProfile: "acceptance" };
+      const run = vi.fn((prepared: { intent: RunIntent }) => {
+        const context = executionClientContext(prepared.intent);
+        if (!context) {throw new Error("Execution client context was not preserved.");}
+        const artifact = new ArtifactBuilder(context.selection).seal("complete");
+        artifactStore.append(artifact);
+        artifacts.push(artifact);
+        return Promise.resolve({ identity, state: "complete" as const, results: [], output: "", passed: 0, failed: 0, durationMs: 1, artifactId: artifact.id });
+      });
+      const gateway: ExecutionGateway = {
+        running: false,
+        diagnose: () => Promise.resolve([]),
+        discover: () => Promise.resolve({ cases: [], diagnostics: [] }),
+        prepare: (intent) => {intents.push(intent); return Promise.resolve({ operationId: `run-${intents.length}`, identity, intent });},
+        run,
+        debug: () => Promise.reject(new Error("not used")),
+        cancel: () => Promise.resolve(), dispose: () => undefined,
+      };
+      const subsystem = {
+        getSnapshot: () => model.snapshot,
+        getActiveAdapter: () => adapter,
+        rebuildNow: () => Promise.resolve(),
+      };
+      const publishCommands = new TraceabilityPublishCommands(logger, {
+        config, fallbackAdapter: () => adapter, subsystem: () => subsystem,
+        board: () => undefined, projectUniverse: () => [], rebuild: () => Promise.resolve(true),
+        linkScenarioForRef: () => Promise.resolve(), credentials: () => Promise.resolve(undefined),
+        jiraCredentials: () => Promise.resolve(undefined), hasJiraCredentials: () => Promise.resolve(false),
+        publishLedger: () => undefined, siteUrl: () => "", idleEvent: changed.event,
+        runArtifactStore: artifactStore, executionGateway: gateway, featureParser: FeatureParser.create(logger),
+        workspaceTrust: new WorkspaceTrust(() => true), attachmentSpoolRoot: () => root,
+        mutation: <T>(run: () => Promise<T>) => run(),
+      } as unknown as TraceabilityPublishCommandDeps);
+      const execute = vi.spyOn(vscode.commands, "executeCommand").mockImplementation((command: string, ...args: unknown[]) =>
+        command === "playwrightBddRunner.traceability.runAndPublish"
+          ? publishCommands.runAndPublish(...args)
+          : Promise.resolve(undefined)
+      );
+      document.querySelector<HTMLButtonElement>('button[aria-label="Open in tracker: SHOP-301"]')?.click();
+      expect(execute).toHaveBeenLastCalledWith(
+        "playwrightBddRunner.traceability.openIssue",
+        expect.objectContaining({ kind: "testSet", testSetKey: "SHOP-301", testKey: "SHOP-301" })
+      );
+      document.querySelector<HTMLButtonElement>('button[aria-label="Copy key: SHOP-301"]')?.click();
+      expect(execute).toHaveBeenLastCalledWith(
+        "playwrightBddRunner.traceability.copyKey",
+        expect.objectContaining({ kind: "testSet", testSetKey: "SHOP-301", testKey: "SHOP-301" })
+      );
+      document.querySelector<HTMLButtonElement>('button[aria-label="Run Set and publish: SHOP-301"]')?.click();
+      await mutation(mounted.dom, () => document.getElementById("preview")?.hasAttribute("open") === true);
+      expect(document.getElementById("preview-summary")?.textContent).toBe("4 remote members · 3 runnable locally · 1 remote only");
+      document.getElementById("confirm-preview")?.click();
+      await vi.waitFor(() => expect(intents).toHaveLength(1));
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(intents[0]?.targets.map((target) => target.kind === "scenario" ? target.scenario.name : target.kind)).toEqual([
+        "Add item to cart", "Checkout as guest", "Pay with saved card",
+      ]);
+
+      document.querySelector<HTMLButtonElement>('[data-view="repository"]')?.click();
+      expect(document.getElementById("tree")?.textContent).toContain("Checkout");
+      document.querySelector<HTMLElement>('[data-id][aria-expanded="false"]')?.querySelector<HTMLButtonElement>(".twisty")?.click();
+      expect(document.getElementById("tree")?.textContent).toContain("Smoke");
+      document.querySelector<HTMLButtonElement>('button[aria-label="Run folder and publish: Smoke"]')?.click();
+      await mutation(mounted.dom, () => document.getElementById("preview")?.hasAttribute("open") === true);
+      document.getElementById("confirm-preview")?.click();
+      await vi.waitFor(() => expect(intents).toHaveLength(2));
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(intents[1]?.targets.map((target) => target.kind === "scenario" ? target.scenario.name : target.kind)).toEqual([
+        "Add item to cart", "Checkout as guest", "Pay with saved card",
+      ]);
+      expect(artifacts.map((artifact) => artifact.selection)).toEqual([
+        expect.objectContaining({ kind: "test-set", testSetKey: "SHOP-301", scenarios: expect.arrayContaining([
+          expect.objectContaining({ name: "Add item to cart" }),
+          expect.objectContaining({ name: "Checkout as guest" }),
+          expect.objectContaining({ name: "Pay with saved card" }),
+        ]) }),
+        expect.objectContaining({ kind: "repository-folder", projectKey: "SHOP", folderPath: "/Checkout/Smoke", scenarios: expect.any(Array) }),
+      ]);
+      expect(artifacts[0]?.selection.kind === "test-set" ? artifacts[0].selection.scenarios : []).toHaveLength(3);
+      expect(artifacts[1]?.selection.kind === "repository-folder" ? artifacts[1].selection.scenarios : []).toHaveLength(3);
+      expect(JSON.stringify(artifacts.map((artifact) => artifact.selection))).not.toContain("memberKeys");
+      execute.mockRestore();
+      provider.dispose();
+    } finally {
+      cachedOrganization?.dispose();
+      model.dispose();
+      await metadata.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("renders the same Xray-tagged feature mapping as Coverage Board and recovers it after a failed visible transfer", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "traceability-view-client-"));
     const feature = path.join(root, "calculator.feature");
@@ -452,10 +702,37 @@ describe("traceability view client", () => {
     view.dom.window.document.querySelector<HTMLElement>("[data-id=row-0]")?.click();
     view.dom.window.document.querySelector<HTMLElement>("[data-id=row-0]")?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "ArrowDown", shiftKey: true, bubbles: true }));
     view.dom.window.document.querySelector<HTMLElement>("[data-id=row-1]")?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "ArrowDown", shiftKey: true, bubbles: true }));
-    expect([...view.dom.window.document.querySelectorAll("[aria-selected=true]")].map((item) => item.getAttribute("data-id"))).toEqual(["row-0", "row-1", "row-2"]);
+    expect([...view.dom.window.document.querySelectorAll("[role=treeitem][aria-selected=true]")].map((item) => item.getAttribute("data-id"))).toEqual(["row-0", "row-1", "row-2"]);
     view.dom.window.document.querySelector<HTMLElement>("[data-id=row-2]")?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "ArrowDown", ctrlKey: true, bubbles: true }));
     expect(view.dom.window.document.activeElement?.getAttribute("data-id")).toBe("row-3");
-    expect([...view.dom.window.document.querySelectorAll("[aria-selected=true]")].map((item) => item.getAttribute("data-id"))).toEqual(["row-0", "row-1", "row-2"]);
+    expect([...view.dom.window.document.querySelectorAll("[role=treeitem][aria-selected=true]")].map((item) => item.getAttribute("data-id"))).toEqual(["row-0", "row-1", "row-2"]);
+  });
+
+  it("keeps a workspace selection, focus, and anchor across a tab round trip", async () => {
+    const view = await rig();
+    const rows: readonly TraceabilityWireRow[] = [
+      { id: "w1", label: "Workspace one", icon: "circle-outline", expandable: false, actions: [], view: "workspace" },
+      { id: "w2", label: "Workspace two", icon: "circle-outline", expandable: false, actions: [], view: "workspace" },
+      { id: "w3", label: "Workspace three", icon: "circle-outline", expandable: false, actions: [], view: "workspace" },
+      { id: "r1", label: "SHOP", icon: "repo", expandable: false, actions: [], view: "repository" },
+    ];
+    view.send({ type: "begin", generation: 1, state: "ready", total: rows.length });
+    view.send({ type: "chunk", generation: 1, offset: 0, rows });
+    view.send({ type: "end", generation: 1 });
+    const document = view.dom.window.document;
+    const selectedIds = (): string[] => [...document.querySelectorAll("[role=treeitem][aria-selected=true]")].map((item) => item.getAttribute("data-id") ?? "");
+    document.querySelector<HTMLElement>("[data-id=w1]")?.click();
+    document.querySelector<HTMLElement>("[data-id=w2]")?.dispatchEvent(new view.dom.window.MouseEvent("click", { bubbles: true, ctrlKey: true }));
+    expect(selectedIds()).toEqual(["w1", "w2"]);
+
+    document.querySelector<HTMLButtonElement>('[data-view="repository"]')?.click();
+    expect(selectedIds()).toEqual([]);
+    document.querySelector<HTMLButtonElement>('[data-view="workspace"]')?.click();
+
+    expect(selectedIds()).toEqual(["w1", "w2"]);
+    expect(document.querySelector("[role=treeitem][tabindex='0']")?.getAttribute("data-id")).toBe("w2");
+    document.querySelector<HTMLElement>("[data-id=w3]")?.dispatchEvent(new view.dom.window.MouseEvent("click", { bubbles: true, shiftKey: true }));
+    expect(selectedIds()).toEqual(["w2", "w3"]);
   });
 
   it("does not let twisty or inline action key events trigger their row handlers", async () => {
@@ -475,7 +752,7 @@ describe("traceability view client", () => {
     expect(view.messages).toHaveLength(1);
   });
 
-  it("caps multi-selection at 256 rows and announces the limit", async () => {
+  it("caps multi-selection at 128 rows and announces the limit", async () => {
     const view = await rig();
     const rows = Array.from({ length: 257 }, (_, index) => ({ id: `row-${index}`, label: `Row ${index}`, icon: "circle", expandable: false, actions: [] }));
     view.send({ type: "begin", generation: 1, state: "ready", total: rows.length });
@@ -490,7 +767,7 @@ describe("traceability view client", () => {
       const item = view.dom.window.document.querySelector<HTMLElement>(`[data-id="row-${index}"]`)!;
       item.dispatchEvent(new view.dom.window.MouseEvent("click", { bubbles: true, ctrlKey: true }));
     }
-    expect(view.dom.window.document.getElementById("status")?.textContent).toBe("Selection is limited to 256 rows.");
+    expect(view.dom.window.document.getElementById("status")?.textContent).toBe("Selection is limited to 128 rows.");
   });
 
   it("has no serious or critical accessibility violations after a bundled render", async () => {

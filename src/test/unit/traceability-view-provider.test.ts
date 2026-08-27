@@ -3,6 +3,8 @@ import * as vscode from "vscode";
 import { Logger } from "../../utils/logger";
 import { TraceabilityViewProvider } from "../../traceability/traceability-view-provider";
 import type { TraceabilityModel, TraceabilitySnapshot } from "../../traceability/traceability-model";
+import { TRACEABILITY_VIEW_PROTOCOL_VERSION } from "../../webview/traceability-view-protocol";
+import type { OrganizationCapability, RemoteTestSet } from "../../traceability/contracts";
 
 const snapshot: TraceabilitySnapshot = {
   links: [{ testKey: "CALC-1", scenario: { filePath: "/workspace/a.feature", line: 1, name: "😀 scenario", kind: "scenario" }, reqKeys: [] }],
@@ -58,7 +60,160 @@ function signal(): { readonly settled: Promise<void>; resolve(): void } {
   return { settled: new Promise<void>((done) => { resolve = done; }), resolve: () => resolve() };
 }
 
+const completeSet = (key: string, summary?: string): RemoteTestSet => ({
+  key, issueId: key, ...(summary ? { summary } : {}), members: [{ key: "CALC-1", ...(summary ? { summary } : {}) }],
+  remoteMemberCount: 1, membershipComplete: true, truncated: false, errors: [],
+});
+
+function organization(
+  refreshTestSet: OrganizationCapability["refreshTestSet"],
+  testSets: () => readonly RemoteTestSet[] = () => [completeSet("CALC-10"), completeSet("CALC-20")],
+  onDidChange: OrganizationCapability["onDidChange"] = () => ({ dispose: () => undefined })
+): OrganizationCapability {
+  return {
+    onDidChange,
+    snapshot: () => ({
+      repositories: [], stale: false,
+      omittedTestSetProjectCount: 0, omittedRepositoryProjectCount: 0,
+      testSetProjects: [{ projectKey: "CALC", testSets: testSets(), complete: true, truncated: false, errors: [] }],
+    }),
+    sync: () => Promise.resolve(), refreshTestSet,
+  };
+}
+
 describe("TraceabilityViewProvider", () => {
+  it("lets a fast newer preview supersede and abort a slow first refresh", async () => {
+    let firstSignal: AbortSignal | undefined;
+    const refresh = vi.fn((key: string, operationSignal?: AbortSignal) => {
+      if (key === "CALC-10") {
+        firstSignal = operationSignal;
+        return new Promise<never>((_resolve, reject) => operationSignal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+      }
+      return Promise.resolve({ status: "complete" as const, testSet: completeSet(key) });
+    });
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.attach({ get snapshot(): TraceabilitySnapshot { return snapshot; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel, "Xray", "test", organization(refresh));
+    const runPreview = (key: string): Promise<void> => (provider as unknown as { previewOrganizationRun(node: unknown): Promise<void> })
+      .previewOrganizationRun({ kind: "testSet", testSetKey: key, testKey: key });
+
+    const first = runPreview("CALC-10");
+    await vi.waitFor(() => expect(firstSignal).toBeDefined());
+    await runPreview("CALC-20");
+    await first;
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect((provider as unknown as { pendingPreview?: { selection: { testSetKey?: string } } }).pendingPreview?.selection.testSetKey).toBe("CALC-20");
+    provider.dispose();
+  });
+
+  it("aborts an exact-membership refresh on invalidation and disposal", async () => {
+    const changes = new vscode.EventEmitter<void>();
+    const signals: AbortSignal[] = [];
+    const refresh = vi.fn((_key: string, operationSignal?: AbortSignal) => {
+      if (operationSignal) {signals.push(operationSignal);}
+      return new Promise<never>((_resolve, reject) => operationSignal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    });
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.attach({ get snapshot(): TraceabilitySnapshot { return snapshot; }, onDidChange: changes.event } as unknown as TraceabilityModel, "Xray", "test", organization(refresh));
+    const run = (): Promise<void> => (provider as unknown as { previewOrganizationRun(node: unknown): Promise<void> })
+      .previewOrganizationRun({ kind: "testSet", testSetKey: "CALC-10", testKey: "CALC-10" });
+
+    const invalidated = run();
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    changes.fire();
+    await invalidated;
+    expect(signals[0]?.aborted).toBe(true);
+
+    const disposed = run();
+    await vi.waitFor(() => expect(signals).toHaveLength(2));
+    provider.dispose();
+    await disposed;
+    expect(signals[1]?.aborted).toBe(true);
+  });
+
+  it("connects cancellable membership progress to the provider refresh signal", async () => {
+    let cancel = (): void => undefined;
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((_options, task) => Promise.resolve(task(
+      { report: () => undefined },
+      { isCancellationRequested: false, onCancellationRequested: (listener) => {cancel = () => listener(undefined); return { dispose: () => undefined };} } as vscode.CancellationToken
+    )));
+    let refreshSignal: AbortSignal | undefined;
+    const refresh = vi.fn((_key: string, operationSignal?: AbortSignal) => {
+      refreshSignal = operationSignal;
+      return new Promise<never>((_resolve, reject) => operationSignal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+    });
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.attach({ get snapshot(): TraceabilitySnapshot { return snapshot; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel, "Xray", "test", organization(refresh));
+
+    const pending = (provider as unknown as { previewOrganizationRun(node: unknown): Promise<void> })
+      .previewOrganizationRun({ kind: "testSet", testSetKey: "CALC-10", testKey: "CALC-10" });
+    await vi.waitFor(() => expect(refreshSignal).toBeDefined());
+    cancel();
+    await pending;
+
+    expect(refreshSignal?.aborted).toBe(true);
+    expect((provider as unknown as { pendingPreview?: unknown }).pendingPreview).toBeUndefined();
+    provider.dispose();
+    vi.restoreAllMocks();
+  });
+
+  it("rebuilds the Test Set row from the change its own exact refresh suppressed", async () => {
+    const posts: unknown[] = [];
+    const receive = { current: (_message: unknown) => undefined };
+    const changed = new vscode.EventEmitter<void>();
+    const refreshed: RemoteTestSet = {
+      ...completeSet("CALC-10"), members: [{ key: "CALC-1" }, { key: "CALC-9" }], remoteMemberCount: 2,
+    };
+    let sets: readonly RemoteTestSet[] = [completeSet("CALC-10")];
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.attach(
+      { get snapshot(): TraceabilitySnapshot { return snapshot; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel,
+      "Xray", "test",
+      organization(() => { sets = [refreshed]; changed.fire(); return Promise.resolve({ status: "complete", testSet: refreshed }); }, () => sets, changed.event)
+    );
+    provider.setConnected(true);
+    provider.resolveWebviewView(view(posts, receive));
+    const session = (provider as unknown as { session: string }).session;
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    await settleTransfer(provider);
+    const rowsFor = (label: string): Array<{ description?: string }> => posts
+      .filter((message) => (message as { body: { type: string } }).body.type === "chunk")
+      .flatMap((message) => (message as { body: { rows: Array<{ label: string; description?: string }> } }).body.rows)
+      .filter((row) => row.label === label);
+    expect(rowsFor("CALC-10").at(-1)?.description).toContain("1 remote members · 1 runnable locally · 0 remote only");
+
+    await (provider as unknown as { previewOrganizationRun(node: unknown): Promise<void> })
+      .previewOrganizationRun({ kind: "testSet", testSetKey: "CALC-10", testKey: "CALC-10" });
+    await settleTransfer(provider);
+
+    expect(rowsFor("CALC-10").at(-1)?.description).toContain("2 remote members · 1 runnable locally · 1 remote only");
+    expect(posts.map((message) => (message as { body: { type: string } }).body.type).at(-1)).toBe("preview");
+    provider.dispose();
+  });
+
+  it("clips long preview content and delivers it within the protocol byte budget", async () => {
+    const posts: unknown[] = [];
+    const receive = { current: (_message: unknown) => undefined };
+    const long = "x".repeat(20_000);
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.attach({ get snapshot(): TraceabilitySnapshot { return snapshot; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel, "Xray", "test", organization(() => Promise.resolve({ status: "complete", testSet: completeSet("CALC-10", long) })));
+    provider.setConnected(true);
+    provider.resolveWebviewView(view(posts, receive));
+    const session = (provider as unknown as { session: string }).session;
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    await settleTransfer(provider);
+
+    await (provider as unknown as { previewOrganizationRun(node: unknown): Promise<void> })
+      .previewOrganizationRun({ kind: "testSet", testSetKey: "CALC-10", testKey: "CALC-10" });
+    await settleTransfer(provider);
+    const preview = [...posts].reverse().find((message) => (message as { body: { type: string } }).body.type === "preview") as { body: { preview: { title: string; members: Array<{ label: string }> } } };
+
+    expect(preview.body.preview.title.length).toBeLessThanOrEqual(1_024);
+    expect(preview.body.preview.members[0]?.label.length).toBeLessThanOrEqual(1_024);
+    expect(new TextEncoder().encode(JSON.stringify(preview)).length).toBeLessThan(512 * 1_024);
+    provider.dispose();
+  });
+
   it("coalesces hidden updates and focus until the retained view becomes visible", async () => {
     const changes = new vscode.EventEmitter<void>();
     let current = snapshot;
@@ -70,7 +225,7 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(controlled.view);
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const before = posts.length;
 
@@ -113,7 +268,7 @@ describe("TraceabilityViewProvider", () => {
     });
     provider.resolveWebviewView(controlled.view);
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     expect(posts.map((message) => (message as { body: { type: string } }).body.type)).toEqual(["begin", "chunk"]);
     expect((provider as unknown as { deliveryFailed: boolean }).deliveryFailed).toBe(false);
@@ -138,11 +293,11 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(first.view);
     const firstSession = (provider as unknown as { session: string }).session;
-    firstReceive.current({ version: 1, session: firstSession, revision: 0, surface: "traceability", body: { type: "ready" } });
+    firstReceive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: firstSession, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     provider.resolveWebviewView(second.view);
     const secondSession = (provider as unknown as { session: string }).session;
-    secondReceive.current({ version: 1, session: secondSession, revision: 0, surface: "traceability", body: { type: "ready" } });
+    secondReceive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: secondSession, revision: 0, surface: "traceability", body: { type: "ready" } });
     changes.fire();
     await settleTransfer(provider);
     const before = secondPosts.length;
@@ -160,11 +315,11 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(view(posts, receive));
     expect(posts).toEqual([]);
-    receive.current({ version: 1, session: (provider as unknown as { session: string }).session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: (provider as unknown as { session: string }).session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const types = posts.map((message) => (message as { body: { type: string } }).body.type);
     expect(types).toEqual(["begin", "chunk", "end"]);
-    receive.current({ version: 1, session: (provider as unknown as { session: string }).session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: (provider as unknown as { session: string }).session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     expect(posts).toHaveLength(3);
   });
@@ -184,13 +339,13 @@ describe("TraceabilityViewProvider", () => {
     expect(resolved.webview.html).toContain("font-src vscode-webview://traceability");
     expect(resolved.webview.html).toContain("Content-Security-Policy");
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     provider.focusFilter();
     await settleTransfer(provider);
     expect(posts.map((message) => (message as { body: { type: string } }).body.type)).toEqual(["begin", "chunk", "end", "focus-filter"]);
     const focused = posts.at(-1) as { body: { generation: number } };
-    receive.current({ version: 1, session, revision: (provider as unknown as { revision: number }).revision, surface: "traceability", body: { type: "focused", generation: focused.body.generation } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: (provider as unknown as { revision: number }).revision, surface: "traceability", body: { type: "focused", generation: focused.body.generation } });
     expect(provider.acknowledgedFocusCount).toBe(1);
     expect(signals).toEqual(["ready", "focused"]);
   });
@@ -206,7 +361,7 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(view(posts, receive, failed));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     expect((provider as unknown as { revision: number }).revision).toBe(0);
     expect((provider as unknown as { deliveryFailed: boolean }).deliveryFailed).toBe(true);
@@ -216,7 +371,7 @@ describe("TraceabilityViewProvider", () => {
     const recovered: unknown[] = [];
     provider.resolveWebviewView(view(recovered, receive));
     const newSession = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session: newSession, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: newSession, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     expect(recovered.map((message) => (message as { body: { type: string } }).body.type)).toEqual(["begin", "chunk", "end"]);
   });
@@ -229,7 +384,7 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(view(posts, receive));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const before = posts.length;
     provider.setGrouping("test");
@@ -259,7 +414,7 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(view(posts, receive));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const before = posts.length;
     const generation = (provider as unknown as { generation: number }).generation;
@@ -290,7 +445,7 @@ describe("TraceabilityViewProvider", () => {
       return Promise.resolve(true);
     }));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await entered.settled;
     provider.focusFilter();
     provider.focusFilter();
@@ -306,7 +461,7 @@ describe("TraceabilityViewProvider", () => {
     failedProvider.setConnected(true);
     failedProvider.resolveWebviewView(view(failedPosts, failedReceive, () => Promise.resolve(!fail)));
     const failedSession = (failedProvider as unknown as { session: string }).session;
-    failedReceive.current({ version: 1, session: failedSession, revision: 0, surface: "traceability", body: { type: "ready" } });
+    failedReceive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: failedSession, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(failedProvider);
     const beforeRetry = failedPosts.length;
     changes.fire();
@@ -342,7 +497,7 @@ describe("TraceabilityViewProvider", () => {
       return Promise.resolve(true);
     }));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await entered.settled;
 
     current = { ...snapshot, links: [{ ...snapshot.links[0]!, scenario: { ...snapshot.links[0]!.scenario, name: "Latest scenario" } }] };
@@ -380,7 +535,7 @@ describe("TraceabilityViewProvider", () => {
       return Promise.resolve(true);
     }));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
 
     provider.focusFilter();
@@ -437,7 +592,7 @@ describe("TraceabilityViewProvider", () => {
       return Promise.resolve(true);
     }));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await entered.settled;
     changes.fire();
     release!();
@@ -459,18 +614,18 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(view(posts, receive));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const chunk = posts.find((message) => (message as { body: { type: string } }).body.type === "chunk") as { body: { generation: number; rows: Array<{ id: string }> } };
     const target = chunk.body.rows.find((candidate) => candidate.id.includes("scenario")) ?? chunk.body.rows[0]!;
     const revision = (provider as unknown as { revision: number }).revision;
-    receive.current({ version: 1, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "run", selection: [target.id, target.id] } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "run", selection: [target.id, target.id] } });
     await Promise.resolve();
     expect(execute).toHaveBeenCalledWith("playwrightBddRunner.traceability.runAndPublish", expect.anything(), [expect.anything()]);
     const calls = execute.mock.calls.length;
-    receive.current({ version: 1, session: "foreign", revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "run", selection: [] } });
-    receive.current({ version: 1, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation - 1, id: target.id, action: "run", selection: [] } });
-    receive.current({ version: 1, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "unknown", selection: [] } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: "foreign", revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "run", selection: [] } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation - 1, id: target.id, action: "run", selection: [] } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "unknown", selection: [] } });
     expect(execute).toHaveBeenCalledTimes(calls);
     execute.mockRestore();
   });
@@ -484,13 +639,13 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(view(posts, receive));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const chunk = posts.find((message) => (message as { body: { type: string } }).body.type === "chunk") as { body: { generation: number; rows: Array<{ id: string }> } };
     const target = chunk.body.rows.find((candidate) => candidate.id.includes("scenario")) ?? chunk.body.rows[0]!;
     const revision = (provider as unknown as { revision: number }).revision;
-    receive.current({ version: 1, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: "unknown", action: "run", selection: [] } });
-    receive.current({ version: 1, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "run", selection: [target.id, "unknown"] } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: "unknown", action: "run", selection: [] } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "run", selection: [target.id, "unknown"] } });
     await Promise.resolve();
     expect(execute).not.toHaveBeenCalled();
     execute.mockRestore();
@@ -505,11 +660,11 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(view(posts, receive, () => Promise.resolve(!fail)));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const failed = posts.length;
     fail = false;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     expect(posts.length).toBeGreaterThan(failed);
     expect(posts.slice(-3).map((message) => (message as { body: { type: string } }).body.type)).toEqual(["begin", "chunk", "end"]);
@@ -526,13 +681,13 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnectionIndicator({ state: "ok", label: "site", message: "detail" });
     provider.resolveWebviewView(view(posts, receive));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const chunk = posts.find((message) => (message as { body: { type: string } }).body.type === "chunk") as { body: { generation: number; rows: Array<{ id: string; label: string; actions: Array<{ id: string }> }> } };
     const revision = (provider as unknown as { revision: number }).revision;
     for (const candidate of chunk.body.rows) {
       for (const action of candidate.actions) {
-        receive.current({ version: 1, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: candidate.id, action: action.id, selection: [candidate.id] } });
+        receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: candidate.id, action: action.id, selection: [candidate.id] } });
       }
     }
     await Promise.resolve();
@@ -559,17 +714,17 @@ describe("TraceabilityViewProvider", () => {
     provider.attach({ get snapshot(): TraceabilitySnapshot { return snapshot; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel, "Xray", "test");
     provider.resolveWebviewView(view(posts, receive));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const disconnected = posts.find((message) => (message as { body: { type: string } }).body.type === "chunk") as { body: { generation: number; rows: Array<{ id: string }> } };
     const revision = (provider as unknown as { revision: number }).revision;
     for (const action of ["connect", "hide"] as const) {
-      receive.current({ version: 1, session, revision, surface: "traceability", body: { type: "action", generation: disconnected.body.generation, id: disconnected.body.rows[0]!.id, action, selection: [] } });
+      receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision, surface: "traceability", body: { type: "action", generation: disconnected.body.generation, id: disconnected.body.rows[0]!.id, action, selection: [] } });
     }
     provider.setTrusted(false);
     await settleTransfer(provider);
     const untrusted = posts.filter((message) => (message as { body: { type: string } }).body.type === "chunk").at(-1) as { body: { generation: number; rows: Array<{ id: string }> } };
-    receive.current({ version: 1, session, revision: (provider as unknown as { revision: number }).revision, surface: "traceability", body: { type: "action", generation: untrusted.body.generation, id: untrusted.body.rows[0]!.id, action: "manage-trust", selection: [] } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: (provider as unknown as { revision: number }).revision, surface: "traceability", body: { type: "action", generation: untrusted.body.generation, id: untrusted.body.rows[0]!.id, action: "manage-trust", selection: [] } });
     await Promise.resolve();
     expect(execute.mock.calls.map(([command]) => command)).toEqual([
       "playwrightBddRunner.traceability.connect",
@@ -591,12 +746,12 @@ describe("TraceabilityViewProvider", () => {
     provider.setConnected(true);
     provider.resolveWebviewView(view(posts, receive));
     const session = (provider as unknown as { session: string }).session;
-    receive.current({ version: 1, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
     await settleTransfer(provider);
     const chunk = posts.find((message) => (message as { body: { type: string } }).body.type === "chunk") as { body: { generation: number; rows: Array<{ id: string }> } };
     const target = chunk.body.rows.find((candidate) => candidate.id.includes("scenario")) ?? chunk.body.rows[0]!;
     const revision = (provider as unknown as { revision: number }).revision;
-    const action = { version: 1, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "open", selection: [] } };
+    const action = { version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision, surface: "traceability", body: { type: "action", generation: chunk.body.generation, id: target.id, action: "open", selection: [] } };
     receive.current(action);
     await Promise.resolve();
     receive.current(action);

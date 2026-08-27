@@ -59,6 +59,58 @@ export interface TestCaseMetadata {
   // automation-binding hook reads it to classify preflight compatibility; absent on a partial
   // snapshot, which the hook treats as `unknown` (never blocking).
   readonly testType?: { readonly name: string; readonly kind: string } | undefined;
+  // Provider repository placement. The path is provider-owned display data, never a local path.
+  readonly repositoryFolder?: { readonly name: string; readonly path: string } | undefined;
+}
+
+export interface RepositoryProject {
+  readonly projectKey: string;
+  readonly tests: readonly TestCaseMetadata[];
+  readonly complete: boolean;
+  readonly truncated: boolean;
+  readonly errors: readonly string[];
+}
+
+export interface RemoteTestSetMember {
+  readonly key: string;
+  readonly summary?: string | undefined;
+}
+
+export interface RemoteTestSet {
+  readonly key: string;
+  readonly issueId: string;
+  readonly summary?: string | undefined;
+  readonly description?: string | undefined;
+  readonly members: readonly RemoteTestSetMember[];
+  readonly remoteMemberCount: number;
+  readonly membershipComplete: boolean;
+  readonly truncated: boolean;
+  readonly errors: readonly string[];
+  readonly membersLastKnown?: boolean | undefined;
+}
+
+export interface TestSetProject {
+  readonly projectKey: string;
+  readonly testSets: readonly RemoteTestSet[];
+  readonly complete: boolean;
+  readonly truncated: boolean;
+  readonly errors: readonly string[];
+}
+
+export interface OrganizationSnapshot {
+  readonly repositories: readonly RepositoryProject[];
+  readonly testSetProjects: readonly TestSetProject[];
+  readonly syncedAt?: number | undefined;
+  readonly stale: boolean;
+  readonly omittedTestSetProjectCount: number;
+  readonly omittedRepositoryProjectCount: number;
+}
+
+export const ORGANIZATION_ITEM_LIMIT = 20_000;
+
+export interface TestSetRefreshResult {
+  readonly status: "complete" | "incomplete" | "failed";
+  readonly testSet?: RemoteTestSet | undefined;
 }
 
 // The scope of a sync. `projectKeys` requests a full catalogue for orphan detection (an empty set
@@ -113,6 +165,17 @@ export type BatchSelection =
   | { readonly kind: "folder"; readonly folderPath: string }
   | { readonly kind: "tag-expression"; readonly expression: string }
   | { readonly kind: "all-mapped"; readonly project?: string | undefined }
+  | {
+      readonly kind: "repository-folder";
+      readonly projectKey: string;
+      readonly folderPath: string;
+      readonly scenarios: readonly ScenarioRef[];
+    }
+  | {
+      readonly kind: "test-set";
+      readonly testSetKey: string;
+      readonly scenarios: readonly ScenarioRef[];
+    }
   | { readonly kind: "suite" }
   | { readonly kind: "test-plan-derived"; readonly planKey: string };
 
@@ -425,6 +488,16 @@ export interface ProjectDirectoryCapability {
   list(signal?: AbortSignal): Promise<ProjectDirectory>;
 }
 
+// Optional read-only provider organization. `snapshot` is offline-only; network work is explicit and
+// cancellable. A Test Set refresh reports whether this attempt itself was complete, so callers never
+// mistake a last-known complete cache entry for fresh confirmation evidence.
+export interface OrganizationCapability {
+  readonly onDidChange: AdapterEvent<void>;
+  snapshot(): OrganizationSnapshot;
+  sync(projectKeys: readonly string[], signal?: AbortSignal): Promise<void>;
+  refreshTestSet(key: string, signal?: AbortSignal): Promise<TestSetRefreshResult>;
+}
+
 export interface ResultPublishingCapability {
   // Search the tracker for the targets a publish can name: executions to append to, test plans to
   // associate a new execution with, projects to create one in. Requires provider credentials for the
@@ -460,6 +533,7 @@ export interface TraceabilityAdapter {
   readonly automationBinding?: AutomationBindingCapability | undefined;
   readonly remoteSearch?: RemoteSearchCapability | undefined;
   readonly projectDirectory?: ProjectDirectoryCapability | undefined;
+  readonly organization?: OrganizationCapability | undefined;
   readonly testAuthoring?: TestAuthoringCapability | undefined;
   readonly resultPublishing?: ResultPublishingCapability | undefined;
   readonly attachments?: AttachmentCapability | undefined;
