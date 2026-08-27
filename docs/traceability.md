@@ -127,7 +127,7 @@ Run **Specwright: Open Coverage Board** from the Command Palette or the Traceabi
 | **Executions** | Groups this workspace's local create and publish activity under each Test Execution. Expand or collapse a parent to inspect its history. This is not a complete list of executions in Jira. |
 | **Publish** | Select a completed local run and create a new Test Execution or append results to an existing one. |
 
-Use the **View project** selector at the top of the board to choose the project the board works in. It narrows what the board shows, loads that project, and is the target for create and publish actions. It leaves the standing sync scope alone, and every sync fetches it alongside that scope. Use **Select sync projects...** in the Mapping toolbar to change the standing list.
+Use the **View project** selector at the top of the board to choose the project the board works in. It narrows what the board shows, loads that project, and is the target for create and publish actions. It leaves the standing sync scope alone, and every sync fetches it alongside that scope. Use **Select projects...** next to **Sync** in the Mapping toolbar to change the standing list.
 
 ![Coverage Board Mapping tab](../images/mapping-xray.png)
 

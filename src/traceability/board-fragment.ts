@@ -181,7 +181,7 @@ function boardPanesHtml(providerLabel: string): string {
         <p class="mapping-hint">Drag a scenario onto a test to link them, or select one scenario and one test and use the visible Link button.</p>
         <div class="mapping-toolbar">
           <button id="sync-now" class="verb" type="button" disabled>Sync</button>
-          <button id="sync-scope" class="verb" type="button" title="Choose which projects every sync fetches">Select sync projects...</button>
+          <button id="sync-scope" class="verb" type="button" title="Choose which projects every sync fetches">Select projects...</button>
           <div class="page-size">
             <label for="page-size-select">Rows</label>
             <select id="page-size-select" title="How many cards each list shows">

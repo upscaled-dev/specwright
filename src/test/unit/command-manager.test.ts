@@ -2307,7 +2307,7 @@ describe("traceability sync command handler", () => {
     expect(sync).toHaveBeenCalledTimes(1);
   });
 
-  it("wires the board's Select sync projects button to the same project picker the palette opens", async () => {
+  it("wires the board's Select projects button to the same project picker the palette opens", async () => {
     const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
     const mgr = managerFor(syncSubsystem({ tagDerived: ["CALC"] }));
 

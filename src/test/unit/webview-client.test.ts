@@ -489,7 +489,7 @@ describe("coverage board browser client", () => {
     const syncButtons = (): boolean[] => ["sync-now", "sync-scope"]
       .map((id) => (client.dom.window.document.getElementById(id) as HTMLButtonElement).disabled);
     expect(syncButtons()).toEqual([false, false]);
-    // Sync and Select sync projects share the host's admission, so a sync in progress takes both.
+    // Sync and Select projects share the host's admission, so a sync in progress takes both.
     client.send("board", { ...changed, syncVerb: { label: "Syncing", enabled: false, hint: "A traceability sync is in progress." } });
     expect(syncButtons()).toEqual([true, true]);
     await expectNoSeriousViolations(client.dom);
