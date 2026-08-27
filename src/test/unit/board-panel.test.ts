@@ -459,7 +459,7 @@ describe("BoardPanel", () => {
     expect(html).not.toContain("acquireVsCodeApi()");
     expect(html).not.toContain("unsafe-eval");
     expect(html).toContain('role="tablist" aria-label="Coverage views"');
-    expect(html).toContain('id="scope-select" aria-label="Project scope"');
+    expect(html).toContain('id="scope-select" aria-label="View project" title="The project the board works in. Filters the board, loads that project, and targets create and publish. Every sync fetches it alongside the Sync scope list."');
     expect(html).toContain('id="search" type="text" spellcheck="false" autocomplete="off" aria-label="Filter coverage board"');
     expect(win.__webviewPanels[0]!.webview.options.localResourceRoots.map((uri) => uri.toString())).toEqual([
       vscode.Uri.file("/extension/dist").toString(),

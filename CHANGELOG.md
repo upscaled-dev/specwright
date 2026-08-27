@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- **Sync scope** sits next to Sync now in the Coverage Board's Mapping toolbar. It opens the same Select Projects to Sync list as the command palette, so the projects a sync fetches can be changed without leaving the board.
+
+### Changed
+
+- The board's header project dropdown is now labelled **View project**. It names the project the board works in: it filters what the board shows, loads that project, and is the target for create and publish actions.
+- Picking a project on the board no longer widens the scope of every later sync. That standing scope comes from your tags, the default project key, and projects already catalogued, or from Select Projects to Sync once that list is set. Every sync still fetches the project the board is working in by name, alongside that standing scope, whether you run it from the board, the panel title, or the command palette.
+
+### Fixed
+
+- The Traceability panel's connection row, and its Select projects to sync action, show on the Repository and Test Sets tabs again instead of only on Workspace.
 
 ## [0.6.0] - 2026-08-27
 ### Added

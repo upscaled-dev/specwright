@@ -107,9 +107,10 @@ Repository and Test Set reads use the same project sync scope and offline cache 
 Sync always looks up the test keys already referenced by your local tags. To also load a whole project catalogue, which is needed to show available or unmapped Xray tests, name the projects before syncing:
 
 - `playwrightBddRunner.xray.syncProjectKeys` is the sync scope whenever it holds a list. Nothing else widens it.
-- While that list is empty, the scope is derived instead from your test and requirement tags, `playwrightBddRunner.xray.defaultProjectKey`, the project selected in the Coverage Board, and projects an earlier sync already catalogued.
+- While that list is empty, the scope is derived instead from your test and requirement tags, `playwrightBddRunner.xray.defaultProjectKey`, and projects an earlier sync already catalogued.
+- The Coverage Board's View project selector never changes that standing scope. It names the project the board works in, and every sync fetches that one project by name alongside the standing scope: when you pick it, and on every later sync, whether you run it from the board, the panel title, or the command palette.
 
-To choose the catalogues yourself, run **Specwright: Select Projects to Sync** from the Command Palette or the connection row of the Traceability panel. It lists every project your connection can reach, along with the ones your tags, default project, board selection, and earlier syncs name, says why each is on offer, and checks the ones currently in scope. Accepting the list writes it to `playwrightBddRunner.xray.syncProjectKeys`. Clear every box to restore the derived scope.
+To choose the catalogues yourself, run **Specwright: Select Projects to Sync** from the Command Palette or the connection row of the Traceability panel. It lists every project your connection can reach, along with the ones your tags, default project, and earlier syncs name, says why each is on offer, and checks the ones currently in scope. Accepting the list writes it to `playwrightBddRunner.xray.syncProjectKeys`. Clear every box to restore the derived scope.
 
 The Coverage Board loads a newly selected project automatically when connected and schedules one quiet, forced project sync after a remote create is confirmed. Both still work under a pinned list: a sync asked for one project by name fetches that project for that run only, and the pinned list stays as written. That post-create sync keeps a newly tagged scenario from remaining **not found on remote** until a manual refresh. **Sync Traceability** remains the on-demand refresh. A remote test is shown as available only after Specwright has completed that project's catalogue sync; an incomplete project catalogue never drives a claim that a test is unlinked. A successful direct lookup can still identify a tagged key that is missing remotely.
 
@@ -126,7 +127,7 @@ Run **Specwright: Open Coverage Board** from the Command Palette or the Traceabi
 | **Executions** | Groups this workspace's local create and publish activity under each Test Execution. Expand or collapse a parent to inspect its history. This is not a complete list of executions in Jira. |
 | **Publish** | Select a completed local run and create a new Test Execution or append results to an existing one. |
 
-Use the project selector at the top of the board to narrow the view and to choose the target project for creation actions.
+Use the **View project** selector at the top of the board to choose the project the board works in. It narrows what the board shows, loads that project, and is the target for create and publish actions. It leaves the standing sync scope alone, and every sync fetches it alongside that scope. Use **Sync scope** in the Mapping toolbar to change the standing list.
 
 ![Coverage Board Mapping tab](../images/mapping-xray.png)
 
@@ -255,7 +256,7 @@ All settings use the `playwrightBddRunner.*` namespace. See the general [setting
 | `traceability.reqTagPrefix` | `REQ_` | Prefix used to recognise requirement tags, for example `@REQ_DEMO-9`. |
 | `xray.siteUrl` | empty | Jira/Xray Cloud host used for setup, Jira access, and browser links. |
 | `xray.apiRegion` | `global` | Xray API region: `global`, `us`, `eu`, or `au`. It must match your tenant. |
-| `xray.syncProjectKeys` | `[]` | Project catalogues every sync fetches. When set, it is the whole sync scope. Empty means the scope is derived from tags, the default project, the board selection, and earlier syncs. |
+| `xray.syncProjectKeys` | `[]` | Project catalogues every sync fetches. When set, it is the whole sync scope. Empty means the scope is derived from tags, the default project, and earlier syncs. |
 | `xray.cacheTtlMinutes` | `15` | How long a synced snapshot is considered fresh. Stale data is not refreshed until Sync runs. |
 | `xray.defaultProjectKey` | empty | Prefills new tests and executions. It joins the sync scope only while `xray.syncProjectKeys` is empty. |
 | `xray.executionIssueType` | `Test Execution` | Work type used when creating a new Test Execution. It must be a standard-level type. |

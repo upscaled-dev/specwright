@@ -2064,16 +2064,68 @@ describe("traceability sync command handler", () => {
     expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["PAY"] }, expect.anything(), expect.anything());
   });
 
-  // The directory rung stays out of the sync scope, so a project only the connection knows about is
-  // fetched precisely because the board is scoped to it.
-  it("carries the board's stored project selection into the sync scope", async () => {
+  // One rule for every control: the standing scope plus the board's working project, named for that run.
+  // The palette's Sync Traceability is not an exception, so a project the board is working in is never
+  // reachable from the board and missing from the palette.
+  it("unions the board's working project into the palette sync, alongside the standing scope", async () => {
     const sync = vi.fn(() => Promise.resolve());
     const scope = projectScopeStore(memento(), () => undefined);
     scope.set("PAY");
+    // The board really is working in PAY, so a scope without it cannot be a selection that never landed.
+    expect(scope.get(["PAY", "OPS"])).toBe("PAY");
 
-    await runSyncOn(managerFor(syncSubsystem({ sync, directory: ["PAY", "OPS"], scope })));
+    await runSyncOn(managerFor(syncSubsystem({ sync, directory: ["PAY", "OPS"], scope, catalogueProjects: ["MATH"] })));
 
-    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["PAY"] }, expect.anything(), expect.anything());
+    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["MATH", "PAY"] }, expect.anything(), expect.anything());
+  });
+
+  // A pinned list is the standing scope, and the working project rides alongside it for that run without
+  // rewriting it. Both halves matter: dropping either strands one of the two controls.
+  it("adds the working project to a pinned sync list for that run", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const scope = projectScopeStore(memento(), () => undefined);
+    scope.set("PAY");
+    const mgr = managerFor(
+      syncSubsystem({ sync, directory: ["PAY", "OPS"], scope }),
+      { "xray.syncProjectKeys": ["SHOP"] }
+    );
+
+    await boardLoads(mgr).runSync();
+
+    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["PAY", "SHOP"] }, expect.anything(), expect.anything());
+  });
+
+  it("names the working project once when a standing rung already holds it", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+    const scope = projectScopeStore(memento(), () => undefined);
+    scope.set("MATH");
+    const mgr = managerFor(syncSubsystem({ sync, scope, catalogueProjects: ["MATH"] }));
+
+    await boardLoads(mgr).runSync();
+
+    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["MATH"] }, expect.anything(), expect.anything());
+  });
+
+  // A directory-only project sits on no rung, so once its quiet load fails the board can only get it
+  // through Sync now naming it. Without that the selection is stranded and the board never fills.
+  it("names the board's working project on Sync now, even after its quiet load failed", async () => {
+    let failNext = true;
+    const sync = vi.fn(() => {
+      if (failNext) {
+        failNext = false;
+        return Promise.reject(new Error("the site is unreachable"));
+      }
+      return Promise.resolve();
+    });
+    const scope = projectScopeStore(memento(), () => undefined);
+    scope.set("PAY");
+    const mgr = managerFor(syncSubsystem({ sync, directory: ["PAY", "OPS"], scope }));
+
+    await boardLoads(mgr).autoSync("PAY");
+    await boardLoads(mgr).runSync();
+
+    expect(sync).toHaveBeenCalledTimes(2);
+    expect(sync).toHaveBeenLastCalledWith({ testKeys: [], projectKeys: ["PAY"] }, expect.anything(), expect.anything());
   });
 
   it("coalesces concurrent invocations into a single in-flight run", async () => {

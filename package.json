@@ -486,7 +486,7 @@
               "type": "string"
             },
             "default": [],
-            "description": "Project keys a traceability sync fetches. When this list is set it is the whole scope: tags, the default project key, the board selection, and already synced projects no longer widen it, and only a project you ask to load or sync by name is fetched alongside it, for that run. Leave the list empty to scope each sync from those sources instead. Run Specwright: Select Projects to Sync to pick the list from a checkbox list."
+            "description": "Project keys a traceability sync fetches. When this list is set it is the whole scope: tags, the default project key, and already synced projects no longer widen it, and only a project you ask to load or sync by name is fetched alongside it, for that run. Leave the list empty to scope each sync from those sources instead. Run Specwright: Select Projects to Sync to pick the list from a checkbox list."
           },
           "playwrightBddRunner.xray.cacheTtlMinutes": {
             "order": 80,
@@ -498,7 +498,7 @@
             "order": 90,
             "type": "string",
             "default": "",
-            "description": "Default Jira project key (e.g. 'CALC'). Prefills the Project field when publishing a new Test Execution. While playwrightBddRunner.xray.syncProjectKeys is empty it also joins the sync scope, alongside tag-derived keys, already synced projects, and the board's project selection; once that list is set, the list alone is the scope. Appending to an existing execution derives its project from the execution key instead."
+            "description": "Default Jira project key (e.g. 'CALC'). Prefills the Project field when publishing a new Test Execution. While playwrightBddRunner.xray.syncProjectKeys is empty it also joins the sync scope, alongside tag-derived keys and already synced projects; once that list is set, the list alone is the scope. Appending to an existing execution derives its project from the execution key instead."
           },
           "playwrightBddRunner.xray.executionIssueType": {
             "order": 100,

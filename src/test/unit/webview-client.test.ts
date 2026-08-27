@@ -35,7 +35,7 @@ interface ClientRig {
 function documentHtml(): string {
   const tabHtml = tabs.map((tab) => `<button role="tab" id="tab-${tab}" data-tab="${tab}" aria-controls="pane-${tab}" aria-selected="false" tabindex="-1"${tab === "link" ? " hidden" : ""}>${tab}</button>`).join("");
   return `<!doctype html><html lang="en"><head><title>Coverage Board</title></head><body data-session="local">
-    <header><h1>Coverage Board</h1><div class="tabs" role="tablist" aria-label="Coverage views">${tabHtml}</div><div class="scope"><select id="scope-select" aria-label="Project scope"></select></div><div class="search"><input id="search" aria-label="Filter coverage board"></div></header>
+    <header><h1>Coverage Board</h1><div class="tabs" role="tablist" aria-label="Coverage views">${tabHtml}</div><div class="scope"><select id="scope-select" aria-label="View project"></select></div><div class="search"><input id="search" aria-label="Filter coverage board"></div></header>
     <div id="sync-strip" role="status" aria-live="polite" hidden><span id="sync-strip-text"></span></div>
     <main>${boardFragment("Xray").paneHtml}<section id="pane-publish" class="pane" data-tab="publish" role="tabpanel" aria-labelledby="tab-publish" hidden>${PUBLISH_FRAGMENT.paneHtml}</section><section id="pane-link" class="pane" data-tab="link" role="tabpanel" aria-labelledby="tab-link" hidden>${LINK_FRAGMENT.paneHtml}</section></main>
   </body></html>`;

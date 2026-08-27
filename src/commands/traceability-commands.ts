@@ -126,8 +126,8 @@ export class TraceabilityCommands {
     return this.mutating((signal) => this.getPublishCommands().runAndPublishTrusted(signal, ...args));
   }
   // The view-title button's own command: it names the whole mapped set, which the node command must
-  // never infer from an empty argument list. "Whole" means whole within the board's project scope,
-  // the same scope the board shows and the sync fetches.
+  // never infer from an empty argument list. "Whole" means whole within the board's working project,
+  // the same project the board shows and creates in.
   public runAndPublishAllMapped(): Promise<void> {
     const project = this.selectedProject();
     return this.mutating((signal) => this.getPublishCommands().runAndPublishSelection({
@@ -242,21 +242,21 @@ export class TraceabilityCommands {
     };
   }
 
-  /** The board's current project scope: undefined is All Projects, never a filter. */
+  /** The project the board is working in: undefined is All projects. */
   private selectedProject(): string | undefined {
     const subsystem = this.deps.subsystem();
     return subsystem?.projectScope().get(this.projectUniverse(subsystem.getActiveAdapter()));
   }
 
-  // `explicitKey` is what one call asks for by name, so it survives an explicit sync setting; the board's
-  // ambient selection does not.
+  // `explicitKey` is what one call asks for by name, so it survives an explicit sync setting. The board's
+  // working project reaches this resolver that way on every sync (see `syncTraceability`); only Select
+  // Projects to Sync changes the standing list.
   private syncProjectKeys(
     adapter: TraceabilityAdapter | undefined,
     explicitKey?: string
   ): string[] {
     return resolveSyncProjectKeys({
       ...this.localProjectSources(adapter),
-      selectedKey: this.selectedProject(),
       explicitKey,
     });
   }
@@ -454,15 +454,21 @@ export class TraceabilityCommands {
     await this.refreshBoard("creating an execution");
   }
 
+  // Every sync fetches the standing Sync scope list plus the project the board is working in, named for
+  // that run. Defaulted here rather than at each entry point, so the palette, the view title, and the
+  // board's Sync now cannot drift, and a selection on no rung is never stranded by a failed load. A call
+  // that already names a project keeps its own.
   public syncTraceability(request: SyncRequest = { announce: true }): Promise<void> {
     this.deps.workspaceTrust.require();
+    const working = request.explicitKey ?? this.selectedProject();
+    const scoped: SyncRequest = { ...request, ...(working ? { explicitKey: working } : {}) };
     if (this.syncInFlight) {
-      if (request.explicitKey !== undefined) {
-        this.projectSyncs.enqueue(request.explicitKey, request.forceProject === true);
+      if (scoped.explicitKey !== undefined) {
+        this.projectSyncs.enqueue(scoped.explicitKey, scoped.forceProject === true);
       }
       return this.syncInFlight;
     }
-    this.syncInFlight = this.operations.sync(() => this.runTraceabilitySyncCommand(request)).finally(() => {
+    this.syncInFlight = this.operations.sync(() => this.runTraceabilitySyncCommand(scoped)).finally(() => {
       this.syncInFlight = undefined;
       this.projectSyncs.poke();
     });
@@ -662,14 +668,8 @@ export class TraceabilityCommands {
       );
       return;
     }
-    // The board's selection is a rung of the scope, resolved against the list just enumerated rather
-    // than through a second walk of the sources.
-    const sources: ProjectUniverseSources = {
-      ...listed,
-      selectedKey: this.deps.subsystem()?.projectScope().get(universe),
-    };
-    const scoped = new Set(resolveSyncProjectKeys(sources));
-    const provenance = projectProvenance(sources);
+    const scoped = new Set(resolveSyncProjectKeys(listed));
+    const provenance = projectProvenance(listed);
     const picked = await vscode.window.showQuickPick(
       universe.map((key) => ({
         label: key,
@@ -678,7 +678,7 @@ export class TraceabilityCommands {
       })),
       {
         title: "Select Projects to Sync",
-        placeHolder: "Projects every traceability sync fetches. Check none to scope it automatically.",
+        placeHolder: "Projects every sync fetches, alongside the board's working project. Check none to scope it automatically.",
         canPickMany: true,
         ignoreFocusOut: true,
       }

@@ -5,8 +5,8 @@ import * as vscode from "vscode";
 import { CommandManager } from "../../commands/command-manager";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { JiraAccessError, searchJiraProjects } from "../../xray/jira-project-search";
-import { captureHandlers, makeContext } from "./helpers/command-manager-harness";
-import { NO_PROJECT_SCOPE } from "../../traceability/project-scope";
+import { captureHandlers, makeContext, memento } from "./helpers/command-manager-harness";
+import { NO_PROJECT_SCOPE, projectScopeStore, type ProjectScopeStore } from "../../traceability/project-scope";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 
 vi.mock("../../xray/jira-project-search", async (importOriginal) => {
@@ -333,6 +333,7 @@ describe("selectSyncProjects command handler", () => {
     directory?: string[];
     cachedDirectory?: string[];
     directoryFails?: boolean;
+    scope?: ProjectScopeStore;
   }): TraceabilitySubsystem {
     return {
       traceabilityPanelActive: true,
@@ -349,7 +350,7 @@ describe("selectSyncProjects command handler", () => {
         },
       }),
       tagDerivedProjectKeys: () => ladder.tagDerived ?? [],
-      projectScope: () => NO_PROJECT_SCOPE,
+      projectScope: () => ladder.scope ?? NO_PROJECT_SCOPE,
     } as unknown as TraceabilitySubsystem;
   }
 
@@ -392,6 +393,26 @@ describe("selectSyncProjects command handler", () => {
       ignoreFocusOut: true,
       title: "Select Projects to Sync",
     });
+  });
+
+  // The board's working project is not a rung of the standing scope, so the project the board is showing
+  // is offered by whatever rung actually names it and is checked only if that rung is in scope. A
+  // site-only project the board happens to be working in stays unchecked until the user pins it here.
+  it("neither checks nor relabels a project just because the board is working in it", async () => {
+    stubConfig({});
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const scope = projectScopeStore(memento(), () => undefined);
+    scope.set("OPS");
+    const handlers = captureHandlers(makeContext(), (manager) =>
+      manager.setTraceabilitySubsystem(subsystemWith({ tagDerived: ["CALC"], directory: ["OPS"], scope }))
+    );
+
+    await handlers.get(CMD)!();
+
+    expect(pickerItems(quickPick.mock.calls)).toEqual([
+      { label: "CALC", description: "referenced by workspace tags", picked: true },
+      { label: "OPS", description: "from site directory", picked: false },
+    ]);
   });
 
   it("still opens on the last known projects when the site cannot be enumerated", async () => {

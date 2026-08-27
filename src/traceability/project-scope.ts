@@ -25,11 +25,9 @@ export interface ProjectUniverseSources {
   // Projects an earlier sync already pulled a catalogue for, so their cards keep a scope to select.
   readonly catalogueKeys?: readonly string[] | undefined;
   readonly defaultKey?: string | undefined;
-  // The board's current project selection, so picking a project there is enough to have it synced.
-  readonly selectedKey?: string | undefined;
-  // One project this call asks for, such as a forced project sync or a project the board just opened.
-  // It names a single fetch rather than the durable scope, so it is the one rung allowed to widen an
-  // explicit sync setting.
+  // One project this call asks for, such as a forced project sync, the project the board just opened, or
+  // the one its Sync now is working in. It names a single fetch rather than the durable scope, so it is
+  // the one rung allowed to widen an explicit sync setting.
   readonly explicitKey?: string | undefined;
 }
 
@@ -45,7 +43,6 @@ export function resolveProjectUniverse(sources: ProjectUniverseSources): string[
     ...(sources.syncSettingKeys ?? []),
     ...(sources.catalogueKeys ?? []),
     sources.defaultKey ?? "",
-    sources.selectedKey ?? "",
     sources.explicitKey ?? "",
   ]);
 }
@@ -56,7 +53,8 @@ export function resolveProjectUniverse(sources: ProjectUniverseSources): string[
  * only for that call. Otherwise the universe ladder minus the provider directory, since a sync fetches
  * one catalogue per project and covering every accessible project is not a scope. The directory is
  * dropped here rather than left to the caller, so a source bag built for a dropdown cannot leak a
- * site-wide fetch into a sync.
+ * site-wide fetch into a sync. The board's working project is not a rung either: it rides as
+ * `explicitKey` on the calls that mean it, never as standing scope.
  */
 export function resolveSyncProjectKeys(sources: ProjectUniverseSources): string[] {
   const chosen = normalizeProjectKeys(sources.syncSettingKeys ?? []);
@@ -70,7 +68,6 @@ export type ProjectProvenance =
   | "referenced by workspace tags"
   | "in the sync setting"
   | "synced earlier"
-  | "board selection"
   | "requested for this sync"
   | "from site directory";
 
@@ -86,7 +83,6 @@ export function projectProvenance(sources: ProjectUniverseSources): Map<string, 
     ["referenced by workspace tags", sources.tagDerivedKeys ?? []],
     ["in the sync setting", sources.syncSettingKeys ?? []],
     ["synced earlier", sources.catalogueKeys ?? []],
-    ["board selection", [sources.selectedKey ?? ""]],
     ["requested for this sync", [sources.explicitKey ?? ""]],
     ["from site directory", sources.directoryProjects ?? []],
   ];

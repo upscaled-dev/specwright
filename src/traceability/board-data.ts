@@ -83,11 +83,11 @@ export interface BoardViewModel {
   readonly completeProjects: readonly string[];
 }
 
-// The available group's empty state, by what the user can do about it. With nothing in the resolved
-// sync scope no sync helps, since no project's catalogue can be fetched without project keys, and the
-// header's project selector is the fastest way to put one there. With a scope but no catalogue landed,
-// a sync is the fix. A landed catalogue that yields nothing has nothing to offer, and saying every test
-// is mapped would be a lie when the sync catalogued no tests at all.
+// The available group's empty state, by what the user can do about it. With nothing in the resolved sync
+// scope a sync fetches no catalogue at all, since it has no project keys to fetch for, but picking a
+// project in the header loads that one by name, which is what the hint asks for. With a scope but no
+// catalogue landed, a sync is the fix. A landed catalogue that yields nothing has nothing to offer, and
+// saying every test is mapped would be a lie when the sync catalogued no tests at all.
 function availableEmptyText(
   syncScopeResolved: boolean,
   landed: boolean
@@ -637,8 +637,9 @@ export function filterExecutionRows(rows: readonly ExecutionRow[], query: string
  * untraced scenario's coverage hole never hides behind a filter. Scenario cards are local, not remote,
  * so they are never scoped away. The available group's empty state is re-decided for the scoped project
  * alone: a project whose own catalogue never landed must not inherit a sibling's authoritative "no
- * unmapped tests". A project can only be scoped to once it is in the sync scope (the selection is a rung
- * of that scope), so the pick-a-project hint is unreachable from here.
+ * unmapped tests". The selection is not a sync-scope rung, so a scoped project can sit outside the
+ * standing scope; the pick-a-project hint stays unreachable here because this pass hardcodes
+ * `syncScopeResolved` (a project IS picked once it is scoped to).
  */
 export function scopeBoardViewModel(model: BoardViewModel, project: string | undefined): BoardViewModel {
   if (project === undefined) {

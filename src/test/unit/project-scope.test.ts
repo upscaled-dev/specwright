@@ -59,12 +59,12 @@ describe("resolveProjectUniverse", () => {
     expect(resolveProjectUniverse({ syncSettingKeys: ["shop"], defaultKey: "pay" })).toEqual(["PAY", "SHOP"]);
   });
 
-  // The sync scope is this resolver minus the directory, so the board's selection is the rung that puts a
-  // project nobody has tagged or configured into the next sync.
-  it("takes the board's selection as a rung of its own, deduped and uppercased with the rest", () => {
-    expect(resolveProjectUniverse({ selectedKey: " pay " })).toEqual(["PAY"]);
-    expect(resolveProjectUniverse({ tagDerivedKeys: ["PAY"], selectedKey: "pay" })).toEqual(["PAY"]);
-    expect(resolveProjectUniverse({ selectedKey: "  " })).toEqual([]);
+  // The project one call asks for is on offer too, so a board opening a project it just named never
+  // shows a dropdown that cannot hold it.
+  it("takes the named project as a rung of its own, deduped and uppercased with the rest", () => {
+    expect(resolveProjectUniverse({ explicitKey: " pay " })).toEqual(["PAY"]);
+    expect(resolveProjectUniverse({ tagDerivedKeys: ["PAY"], explicitKey: "pay" })).toEqual(["PAY"]);
+    expect(resolveProjectUniverse({ explicitKey: "  " })).toEqual([]);
   });
 
   it("returns nothing when every source is empty", () => {
@@ -82,13 +82,11 @@ describe("resolveSyncProjectKeys", () => {
         tagDerivedKeys: ["CALC"],
         catalogueKeys: ["MATH"],
         defaultKey: "pay",
-        selectedKey: "calc",
       })
     ).toEqual(["CALC", "MATH", "PAY"]);
   });
 
-  // The setting is the user's own answer, so a sync must not widen it behind their back. The board's
-  // ambient selection is exactly the kind of widening this rules out.
+  // The setting is the user's own answer, so a sync must not widen it behind their back.
   it("takes a set sync setting as the whole scope", () => {
     expect(
       resolveSyncProjectKeys({
@@ -96,7 +94,6 @@ describe("resolveSyncProjectKeys", () => {
         syncSettingKeys: ["shop"],
         catalogueKeys: ["MATH"],
         defaultKey: "pay",
-        selectedKey: "calc",
       })
     ).toEqual(["SHOP"]);
   });
@@ -106,7 +103,7 @@ describe("resolveSyncProjectKeys", () => {
   // project and can never satisfy its own caller.
   it("lets a project this call names ride along with the setting", () => {
     expect(
-      resolveSyncProjectKeys({ syncSettingKeys: ["shop"], selectedKey: "calc", explicitKey: "pay" })
+      resolveSyncProjectKeys({ syncSettingKeys: ["shop"], catalogueKeys: ["calc"], explicitKey: "pay" })
     ).toEqual(["PAY", "SHOP"]);
   });
 
@@ -136,7 +133,6 @@ describe("projectProvenance", () => {
     syncSettingKeys: ["shop"],
     catalogueKeys: ["math"],
     defaultKey: "pay",
-    selectedKey: "web",
     explicitKey: "api",
   };
 
@@ -146,7 +142,6 @@ describe("projectProvenance", () => {
       ["CALC", "referenced by workspace tags"],
       ["SHOP", "in the sync setting"],
       ["MATH", "synced earlier"],
-      ["WEB", "board selection"],
       ["API", "requested for this sync"],
       ["OPS", "from site directory"],
     ]);
