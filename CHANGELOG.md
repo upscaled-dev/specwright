@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.6.0] - 2026-08-27
 ### Added
 
 - **The Traceability panel now has Workspace, Repository, and Test Sets tabs.** Workspace keeps the existing by-test or by-feature-file mapping, untraced scenarios, available tests, and run badges. Repository mirrors each synced project's read-only Xray Test Repository folders, showing how many remote tests a folder holds and how many of them are mapped locally. Test Sets lists read-only remote Test Sets with their summary, remote member count, locally runnable count, remote-only count, and their members. The filter and the row actions apply to the tab you are on, and the panel reopens on the tab you left.
