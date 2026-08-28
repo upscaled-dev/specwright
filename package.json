@@ -885,7 +885,7 @@
         "command": "playwrightBddRunner.traceability.createTestSet",
         "title": "Create Test Set…",
         "category": "Specwright",
-        "icon": "$(library)",
+        "icon": "$(list-selection)",
         "enablement": "isWorkspaceTrusted"
       },
       {

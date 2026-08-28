@@ -613,8 +613,8 @@ describe("traceability view client", () => {
     const rows: readonly TraceabilityWireRow[] = [
       { id: "connection", view: "all", label: "Xray Cloud", icon: "cloud", expandable: false, actions: [selectSyncProjects] },
       { id: "workspace-row", view: "workspace", label: "Mapped scenario", icon: "circle-outline", expandable: false, actions: [] },
-      { id: "repository-row", view: "repository", label: "SHOP repository", icon: "repo", expandable: false, actions: [] },
-      { id: "test-set-row", view: "test-sets", label: "SHOP-301", icon: "folder", expandable: false, actions: [] },
+      { id: "repository-row", view: "repository", label: "SHOP repository", icon: "project", expandable: false, actions: [] },
+      { id: "test-set-row", view: "test-sets", label: "SHOP-301", icon: "list-selection", expandable: false, actions: [] },
     ];
     view.send({ type: "begin", generation: 1, state: "ready", total: rows.length });
     view.send({ type: "chunk", generation: 1, offset: 0, rows });
@@ -743,7 +743,7 @@ describe("traceability view client", () => {
       { id: "w1", label: "Workspace one", icon: "circle-outline", expandable: false, actions: [], view: "workspace" },
       { id: "w2", label: "Workspace two", icon: "circle-outline", expandable: false, actions: [], view: "workspace" },
       { id: "w3", label: "Workspace three", icon: "circle-outline", expandable: false, actions: [], view: "workspace" },
-      { id: "r1", label: "SHOP", icon: "repo", expandable: false, actions: [], view: "repository" },
+      { id: "r1", label: "SHOP", icon: "project", expandable: false, actions: [], view: "repository" },
     ];
     view.send({ type: "begin", generation: 1, state: "ready", total: rows.length });
     view.send({ type: "chunk", generation: 1, offset: 0, rows });

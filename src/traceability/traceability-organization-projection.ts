@@ -169,7 +169,7 @@ export function projectTraceabilityOrganization(
     const hierarchyError = index.truncated
       ? [`Repository hierarchy reached the ${REPOSITORY_FOLDER_NODE_LIMIT}-folder or ${REPOSITORY_FOLDER_DEPTH_LIMIT}-level limit.`]
       : [];
-    add({ id: projectId, view: "repository", label: project.projectKey, description: `${project.tests.length} remote tests · ${qualifier}`, tooltip: [...project.errors, ...hierarchyError].join("\n") || undefined, icon: "repo", tone: usable ? "info" : "warning", expandable: true, actions: [] }, { kind: "repositoryProject", projectKey: project.projectKey });
+    add({ id: projectId, view: "repository", label: project.projectKey, description: `${project.tests.length} remote tests · ${qualifier}`, tooltip: [...project.errors, ...hierarchyError].join("\n") || undefined, icon: "project", tone: usable ? "info" : "warning", expandable: true, actions: [] }, { kind: "repositoryProject", projectKey: project.projectKey });
     for (const folder of [...index.folders.values()].sort((a, b) => a.path.localeCompare(b.path))) {
       const folderId = traceabilityRowId("repository-folder", `${project.projectKey}:${folder.path}`);
       add({
@@ -199,7 +199,7 @@ export function projectTraceabilityOrganization(
 
   for (const project of organization?.testSetProjects ?? []) {
     const projectId = traceabilityRowId("test-set-project", project.projectKey);
-    add({ id: projectId, view: "test-sets", label: project.projectKey, description: `${project.testSets.length} Test Sets${project.truncated ? " · truncated" : ""}`, tooltip: project.errors.join("\n") || undefined, icon: "folder", tone: project.complete ? "info" : "warning", expandable: true, actions: [] }, { kind: "testSetProject", projectKey: project.projectKey });
+    add({ id: projectId, view: "test-sets", label: project.projectKey, description: `${project.testSets.length} Test Sets${project.truncated ? " · truncated" : ""}`, tooltip: project.errors.join("\n") || undefined, icon: "project", tone: project.complete ? "info" : "warning", expandable: true, actions: [] }, { kind: "testSetProject", projectKey: project.projectKey });
     for (const set of [...project.testSets].sort((a, b) => a.key.localeCompare(b.key))) {
       const setId = traceabilityRowId("test-set", set.key);
       let detail = `${set.remoteMemberCount} remote members · ${set.members.length} ${set.membersLastKnown ? "cached" : "loaded"} · membership incomplete`;
@@ -220,7 +220,9 @@ export function projectTraceabilityOrganization(
           id: traceabilityRowId("test-set-member", `${set.key}:${member.key}`), parentId: setId,
           view: "test-sets", label: member.key,
           description: [member.summary, local ? "mapped" : "remote only"].filter(Boolean).join(" · "),
-          icon: local ? "check" : "remove", tone: local ? "success" : "muted", expandable: false,
+          // A member is a remote test, like a repository test or a Workspace orphan, so it carries the
+          // same glyph; whether this workspace maps it is tone and description, never identity.
+          icon: "beaker", tone: local ? "success" : "muted", expandable: false,
           actions: [TRACEABILITY_ACTIONS.openRemote, TRACEABILITY_ACTIONS.copy], defaultAction: "open",
         }, { kind: "testSetMember", testKey: member.key, summary: member.summary });
       }
