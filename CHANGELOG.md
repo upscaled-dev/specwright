@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.7.1] - 2026-09-02
+### Added
+
+- The test key on a Coverage Board card now opens that test in the tracker. The key on the Available and Mapped cards is a real control with hover text, and clicking it leaves the card's checkbox, drag, and link actions untouched.
+
+### Fixed
+
+- The Sync and Select projects... buttons in the Mapping toolbar show hover text again, including while a running sync disables them. The Sync text names the exact projects the next run will fetch, or says the scope is empty, and follows changes to the View project and the sync list.
+- Board tooltips paint above the sticky section headers instead of being sliced where they overlap.
+
 ## [0.7.0] - 2026-09-02
 ### Added
 
