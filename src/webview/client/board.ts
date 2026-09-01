@@ -47,6 +47,7 @@ export function installBoard(): void {
   const mappedPaginator = element<HTMLElement>('mapped-paginator');
   const pageSizeSelect = element<HTMLSelectElement>('page-size-select');
   const syncNow = element<HTMLButtonElement>('sync-now');
+  const syncNowTooltip = element<HTMLElement>('sync-now-tooltip');
   const syncScope = element<HTMLButtonElement>('sync-scope');
   const syncStrip = element<HTMLElement>('sync-strip');
   const syncStripText = element<HTMLElement>('sync-strip-text');
@@ -467,7 +468,13 @@ export function installBoard(): void {
         if (action) {renderIconVerb(button, mappingVerb(action, msg), button.getAttribute('aria-label') ?? '');}
       }
       renderVerb(createExecution, msg.executionVerb, 'Create Execution');
-      renderVerb(syncNow, msg.syncVerb, 'Sync');
+      // Not `renderVerb`: a disabled button gets no native `title` tooltip, and the hint matters most
+      // while the button is dead, so the toolbar verbs carry the same hover span the icon verbs use.
+      const syncLabel = msg.syncVerb.label || 'Sync';
+      syncNow.textContent = syncLabel;
+      syncNow.disabled = !msg.syncVerb.enabled;
+      // Never empty: a tooltip node with no text is a node with no accessible name.
+      syncNowTooltip.textContent = msg.syncVerb.hint || syncLabel;
       // The picker and the sync share one admission, so the strip's two buttons go dead together rather
       // than leaving the project picker live for a click the host would drop.
       syncScope.disabled = !msg.syncVerb.enabled;

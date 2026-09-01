@@ -488,10 +488,24 @@ describe("coverage board browser client", () => {
     expect(client.dom.window.document.getElementById("available-count")?.textContent).toBe("(7)");
     const syncButtons = (): boolean[] => ["sync-now", "sync-scope"]
       .map((id) => (client.dom.window.document.getElementById(id) as HTMLButtonElement).disabled);
+    // Hover text for both toolbar verbs, through every render. A native title would go quiet exactly when
+    // the button is disabled, which is when the hint has the most to say, so both carry a tooltip span.
+    const syncHovers = (): string[] => ["sync-now-tooltip", "sync-scope-tooltip"]
+      .map((id) => client.dom.window.document.getElementById(id)?.textContent ?? "");
+    client.send("board", { ...changed, syncVerb: { label: "Sync", enabled: true, hint: "Fetches the selected sync projects, plus the View project." } });
     expect(syncButtons()).toEqual([false, false]);
+    expect(syncHovers()).toEqual([
+      "Fetches the selected sync projects, plus the View project.",
+      "Choose which projects every sync fetches",
+    ]);
     // Sync and Select projects share the host's admission, so a sync in progress takes both.
     client.send("board", { ...changed, syncVerb: { label: "Syncing", enabled: false, hint: "A traceability sync is in progress." } });
     expect(syncButtons()).toEqual([true, true]);
+    expect(syncHovers()).toEqual([
+      "A traceability sync is in progress.",
+      "Choose which projects every sync fetches",
+    ]);
+    expect(syncHovers().every((text) => text.length > 0)).toBe(true);
     await expectNoSeriousViolations(client.dom);
 
     const restored = await rig(client.state);

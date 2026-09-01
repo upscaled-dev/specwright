@@ -474,7 +474,7 @@ export class BoardSurface {
     if (this.deps.mutationActive()) {
       return { label: "Sync", enabled: false, hint: "Wait for the active board operation to finish." };
     }
-    return { label: "Sync", enabled: true, hint: "Refresh traceability from the connected provider." };
+    return { label: "Sync", enabled: true, hint: "Fetches the selected sync projects, plus the View project." };
   }
 
   // What a section's meta says beyond its page arithmetic: `total` is the count the header shows, before

@@ -50,6 +50,8 @@ const BOARD_CSS = `
   .board-pane .mapping-top { flex: none; display: flex; align-items: flex-start; gap: 0.75rem; margin: 0 0 0.6rem; }
   .board-pane .mapping-top .mapping-hint { flex: 1; margin: 0; }
   .board-pane .mapping-toolbar { flex: none; display: flex; align-items: center; gap: 0.5rem; }
+  /* The toolbar has no verbs row to hang a tooltip off, so each wrapper anchors its own. */
+  .board-pane .mapping-toolbar .icon-verb-tooltip { position: relative; }
   .board-pane .page-size { flex: none; display: flex; align-items: center; gap: 0.35rem; color: var(--vscode-descriptionForeground); font-size: 0.82em; }
   .board-pane .page-size select { padding: 0.3rem 0.4rem; color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); background: var(--vscode-dropdown-background, var(--vscode-input-background)); border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, transparent)); border-radius: 3px; font-family: inherit; font-size: inherit; }
   .board-pane .page-size select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
@@ -180,8 +182,8 @@ function boardPanesHtml(providerLabel: string): string {
       <div class="mapping-top">
         <p class="mapping-hint">Drag a scenario onto a test to link them, or select one scenario and one test and use the visible Link button.</p>
         <div class="mapping-toolbar">
-          <button id="sync-now" class="verb" type="button" disabled>Sync</button>
-          <button id="sync-scope" class="verb" type="button" title="Choose which projects every sync fetches">Select projects...</button>
+          <span class="icon-verb-tooltip"><button id="sync-now" class="verb" type="button" disabled aria-describedby="sync-now-tooltip">Sync</button><span id="sync-now-tooltip" class="icon-verb-tooltip-content" role="tooltip">Sync</span></span>
+          <span class="icon-verb-tooltip"><button id="sync-scope" class="verb" type="button" aria-describedby="sync-scope-tooltip">Select projects...</button><span id="sync-scope-tooltip" class="icon-verb-tooltip-content" role="tooltip">Choose which projects every sync fetches</span></span>
           <div class="page-size">
             <label for="page-size-select">Rows</label>
             <select id="page-size-select" title="How many cards each list shows">
