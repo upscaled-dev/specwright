@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.7.0] - 2026-09-02
 ### Added
 
 - **Select projects...** sits next to Sync in the Coverage Board's Mapping toolbar. It opens the same Select Projects to Sync list as the command palette, so the projects a sync fetches can be changed without leaving the board.
@@ -14,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The board's header project dropdown is now labelled **View project**. It names the project the board works in: it filters what the board shows, loads that project, and is the target for create and publish actions.
 - Picking a project on the board no longer widens the scope of every later sync. That standing scope comes from your tags, the default project key, and projects already catalogued, or from Select Projects to Sync once that list is set. Every sync still fetches the project the board is working in by name, alongside that standing scope, whether you run it from the board, the panel title, or the command palette.
+- The Traceability panel's organization tabs share one icon vocabulary: a Jira project shows the project glyph on both tabs, and a Test Set member carries the beaker like every other remote test, with its mapped state in the tone and description instead of the icon. The Create Test Set command now uses the sidebar's Test Set list glyph.
 
 ### Fixed
 
