@@ -36,6 +36,15 @@ describe("webview protocol", () => {
     expect(parseClientEnvelope(client("publish", { type: "confirm", runId: "run", request: { mode: "append", executionKey: "CALC-1" }, attachments: Array(129).fill("a") }))).toBeUndefined();
   });
 
+  // The Executions rows and the test card keys share this message, and the key is the whole request.
+  it("accepts an open request only for a non-empty issue key", () => {
+    expect(parseClientEnvelope(client("board", { type: "open", key: "CALC-1" }))).toBeDefined();
+    expect(parseClientEnvelope(client("board", { type: "open", key: "" }))).toBeUndefined();
+    expect(parseClientEnvelope(client("board", { type: "open" }))).toBeUndefined();
+    expect(parseClientEnvelope(client("board", { type: "open", key: "CALC-1", extra: true }))).toBeUndefined();
+    expect(parseClientEnvelope(client("board", { type: "open", key: "x".repeat(513) }))).toBeUndefined();
+  });
+
   // The select-all posts an intent, never a key list, so the whole message is one list name and one flag.
   it("accepts a select-all intent for a known test list only", () => {
     expect(parseClientEnvelope(client("board", { type: "select-scope", section: "available", on: true }))).toBeDefined();

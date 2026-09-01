@@ -39,13 +39,13 @@ describe("BoardPanel", () => {
     expect(lastRender(panel)!.executions.map((e) => e.key)).toEqual(["PAY-9"]);
   });
 
-  it("routes an open message to openExecution with the row key", async () => {
-    const openExecution = vi.fn();
-    const { panel } = await openReady({ openExecution });
+  it("routes an open message to openIssue with the row key", async () => {
+    const openIssue = vi.fn();
+    const { panel } = await openReady({ openIssue });
 
     await receive(panel, { surface: "board", type: "open", key: "XNP-1" });
 
-    expect(openExecution).toHaveBeenCalledWith("XNP-1");
+    expect(openIssue).toHaveBeenCalledWith("XNP-1");
   });
 
   it("filters the matrix rows alongside the cards", async () => {

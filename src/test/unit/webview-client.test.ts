@@ -113,7 +113,7 @@ async function bridgeBoardSurface(
     syncProjects: () => ["CALC"],
     selectSyncProjects: () => undefined,
     autoSync: () => Promise.resolve(),
-    openExecution: () => undefined,
+    openIssue: () => undefined,
     bulkCreate: () => undefined,
     createTestSet: () => onContainerAction("createTestSet", board.surface!),
     addToTestSet: () => onContainerAction("addToTestSet", board.surface!),
@@ -222,6 +222,35 @@ describe("coverage board browser client", () => {
     client.send("board", boardRender());
     expect(client.dom.window.document.querySelector("#scenario-cards .title")?.textContent).toBe("Login");
     expect(client.dom.window.document.getElementById("pane-mapping")?.hidden).toBe(false);
+  });
+
+  // The key has always been painted as a link, so it acts like one. Clicking it must not double as a
+  // click on the card underneath, which is where selection and drag live.
+  it("opens a test card's key in the tracker without touching that card's selection", async () => {
+    const client = await rig();
+    client.send("shell", { type: "activate", tab: "mapping" });
+    client.send("board", mappedRender());
+    const doc = client.dom.window.document;
+    const box = doc.querySelector<HTMLInputElement>('input[aria-label="Select test CALC-2"]')!;
+    const key = [...doc.querySelectorAll<HTMLButtonElement>("#mapped-cards .key-link")]
+      .find((button) => button.textContent === "CALC-2")!;
+
+    expect(key.title).toBe("Open CALC-2 in the tracker.");
+    key.dispatchEvent(new client.dom.window.MouseEvent("click", { bubbles: true }));
+
+    expect(clientBodies(client, "board")).toEqual([{ type: "open", key: "CALC-2" }]);
+    expect(box.checked).toBe(false);
+  });
+
+  it("gives every available card key the same tracker control", async () => {
+    const client = await rig();
+    client.send("shell", { type: "activate", tab: "mapping" });
+    client.send("board", boardRender());
+    const key = client.dom.window.document.querySelector<HTMLButtonElement>("#available-cards .key-link")!;
+
+    key.dispatchEvent(new client.dom.window.MouseEvent("click", { bubbles: true }));
+
+    expect(clientBodies(client, "board")).toEqual([{ type: "open", key: "CALC-1" }]);
   });
 
   it("dispatches each shared Mapping action from both test toolbars", async () => {

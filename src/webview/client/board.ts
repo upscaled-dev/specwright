@@ -331,7 +331,20 @@ export function installBoard(): void {
       head.appendChild(selectBox('test', card.key, `Select test ${  card.key}`, card.selected));
       const title = document.createElement('div');
       title.className = 'title key';
-      title.textContent = card.key;
+      // The key has always looked like a link; this is the control that makes it one. The click stops
+      // there so the card's drag, its checkbox, and the keyboard link row all behave as before.
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'key-link';
+      open.textContent = card.key;
+      open.title = `Open ${card.key} in the tracker.`;
+      open.dataset["focusKey"] = `open:${card.key}`;
+      open.dataset["focusFallback"] = `test:${card.key}`;
+      open.addEventListener('click', (event) => {
+        event.stopPropagation();
+        window.__spec.post('board', { type: 'open', key: card.key });
+      });
+      title.appendChild(open);
       head.appendChild(title);
       el.appendChild(head);
       if (card.summary) { el.appendChild(metaEl(card.summary)); }

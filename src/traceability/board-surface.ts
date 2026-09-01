@@ -134,8 +134,9 @@ export interface BoardSurfaceDeps {
   // (a reachable tracker, a project no sync has catalogued) is the host's call, not the board's: the
   // board only says which project it is looking at, and the host keeps the run quiet.
   autoSync(projectKey: string): Promise<void>;
-  // An Executions row's key link: routed through the host's browseIssue path.
-  openExecution(key: string): void;
+  // Any issue key the board shows as a link, an Executions row or a test card's key, routed through the
+  // host's browseIssue path. Opening a page reads and writes nothing here, so it takes no admission.
+  openIssue(key: string): void;
   // The Create tests button: authors one remote test per checked scenario card. The command layer owns
   // the confirm, the progress, and the reporting, and reads the same selection this surface holds, so
   // the button and the palette entry run one path.
@@ -265,7 +266,7 @@ export class BoardSurface {
     },
     unlink: (message) => this.unlinkRow(message.scenario, message.key),
     pushText: (message) => this.deps.pushText(message.scenario, message.key),
-    open: (message) => this.deps.openExecution(message.key),
+    open: (message) => this.deps.openIssue(message.key),
     sync: () => this.syncNow(),
     // The picker writes the sync scope the next fetch reads, so it takes the same admission Sync takes
     // rather than opening over a run that is already reading with the old scope.

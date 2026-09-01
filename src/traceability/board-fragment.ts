@@ -43,6 +43,10 @@ const BOARD_CSS = `
   .board-pane .icon-verb-tooltip-content { position: absolute; z-index: 4; /* above the sticky section-chrome (3), or the columns slice the toolbar tooltips */ top: calc(100% + 0.35rem); left: 0; box-sizing: border-box; width: max-content; max-width: min(100%, calc(100vw - 2rem)); padding: 0.3rem 0.45rem; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent)); border-radius: 3px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); color: var(--vscode-editorWidget-foreground, var(--vscode-foreground)); font-size: 0.78rem; line-height: 1.3; white-space: normal; visibility: hidden; opacity: 0; pointer-events: none; }
   .board-pane .icon-verb-tooltip:hover .icon-verb-tooltip-content, .board-pane .icon-verb-tooltip:focus-within .icon-verb-tooltip-content { visibility: visible; opacity: 1; }
   .board-pane .card .key { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-textLink-foreground); }
+  /* The key control keeps the look of the text it replaced: everything comes from the .key wrapper. */
+  .board-pane .card .key-link { padding: 0; border: none; background: none; font: inherit; color: inherit; text-align: left; word-break: break-word; cursor: pointer; }
+  .board-pane .card .key-link:hover { text-decoration: underline; }
+  .board-pane .card .key-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
   .board-pane .card .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 0.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .board-pane .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
   .board-pane .pill { font-size: 0.72rem; padding: 0.08rem 0.4rem; border-radius: 999px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }

@@ -333,13 +333,13 @@ export class TraceabilityCommands {
           });
       },
       autoSync: (projectKey) => this.autoSyncProject(projectKey),
-      openExecution: (key) => {
+      openIssue: (key) => {
         const adapter =
           this.deps.subsystem()?.getActiveAdapter() ?? this.deps.fallbackAdapter();
         this.getLinkCommands()
           .browseIssue(adapter, key)
           .catch((error) => {
-            this.logger.warn("Opening the execution issue failed", {
+            this.logger.warn("Opening the issue from the board failed", {
               error: errMsg(error),
             });
           });

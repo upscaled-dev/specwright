@@ -305,7 +305,9 @@ function validBoard(body: Record<string, unknown>): boolean {
   if (body["type"] === "page") {return exact(body, ["type", "section", "step"]) && oneOf(body["section"], section) && oneOf(body["step"], ["prev", "next"] as const);}
   if (body["type"] === "pageSize") {return exact(body, ["type", "size"]) && Number.isSafeInteger(body["size"]) && (body["size"] as number) >= 1 && (body["size"] as number) <= 100;}
   if (oneOf(body["type"], ["drop", "unlink", "pushText"] as const)) {return exact(body, ["type", "scenario", "key"]) && text(body["scenario"]) && text(body["key"]);}
-  if (body["type"] === "open") {return exact(body, ["type", "key"]) && text(body["key"]);}
+  // Both the Executions rows and the test cards post this; an issue key is the whole request, so an empty
+  // one is not a request at all.
+  if (body["type"] === "open") {return exact(body, ["type", "key"]) && text(body["key"]) && body["key"] !== "";}
   if (body["type"] === "scope") {return exact(body, ["type", "project"]) && text(body["project"]);}
   if (body["type"] === "select") {
     return exact(body, ["type", "target", "id", "on"]) && oneOf(body["target"], ["scenario", "test"] as const) &&

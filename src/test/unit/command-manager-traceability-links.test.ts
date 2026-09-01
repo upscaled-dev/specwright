@@ -119,6 +119,21 @@ describe("traceability browse/copy command handlers", () => {
     warn.mockRestore();
   });
 
+  // A card key on the board is the same request as the panel's Open in tracker action, so it must land
+  // on the same browse URL rather than a second, board-only path.
+  it("opens the same browse URL from a board card's key link", async () => {
+    let manager: CommandManager | undefined;
+    captureHandlers(
+      makeContext({ traceabilityAdapter: stubAdapter((key) => `https://acme.atlassian.net/browse/${key}`) }),
+      (created) => { manager = created; }
+    );
+
+    traceabilityBoardDeps(manager!).openIssue("CALC-1");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(envHooks.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-1"]);
+  });
+
   it("no-ops when the item carries no issue key", async () => {
     await openIssue(stubAdapter((key) => `https://acme.atlassian.net/browse/${key}`), { notAKey: true });
     expect(envHooks.__openExternalCalls).toEqual([]);
