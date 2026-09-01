@@ -320,6 +320,10 @@ export class TraceabilityCommands {
           });
       },
       runSync: () => this.boardPrivileged(() => this.syncTraceability()),
+      // The same resolution that run would take, off cached sources only: the working project rides as
+      // `explicitKey` exactly as `syncTraceability` defaults it.
+      syncProjects: () =>
+        this.syncProjectKeys(this.deps.subsystem()?.getActiveAdapter(), this.selectedProject()),
       selectSyncProjects: () => {
         this.boardPrivileged((signal) => this.selectSyncProjectsTrusted(signal))
           .catch((error) => {

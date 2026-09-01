@@ -112,6 +112,49 @@ describe("BoardPanel", () => {
     expect(lastRender(panel)?.syncVerb).toMatchObject({ enabled: false, label: "Sync" });
   });
 
+  // The hover text answers "what will this fetch", so it names the resolved keys rather than describing
+  // the ladder. Long lists are counted out so the tooltip cannot run away from the button.
+  it("names the projects the next sync resolves to in the Sync hint", async () => {
+    const { panel } = await openReady({ syncProjects: () => ["PAY", "SHOP"] });
+
+    expect(lastRender(panel)?.syncVerb).toMatchObject({
+      enabled: true,
+      label: "Sync",
+      hint: "Syncs PAY, SHOP.",
+    });
+  });
+
+  it("counts out a resolved scope too long to name in the Sync hint", async () => {
+    const { panel } = await openReady({ syncProjects: () => ["CALC", "MATH", "OPS", "PAY", "SHOP", "WEB"] });
+
+    expect(lastRender(panel)?.syncVerb.hint).toBe("Syncs CALC, MATH, OPS, PAY, and 2 more.");
+  });
+
+  // Nothing resolved means a click fetches no catalogue at all, so the tooltip says what would change it.
+  it("says how to put a project in scope when the Sync hint has none to name", async () => {
+    const { panel } = await openReady({ syncProjects: () => [] });
+
+    expect(lastRender(panel)?.syncVerb).toMatchObject({
+      enabled: true,
+      hint: "No projects in scope yet. Tag scenarios or select projects to sync.",
+    });
+  });
+
+  // The View selector repaints through the same render, so the hint follows the project it just named.
+  it("re-resolves the Sync hint when the View project changes", async () => {
+    let working: string | undefined;
+    const { panel } = await openReady({
+      knownProjects: () => ["CALC", "PAY"],
+      syncProjects: () => (working ? ["CALC", working] : ["CALC"]),
+      projectScope: { get: () => working, set: (project) => { working = project; } },
+    });
+    expect(lastRender(panel)?.syncVerb.hint).toBe("Syncs CALC.");
+
+    await receive(panel, { surface: "board", type: "scope", project: "PAY" });
+
+    expect(lastRender(panel)?.syncVerb.hint).toBe("Syncs CALC, PAY.");
+  });
+
   it("paints an open board disabled during a mutation and re-enables from the activity event", async () => {
     let active = true;
     const activity = new vscode.EventEmitter<void>();

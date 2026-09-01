@@ -110,6 +110,7 @@ async function bridgeBoardSurface(
     applyUnlink: () => Promise.resolve(),
     pushText: () => undefined,
     runSync: () => Promise.resolve(),
+    syncProjects: () => ["CALC"],
     selectSyncProjects: () => undefined,
     autoSync: () => Promise.resolve(),
     openExecution: () => undefined,
@@ -492,19 +493,19 @@ describe("coverage board browser client", () => {
     // the button is disabled, which is when the hint has the most to say, so both carry a tooltip span.
     const syncHovers = (): string[] => ["sync-now-tooltip", "sync-scope-tooltip"]
       .map((id) => client.dom.window.document.getElementById(id)?.textContent ?? "");
-    client.send("board", { ...changed, syncVerb: { label: "Sync", enabled: true, hint: "Fetches the selected sync projects, plus the View project." } });
+    const picker = "Choose the projects every sync fetches, alongside the View project.";
+    // The host resolves a standing SHOP plus a View project of PAY into one list; the button says so.
+    client.send("board", { ...changed, syncVerb: { label: "Sync", enabled: true, hint: "Syncs PAY, SHOP." } });
     expect(syncButtons()).toEqual([false, false]);
-    expect(syncHovers()).toEqual([
-      "Fetches the selected sync projects, plus the View project.",
-      "Choose which projects every sync fetches",
-    ]);
+    expect(syncHovers()).toEqual(["Syncs PAY, SHOP.", picker]);
+
+    client.send("board", { ...changed, syncVerb: { label: "Sync", enabled: true, hint: "No projects in scope yet. Tag scenarios or select projects to sync." } });
+    expect(syncHovers()).toEqual(["No projects in scope yet. Tag scenarios or select projects to sync.", picker]);
+
     // Sync and Select projects share the host's admission, so a sync in progress takes both.
     client.send("board", { ...changed, syncVerb: { label: "Syncing", enabled: false, hint: "A traceability sync is in progress." } });
     expect(syncButtons()).toEqual([true, true]);
-    expect(syncHovers()).toEqual([
-      "A traceability sync is in progress.",
-      "Choose which projects every sync fetches",
-    ]);
+    expect(syncHovers()).toEqual(["A traceability sync is in progress.", picker]);
     expect(syncHovers().every((text) => text.length > 0)).toBe(true);
     await expectNoSeriousViolations(client.dom);
 

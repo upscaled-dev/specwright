@@ -218,6 +218,7 @@ export function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     applyUnlink: () => Promise.resolve(),
     pushText: () => undefined,
     runSync: () => Promise.resolve(),
+    syncProjects: () => PROJECTS,
     selectSyncProjects: () => undefined,
     autoSync: () => Promise.resolve(),
     openExecution: () => undefined,

@@ -124,6 +124,9 @@ export interface BoardSurfaceDeps {
   // The persistent Sync button runs the same traceability sync the palette runs. Its enabled state
   // is host-owned, and this surface enforces that state again before starting the read.
   runSync(): Promise<void>;
+  // The project keys that run would fetch, resolved from cached sources the way the sync itself resolves
+  // them. Read on every render, so the Sync button's hover text follows a scope or View change.
+  syncProjects(): readonly string[];
   // The scope button opens the same Select Projects to Sync picker the palette opens. The command layer
   // owns the list, the write, and the reporting; the board only asks for it.
   selectSyncProjects(): void;
@@ -167,6 +170,20 @@ interface MappingViewState {
 
 const NO_COLUMN_QUERIES: Record<MappingSection, string> = { untraced: "", available: "", mapped: "" };
 const FIRST_PAGES: Record<MappingSection, number> = { untraced: 0, available: 0, mapped: 0 };
+
+// How many project keys the Sync tooltip names before it counts the rest.
+const SYNC_HINT_KEYS = 4;
+
+// The Sync button's hover text: what the next run will actually fetch, not how the scope is assembled.
+function syncHint(projects: readonly string[]): string {
+  if (projects.length === 0) {
+    return "No projects in scope yet. Tag scenarios or select projects to sync.";
+  }
+  const named = projects.slice(0, SYNC_HINT_KEYS).join(", ");
+  return projects.length > SYNC_HINT_KEYS
+    ? `Syncs ${named}, and ${projects.length - SYNC_HINT_KEYS} more.`
+    : `Syncs ${named}.`;
+}
 
 function prune(selection: Set<string>, live: readonly string[]): void {
   const known = new Set(live);
@@ -474,7 +491,7 @@ export class BoardSurface {
     if (this.deps.mutationActive()) {
       return { label: "Sync", enabled: false, hint: "Wait for the active board operation to finish." };
     }
-    return { label: "Sync", enabled: true, hint: "Fetches the selected sync projects, plus the View project." };
+    return { label: "Sync", enabled: true, hint: syncHint(this.deps.syncProjects()) };
   }
 
   // What a section's meta says beyond its page arithmetic: `total` is the count the header shows, before
