@@ -1,72 +1,24 @@
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as vscode from "vscode";
-import type { ExtensionApi } from "../../../extension";
+import {
+  activatedTestProvider,
+  cannedReport,
+  findScenario,
+  waitUntil,
+  type TargetScenario,
+  type TestProviderApi,
+} from "./fixture-host";
 import {
   materializeGeneratedSpecForBddgen,
   removeGeneratedSpecs,
   SAMPLE_EXACT_TARGET,
 } from "./generated-spec-fixture";
 
-const EXTENSION_ID = "upscaled-dev.specwright";
-
-type TestProviderApi = NonNullable<ExtensionApi["testProvider"]>;
-
-async function getProvider(): Promise<TestProviderApi> {
-  const ext = vscode.extensions.getExtension(EXTENSION_ID);
-  if (!ext) { throw new Error(`Extension ${EXTENSION_ID} not found`); }
-  const api = (await ext.activate()) as ExtensionApi;
-  assert.ok(api.testProvider, "testProvider not exposed by ExtensionApi");
-  return api.testProvider;
-}
-
 function workspaceRoot(): string {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!root) {throw new Error("No workspace folder open in integration host");}
   return root;
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs: number, description: string): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) { return; }
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${description}`);
-}
-
-interface TargetScenario { id: string; filePath: string; lineNumber: number; }
-
-function findScenario(provider: TestProviderApi, name: string): TargetScenario | undefined {
-  for (const [id, scenario] of provider.testIdToScenarioMap) {
-    if (scenario.name === name) {
-      return { id, filePath: scenario.filePath, lineNumber: scenario.lineNumber };
-    }
-  }
-  return undefined;
-}
-
-/** A canned Playwright JSON report for one scenario, with a source annotation so the parser maps
- * it back to the .feature line without needing a generated spec on disk. */
-function cannedReport(target: TargetScenario, status: "passed" | "failed"): string {
-  return JSON.stringify({
-    suites: [{
-      title: "Fixture feature",
-      specs: [{
-        title: "Plain scenario",
-        file: "features/sample.feature.spec.js",
-        tests: [{
-          annotations: [{ type: `${target.filePath}:${target.lineNumber}` }],
-          results: [{
-            status,
-            duration: 5,
-            ...(status === "failed" ? { error: { message: "boom", stack: "Error: boom\n    at steps.ts:1:1" } } : {}),
-            steps: [{ title: "Given I am on the test page", duration: 2 }],
-          }],
-        }],
-      }],
-    }],
-  });
 }
 
 suite("Run → Test Explorer status (real VS Code, canned shell)", () => {
@@ -75,7 +27,7 @@ suite("Run → Test Explorer status (real VS Code, canned shell)", () => {
 
   suiteSetup(async () => {
     removeGeneratedSpecs(workspaceRoot());
-    provider = await getProvider();
+    provider = await activatedTestProvider();
     await waitUntil(
       () => findScenario(provider, "Plain scenario") !== undefined,
       10_000,
@@ -98,7 +50,13 @@ suite("Run → Test Explorer status (real VS Code, canned shell)", () => {
       }
       assert.ok(command.includes(SAMPLE_EXACT_TARGET), `expected exact target, got: ${command}`);
       const reportPath = env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"];
-      if (reportPath) { fs.writeFileSync(reportPath, cannedReport(target, status)); }
+      if (reportPath) {
+        fs.writeFileSync(reportPath, cannedReport(target, {
+          featureTitle: "Fixture feature",
+          specFile: "features/sample.feature.spec.js",
+          status,
+        }));
+      }
       return { success: status === "passed", output: "", error: "", returnCode: status === "passed" ? 0 : 1 };
     });
     await vscode.commands.executeCommand(

@@ -155,12 +155,37 @@ describe("activate", () => {
     expect(typeof api.seedParallelProfilePrompted).toBe("function");
     expect("testProvider" in api).toBe(true);
     expect("providerRegistry" in api).toBe(true);
+    expect(api.runArtifacts?.list()).toEqual([]);
+    expect(typeof api.runArtifacts?.onDidChange).toBe("function");
 
     await api.seedParallelProfilePrompted(true);
     expect(context.workspaceState.update).toHaveBeenCalledWith(PROMPTED_STATE_KEY, true);
 
     await api.seedParallelProfilePrompted(false);
     expect(context.workspaceState.update).toHaveBeenLastCalledWith(PROMPTED_STATE_KEY, false);
+  });
+
+  it("serves the live run-artifact catalog across a duplicate activation and a fresh one after deactivate", async () => {
+    // A controller the provider can register profiles on, so activation completes and the second
+    // call takes the already-activated path.
+    vi.spyOn(vscode.tests, "createTestController").mockReturnValue(new FakeTestController() as never);
+    const context = makeStubContext();
+    const first = await activate(context as unknown as vscode.ExtensionContext);
+    const duplicate = await activate(makeStubContext() as unknown as vscode.ExtensionContext);
+
+    const shared = first.runArtifacts?.onDidChange;
+    expect(shared).toBeTypeOf("function");
+    expect(duplicate.runArtifacts?.onDidChange).toBe(shared);
+
+    await deactivate();
+    // The first context still owns the host-wide registrations; drain it as VS Code would.
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    const restarted = await activate(makeStubContext() as unknown as vscode.ExtensionContext);
+
+    expect(restarted.runArtifacts?.onDidChange).toBeTypeOf("function");
+    expect(restarted.runArtifacts?.onDidChange).not.toBe(shared);
   });
 
   it("keeps activation alive and execution blocked when a durable lease record is corrupt", async () => {

@@ -45,7 +45,7 @@ import {
 import type { ExecutionEngine, ExecutionGateway, ExecutionIdentity } from "./core/run-contracts";
 import { LegacyExecutionDiscovery } from "./core/legacy-discovery";
 import { LegacyArtifactGateway } from "./ui/legacy-artifact-gateway";
-import { SelectedArtifactCatalog } from "./ui/execution-artifacts";
+import { SelectedArtifactCatalog, type ExecutionArtifactCatalog } from "./ui/execution-artifacts";
 import { XrayAdapter } from "./xray/xray-adapter";
 import { XraySetupPanel } from "./xray/xray-setup-panel";
 import {
@@ -65,6 +65,7 @@ let traceabilityViewProvider: TraceabilityViewProvider | undefined;
 let activationLogger: Logger | undefined;
 let workspaceTrust: WorkspaceTrust | undefined;
 let activeExecutionGateway: ExecutionGateway | undefined;
+let runArtifactCatalog: SelectedArtifactCatalog | undefined;
 
 /**
  * Test-only API surface. Not a public contract for other extensions.
@@ -119,6 +120,8 @@ export interface ExtensionApi {
         readonly onDidReceiveClientSignal: vscode.Event<TraceabilityClientSignal>;
       }
     | undefined;
+  /** @internal — the sealed run artifacts the publish flow would offer. */
+  readonly runArtifacts: Pick<ExecutionArtifactCatalog, "list" | "onDidChange"> | undefined;
   /** @internal */
   seedParallelProfilePrompted(value: boolean): Promise<void>;
 }
@@ -128,6 +131,7 @@ function buildApi(
   registry: ProviderRegistry | undefined,
   traceability: TraceabilitySubsystem | undefined,
   traceabilityView: TraceabilityViewProvider | undefined,
+  artifacts: ExecutionArtifactCatalog | undefined,
   workspaceState: vscode.Memento | undefined
 ): ExtensionApi {
   const seedParallelProfilePrompted = async (value: boolean): Promise<void> => {
@@ -160,6 +164,12 @@ function buildApi(
         applyCurrent: () => traceability.applyCurrent(),
       }
     : undefined;
+  const runArtifactsApi = artifacts
+    ? {
+        list: () => artifacts.list(),
+        onDidChange: artifacts.onDidChange,
+      }
+    : undefined;
   const traceabilityViewApi = traceabilityView
     ? {
         get clientReady() { return traceabilityView.clientReady; },
@@ -174,6 +184,7 @@ function buildApi(
       providerRegistry: registryApi,
       traceabilitySubsystem: traceabilityApi,
       traceabilityView: traceabilityViewApi,
+      runArtifacts: runArtifactsApi,
       seedParallelProfilePrompted,
     };
   }
@@ -189,6 +200,7 @@ function buildApi(
     providerRegistry: registryApi,
     traceabilitySubsystem: traceabilityApi,
     traceabilityView: traceabilityViewApi,
+    runArtifacts: runArtifactsApi,
     seedParallelProfilePrompted,
   };
 }
@@ -201,7 +213,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   if (isActivated) {
     activationLogger?.warn("Extension already activated, skipping duplicate activation");
-    return buildApi(testProvider, providerRegistry, traceabilitySubsystem, traceabilityViewProvider, context.workspaceState);
+    return buildApi(testProvider, providerRegistry, traceabilitySubsystem, traceabilityViewProvider, runArtifactCatalog, context.workspaceState);
   }
 
   const diagnostics = new SupportDiagnostics();
@@ -298,6 +310,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const artifactCatalog = new SelectedArtifactCatalog(executionSelection, new Map([
     [`${legacyIdentity.engine}:${legacyIdentity.schemaProfile}`, runArtifactStore],
   ]));
+  runArtifactCatalog = artifactCatalog;
   context.subscriptions.push(artifactCatalog);
   activeExecutionGateway = executionGateway;
   context.subscriptions.push(executionGateway);
@@ -454,7 +467,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     );
   }
 
-  return buildApi(testProvider, providerRegistry, traceabilitySubsystem, traceabilityViewProvider, context.workspaceState);
+  return buildApi(testProvider, providerRegistry, traceabilitySubsystem, traceabilityViewProvider, runArtifactCatalog, context.workspaceState);
 }
 
 export async function deactivate(): Promise<void> {
@@ -511,5 +524,6 @@ export async function deactivate(): Promise<void> {
     activationLogger = undefined;
     workspaceTrust = undefined;
     activeExecutionGateway = undefined;
+    runArtifactCatalog = undefined;
   }
 }
