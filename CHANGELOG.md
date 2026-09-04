@@ -6,7 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
 
+- Running a Test Repository folder from the Traceability panel now covers that folder only. A remote path carrying `.` or `..` segments resolves to the folder it names, and a folder actually named Unfiled stays separate from the tests that sit in no folder.
+- Refreshing the same Test Set from two places at once no longer fails the second one when the first is cancelled. The refresh stops only once every caller has walked away.
+- Select Projects to Sync no longer pins the current scope when you confirm the checked boxes unchanged, so a project you tag later is still synced. Opening the picker from the board while it is already open reuses the open one instead of loading the project list twice.
 
 ## [0.7.1] - 2026-09-02
 ### Added

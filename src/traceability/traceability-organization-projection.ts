@@ -54,9 +54,38 @@ function mappedByKey(snapshot: TraceabilitySnapshot | undefined): Map<string, Sc
   return output;
 }
 
+// No leading slash, so it can never equal or prefix-match a normalized key: a real folder named
+// "Unfiled" keys as "/Unfiled" and stays its own row.
+const UNFILED_KEY = "Unfiled";
+
+// Remote paths arrive raw. Traversal segments must resolve here, or a folder key would prefix-match
+// tests the folder does not hold and sweep them into its run.
+function folderSegments(rawPath: string | undefined): string[] {
+  const segments: string[] = [];
+  for (const part of (rawPath ?? "").replaceAll("\\", "/").split("/")) {
+    const segment = part.trim();
+    if (segment === "" || segment === ".") {continue;}
+    if (segment === "..") {segments.pop(); continue;}
+    segments.push(segment);
+  }
+  return segments;
+}
+
+function folderKey(segments: readonly string[]): string {
+  return segments.length > 0 ? `/${segments.join("/")}` : UNFILED_KEY;
+}
+
 function folderPath(test: TestCaseMetadata): string {
-  const path = test.repositoryFolder?.path.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/gu, "");
-  return path ? `/${path}` : "/Unfiled";
+  return folderKey(folderSegments(test.repositoryFolder?.path));
+}
+
+// Unfiled is a bucket rather than a folder, so it sits after the real ones instead of wherever
+// punctuation weighting drops a slash-less key.
+function byFolderPath(a: FolderEntry, b: FolderEntry): number {
+  if (a.path === b.path) {return 0;}
+  if (a.path === UNFILED_KEY) {return 1;}
+  if (b.path === UNFILED_KEY) {return -1;}
+  return a.path.localeCompare(b.path);
 }
 
 function folderIndex(tests: readonly TestCaseMetadata[], mapped: ReadonlyMap<string, readonly ScenarioRef[]>): {
@@ -66,22 +95,24 @@ function folderIndex(tests: readonly TestCaseMetadata[], mapped: ReadonlyMap<str
   const folders = new Map<string, FolderEntry>();
   let truncated = false;
   for (const test of tests) {
-    const testPath = folderPath(test);
-    const parts = testPath.split("/").filter(Boolean);
-    if (parts.length > REPOSITORY_FOLDER_DEPTH_LIMIT) {truncated = true; continue;}
+    const segments = folderSegments(test.repositoryFolder?.path);
+    if (segments.length > REPOSITORY_FOLDER_DEPTH_LIMIT) {truncated = true; continue;}
+    const trail = segments.length > 0
+      ? segments.map((_, index) => folderKey(segments.slice(0, index + 1)))
+      : [folderKey(segments)];
+    let parentPath: string | undefined;
     let leaf: FolderEntry | undefined;
-    for (let index = 0; index < parts.length; index += 1) {
-      const path = `/${parts.slice(0, index + 1).join("/")}`;
+    for (const path of trail) {
       let entry = folders.get(path);
       if (!entry) {
         if (folders.size >= REPOSITORY_FOLDER_NODE_LIMIT) {truncated = true; break;}
-        const parentPath = index > 0 ? `/${parts.slice(0, index).join("/")}` : undefined;
         entry = { path, parentPath, directTests: [], descendantTests: 0, descendantMappedTests: 0 };
         folders.set(path, entry);
       }
       leaf = entry;
+      parentPath = path;
     }
-    if (leaf?.path === testPath) {leaf.directTests.push(test);}
+    if (leaf && leaf.path === trail.at(-1)) {leaf.directTests.push(test);}
   }
   const deepestFirst = [...folders.values()].sort((a, b) => b.path.split("/").length - a.path.split("/").length);
   for (const folder of deepestFirst) {
@@ -170,7 +201,7 @@ export function projectTraceabilityOrganization(
       ? [`Repository hierarchy reached the ${REPOSITORY_FOLDER_NODE_LIMIT}-folder or ${REPOSITORY_FOLDER_DEPTH_LIMIT}-level limit.`]
       : [];
     add({ id: projectId, view: "repository", label: project.projectKey, description: `${project.tests.length} remote tests · ${qualifier}`, tooltip: [...project.errors, ...hierarchyError].join("\n") || undefined, icon: "project", tone: usable ? "info" : "warning", expandable: true, actions: [] }, { kind: "repositoryProject", projectKey: project.projectKey });
-    for (const folder of [...index.folders.values()].sort((a, b) => a.path.localeCompare(b.path))) {
+    for (const folder of [...index.folders.values()].sort(byFolderPath)) {
       const folderId = traceabilityRowId("repository-folder", `${project.projectKey}:${folder.path}`);
       add({
         id: folderId,

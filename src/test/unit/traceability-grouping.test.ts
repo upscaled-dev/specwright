@@ -7,6 +7,8 @@ import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { JiraAccessError, searchJiraProjects } from "../../xray/jira-project-search";
 import { captureHandlers, makeContext, memento } from "./helpers/command-manager-harness";
 import { NO_PROJECT_SCOPE, projectScopeStore, type ProjectScopeStore } from "../../traceability/project-scope";
+import { NO_MAPPING_PAGE_SIZE } from "../../traceability/mapping-page-size";
+import type { BoardPanelDeps } from "../../traceability/board-panel";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 
 vi.mock("../../xray/jira-project-search", async (importOriginal) => {
@@ -351,7 +353,16 @@ describe("selectSyncProjects command handler", () => {
       }),
       tagDerivedProjectKeys: () => ladder.tagDerived ?? [],
       projectScope: () => ladder.scope ?? NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
     } as unknown as TraceabilitySubsystem;
+  }
+
+  // The board's own wiring, reached the way the panel reaches it, so the guard is proved across both
+  // entry points rather than twice through the palette.
+  function boardDeps(manager: CommandManager): BoardPanelDeps {
+    return (manager as unknown as {
+      traceabilityCommands: { boardDeps: () => BoardPanelDeps };
+    }).traceabilityCommands.boardDeps();
   }
 
   function pickerItems(calls: ReadonlyArray<ReadonlyArray<unknown>>): PickItem[] {
@@ -429,8 +440,11 @@ describe("selectSyncProjects command handler", () => {
     expect(pickerItems(quickPick.mock.calls).map((item) => item.label)).toEqual(["OPS", "PAY"]);
   });
 
-  it("writes exactly the checked set when the user accepts the picker unchanged", async () => {
+  // Accepting the boxes as offered is not a decision to pin them: writing the derived union would freeze
+  // the scope, and the next project the workspace tags would stop being synced.
+  it("leaves the setting alone when the user confirms the checked boxes unchanged", async () => {
     const updates = stubConfig({ "xray.defaultProjectKey": "PAY" });
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
     const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockImplementation(
       ((items: PickItem[]) => Promise.resolve(items.filter((item) => item.picked))) as never
     );
@@ -444,8 +458,31 @@ describe("selectSyncProjects command handler", () => {
 
     const checked = pickerItems(quickPick.mock.calls).filter((item) => item.picked).map((item) => item.label);
     expect(checked).toEqual(["CALC", "MATH", "PAY"]);
+    expect(updates).toEqual([]);
+    expect(String(info.mock.calls[0]?.[0])).toContain("Syncs will fetch CALC, MATH, PAY");
+  });
+
+  it("opens one picker when the palette and the board ask at the same time", async () => {
+    const updates = stubConfig({ "xray.defaultProjectKey": "PAY" });
+    let confirm!: (picks: unknown) => void;
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockReturnValue(
+      new Promise((resolve) => {confirm = resolve;}) as never
+    );
+    let board!: BoardPanelDeps;
+    const handlers = captureHandlers(makeContext(), (manager) => {
+      manager.setTraceabilitySubsystem(subsystemWith({ tagDerived: ["CALC"] }));
+      board = boardDeps(manager);
+    });
+
+    const fromPalette = handlers.get(CMD)!();
+    board.selectSyncProjects();
+    await new Promise((resolve) => setImmediate(resolve));
+    confirm([{ label: "CALC" }]);
+    await fromPalette;
+
+    expect(quickPick).toHaveBeenCalledOnce();
     expect(updates).toEqual([
-      { key: "xray.syncProjectKeys", value: checked, target: vscode.ConfigurationTarget.Workspace },
+      { key: "xray.syncProjectKeys", value: ["CALC"], target: vscode.ConfigurationTarget.Workspace },
     ]);
   });
 
@@ -505,7 +542,7 @@ describe("selectSyncProjects command handler", () => {
       { label: "PAY", description: "default project", picked: true },
     ] as never);
     const handlers = captureHandlers(makeContext(), (manager) =>
-      manager.setTraceabilitySubsystem(subsystemWith({}))
+      manager.setTraceabilitySubsystem(subsystemWith({ tagDerived: ["CALC"] }))
     );
 
     await handlers.get(CMD)!();

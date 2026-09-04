@@ -71,6 +71,7 @@ export class TraceabilityCommands {
   private authoringCommands: TraceabilityAuthoringCommands | undefined;
   private connectionCommands: XrayConnectionCommands | undefined;
   private syncInFlight: Promise<void> | undefined;
+  private syncPickerInFlight: Promise<void> | undefined;
   private readonly boardChange = new vscode.EventEmitter<void>();
   private readonly operations = new BoardOperationState();
   private readonly projectSyncs: ProjectSyncScheduler;
@@ -655,7 +656,17 @@ export class TraceabilityCommands {
     return this.privileged((signal) => this.selectSyncProjectsTrusted(signal));
   }
 
-  private async selectSyncProjectsTrusted(signal: AbortSignal): Promise<void> {
+  // The palette and the board reach the same picker, and a second one would load the project list again
+  // and let whichever picker the user closed last name the scope.
+  private selectSyncProjectsTrusted(signal: AbortSignal): Promise<void> {
+    if (this.syncPickerInFlight) {return this.syncPickerInFlight;}
+    this.syncPickerInFlight = this.pickSyncProjects(signal).finally(() => {
+      this.syncPickerInFlight = undefined;
+    });
+    return this.syncPickerInFlight;
+  }
+
+  private async pickSyncProjects(signal: AbortSignal): Promise<void> {
     const adapter = this.deps.subsystem()?.getActiveAdapter();
     // One bag per invocation: the offered list, the boxes to check, and each row's reason all read the
     // same sources, so the picker cannot contradict itself or the next sync.
@@ -689,8 +700,11 @@ export class TraceabilityCommands {
     );
     if (picked === undefined) {return;}
     const keys = picked.map((item) => item.label);
+    // Confirming the boxes as offered is not a choice to pin the scope: writing the derived union would
+    // freeze it, and the next tagged project would stop being synced.
+    const edited = keys.length !== scoped.size || keys.some((key) => !scoped.has(key));
     // The write is the refresh: the config listeners rebuild the panel and repaint an open board.
-    await this.writeSyncProjectKeys(keys);
+    if (edited) {await this.writeSyncProjectKeys(keys);}
     vscode.window.showInformationMessage(
       keys.length === 0
         ? "Sync project list cleared. Tagged projects, the default project, and projects synced earlier are fetched again."

@@ -380,4 +380,85 @@ describe("XrayOrganizationCapability cache isolation", () => {
     expect(notified).not.toHaveBeenCalled();
     capability.dispose();
   });
+
+  // The refresh hangs until the test releases it, so what each caller gets is decided by the abort
+  // bookkeeping and not by a race with the reader.
+  function heldRefresh(): {
+    capability: XrayOrganizationCapability;
+    signal: () => AbortSignal | undefined;
+    release: () => void;
+  } {
+    let taken: AbortSignal | undefined;
+    let settle: (() => void) | undefined;
+    const capability = new XrayOrganizationCapability({
+      reader: {
+        list: vi.fn(),
+        refresh: vi.fn((_key: string, signal?: AbortSignal) => new Promise((resolve, reject) => {
+          taken = signal;
+          settle = () => resolve(SHOP_301);
+          signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+        })),
+      } as unknown as XrayOrganizationReader,
+      metadata: metadata(),
+      cache: new XrayOrganizationCache(memento(), { endpoint: "xray.example", account: () => Promise.resolve("account-a"), workspaceId: "ws" }),
+      config: { xrayCacheTtlMinutes: 15 } as ExtensionConfig,
+      logger: Logger.create(), account: () => Promise.resolve("account-a"), onCredentialsChange: new vscode.EventEmitter<void>().event,
+      projectOf: () => "SHOP",
+    });
+    return { capability, signal: () => taken, release: (): void => settle?.() };
+  }
+
+  it("completes a shared refresh for the callers still waiting after one abandons it", async () => {
+    const abandoned = new AbortController();
+    const waiting = new AbortController();
+    const held = heldRefresh();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const first = held.capability.refreshTestSet("SHOP-301", abandoned.signal);
+    const second = held.capability.refreshTestSet("SHOP-301", waiting.signal);
+    abandoned.abort();
+    await new Promise((resolve) => setImmediate(resolve));
+    held.release();
+
+    await expect(second).resolves.toMatchObject({ status: "complete" });
+    await expect(first).resolves.toMatchObject({ status: "complete" });
+    expect(held.signal()?.aborted).toBe(false);
+    held.capability.dispose();
+  });
+
+  it("holds a shared refresh open for a caller that brought no signal to abandon it with", async () => {
+    const abandoned = new AbortController();
+    const held = heldRefresh();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const anonymous = held.capability.refreshTestSet("SHOP-301");
+    const signalled = held.capability.refreshTestSet("SHOP-301", abandoned.signal);
+    abandoned.abort();
+    await new Promise((resolve) => setImmediate(resolve));
+    held.release();
+
+    await expect(anonymous).resolves.toMatchObject({ status: "complete" });
+    await expect(signalled).resolves.toMatchObject({ status: "complete" });
+    expect(held.signal()?.aborted).toBe(false);
+    held.capability.dispose();
+  });
+
+  it("cancels a shared refresh once every caller has abandoned it", async () => {
+    const first = new AbortController();
+    const second = new AbortController();
+    const held = heldRefresh();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const pending = [
+      held.capability.refreshTestSet("SHOP-301", first.signal),
+      held.capability.refreshTestSet("SHOP-301", second.signal),
+    ];
+    await new Promise((resolve) => setImmediate(resolve));
+    first.abort();
+    second.abort();
+
+    await expect(Promise.all(pending)).resolves.toMatchObject([{ status: "failed" }, { status: "failed" }]);
+    expect(held.signal()?.aborted).toBe(true);
+    held.capability.dispose();
+  });
 });

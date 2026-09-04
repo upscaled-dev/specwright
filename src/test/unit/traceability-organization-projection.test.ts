@@ -5,6 +5,7 @@ import {
   projectTraceabilityOrganization,
   resolveRepositoryFolderPreview,
 } from "../../traceability/traceability-organization-projection";
+import type { OrganizationProjection } from "../../traceability/traceability-organization-projection";
 import type { OrganizationSnapshot } from "../../traceability/contracts";
 import { ORGANIZATION_ITEM_LIMIT } from "../../traceability/contracts";
 import type { TraceabilitySnapshot } from "../../traceability/traceability-model";
@@ -17,6 +18,17 @@ const mapped: TraceabilitySnapshot = {
 
 function organization(over: Partial<OrganizationSnapshot> = {}): OrganizationSnapshot {
   return { repositories: [], testSetProjects: [], stale: false, omittedTestSetProjectCount: 0, omittedRepositoryProjectCount: 0, ...over };
+}
+
+function folderRows(projection: OrganizationProjection): { path: string; description: string | undefined }[] {
+  return projection.rows.filter((row) => row.icon === "folder-library").map((row) => {
+    const node = projection.nodes.get(row.id);
+    return { path: node?.kind === "repositoryFolder" ? node.folderPath : row.label, description: row.description };
+  });
+}
+
+function repository(tests: OrganizationSnapshot["repositories"][number]["tests"]): OrganizationSnapshot {
+  return organization({ repositories: [{ projectKey: "SHOP", tests, complete: true, truncated: false, errors: [] }] });
 }
 
 describe("traceability organization projection", () => {
@@ -35,6 +47,53 @@ describe("traceability organization projection", () => {
     expect(rows.map((row) => row.label)).toEqual(["SHOP", "A", "SHOP-1", "B", "SHOP-2"]);
     expect(rows[2]?.parentId).toBe(rows[1]?.id);
     expect(rows[4]?.parentId).toBe(rows[3]?.id);
+  });
+
+  it("keeps a folder named Unfiled apart from the tests that sit in no folder", () => {
+    const snapshot = repository([
+      { key: "SHOP-1", repositoryFolder: { name: "Unfiled", path: "/Unfiled" } },
+      { key: "SHOP-2" },
+      { key: "SHOP-3", repositoryFolder: { name: "Zebra", path: "/Zebra" } },
+    ]);
+
+    const projection = projectTraceabilityOrganization(snapshot, mapped);
+
+    // The bucket of unfoldered tests sorts after every real folder, not where its key's punctuation
+    // happens to land it.
+    expect(folderRows(projection)).toEqual([
+      { path: "/Unfiled", description: "1 remote tests · 1 mapped locally" },
+      { path: "/Zebra", description: "1 remote tests · 0 mapped locally" },
+      { path: "Unfiled", description: "1 remote tests · 0 mapped locally" },
+    ]);
+    expect(projection.rows.filter((row) => row.icon === "folder-library").map((row) => row.label))
+      .toEqual(["Unfiled", "Zebra", "Unfiled"]);
+    expect(resolveRepositoryFolderPreview(snapshot, mapped, "SHOP", "/Unfiled")?.members.map((member) => member.label))
+      .toEqual(["SHOP-1"]);
+  });
+
+  it("resolves traversal and empty segments to the folder key the clean path would take", () => {
+    const snapshot = repository([
+      { key: "SHOP-1", repositoryFolder: { name: "B", path: "/A/B" } },
+      { key: "SHOP-2", repositoryFolder: { name: "B", path: "A/./B" } },
+      { key: "SHOP-3", repositoryFolder: { name: "B", path: "A//B\\" } },
+      { key: "SHOP-4", repositoryFolder: { name: "B", path: "A/../B" } },
+    ]);
+
+    expect(folderRows(projectTraceabilityOrganization(snapshot, mapped))).toEqual([
+      { path: "/A", description: "3 remote tests · 1 mapped locally" },
+      { path: "/A/B", description: "3 remote tests · 1 mapped locally" },
+      { path: "/B", description: "1 remote tests · 0 mapped locally" },
+    ]);
+  });
+
+  it("scopes a folder run to that folder, not to a sibling whose name it prefixes", () => {
+    const snapshot = repository([
+      { key: "SHOP-1", repositoryFolder: { name: "A", path: "/A" } },
+      { key: "SHOP-2", repositoryFolder: { name: "AB", path: "/AB" } },
+    ]);
+
+    expect(resolveRepositoryFolderPreview(snapshot, mapped, "SHOP", "/A")?.members.map((member) => member.label))
+      .toEqual(["SHOP-1"]);
   });
 });
 

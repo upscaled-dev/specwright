@@ -268,6 +268,16 @@ function retainComplete(next: RemoteTestSet, previous: RemoteTestSet | undefined
   };
 }
 
+// One refresh serves every caller asking for the same Test Set. It owns its cancellation so a caller
+// that walks away cancels only its own share: the work stops when nobody is left waiting.
+interface SharedRefresh {
+  readonly task: Promise<TestSetRefreshResult>;
+  readonly controller: AbortController;
+  // Undone when the task settles: a caller's signal can outlive its refresh by the life of the adapter.
+  readonly detach: (() => void)[];
+  waiting: number;
+}
+
 export class XrayOrganizationCapability implements OrganizationCapability, vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<void>();
   public readonly onDidChange = this.emitter.event;
@@ -277,7 +287,7 @@ export class XrayOrganizationCapability implements OrganizationCapability, vscod
   private state: OrganizationState = { projects: [], omittedTestSetProjectCount: 0 };
   private accountStamp: string | undefined;
   private epoch = 0;
-  private readonly refreshes = new Map<string, Promise<TestSetRefreshResult>>();
+  private readonly refreshes = new Map<string, SharedRefresh>();
 
   constructor(private readonly deps: XrayOrganizationDeps) {
     this.now = deps.now ?? Date.now;
@@ -406,16 +416,39 @@ export class XrayOrganizationCapability implements OrganizationCapability, vscod
 
   public refreshTestSet(key: string, signal?: AbortSignal): Promise<TestSetRefreshResult> {
     const canonical = key.toUpperCase();
+    if (signal?.aborted) {return Promise.resolve({ status: "failed", testSet: this.findSet(canonical) });}
     const current = this.refreshes.get(canonical);
-    if (current) {return current;}
-    const task = this.refreshNow(canonical, signal);
-    this.refreshes.set(canonical, task);
-    task.finally(() => {if (this.refreshes.get(canonical) === task) {this.refreshes.delete(canonical);}}).catch(() => undefined);
-    return task;
+    // An entry whose controller has aborted is only waiting for the reader to honor it, so joining it
+    // would answer this caller with a failure nobody worked for.
+    const shared = current && !current.controller.signal.aborted ? current : this.startRefresh(canonical);
+    // A caller that brought no signal never leaves, so its count keeps the shared work alive whatever
+    // the others do.
+    shared.waiting += 1;
+    if (signal) {
+      const leave = (): void => {
+        shared.waiting -= 1;
+        if (shared.waiting === 0) {shared.controller.abort();}
+      };
+      signal.addEventListener("abort", leave, { once: true });
+      shared.detach.push(() => signal.removeEventListener("abort", leave));
+    }
+    return shared.task;
   }
 
-  private async refreshNow(key: string, signal?: AbortSignal): Promise<TestSetRefreshResult> {
-    const combined = signal ? AbortSignal.any([signal, this.lifecycle.signal]) : this.lifecycle.signal;
+  private startRefresh(key: string): SharedRefresh {
+    const controller = new AbortController();
+    const shared: SharedRefresh = { task: this.refreshNow(key, controller.signal), controller, detach: [], waiting: 0 };
+    this.refreshes.set(key, shared);
+    shared.task.finally(() => {
+      for (const detach of shared.detach) {detach();}
+      shared.detach.length = 0;
+      if (this.refreshes.get(key) === shared) {this.refreshes.delete(key);}
+    }).catch(() => undefined);
+    return shared;
+  }
+
+  private async refreshNow(key: string, signal: AbortSignal): Promise<TestSetRefreshResult> {
+    const combined = AbortSignal.any([signal, this.lifecycle.signal]);
     const epoch = this.epoch;
     const account = this.accountStamp ?? await this.deps.account();
     if (combined.aborted || epoch !== this.epoch) {return { status: "failed", testSet: this.findSet(key) };}
