@@ -61,9 +61,9 @@ describe("traceability organization projection", () => {
     // The bucket of unfoldered tests sorts after every real folder, not where its key's punctuation
     // happens to land it.
     expect(folderRows(projection)).toEqual([
-      { path: "/Unfiled", description: "1 remote tests · 1 mapped locally" },
-      { path: "/Zebra", description: "1 remote tests · 0 mapped locally" },
-      { path: "Unfiled", description: "1 remote tests · 0 mapped locally" },
+      { path: "/Unfiled", description: "1 remote test · 1 mapped locally" },
+      { path: "/Zebra", description: "1 remote test · 0 mapped locally" },
+      { path: "Unfiled", description: "1 remote test · 0 mapped locally" },
     ]);
     expect(projection.rows.filter((row) => row.icon === "folder-library").map((row) => row.label))
       .toEqual(["Unfiled", "Zebra", "Unfiled"]);
@@ -82,8 +82,54 @@ describe("traceability organization projection", () => {
     expect(folderRows(projectTraceabilityOrganization(snapshot, mapped))).toEqual([
       { path: "/A", description: "3 remote tests · 1 mapped locally" },
       { path: "/A/B", description: "3 remote tests · 1 mapped locally" },
-      { path: "/B", description: "1 remote tests · 0 mapped locally" },
+      { path: "/B", description: "1 remote test · 0 mapped locally" },
     ]);
+  });
+
+  it("dates the catalogue on the project row of both tabs", () => {
+    const snapshot = organization({
+      repositories: [{ projectKey: "SHOP", tests: [{ key: "SHOP-1" }], complete: true, truncated: false, errors: [] }],
+      testSetProjects: [{ projectKey: "SHOP", testSets: [], complete: true, truncated: false, errors: [] }],
+      syncedAt: Date.now() - 120_000,
+    });
+
+    const rows = projectTraceabilityOrganization(snapshot, mapped).rows.filter((row) => row.icon === "project");
+
+    expect(rows.map((row) => row.description)).toEqual([
+      "1 remote test · complete · synced 2m ago",
+      "0 Test Sets · synced 2m ago",
+    ]);
+  });
+
+  it("marks a stale catalogue on the project row of both tabs in the connection row's words", () => {
+    const snapshot = organization({
+      repositories: [{ projectKey: "SHOP", tests: [{ key: "SHOP-1" }, { key: "SHOP-2" }], complete: true, truncated: false, errors: [] }],
+      testSetProjects: [{ projectKey: "SHOP", testSets: [], complete: true, truncated: true, errors: [] }],
+      syncedAt: Date.now() - 3_600_000, stale: true,
+    });
+
+    const rows = projectTraceabilityOrganization(snapshot, mapped).rows.filter((row) => row.icon === "project");
+
+    expect(rows.map((row) => row.description)).toEqual([
+      "2 remote tests · complete · synced 1h ago (stale)",
+      "0 Test Sets · truncated · synced 1h ago (stale)",
+    ]);
+  });
+
+  it("says a tracker without an organization capability has no Repository or Test Sets", () => {
+    expect(projectTraceabilityOrganization("absent", mapped).rows.map((row) => row.label)).toEqual([
+      "This tracker does not provide a Test Repository.",
+      "This tracker does not provide Test Sets.",
+    ]);
+  });
+
+  it("keeps the sync prompt for a cached catalogue that is empty or unreadable", () => {
+    const prompts = [
+      "No complete Test Repository catalogue is cached. Sync Traceability to load it.",
+      "No Test Sets are cached. Sync Traceability to load them.",
+    ];
+    expect(projectTraceabilityOrganization(organization(), mapped).rows.map((row) => row.label)).toEqual(prompts);
+    expect(projectTraceabilityOrganization(undefined, mapped).rows.map((row) => row.label)).toEqual(prompts);
   });
 
   it("scopes a folder run to that folder, not to a sibling whose name it prefixes", () => {

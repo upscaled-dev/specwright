@@ -10,8 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Clear Local Run History…** now sits at the end of the Traceability panel's overflow menu, after Manage Xray Connection. It stays in the Command Palette as well.
 
+### Changed
+
+- The Traceability panel's Repository and Test Sets tabs now date the catalogue. Each project row says "synced 5m ago", and "synced 2h ago (stale)" once the cache has passed its lifetime, in the same words as the connection row.
+
 ### Fixed
 
+- The Traceability panel keeps its connection row when a connected workspace has no tagged scenarios yet, so **Select Projects to Sync** stays in reach for a first sync instead of the panel showing only the empty message.
+- A tracker that provides no Test Repository or Test Sets now says so on those tabs instead of asking for a sync that could never fill them.
 - Running a Test Repository folder from the Traceability panel now covers that folder only. A remote path carrying `.` or `..` segments resolves to the folder it names, and a folder actually named Unfiled stays separate from the tests that sit in no folder.
 - Refreshing the same Test Set from two places at once no longer fails the second one when the first is cancelled. The refresh stops only once every caller has walked away.
 - Select Projects to Sync no longer pins the current scope when you confirm the checked boxes unchanged, so a project you tag later is still synced. Opening the picker from the board while it is already open reuses the open one instead of loading the project list twice.

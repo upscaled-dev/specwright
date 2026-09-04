@@ -55,6 +55,18 @@ async function settleTransfer(provider: TraceabilityViewProvider): Promise<void>
   } while (transfer !== (provider as unknown as { transfer: Promise<void> | undefined }).transfer);
 }
 
+function begins(posts: readonly unknown[]): string[] {
+  return posts.map((message) => (message as { body: { type: string; state?: string } }).body)
+    .filter((body) => body.type === "begin")
+    .map((body) => body.state ?? "");
+}
+
+function chunkRows(posts: readonly unknown[]): { label: string }[] {
+  return posts.map((message) => (message as { body: { type: string; rows?: { label: string }[] } }).body)
+    .filter((body) => body.type === "chunk")
+    .flatMap((body) => body.rows ?? []);
+}
+
 function signal(): { readonly settled: Promise<void>; resolve(): void } {
   let resolve!: () => void;
   return { settled: new Promise<void>((done) => { resolve = done; }), resolve: () => resolve() };
@@ -737,6 +749,80 @@ describe("TraceabilityViewProvider", () => {
     ]);
     expect(execute.mock.calls.every((call) => call.length === 1)).toBe(true);
     execute.mockRestore();
+  });
+
+  it("posts an empty connected workspace as a ready tree led by the connection row", async () => {
+    const empty: TraceabilitySnapshot = { ...snapshot, links: [] };
+    const posts: unknown[] = [];
+    const receive = { current: (_message: unknown) => undefined };
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.attach({ get snapshot(): TraceabilitySnapshot { return empty; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel, "Xray", "test");
+    provider.setConnectionIndicator({ state: "ok", label: "site", message: "detail" });
+    provider.setConnected(true);
+    provider.resolveWebviewView(view(posts, receive));
+    const session = (provider as unknown as { session: string }).session;
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    await settleTransfer(provider);
+    const chunk = posts.find((message) => (message as { body: { type: string } }).body.type === "chunk") as { body: { rows: Array<{ label: string }> } };
+
+    expect(begins(posts).at(-1)).toBe("ready");
+    expect(chunk.body.rows.map((row) => row.label).slice(0, 2)).toEqual(["Xray Cloud", "No Xray-tagged scenarios found yet."]);
+    provider.dispose();
+  });
+
+  it("posts the empty state while a connected workspace has no connection row yet", async () => {
+    const empty: TraceabilitySnapshot = { ...snapshot, links: [] };
+    const posts: unknown[] = [];
+    const receive = { current: (_message: unknown) => undefined };
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.attach({ get snapshot(): TraceabilitySnapshot { return empty; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel, "Xray", "test");
+    provider.setConnected(true);
+    provider.resolveWebviewView(view(posts, receive));
+    const session = (provider as unknown as { session: string }).session;
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    await settleTransfer(provider);
+
+    expect(begins(posts).at(-1)).toBe("empty");
+    provider.dispose();
+  });
+
+  it("keeps the sync prompt when an attached capability cannot read its cache", async () => {
+    const posts: unknown[] = [];
+    const receive = { current: (_message: unknown) => undefined };
+    const logger = Logger.create();
+    const warning = vi.spyOn(logger, "warn");
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), logger);
+    const unreadable: OrganizationCapability = {
+      ...organization(() => Promise.resolve({ status: "failed" })),
+      snapshot: () => { throw new Error("cache unreadable"); },
+    };
+    provider.attach({ get snapshot(): TraceabilitySnapshot { return snapshot; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel, "Xray", "test", unreadable);
+    provider.setConnected(true);
+    provider.resolveWebviewView(view(posts, receive));
+    const session = (provider as unknown as { session: string }).session;
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    await settleTransfer(provider);
+    const labels = chunkRows(posts).map((row) => row.label);
+
+    expect(labels).toContain("No complete Test Repository catalogue is cached. Sync Traceability to load it.");
+    expect(labels.some((label) => label.includes("does not provide"))).toBe(false);
+    expect(warning).toHaveBeenCalled();
+    warning.mockRestore();
+    provider.dispose();
+  });
+
+  it("says nothing about absent capabilities before an adapter attaches", async () => {
+    const posts: unknown[] = [];
+    const receive = { current: (_message: unknown) => undefined };
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.resolveWebviewView(view(posts, receive));
+    const session = (provider as unknown as { session: string }).session;
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision: 0, surface: "traceability", body: { type: "ready" } });
+    await settleTransfer(provider);
+
+    expect(begins(posts)).toEqual(["empty"]);
+    expect(chunkRows(posts)).toEqual([]);
+    provider.dispose();
   });
 
   it("contains one command rejection and leaves the current projection usable", async () => {

@@ -151,14 +151,18 @@ export function formatSyncedAgo(elapsedMs: number): string {
   return `${Math.floor(minutes / 1_440)}d ago`;
 }
 
-function stateProjection(state: "disconnected" | "empty" | "untrusted"): TraceabilityProjection {
+function stateRow(state: StateNode["state"]): TraceabilityProjectionRow {
   const id = traceabilityRowId("state", state);
-  const row: TraceabilityProjectionRow = state === "disconnected"
+  return state === "disconnected"
     ? { id, label: "Set up Xray", description: "Set up Xray integration to map scenarios and publish results.", tooltip: "Set up Xray integration to map scenarios and publish results.", icon: "plug", tone: "info", expandable: false, actions: [TRACEABILITY_ACTIONS.connect, TRACEABILITY_ACTIONS.hide], defaultAction: "connect" }
     : state === "untrusted"
       ? { id, label: "Workspace trust required", description: "Traceability stays offline while this workspace is untrusted.", tooltip: "Trust this workspace before connecting to Xray or reading traceability data.", icon: "shield", tone: "warning", expandable: false, actions: [TRACEABILITY_ACTIONS.manageTrust], defaultAction: "manage-trust" }
       : { id, label: "No Xray-tagged scenarios found yet.", description: "Add @TEST_KEY tags to scenarios. Local mappings update automatically.", tooltip: "Add @TEST_KEY tags to scenarios. Local mappings update automatically.", icon: "info", tone: "muted", expandable: false, actions: [] };
-  return { state, rows: [row], nodes: new Map([[id, { kind: "state", state }]]) };
+}
+
+function stateProjection(state: StateNode["state"]): TraceabilityProjection {
+  const row = stateRow(state);
+  return { state, rows: [row], nodes: new Map([[row.id, { kind: "state", state }]]) };
 }
 
 /** A flat, browser-neutral rendering of the native tree's established ordering and semantics. */
@@ -172,11 +176,6 @@ export function projectTraceabilityTree(
 ): TraceabilityProjection {
   if (!trusted) { return stateProjection("untrusted"); }
   if (!connected) { return stateProjection("disconnected"); }
-  if (!model) { return stateProjection("empty"); }
-  const snapshot = model.snapshot;
-  if (snapshot.links.length === 0 && snapshot.untraced.length === 0) {
-    return stateProjection("empty");
-  }
   const label = boundedTraceabilityText(providerLabel);
   const rows: TraceabilityProjectionRow[] = [];
   const nodes = new Map<string, TraceabilityNode>();
@@ -196,6 +195,14 @@ export function projectTraceabilityTree(
       ? displayJoin([boundedTraceabilityText(connection.label), text.tooltip, `Default project ${project}. Prefills new tests and executions, and joins the sync scope while no sync project list is set.`], "\n")
       : displayJoin([boundedTraceabilityText(connection.label), text.tooltip], "\n");
     add({ id, view: "all", label: "Xray Cloud", description: project ? displayJoin([text.description, `project ${project}`], " · ") : text.description, tooltip, icon: connection.state === "ok" ? "cloud" : connection.state === "checking" ? "loading" : connection.state === "auth-failed" ? "key" : "debug-disconnect", tone, expandable: false, actions: [TRACEABILITY_ACTIONS.connect, TRACEABILITY_ACTIONS.switchProject, TRACEABILITY_ACTIONS.selectSyncProjects], defaultAction: "connect" }, { kind: "connection", ...connection });
+  }
+  const snapshot = model?.snapshot;
+  // With a connection row to sit under, the empty message is a row beneath it and the tree stays
+  // rendered, so a workspace whose first sync still needs scoping keeps the sync-scope action in
+  // reach. With no connection row there is nothing to keep, so the panel shows the state message.
+  if (!snapshot || (snapshot.links.length === 0 && snapshot.untraced.length === 0)) {
+    add(stateRow("empty"), { kind: "state", state: "empty" });
+    return { state: connection ? "ready" : "empty", rows, nodes };
   }
   const addScenario = (link: TraceLink, parentId: string): void => {
     const id = traceabilityRowId("scenario", `${link.testKey}:${refId(link.scenario)}`);

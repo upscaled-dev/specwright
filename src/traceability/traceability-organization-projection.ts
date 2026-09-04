@@ -3,11 +3,13 @@ import { refIdentity, type ScenarioRef } from "./scenario-ref";
 import type { TraceabilitySnapshot } from "./traceability-model";
 import {
   TRACEABILITY_ACTIONS,
+  formatSyncedAgo,
   traceabilityRowId,
   type TraceabilityAction,
   type TraceabilityProjectionRow,
 } from "./traceability-tree-projection";
 import { boundedTraceabilityText } from "../webview/traceability-view-protocol";
+import { plural } from "../utils/text";
 
 const PREVIEW_SET: TraceabilityAction = { id: "preview-run", label: "Run Set and publish", icon: "play" };
 const PREVIEW_FOLDER: TraceabilityAction = { id: "preview-run", label: "Run folder and publish", icon: "play" };
@@ -173,10 +175,12 @@ export function resolveRepositoryFolderPreview(
   };
 }
 
+/** `"absent"` is an adapter with no organization capability; `undefined` is one whose cache could not be read. */
 export function projectTraceabilityOrganization(
-  organization: OrganizationSnapshot | undefined,
+  organization: OrganizationSnapshot | undefined | "absent",
   snapshot: TraceabilitySnapshot | undefined
 ): OrganizationProjection {
+  const catalogue = organization === "absent" ? undefined : organization;
   const rows: TraceabilityProjectionRow[] = [];
   const nodes = new Map<string, OrganizationNode>();
   const mapped = mappedByKey(snapshot);
@@ -192,7 +196,11 @@ export function projectTraceabilityOrganization(
     nodes.set(row.id, node);
   };
 
-  for (const project of organization?.repositories ?? []) {
+  const freshness = catalogue?.syncedAt === undefined
+    ? undefined
+    : `synced ${formatSyncedAgo(Date.now() - catalogue.syncedAt)}${catalogue.stale ? " (stale)" : ""}`;
+
+  for (const project of catalogue?.repositories ?? []) {
     const projectId = traceabilityRowId("repository-project", project.projectKey);
     const index = folderIndex(project.tests, mapped);
     const usable = project.complete && !project.truncated && !index.truncated;
@@ -200,14 +208,14 @@ export function projectTraceabilityOrganization(
     const hierarchyError = index.truncated
       ? [`Repository hierarchy reached the ${REPOSITORY_FOLDER_NODE_LIMIT}-folder or ${REPOSITORY_FOLDER_DEPTH_LIMIT}-level limit.`]
       : [];
-    add({ id: projectId, view: "repository", label: project.projectKey, description: `${project.tests.length} remote tests · ${qualifier}`, tooltip: [...project.errors, ...hierarchyError].join("\n") || undefined, icon: "project", tone: usable ? "info" : "warning", expandable: true, actions: [] }, { kind: "repositoryProject", projectKey: project.projectKey });
+    add({ id: projectId, view: "repository", label: project.projectKey, description: [`${project.tests.length} remote ${plural(project.tests.length, "test")}`, qualifier, freshness].filter(Boolean).join(" · "), tooltip: [...project.errors, ...hierarchyError].join("\n") || undefined, icon: "project", tone: usable ? "info" : "warning", expandable: true, actions: [] }, { kind: "repositoryProject", projectKey: project.projectKey });
     for (const folder of [...index.folders.values()].sort(byFolderPath)) {
       const folderId = traceabilityRowId("repository-folder", `${project.projectKey}:${folder.path}`);
       add({
         id: folderId,
         parentId: folder.parentPath ? traceabilityRowId("repository-folder", `${project.projectKey}:${folder.parentPath}`) : projectId,
         view: "repository", label: folder.path.slice(folder.path.lastIndexOf("/") + 1),
-        description: `${folder.descendantTests} remote tests · ${folder.descendantMappedTests} mapped locally`,
+        description: `${folder.descendantTests} remote ${plural(folder.descendantTests, "test")} · ${folder.descendantMappedTests} mapped locally`,
         tooltip: usable ? undefined : "Folder run unavailable because the repository hierarchy is incomplete.",
         icon: "folder-library", tone: usable ? (folder.descendantMappedTests ? "info" : "muted") : "warning",
         expandable: true, actions: usable && folder.descendantMappedTests > 0 ? [PREVIEW_FOLDER] : [],
@@ -228,9 +236,9 @@ export function projectTraceabilityOrganization(
     }
   }
 
-  for (const project of organization?.testSetProjects ?? []) {
+  for (const project of catalogue?.testSetProjects ?? []) {
     const projectId = traceabilityRowId("test-set-project", project.projectKey);
-    add({ id: projectId, view: "test-sets", label: project.projectKey, description: `${project.testSets.length} Test Sets${project.truncated ? " · truncated" : ""}`, tooltip: project.errors.join("\n") || undefined, icon: "project", tone: project.complete ? "info" : "warning", expandable: true, actions: [] }, { kind: "testSetProject", projectKey: project.projectKey });
+    add({ id: projectId, view: "test-sets", label: project.projectKey, description: [`${project.testSets.length} ${plural(project.testSets.length, "Test Set")}`, project.truncated ? "truncated" : "", freshness].filter(Boolean).join(" · "), tooltip: project.errors.join("\n") || undefined, icon: "project", tone: project.complete ? "info" : "warning", expandable: true, actions: [] }, { kind: "testSetProject", projectKey: project.projectKey });
     for (const set of [...project.testSets].sort((a, b) => a.key.localeCompare(b.key))) {
       const setId = traceabilityRowId("test-set", set.key);
       let detail = `${set.remoteMemberCount} remote members · ${set.members.length} ${set.membersLastKnown ? "cached" : "loaded"} · membership incomplete`;
@@ -260,21 +268,25 @@ export function projectTraceabilityOrganization(
     }
   }
 
-  if (!(organization?.repositories.length)) {
-    const label = "No complete Test Repository catalogue is cached. Sync Traceability to load it.";
+  if (!(catalogue?.repositories.length)) {
+    const label = organization === "absent"
+      ? "This tracker does not provide a Test Repository."
+      : "No complete Test Repository catalogue is cached. Sync Traceability to load it.";
     add({ id: traceabilityRowId("repository-info", "empty"), view: "repository", label, icon: "info", tone: "muted", expandable: false, actions: [] }, { kind: "organizationInfo", label });
   }
-  if (!(organization?.testSetProjects.length)) {
-    const label = "No Test Sets are cached. Sync Traceability to load them.";
+  if (!(catalogue?.testSetProjects.length)) {
+    const label = organization === "absent"
+      ? "This tracker does not provide Test Sets."
+      : "No Test Sets are cached. Sync Traceability to load them.";
     add({ id: traceabilityRowId("test-set-info", "empty"), view: "test-sets", label, icon: "info", tone: "muted", expandable: false, actions: [] }, { kind: "organizationInfo", label });
   }
-  if ((organization?.omittedRepositoryProjectCount ?? 0) > 0) {
-    const count = organization?.omittedRepositoryProjectCount ?? 0;
+  if ((catalogue?.omittedRepositoryProjectCount ?? 0) > 0) {
+    const count = catalogue?.omittedRepositoryProjectCount ?? 0;
     const label = `${count} Repository projects omitted by the organization item limit.`;
     add({ id: traceabilityRowId("repository-info", "bounded"), view: "repository", label, icon: "warning", tone: "warning", expandable: false, actions: [] }, { kind: "organizationInfo", label });
   }
-  if ((organization?.omittedTestSetProjectCount ?? 0) > 0) {
-    const count = organization?.omittedTestSetProjectCount ?? 0;
+  if ((catalogue?.omittedTestSetProjectCount ?? 0) > 0) {
+    const count = catalogue?.omittedTestSetProjectCount ?? 0;
     const label = `${count} Test Set projects omitted by the organization item limit.`;
     add({ id: traceabilityRowId("test-set-info", "bounded"), view: "test-sets", label, icon: "warning", tone: "warning", expandable: false, actions: [] }, { kind: "organizationInfo", label });
   }

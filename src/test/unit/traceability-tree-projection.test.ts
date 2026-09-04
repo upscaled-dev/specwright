@@ -8,6 +8,7 @@ const snapshot: TraceabilitySnapshot = {
   orphans: [], stale: false, completeProjects: [], errors: [],
 };
 const model = { get snapshot(): TraceabilitySnapshot { return snapshot; } } as TraceabilityModel;
+const emptyModel = { get snapshot(): TraceabilitySnapshot { return { ...snapshot, links: [], untraced: [] }; } } as TraceabilityModel;
 function projection(value: TraceabilitySnapshot) {
   return projectTraceabilityTree({ get snapshot(): TraceabilitySnapshot { return value; } } as TraceabilityModel, "Xray", "test", true, undefined, true);
 }
@@ -130,11 +131,35 @@ describe("traceability tree projection", () => {
     expect(row(snapshot, "adds")?.description).toBe("REQ CALC-9");
   });
 
-  it("omits connection rows for empty snapshots and leads both populated layouts when present", () => {
+  it("leads empty and populated layouts alike with the connection row", () => {
     const indicator = { state: "ok" as const, label: "site", message: "connected" };
-    expect(projectTraceabilityTree({ get snapshot(): TraceabilitySnapshot { return { ...snapshot, links: [], untraced: [] }; } } as TraceabilityModel, "Xray", "test", true, indicator, true).rows[0]?.label).toBe("No Xray-tagged scenarios found yet.");
+    const empty = projectTraceabilityTree(emptyModel, "Xray", "test", true, indicator, true);
+    expect(empty.rows.map((row) => row.label)).toEqual(["Xray Cloud", "No Xray-tagged scenarios found yet."]);
     expect(projectTraceabilityTree(model, "Xray", "test", true, indicator, true).rows[0]?.label).toBe("Xray Cloud");
     expect(projectTraceabilityTree(model, "Xray", "file", true, indicator, true).rows[0]?.label).toBe("Xray Cloud");
+  });
+
+  it("keeps the sync-scope action reachable on an empty snapshot and drops it when disconnected", () => {
+    const indicator = { state: "ok" as const, label: "site", message: "connected" };
+    const connected = projectTraceabilityTree(emptyModel, "Xray", "test", true, indicator, true);
+    expect(connected.state).toBe("ready");
+    expect(connected.rows[0]?.actions.map((action) => action.id)).toContain("select-sync-projects");
+    expect(connected.rows[0]?.description).toBe("Connected");
+    const disconnected = projectTraceabilityTree(emptyModel, "Xray", "test", false, indicator, true);
+    expect(disconnected.rows.some((row) => row.actions.some((action) => action.id === "select-sync-projects"))).toBe(false);
+  });
+
+  // Nothing to sit beneath, so the empty message stays the state panel rather than becoming a lone row.
+  it("stays in the empty state while an empty snapshot has no connection row", () => {
+    const bare = projectTraceabilityTree(emptyModel, "Xray", "test", true, undefined, true);
+    expect(bare.state).toBe("empty");
+    expect(bare.rows.map((row) => row.label)).toEqual(["No Xray-tagged scenarios found yet."]);
+  });
+
+  it("keeps the connection row for a workspace with no model yet", () => {
+    const pending = projectTraceabilityTree(undefined, "Xray", "test", true, { state: "ok", label: "site", message: "connected" }, true);
+    expect(pending.state).toBe("ready");
+    expect(pending.rows.map((row) => row.label)).toEqual(["Xray Cloud", "No Xray-tagged scenarios found yet."]);
   });
 
   it.each([

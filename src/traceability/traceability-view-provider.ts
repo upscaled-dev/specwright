@@ -170,18 +170,14 @@ export class TraceabilityViewProvider implements vscode.WebviewViewProvider, vsc
       this.logger.warn("Traceability organization snapshot failed", { error: String(error) });
     }
     this.organizationSnapshot = organizationSnapshot;
-    const organization = projectTraceabilityOrganization(organizationSnapshot, this.model?.snapshot);
+    const organization = projectTraceabilityOrganization(this.organization ? organizationSnapshot : "absent", this.model?.snapshot);
     const rows = [
       ...workspace.rows.map((row) => ({ ...row, view: row.view ?? ("workspace" as const) })),
       ...organization.rows,
     ];
     const nodes = new Map<string, TraceabilityNode | OrganizationNode>(workspace.nodes);
     for (const [id, node] of organization.nodes) {nodes.set(id, node);}
-    this.projection = {
-      state: workspace.state === "empty" && this.connected && this.trusted ? "ready" : workspace.state,
-      rows,
-      nodes,
-    };
+    this.projection = { state: workspace.state, rows, nodes };
     this.advertisedActions = new Map(this.projection.rows.map((row) => [row.id, new Set(row.actions.map((action) => action.id))]));
     this.scheduleTransfer();
   }
