@@ -1,3 +1,20 @@
+/**
+ * The one spelling of the tab set. The wire union, the host projections, the tab markup, and the
+ * client's filter placeholder all derive from it, so a tab is added or renamed here alone.
+ */
+export const TRACEABILITY_VIEW_TABS = [
+  { id: "workspace", label: "Workspace", placeholder: "Filter workspace" },
+  { id: "repository", label: "Repository", placeholder: "Filter repository" },
+  { id: "test-sets", label: "Test Sets", placeholder: "Filter Test Sets" },
+] as const;
+
+export type TraceabilityViewTab = (typeof TRACEABILITY_VIEW_TABS)[number]["id"];
+export const TRACEABILITY_DEFAULT_VIEW = TRACEABILITY_VIEW_TABS[0].id;
+
+export function isTraceabilityViewTab(value: unknown): value is TraceabilityViewTab {
+  return TRACEABILITY_VIEW_TABS.some((tab) => tab.id === value);
+}
+
 export const TRACEABILITY_VIEW_PROTOCOL_VERSION = 2 as const;
 export const TRACEABILITY_CHUNK_ROWS = 256;
 export const TRACEABILITY_CHUNK_BYTES = 512 * 1024;
@@ -5,6 +22,7 @@ export const TRACEABILITY_DISPLAY_TEXT_LIMIT = 1_024;
 export const TRACEABILITY_PREVIEW_MEMBER_LIMIT = 128;
 export const TRACEABILITY_SELECTION_LIMIT = 128;
 
+const ROW_VIEWS: readonly string[] = [...TRACEABILITY_VIEW_TABS.map((tab) => tab.id), "all"];
 const SESSION_LIMIT = 128;
 const ID_LIMIT = 512;
 const ACTION_LIMIT = 64;
@@ -13,18 +31,19 @@ export function boundedTraceabilityText(value: string): string {
   return value.slice(0, TRACEABILITY_DISPLAY_TEXT_LIMIT);
 }
 
+/** The row shape the host projections build and the client renders. `"all"` pins a row to every tab. */
 export interface TraceabilityWireRow {
   readonly id: string;
-  readonly parentId?: string;
+  readonly parentId?: string | undefined;
   readonly label: string;
-  readonly description?: string;
-  readonly tooltip?: string;
+  readonly description?: string | undefined;
+  readonly tooltip?: string | undefined;
   readonly icon: string;
-  readonly tone?: "success" | "error" | "skipped" | "pending" | "unknown" | "warning" | "info" | "muted";
+  readonly tone?: "success" | "error" | "skipped" | "pending" | "unknown" | "warning" | "info" | "muted" | undefined;
   readonly expandable: boolean;
   readonly actions: readonly { readonly id: string; readonly label: string; readonly icon: string }[];
-  readonly defaultAction?: string;
-  readonly view?: "workspace" | "repository" | "test-sets" | "all";
+  readonly defaultAction?: string | undefined;
+  readonly view?: TraceabilityViewTab | "all" | undefined;
 }
 
 export interface TraceabilityRunPreview {
@@ -160,7 +179,7 @@ function row(value: unknown): boolean {
     && (value["description"] === undefined || text(value["description"], TRACEABILITY_DISPLAY_TEXT_LIMIT))
     && (value["tooltip"] === undefined || text(value["tooltip"], TRACEABILITY_DISPLAY_TEXT_LIMIT))
     && (value["tone"] === undefined || ["success", "error", "skipped", "pending", "unknown", "warning", "info", "muted"].includes(value["tone"] as string))
-    && (value["view"] === undefined || ["workspace", "repository", "test-sets", "all"].includes(value["view"] as string))
+    && (value["view"] === undefined || ROW_VIEWS.includes(value["view"] as string))
     && (defaultAction === undefined
       || text(defaultAction, ACTION_LIMIT)
         && actions.some((candidate) => object(candidate) && candidate["id"] === defaultAction));

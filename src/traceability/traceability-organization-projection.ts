@@ -1,4 +1,4 @@
-import { ORGANIZATION_ITEM_LIMIT, type BatchSelection, type OrganizationSnapshot, type RemoteTestSet, type TestCaseMetadata } from "./contracts";
+import type { BatchSelection, OrganizationSnapshot, RemoteTestSet, TestCaseMetadata } from "./contracts";
 import { refIdentity, type ScenarioRef } from "./scenario-ref";
 import type { TraceabilitySnapshot } from "./traceability-model";
 import {
@@ -6,10 +6,23 @@ import {
   formatSyncedAgo,
   traceabilityRowId,
   type TraceabilityAction,
-  type TraceabilityProjectionRow,
 } from "./traceability-tree-projection";
-import { boundedTraceabilityText } from "../webview/traceability-view-protocol";
+import {
+  TRACEABILITY_VIEW_TABS,
+  boundedTraceabilityText,
+  type TraceabilityWireRow,
+} from "../webview/traceability-view-protocol";
 import { plural } from "../utils/text";
+
+// The tabs this projection renders; Workspace belongs to the tree projection.
+type OrganizationTab = Extract<(typeof TRACEABILITY_VIEW_TABS)[number], { id: "repository" | "test-sets" }>;
+const ORGANIZATION_TABS = TRACEABILITY_VIEW_TABS.filter(
+  (tab): tab is OrganizationTab => tab.id === "repository" || tab.id === "test-sets"
+);
+
+// How many rows the Repository and Test Sets tabs will render. Separate from the cache's
+// ORGANIZATION_ITEM_LIMIT so what is fetched and what is shown can be set independently.
+export const ORGANIZATION_DISPLAY_LIMIT = 20_000;
 
 const PREVIEW_SET: TraceabilityAction = { id: "preview-run", label: "Run Set and publish", icon: "play" };
 const PREVIEW_FOLDER: TraceabilityAction = { id: "preview-run", label: "Run folder and publish", icon: "play" };
@@ -26,7 +39,7 @@ export type OrganizationNode =
   | { readonly kind: "organizationInfo"; readonly label: string };
 
 export interface OrganizationProjection {
-  readonly rows: readonly TraceabilityProjectionRow[];
+  readonly rows: readonly TraceabilityWireRow[];
   readonly nodes: ReadonlyMap<string, OrganizationNode>;
 }
 
@@ -181,12 +194,13 @@ export function projectTraceabilityOrganization(
   snapshot: TraceabilitySnapshot | undefined
 ): OrganizationProjection {
   const catalogue = organization === "absent" ? undefined : organization;
-  const rows: TraceabilityProjectionRow[] = [];
+  const rows: TraceabilityWireRow[] = [];
   const nodes = new Map<string, OrganizationNode>();
   const mapped = mappedByKey(snapshot);
-  const truncatedViews = new Set<TraceabilityProjectionRow["view"]>();
-  const add = (row: TraceabilityProjectionRow, node: OrganizationNode): void => {
-    if (rows.length >= ORGANIZATION_ITEM_LIMIT - 2) {truncatedViews.add(row.view); return;}
+  const truncatedViews = new Set<TraceabilityWireRow["view"]>();
+  const add = (row: TraceabilityWireRow, node: OrganizationNode): void => {
+    // Each rendered tab can still owe an overflow notice, so the cap holds a row back for each.
+    if (rows.length >= ORGANIZATION_DISPLAY_LIMIT - ORGANIZATION_TABS.length) {truncatedViews.add(row.view); return;}
     rows.push({
       ...row,
       label: boundedTraceabilityText(row.label),
@@ -290,9 +304,9 @@ export function projectTraceabilityOrganization(
     const label = `${count} Test Set projects omitted by the organization item limit.`;
     add({ id: traceabilityRowId("test-set-info", "bounded"), view: "test-sets", label, icon: "warning", tone: "warning", expandable: false, actions: [] }, { kind: "organizationInfo", label });
   }
-  for (const view of ["repository", "test-sets"] as const) {
+  for (const { id: view, label: tab } of ORGANIZATION_TABS) {
     if (!truncatedViews.has(view)) {continue;}
-    const label = `${view === "repository" ? "Repository" : "Test Sets"} display reached the ${ORGANIZATION_ITEM_LIMIT}-item limit.`;
+    const label = `${tab} display reached the ${ORGANIZATION_DISPLAY_LIMIT}-item limit.`;
     const row = { id: traceabilityRowId("organization-info", `bounded:${view}`), view, label, icon: "warning", tone: "warning" as const, expandable: false, actions: [] };
     rows.push(row);
     nodes.set(row.id, { kind: "organizationInfo", label });

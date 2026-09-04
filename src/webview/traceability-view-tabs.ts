@@ -1,4 +1,4 @@
-export type TraceabilityViewTab = "workspace" | "repository" | "test-sets";
+import { isTraceabilityViewTab, type TraceabilityViewTab } from "./traceability-view-protocol";
 
 export function installTraceabilityTabs(
   tabs: readonly HTMLButtonElement[],
@@ -17,7 +17,7 @@ export function installTraceabilityTabs(
   for (const tab of tabs) {
     tab.onclick = () => {
       const view = tab.dataset["view"];
-      if (view === "workspace" || view === "repository" || view === "test-sets") {activate(view);}
+      if (isTraceabilityViewTab(view)) {activate(view);}
     };
     tab.onkeydown = (event) => {
       const current = tabs.indexOf(tab);
@@ -29,7 +29,7 @@ export function installTraceabilityTabs(
       if (next === undefined) {return;}
       event.preventDefault();
       const view = tabs[next]?.dataset["view"];
-      if (view === "workspace" || view === "repository" || view === "test-sets") {activate(view, true);}
+      if (isTraceabilityViewTab(view)) {activate(view, true);}
     };
   }
   activate(initial);

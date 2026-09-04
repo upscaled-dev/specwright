@@ -2,7 +2,7 @@ import { toWorkspaceRelative } from "../utils/workspace-path";
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { NormalizedStatus } from "./contracts";
-import { TRACEABILITY_DISPLAY_TEXT_LIMIT, boundedTraceabilityText } from "../webview/traceability-view-protocol";
+import { TRACEABILITY_DISPLAY_TEXT_LIMIT, boundedTraceabilityText, type TraceabilityWireRow } from "../webview/traceability-view-protocol";
 import {
   RunOutcome,
   ScenarioRef,
@@ -40,25 +40,9 @@ export interface TraceabilityAction {
   readonly icon: string;
 }
 
-export interface TraceabilityProjectionRow {
-  readonly id: string;
-  readonly parentId?: string | undefined;
-  readonly label: string;
-  readonly description?: string | undefined;
-  readonly tooltip?: string | undefined;
-  readonly icon: string;
-  readonly tone?: "success" | "error" | "skipped" | "pending" | "unknown" | "warning" | "info" | "muted" | undefined;
-  readonly expandable: boolean;
-  readonly actions: readonly TraceabilityAction[];
-  readonly defaultAction?: TraceabilityAction["id"] | undefined;
-  // Which tab shows the row. "all" pins it to every tab, which is how the connection row and its actions
-  // stay reachable outside the Workspace tab.
-  readonly view?: "workspace" | "repository" | "test-sets" | "all" | undefined;
-}
-
 export interface TraceabilityProjection {
   readonly state: "ready" | "disconnected" | "empty" | "untrusted";
-  readonly rows: readonly TraceabilityProjectionRow[];
+  readonly rows: readonly TraceabilityWireRow[];
   readonly nodes: ReadonlyMap<string, TraceabilityNode>;
 }
 
@@ -81,12 +65,12 @@ const outcomeIcon: Record<RunOutcome, string> = {
   failed: "error",
   skipped: "skip",
 };
-const outcomeTone: Record<RunOutcome, TraceabilityProjectionRow["tone"]> = {
+const outcomeTone: Record<RunOutcome, TraceabilityWireRow["tone"]> = {
   passed: "success",
   failed: "error",
   skipped: "skipped",
 };
-const statusTone: Record<NormalizedStatus["category"], TraceabilityProjectionRow["tone"]> = {
+const statusTone: Record<NormalizedStatus["category"], TraceabilityWireRow["tone"]> = {
   passed: "success",
   failed: "error",
   pending: "pending",
@@ -151,7 +135,7 @@ export function formatSyncedAgo(elapsedMs: number): string {
   return `${Math.floor(minutes / 1_440)}d ago`;
 }
 
-function stateRow(state: StateNode["state"]): TraceabilityProjectionRow {
+function stateRow(state: StateNode["state"]): TraceabilityWireRow {
   const id = traceabilityRowId("state", state);
   return state === "disconnected"
     ? { id, label: "Set up Xray", description: "Set up Xray integration to map scenarios and publish results.", tooltip: "Set up Xray integration to map scenarios and publish results.", icon: "plug", tone: "info", expandable: false, actions: [TRACEABILITY_ACTIONS.connect, TRACEABILITY_ACTIONS.hide], defaultAction: "connect" }
@@ -177,9 +161,9 @@ export function projectTraceabilityTree(
   if (!trusted) { return stateProjection("untrusted"); }
   if (!connected) { return stateProjection("disconnected"); }
   const label = boundedTraceabilityText(providerLabel);
-  const rows: TraceabilityProjectionRow[] = [];
+  const rows: TraceabilityWireRow[] = [];
   const nodes = new Map<string, TraceabilityNode>();
-  const add = (row: TraceabilityProjectionRow, node: TraceabilityNode): void => {
+  const add = (row: TraceabilityWireRow, node: TraceabilityNode): void => {
     const text = (value: string | undefined): string | undefined => {
       return value ? value.slice(0, DISPLAY_TEXT_LIMIT) : undefined;
     };

@@ -5,6 +5,7 @@ import {
   TRACEABILITY_PREVIEW_MEMBER_LIMIT,
   TRACEABILITY_SELECTION_LIMIT,
   TRACEABILITY_VIEW_PROTOCOL_VERSION,
+  TRACEABILITY_VIEW_TABS,
   parseTraceabilityClientEnvelope,
   parseTraceabilityHostEnvelope,
 } from "../../webview/traceability-view-protocol";
@@ -60,5 +61,14 @@ describe("traceability view protocol", () => {
     expect(parseTraceabilityHostEnvelope(maximumEnvelope, "trace-session", 1)).toBeDefined();
     expect(parseTraceabilityHostEnvelope({ ...begin, revision: 2, body: { type: "preview", generation: 1, preview: { ...preview, members: Array(TRACEABILITY_PREVIEW_MEMBER_LIMIT + 1).fill(preview.members[0]) } } }, "trace-session", 1)).toBeUndefined();
     expect(parseTraceabilityHostEnvelope({ ...begin, revision: 2, body: { type: "preview", generation: 1, preview: { ...preview, title: "x".repeat(TRACEABILITY_CHUNK_BYTES) } } }, "trace-session", 1)).toBeUndefined();
+  });
+
+  it("admits a row on every declared tab plus all, and no other view", () => {
+    const begin = { version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: "trace-session", revision: 2, surface: "traceability" };
+    const chunk = (view: string): object => ({ ...begin, body: { type: "chunk", generation: 1, offset: 0, rows: [{ id: "row", label: "row", icon: "circle", expandable: false, actions: [], view }] } });
+    for (const view of [...TRACEABILITY_VIEW_TABS.map((tab) => tab.id), "all"]) {
+      expect(parseTraceabilityHostEnvelope(chunk(view), "trace-session", 1)).toBeDefined();
+    }
+    expect(parseTraceabilityHostEnvelope(chunk("archive"), "trace-session", 1)).toBeUndefined();
   });
 });

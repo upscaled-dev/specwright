@@ -5,6 +5,7 @@ import { createNonce } from "../utils/webview";
 import {
   TRACEABILITY_CHUNK_BYTES,
   TRACEABILITY_CHUNK_ROWS,
+  TRACEABILITY_DEFAULT_VIEW,
   TRACEABILITY_PREVIEW_MEMBER_LIMIT,
   TRACEABILITY_VIEW_PROTOCOL_VERSION,
   boundedTraceabilityText,
@@ -172,7 +173,7 @@ export class TraceabilityViewProvider implements vscode.WebviewViewProvider, vsc
     this.organizationSnapshot = organizationSnapshot;
     const organization = projectTraceabilityOrganization(this.organization ? organizationSnapshot : "absent", this.model?.snapshot);
     const rows = [
-      ...workspace.rows.map((row) => ({ ...row, view: row.view ?? ("workspace" as const) })),
+      ...workspace.rows.map((row) => ({ ...row, view: row.view ?? TRACEABILITY_DEFAULT_VIEW })),
       ...organization.rows,
     ];
     const nodes = new Map<string, TraceabilityNode | OrganizationNode>(workspace.nodes);
@@ -257,9 +258,8 @@ export class TraceabilityViewProvider implements vscode.WebviewViewProvider, vsc
     let chunk: TraceabilityWireRow[] = [];
     let bytes = 0;
     let rowsSent = 0;
-    for (const row of projection.rows) {
+    for (const wire of projection.rows) {
       if (generation !== this.generation) { return "sent"; }
-      const wire = row as TraceabilityWireRow;
       // Byte length, rather than UTF-16 code units, is the transport boundary: emoji and CJK labels
       // must not allow a chunk beyond the webview message budget.
       const size = Buffer.byteLength(JSON.stringify(wire), "utf8") + 256;

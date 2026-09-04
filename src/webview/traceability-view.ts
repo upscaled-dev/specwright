@@ -1,11 +1,15 @@
 import {
+  isTraceabilityViewTab,
   parseTraceabilityHostEnvelope,
+  TRACEABILITY_DEFAULT_VIEW,
   TRACEABILITY_SELECTION_LIMIT,
   TRACEABILITY_VIEW_PROTOCOL_VERSION,
+  TRACEABILITY_VIEW_TABS,
+  type TraceabilityViewTab,
   type TraceabilityWireRow,
 } from "./traceability-view-protocol";
 import { createTraceabilityPreviewDialog } from "./traceability-preview-dialog";
-import { installTraceabilityTabs, type TraceabilityViewTab } from "./traceability-view-tabs";
+import { installTraceabilityTabs } from "./traceability-view-tabs";
 import {
   pageSize,
   revealIndex,
@@ -53,7 +57,7 @@ const anchorByView = new Map<TraceabilityViewTab, string>();
 
 const restored = vscode.getState();
 const restoredView = restored?.["view"];
-let activeView: TraceabilityViewTab = restoredView === "repository" || restoredView === "test-sets" ? restoredView : "workspace";
+let activeView: TraceabilityViewTab = isTraceabilityViewTab(restoredView) ? restoredView : TRACEABILITY_DEFAULT_VIEW;
 let query = typeof restored?.["filter"] === "string" ? restored["filter"].slice(0, FILTER_LIMIT) : "";
 const expanded = new Set<string>(strings(restored?.["expanded"]));
 const collapsedRoots = new Set<string>(strings(restored?.["collapsedRoots"]).slice(-COLLAPSED_ROOT_LIMIT));
@@ -102,7 +106,7 @@ function isExpanded(id: string): boolean {
 }
 
 function refreshVisible(): void {
-  const viewRows = rows.filter((row) => row.view === "all" || (row.view ?? "workspace") === activeView);
+  const viewRows = rows.filter((row) => row.view === "all" || (row.view ?? TRACEABILITY_DEFAULT_VIEW) === activeView);
   rowById = new Map(viewRows.map((row) => [row.id, row]));
   depthById = new Map();
   for (const row of viewRows) {
@@ -185,7 +189,7 @@ function selectView(view: TraceabilityViewTab): void {
     focusId = focusByView.get(view);
     selectionAnchorId = anchorByView.get(view);
   }
-  filter.placeholder = activeView === "workspace" ? "Filter workspace" : activeView === "repository" ? "Filter repository" : "Filter Test Sets";
+  filter.placeholder = (TRACEABILITY_VIEW_TABS.find((tab) => tab.id === activeView) ?? TRACEABILITY_VIEW_TABS[0]).placeholder;
   refreshVisible();
   tree.scrollTop = 0;
   persist();

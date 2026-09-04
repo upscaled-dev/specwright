@@ -1384,6 +1384,7 @@
     "check-types:extension": "tsc --noEmit",
     "check-types:webview": "tsc -p tsconfig.webview.json",
     "check-types:webview-test": "tsc -p tsconfig.webview-test.json",
+    "check-types:integration": "tsc -p tsconfig.integration.json --noEmit",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "clean": "rimraf dist out",

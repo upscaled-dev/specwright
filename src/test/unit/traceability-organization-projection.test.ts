@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ORGANIZATION_DISPLAY_LIMIT,
   REPOSITORY_FOLDER_DEPTH_LIMIT,
   REPOSITORY_FOLDER_NODE_LIMIT,
   projectTraceabilityOrganization,
@@ -7,7 +8,6 @@ import {
 } from "../../traceability/traceability-organization-projection";
 import type { OrganizationProjection } from "../../traceability/traceability-organization-projection";
 import type { OrganizationSnapshot } from "../../traceability/contracts";
-import { ORGANIZATION_ITEM_LIMIT } from "../../traceability/contracts";
 import type { TraceabilitySnapshot } from "../../traceability/traceability-model";
 
 const scenario = { filePath: "/ws/a.feature", line: 3, name: "Mapped", kind: "scenario" as const };
@@ -194,25 +194,25 @@ describe("traceability organization projection bounds", () => {
   });
 
   it("hard-caps browser organization rows and renders an omission warning", () => {
-    const members = Array.from({ length: ORGANIZATION_ITEM_LIMIT + 100 }, (_, index) => ({ key: `SHOP-${index}` }));
+    const members = Array.from({ length: ORGANIZATION_DISPLAY_LIMIT + 100 }, (_, index) => ({ key: `SHOP-${index}` }));
     const result = projectTraceabilityOrganization(organization({ testSetProjects: [{
       projectKey: "SHOP", complete: false, truncated: true, errors: ["bounded"],
       testSets: [{ key: "SHOP-301", issueId: "301", members, remoteMemberCount: members.length, membershipComplete: true, truncated: false, errors: [] }],
     }] }), mapped);
 
-    expect(result.rows.length).toBeLessThanOrEqual(ORGANIZATION_ITEM_LIMIT);
+    expect(result.rows.length).toBeLessThanOrEqual(ORGANIZATION_DISPLAY_LIMIT);
     expect(result.rows.at(-1)?.label).toContain("Test Sets display reached");
   });
 
   it("renders a Repository warning when repository rows reach the browser limit", () => {
-    const tests = Array.from({ length: ORGANIZATION_ITEM_LIMIT }, (_, index) => ({
+    const tests = Array.from({ length: ORGANIZATION_DISPLAY_LIMIT }, (_, index) => ({
       key: `SHOP-${index}`, repositoryFolder: { name: "Bulk", path: "/Bulk" },
     }));
     const result = projectTraceabilityOrganization(organization({ repositories: [{
       projectKey: "SHOP", tests, complete: true, truncated: false, errors: [],
     }] }), mapped);
 
-    expect(result.rows.length).toBeLessThanOrEqual(ORGANIZATION_ITEM_LIMIT);
+    expect(result.rows.length).toBeLessThanOrEqual(ORGANIZATION_DISPLAY_LIMIT);
     expect(result.rows.find((row) => row.view === "repository" && row.label.includes("Repository display reached"))).toBeDefined();
   });
 });

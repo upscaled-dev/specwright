@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { contentSecurityPolicy, createNonce } from "../utils/webview";
+import { TRACEABILITY_VIEW_TABS } from "../webview/traceability-view-protocol";
 
 export function renderTraceabilityViewDocument(webview: vscode.Webview, assetRoot: vscode.Uri, session: string): string {
   const nonce = createNonce();
@@ -62,9 +63,7 @@ export function renderTraceabilityViewDocument(webview: vscode.Webview, assetRoo
 </head>
 <body data-session="${session}">
   <nav id="tabs" role="tablist" aria-label="Traceability views">
-    <button type="button" role="tab" data-view="workspace" aria-selected="true" tabindex="0">Workspace</button>
-    <button type="button" role="tab" data-view="repository" aria-selected="false" tabindex="-1">Repository</button>
-    <button type="button" role="tab" data-view="test-sets" aria-selected="false" tabindex="-1">Test Sets</button>
+    ${TRACEABILITY_VIEW_TABS.map((tab, index) => `<button type="button" role="tab" data-view="${tab.id}" aria-selected="${index === 0}" tabindex="${index === 0 ? 0 : -1}">${tab.label}</button>`).join("\n    ")}
   </nav>
   <input id="filter" type="search" maxlength="4096" aria-label="Filter traceability" placeholder="Filter traceability">
   <div id="tree" role="tree" aria-label="Traceability tree" tabindex="0"></div>
