@@ -1116,6 +1116,11 @@
           "group": "playwrightBddRunner@4"
         },
         {
+          "command": "playwrightBddRunner.traceability.clearLocalRunHistory",
+          "when": "view == playwrightBddRunner.traceability",
+          "group": "playwrightBddRunner@5"
+        },
+        {
           "command": "playwrightBddRunner.traceability.openBoard",
           "when": "view == playwrightBddRunner.traceability",
           "group": "navigation@1"

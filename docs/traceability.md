@@ -166,7 +166,7 @@ Push is available only for a synced Gherkin-compatible Xray test with a remote i
 
 ## Run locally and publish results
 
-The Traceability view has an always-visible filter and inline row actions. Cmd/Ctrl-click mapped scenario rows to select a batch, then use **Run and publish** on one selected row. A single row runs one scenario; the Traceability toolbar's **Run All Mapped Scenarios and Publish** runs all mapped scenarios. The Command Palette offers **Run and Publish by Tag Expression**. Specwright runs the batch through your local Playwright configuration, then opens the Publish workflow.
+The Traceability view has inline row actions, plus the filter and multi-selection described in [Navigate the panel with the keyboard](#navigate-the-panel-with-the-keyboard). Select a batch of mapped scenario rows, then use **Run and publish** on one selected row. A single row runs one scenario; the Traceability toolbar's **Run All Mapped Scenarios and Publish** runs all mapped scenarios. The Command Palette offers **Run and Publish by Tag Expression**. Specwright runs the batch through your local Playwright configuration, then opens the Publish workflow.
 
 Repository folder and Test Set runs show a confirmation with remote, runnable-local, and remote-only counts. Confirmation seals only the named folder or Test Set identity and the exact mapped local scenarios shown. Remote-only tests never execute locally, and an empty selection is never widened to another scope. After confirmation, these runs use the same preflight, local execution, immutable run artifact, and publish workflow as Workspace runs. Specwright never starts a server-side Xray run.
 
@@ -196,6 +196,28 @@ In the **Publish** tab:
 Creating a new execution imports results as a new Xray Test Execution. Appending imports results into the execution you selected. Publishing does not launch a remote test run.
 
 To create a new Test Execution, the target Jira project must have an Xray-mapped, standard-level work type named **Test Execution**, unless you configured a different name with `playwrightBddRunner.xray.executionIssueType`. A subtask work type cannot hold a standalone execution.
+
+### Navigate the panel with the keyboard
+
+The filter box above the tree is always visible, and its placeholder names the tab you are on. Typing narrows the rows as you type and returns the tree to the top. The panel title's search button, **Find in Traceability**, focuses the panel and puts the cursor in that box. The filter text, expanded rows, and selection survive a refresh and reopening the panel.
+
+With a tab focused, Left and Right move between Workspace, Repository, and Test Sets, and Home and End jump to the first and last tab.
+
+Inside the tree:
+
+| Key | What it does |
+| --- | --- |
+| Up, Down | Move focus one row. |
+| Home, End | Move focus to the first or last row. |
+| Page Up, Page Down | Move focus a screen of rows. |
+| Right | Expand the focused group, or move to its first child when it is already expanded. |
+| Left | Collapse the focused group, or move to its parent row. |
+| Enter, Space | Expand or collapse a group row. On any other row, run that row's own default action: a scenario opens in the editor, a remote test opens in the tracker, the connection row starts Xray setup, and the workspace-trust row opens the VS Code trust dialog. |
+| Shift with a movement key | Extend the selection from the anchor row to the row you land on. |
+| Ctrl or Cmd with a movement key | Move focus and leave the selection as it is. |
+| Ctrl or Cmd with Space | Add the focused row to the selection, or take it out. |
+
+Those modifiers work with the mouse too: Shift-click selects a range, and Cmd/Ctrl-click toggles one row. A selection holds at most 128 rows, the same number a run confirmation lists, however you build it: extending with Shift stops at the cap, and a Cmd/Ctrl toggle that would pass it is ignored, with the refusal announced to screen readers only. Escape cancels the run confirmation dialog.
 
 ### Evidence and report attachments
 
@@ -302,13 +324,13 @@ must not be used for managed execution hosts or delegated bridge adapters.
 | A mapped test says it is not found remotely | The key may be mistyped, belong to a different project or site, or name an issue that is not an Xray test. Sync again after correcting the tag or connection. |
 | Preflight reports a duplicate or incompatible mapping | Use one test tag per scenario unit and one scenario unit per test. For publishing or Push, link a Gherkin-compatible Xray test. |
 | Push is blocked by drift | Another person may have changed the remote Gherkin since the last sync. Sync, review the intended overwrite, then try again. Examples-block mappings cannot be pushed. |
-| Publish has no local runs | Enable the Traceability panel first: with it off, no run is publishable. Then check that the scenarios carry a valid test tag, that you started the run from the Testing view or with **Run Locally and Publish…**, and that preflight did not exclude them, and run them again. Only the last 10 runs are kept, and **Clear Local Run History…** in the Command Palette empties them. |
+| Publish has no local runs | Enable the Traceability panel first: with it off, no run is publishable. Then check that the scenarios carry a valid test tag, that you started the run from the Testing view or with **Run Locally and Publish…**, and that preflight did not exclude them, and run them again. Only the last 10 runs are kept, and **Clear Local Run History…** empties them. |
 | A new execution cannot be created | Check project permissions and the Xray Test Execution work-type mapping. If your project uses another standard-level name, set `xray.executionIssueType` to that name. |
 | Attachments are unavailable or fail | Add Jira credentials for issue uploads, check the site's upload limit and file size, then use the pending-attachment retry. A successful result import is not repeated. |
 
 ## Trial cleanup
 
-For a clean trial, run **Specwright: Clear Local Run History…** from the Command Palette, which is its only entry point, to remove this workspace's recorded local runs and, if you choose, its local publish ledger. This does not delete remote records.
+For a clean trial, run **Specwright: Clear Local Run History…** from the Command Palette or the last item in the Traceability panel's overflow menu to remove this workspace's recorded local runs and, if you choose, its local publish ledger. This does not delete remote records.
 
 Delete any trial Tests, Test Sets, Test Plans, Test Executions, and attachments through Jira/Xray using an account with permission to do so. When you are finished, use **Disconnect from Xray** to remove stored credentials from VS Code Secret Storage.
 

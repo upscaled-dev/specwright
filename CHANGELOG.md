@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- **Clear Local Run History…** now sits at the end of the Traceability panel's overflow menu, after Manage Xray Connection. It stays in the Command Palette as well.
+
 ### Fixed
 
 - Running a Test Repository folder from the Traceability panel now covers that folder only. A remote path carrying `.` or `..` segments resolves to the folder it names, and a folder actually named Unfiled stays separate from the tests that sit in no folder.

@@ -496,7 +496,28 @@ describe("command contributions ↔ handler registrations parity", () => {
     const viewTitle = pkg.contributes.menus["view/title"]!;
     const plug = viewTitle.find((e) => e.command === "playwrightBddRunner.traceability.manageConnection");
     expect(plug?.when).toBe("view == playwrightBddRunner.traceability");
-    expect(plug?.group).toBe("playwrightBddRunner@4");
+  });
+
+  // Clearing run history is destructive, so it sits last in the overflow menu rather than next to a
+  // button someone reaches for often.
+  it("ends the traceability overflow menu with clear-run-history", () => {
+    const viewTitle = pkg.contributes.menus["view/title"]!;
+    const slots = viewTitle
+      .filter((e) =>
+        e.command?.startsWith("playwrightBddRunner.traceability.") &&
+        e.group?.startsWith("playwrightBddRunner@")
+      )
+      .map((e) => [e.command, e.group] as const);
+
+    expect(slots).toEqual([
+      ["playwrightBddRunner.traceability.toggleGrouping", "playwrightBddRunner@1"],
+      ["playwrightBddRunner.traceability.runAndPublishAllMapped", "playwrightBddRunner@2"],
+      ["playwrightBddRunner.traceability.publishLastRun", "playwrightBddRunner@3"],
+      ["playwrightBddRunner.traceability.manageConnection", "playwrightBddRunner@4"],
+      ["playwrightBddRunner.traceability.clearLocalRunHistory", "playwrightBddRunner@5"],
+    ]);
+    expect(viewTitle.find((e) => e.command === "playwrightBddRunner.traceability.clearLocalRunHistory")?.when)
+      .toBe("view == playwrightBddRunner.traceability");
   });
 
   it("keeps Coverage Board, Sync, and Find as primary traceability title actions", () => {
@@ -560,7 +581,7 @@ describe("command contributions ↔ handler registrations parity", () => {
       .filter((e) => e.command?.startsWith("playwrightBddRunner.traceability."))
       .map((e) => iconOf(e.command!));
 
-    expect(icons).toEqual(["$(list-tree)", "$(sync)", "$(play-circle)", "$(cloud-upload)", "$(plug)", "$(project)", "$(search)"]);
+    expect(icons).toEqual(["$(list-tree)", "$(sync)", "$(play-circle)", "$(cloud-upload)", "$(plug)", "$(clear-all)", "$(project)", "$(search)"]);
     expect(new Set(icons).size).toBe(icons.length);
   });
 
