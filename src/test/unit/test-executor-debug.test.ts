@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
 import { TestExecutor, RunOutputResult, ShellRunner } from "../../core/test-executor";
+import { WINDOWS_TERMINATION_WORST_CASE_MS } from "../../core/bounded-command-runner";
 import { Logger } from "../../utils/logger";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { BreakpointMirror } from "../../core/breakpoint-mirror";
@@ -988,10 +989,10 @@ describe("TestExecutor cancellation", () => {
   // The child must outlive every termination path, so settling before it can only mean the tree was
   // killed rather than waited out.
   const CHILD_LIFETIME_MS = 30_000;
-  // Above the Windows termination ladder's worst case and far below CHILD_LIFETIME_MS. The ladder's
-  // WINDOWS_TERMINATION_BUDGET_MS is private to bounded-command-runner.ts, so this cannot be
-  // derived: keep it above that budget plus the TERMINATION_GRACE_MS an in-flight kill adds to it.
-  const SETTLE_BUDGET_MS = 20_000;
+  // Head-room over the ladder's worst case for a cold or loaded runner, kept far below
+  // CHILD_LIFETIME_MS so a settle that only waited the child out still fails.
+  const SLOW_RUNNER_MARGIN_MS = 10_000;
+  const SETTLE_BUDGET_MS = WINDOWS_TERMINATION_WORST_CASE_MS + SLOW_RUNNER_MARGIN_MS;
   // Every message the Windows ladder emits when it cannot clear the tree: the confirmation window
   // elapsing, an unreadable process table, a taskkill failure, and survivors ("left N processes
   // running"). It deliberately excludes unconfirmedTermination's "Process termination" catch-all,

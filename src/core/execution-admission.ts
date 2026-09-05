@@ -173,8 +173,11 @@ function systemBootId(): string | undefined {
   return cachedBootId;
 }
 
-export function terminationLease(lease: TerminationLeaseInput): TerminationLease {
-  const bootId = systemBootId();
+export function terminationLease(
+  lease: TerminationLeaseInput,
+  resolveBootId: () => string | undefined = systemBootId
+): TerminationLease {
+  const bootId = resolveBootId();
   return {
     ...lease,
     ...(bootId === undefined ? {} : { bootId }),

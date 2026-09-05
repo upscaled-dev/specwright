@@ -19,7 +19,10 @@ import type { RunArtifactStore } from "../../traceability/run-artifact-store";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { ScenarioResult } from "../../utils/playwright-json-parser";
 import { EXECUTION_LIMITS } from "../../core/execution-limits";
-import { runBoundedCommand } from "../../core/bounded-command-runner";
+import {
+  runBoundedCommand,
+  WINDOWS_TERMINATION_WORST_CASE_MS,
+} from "../../core/bounded-command-runner";
 import { Logger } from "../../utils/logger";
 import { shellQuote } from "../../utils/shell";
 import { ExecutionAdmissionBlockedError } from "../../core/execution-admission";
@@ -645,6 +648,10 @@ describe("LegacyDirectExecutionGateway", () => {
     ]);
   });
 
+  // What the cancelled row needs on top of the termination ladder: a real child booting, flooding
+  // both tails past their limits, and the runner draining them.
+  const CHILD_FLOOD_MARGIN_MS = 30_000;
+
   it.each([
     ["complete", "", false],
     ["partial", "process.exitCode=7", false],
@@ -730,10 +737,8 @@ describe("LegacyDirectExecutionGateway", () => {
       );
     },
     // A ceiling shared by all three rows but sized for the cancelled one, which aborts a real child
-    // and must clear the Windows termination ladder: WINDOWS_TERMINATION_BUDGET_MS (private to
-    // bounded-command-runner.ts) plus an in-flight kill's TERMINATION_GRACE_MS. The other two rows
-    // settle in milliseconds regardless.
-    40_000
+    // and must clear the Windows termination ladder. The other two settle in milliseconds regardless.
+    WINDOWS_TERMINATION_WORST_CASE_MS + CHILD_FLOOD_MARGIN_MS
   );
 
   it("captures all reported rows for a declaration-line outline intent", async () => {

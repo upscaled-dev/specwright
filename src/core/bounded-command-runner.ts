@@ -23,7 +23,10 @@ export const TERMINATION_GRACE_MS = 2_000;
 
 // The Windows kill, confirm, retry, confirm sequence runs against this deadline; a kill already in
 // flight keeps its own TERMINATION_GRACE_MS on top of it.
-const WINDOWS_TERMINATION_BUDGET_MS = 8_000;
+export const WINDOWS_TERMINATION_BUDGET_MS = 8_000;
+/** The longest the Windows ladder can run: its confirmation budget plus that in-flight kill. */
+export const WINDOWS_TERMINATION_WORST_CASE_MS =
+  WINDOWS_TERMINATION_BUDGET_MS + TERMINATION_GRACE_MS;
 // A recorded member serializes to about 40 bytes, so a lease carrying 200 of them plus its failure
 // text lands near half of the durable record's MAX_ADMISSION_RECORD_BYTES.
 const RECORDED_MEMBERS = 200;

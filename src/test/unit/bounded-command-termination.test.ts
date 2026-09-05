@@ -5,6 +5,8 @@ import { spawn } from "node:child_process";
 import {
   runBoundedCommand,
   TERMINATION_GRACE_MS,
+  WINDOWS_TERMINATION_BUDGET_MS,
+  WINDOWS_TERMINATION_WORST_CASE_MS,
   type BoundedCommandResult,
 } from "../../core/bounded-command-runner";
 import {
@@ -34,8 +36,6 @@ const RUNNING_TREE: readonly ProcessEntry[] = [
   { pid: 4242, parentPid: 1, creationDate: 1_000 },
   { pid: 4343, parentPid: 4242, creationDate: 2_000 },
 ];
-// The budget the runner keeps for the whole confirm-and-retry sequence.
-const WINDOWS_TERMINATION_BUDGET_MS = 8_000;
 
 /** Serializes like the durable store, so a dropped undefined field shows up in the read-back. */
 class JsonStore implements AdmissionStore {
@@ -384,7 +384,7 @@ describe("runBoundedCommand cancellation", () => {
 
     const run = cancelledRun();
     // The table answers "unreadable" with time to spare; the kill that follows runs past the window.
-    await vi.advanceTimersByTimeAsync(WINDOWS_TERMINATION_BUDGET_MS + TERMINATION_GRACE_MS);
+    await vi.advanceTimersByTimeAsync(WINDOWS_TERMINATION_WORST_CASE_MS);
     const failure = (await run.result).terminationFailure;
 
     expect(failure).toContain("process table could not be read");

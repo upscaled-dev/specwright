@@ -7,6 +7,7 @@ import {
   parseExecutableCommand,
   resolveExecutableCommand,
   runBoundedCommand,
+  WINDOWS_TERMINATION_WORST_CASE_MS,
 } from "../../core/bounded-command-runner";
 import { EXECUTION_LIMITS } from "../../core/execution-limits";
 import { Logger } from "../../utils/logger";
@@ -173,10 +174,10 @@ describe("runBoundedCommand", () => {
   // The flood must outlast every termination path, so a Stop starved by the writes settles at the
   // child's own end and fails the budget below instead of hanging to the suite timeout.
   const FLOOD_LIFETIME_MS = 30_000;
-  // Above the Windows termination ladder's worst case and far below FLOOD_LIFETIME_MS. The ladder's
-  // WINDOWS_TERMINATION_BUDGET_MS is private to bounded-command-runner.ts, so this cannot be
-  // derived: keep it above that budget plus the TERMINATION_GRACE_MS an in-flight kill adds to it.
-  const CANCEL_SETTLE_BUDGET_MS = 20_000;
+  // Head-room over the ladder's worst case for a cold or loaded runner, kept far below
+  // FLOOD_LIFETIME_MS so a starved cancellation still fails the budget rather than the child's end.
+  const SLOW_RUNNER_MARGIN_MS = 10_000;
+  const CANCEL_SETTLE_BUDGET_MS = WINDOWS_TERMINATION_WORST_CASE_MS + SLOW_RUNNER_MARGIN_MS;
   // The child announces its pid on its first write so the kill can be checked against the process
   // itself. The exit timer is armed by the first flood write rather than at boot, so the margin
   // between a starved cancellation and CANCEL_SETTLE_BUDGET_MS does not shrink with a cold start.
@@ -278,26 +279,88 @@ describe("runBoundedCommand", () => {
     expect(result.output).toBe("😀");
   });
 
+  // Room for a cold runner's process boots on top of the ladder's worst case.
+  const COLD_BOOT_MARGIN_MS = 5_000;
+  // How long the grandchild will wait for its cue, which is the longest a run can take to settle.
+  const LATE_WRITE_WAIT_MS = WINDOWS_TERMINATION_WORST_CASE_MS + COLD_BOOT_MARGIN_MS;
+  const MARKER_POLL_MS = 50;
+  const SETTLED_MARKER = "settled";
+  const LATE_WRITE_MARKER = "written";
+
   it("stops streaming when the exit grace settles inherited pipes", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-late-write-"));
+    const script = path.join(dir, "late-write.js");
+    const marker = path.join(dir, LATE_WRITE_MARKER);
+    // The grandchild writes only once the test says the run has settled, so its write needs no
+    // timer raced against the grace window. It records the kind of handle fd 1 turned out to be,
+    // which is the only proof that the silence below is a closed inherited pipe rather than a
+    // grandchild that never held one.
+    fs.writeFileSync(script, [
+      'const fs = require("node:fs");',
+      'const path = require("node:path");',
+      `const settled = path.join(__dirname, ${JSON.stringify(SETTLED_MARKER)});`,
+      `const deadline = Date.now() + ${LATE_WRITE_WAIT_MS};`,
+      "const poll = setInterval(() => {",
+      "  if (!fs.existsSync(settled)) {",
+      "    if (Date.now() < deadline) { return; }",
+      "    clearInterval(poll);",
+      "    process.exit(1);",
+      "  }",
+      "  clearInterval(poll);",
+      "  const fd = fs.fstatSync(1);",
+      '  const handle = fd.isFIFO() ? "fifo" : fd.isSocket() ? "socket"',
+      '    : fd.isCharacterDevice() ? "chardev" : "other";',
+      '  process.stdout.write("late");',
+      // Renamed into place so the marker is complete the moment the test can see it.
+      `  const marker = path.join(__dirname, ${JSON.stringify(LATE_WRITE_MARKER)});`,
+      '  fs.writeFileSync(marker + ".part", JSON.stringify({ handle }));',
+      '  fs.renameSync(marker + ".part", marker);',
+      `}, ${MARKER_POLL_MS});`,
+    ].join("\n"));
+
     let streamed = "";
-    const result = await runBoundedCommand({
-      command: nodeCommand(
-        "const cp=require('node:child_process');" +
-        "cp.spawn(process.execPath,['-e','setTimeout(()=>process.stdout.write(\"late\"),2600)']," +
-        "{stdio:'inherit'});setTimeout(()=>process.exit(0),50);"
-      ),
-      workingDir: process.cwd(),
-      logger,
-      onOutput: (_stream, text) => {streamed += text;},
-    });
-    const settledOutput = streamed;
+    try {
+      const result = await runBoundedCommand({
+        // The grandchild's path rides in argv rather than inside the -e source, so no Windows
+        // backslash has to survive a round trip through a nested JS string literal.
+        command: `${nodeCommand(
+          "const cp=require('node:child_process');" +
+          // POSIX detaches so the grandchild leads its own group: the runner kills the group it
+          // owns on every completed run, which would take the grandchild down before it can write
+          // and leave nothing for this test to observe. Windows has no group to escape, and
+          // detaching there would hand the grandchild its own console. Unref'd either way, so the
+          // parent exits at once and leaves only the grandchild holding the pipes.
+          "cp.spawn(process.execPath,[process.argv[1]]," +
+          "{stdio:'inherit',detached:process.platform!=='win32'}).unref();"
+        )} ${shellQuote(script)}`,
+        workingDir: process.cwd(),
+        logger,
+        onOutput: (_stream, text) => {streamed += text;},
+      });
+      const settledOutput = streamed;
+      fs.writeFileSync(path.join(dir, SETTLED_MARKER), "yes");
 
-    await new Promise((resolve) => setTimeout(resolve, 900));
+      const record = await vi.waitFor(() => {
+        if (!fs.existsSync(marker)) {
+          throw new Error("the grandchild never recorded its late write");
+        }
+        return JSON.parse(fs.readFileSync(marker, "utf8")) as { handle: string };
+      }, { timeout: LATE_WRITE_WAIT_MS, interval: MARKER_POLL_MS });
 
-    expect(result.success).toBe(true);
-    expect(streamed).toBe(settledOutput);
-    expect(streamed).not.toContain("late");
-  }, 10_000);
+      expect(result.success).toBe(true);
+      // The runner's stdio pipe reaches the grandchild as a socketpair on POSIX and a named pipe on
+      // Windows. A grandchild given stdio:"ignore" would land on the null device instead, so this is
+      // what makes the silence below the runner closing an inherited pipe.
+      expect(["fifo", "socket"]).toContain(record.handle);
+      expect(streamed).toBe(settledOutput);
+      expect(streamed).not.toContain("late");
+    } finally {
+      // Reached only once the grandchild has written or given up, so nothing is left pointing a
+      // pending write at a removed directory. Windows can still hold its handles for a moment.
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+    // The run has to settle before the observation can start, so the ceiling covers both.
+  }, WINDOWS_TERMINATION_WORST_CASE_MS + LATE_WRITE_WAIT_MS);
 
   it("does not claim output was streamed when spawn fails before delivering a chunk", async () => {
     const result = await runBoundedCommand({

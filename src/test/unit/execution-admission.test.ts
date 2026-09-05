@@ -8,6 +8,7 @@ import {
   FileAdmissionStore,
   isCanonicalBootId,
   resolveSystemBootId,
+  terminationLease,
   type AdmissionRecord,
   type AdmissionStore,
   type TerminationLease,
@@ -502,6 +503,20 @@ describe("system boot identity", () => {
     BOOT_EVENT.replace("</System>", "<EventRecordID>4183</EventRecordID></System>"),
   ])("fails closed for absent or malformed Windows boot-event output", (output) => {
     expect(resolveSystemBootId("win32", () => undefined, () => output)).toBeUndefined();
+  });
+});
+
+describe("terminationLease", () => {
+  const input = { kind: "windows-tree", pid: ROOT.pid, failure: "termination unconfirmed" } as const;
+
+  it("stamps the resolved boot session on the lease", () => {
+    expect(terminationLease(input, () => BOOT_A)).toEqual({ ...input, bootId: BOOT_A });
+  });
+
+  it("omits the key entirely when the host has no boot session to name", () => {
+    // A serialized undefined reads back as an absent key anyway, so the writer must not pretend it
+    // recorded one.
+    expect(terminationLease(input, () => undefined)).not.toHaveProperty("bootId");
   });
 });
 
