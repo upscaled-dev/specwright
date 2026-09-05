@@ -246,6 +246,7 @@ function snapshot(value: unknown, budget: ValidationBudget): value is RemoteMeta
     && texts(value["verifiedAbsentKeys"], budget)
     && optional(value["syncedAt"], budget, finiteNumber)
     && boolean(value["stale"], budget)
+    && optional(value["truncated"], budget, boolean)
     && texts(value["errors"], budget);
 }
 

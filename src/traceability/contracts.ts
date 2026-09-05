@@ -152,6 +152,11 @@ export interface RemoteMetadataSnapshot {
   readonly verifiedAbsentKeys: readonly string[];
   readonly syncedAt?: number | undefined;
   readonly stale: boolean;
+  // True when any scope in the whole sync hit the provider's pagination cap, so the snapshot holds
+  // part of it. Whole-sync rather than per project, unlike the fields above, and optional so an
+  // adapter that never truncates (or predates the flag) simply omits it. Carried as a flag because
+  // the alternative is reading it back out of the `errors` prose.
+  readonly truncated?: boolean | undefined;
   readonly errors: readonly string[];
 }
 

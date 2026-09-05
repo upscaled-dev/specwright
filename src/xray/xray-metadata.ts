@@ -28,6 +28,7 @@ interface MetadataState {
   completeProjects: string[];
   verifiedAbsentKeys: string[];
   syncedAt: number | undefined;
+  truncated: boolean;
   errors: string[];
   pages: XrayCachePage[];
 }
@@ -40,6 +41,7 @@ function emptyState(): MetadataState {
     completeProjects: [],
     verifiedAbsentKeys: [],
     syncedAt: undefined,
+    truncated: false,
     errors: [],
     pages: [],
   };
@@ -53,6 +55,7 @@ function stateFromCached(cached: CachedMetadata): MetadataState {
     completeProjects: [...(cached.completeProjects ?? [])],
     verifiedAbsentKeys: [...(cached.verifiedAbsentKeys ?? [])],
     syncedAt: cached.syncedAt,
+    truncated: cached.truncated ?? false,
     errors: [...cached.errors],
     pages: [...cached.pages],
   };
@@ -186,6 +189,7 @@ export class XrayMetadataCapability
       verifiedAbsentKeys: [...this.state.verifiedAbsentKeys],
       syncedAt: this.state.syncedAt,
       stale,
+      truncated: this.state.truncated,
       errors: [...this.state.errors],
     };
   }
@@ -355,6 +359,7 @@ export class XrayMetadataCapability
     const errors: string[] = [];
     const completeProjects: string[] = [];
     let verifiedAbsent: string[] = [];
+    let truncated = false;
 
     try {
       for (const projectKey of projectKeys) {
@@ -362,6 +367,7 @@ export class XrayMetadataCapability
           onProgress?.({ projectKey, fetched, total })
         );
         this.absorb(merged, pages, errors, outcome);
+        truncated ||= outcome.truncated;
         // Per project: a catalogue that paged short or reported an error authorizes nothing for its
         // own project and says nothing about the others, which keep whatever they earned.
         if (outcome.complete && outcome.errors.length === 0) {
@@ -373,6 +379,7 @@ export class XrayMetadataCapability
         // The key batch supplements the catalogue with out-of-scope keys; its presence or failure
         // never affects catalogue completeness. Its errors surface in `errors` only.
         this.absorb(merged, pages, errors, outcome);
+        truncated ||= outcome.truncated;
         // §5 key-batch leniency: getTests silently omits nonexistent keys and still returns 200, so a
         // trustworthy batch (whole outcome complete, no errors) that queried a key and did not get it
         // back is authoritative absence evidence. fetchTestsByKeys merges its internal chunks into one
@@ -414,7 +421,9 @@ export class XrayMetadataCapability
     // sync it is what keeps an unknown catalogue from presenting as "synced just now". A run that
     // learned anything commits it, so one project's failure never discards its siblings' work.
     if (completeProjects.length === 0 && verifiedAbsent.length === 0 && merged.size === 0 && errors.length > 0) {
-      this.state = { ...this.state, errors };
+      // The retained tests are still whatever a previous run truncated, so the flag survives a run
+      // that learned nothing: only a run that commits a fresh scope may clear it.
+      this.state = { ...this.state, truncated: this.state.truncated || truncated, errors };
       this._onDidChange.fire();
       return;
     }
@@ -426,6 +435,7 @@ export class XrayMetadataCapability
       completeProjects,
       verifiedAbsentKeys: verifiedAbsent,
       syncedAt: this.now(),
+      truncated,
       errors,
       pages,
     };
@@ -501,6 +511,7 @@ export class XrayMetadataCapability
       catalogueProjects: [...this.state.catalogueProjects],
       completeProjects: [...this.state.completeProjects],
       verifiedAbsentKeys: [...this.state.verifiedAbsentKeys],
+      truncated: this.state.truncated,
       errors: [...this.state.errors],
       tests: [...this.state.tests.values()],
       pages: [...this.state.pages],

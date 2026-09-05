@@ -365,7 +365,29 @@ describe("XrayClient pagination", () => {
 
     expect(outcome.tests).toHaveLength(100);
     expect(outcome.complete).toBe(false);
+    expect(outcome.truncated).toBe(false);
     expect(outcome.errors.some((e) => e.includes("pagination incomplete"))).toBe(true);
+  });
+
+  // Chunks are folded, not overwritten: the capped one comes first, so a later clean chunk must not
+  // report the whole batch as untruncated.
+  it("keeps the cap flag when only the first key-batch chunk hit it", async () => {
+    const keys = Array.from({ length: 150 }, (_v, index) => `CALC-${index + 1}`);
+    const client = makeClient({
+      fetchImpl: jwtThenGraphql((query) => {
+        if (!query.includes('"CALC-101"')) {
+          const start = Number(/start: (\d+)/.exec(query)?.[1] ?? "0");
+          return testsPage(Array.from({ length: 100 }, (_v, i) => `CALC-${start + i + 1}`), start + 100_000);
+        }
+        return testsPage(keys.slice(100));
+      }),
+    });
+
+    const outcome = await client.fetchTestsByKeys(keys);
+
+    expect(outcome.truncated).toBe(true);
+    expect(outcome.complete).toBe(false);
+    expect(outcome.tests.some((test) => test.key === "CALC-150")).toBe(true);
   });
 
   it("stops at the item cap and marks incomplete when the server's total keeps growing", async () => {
@@ -381,6 +403,7 @@ describe("XrayClient pagination", () => {
     const outcome = await client.fetchProjectCatalogue("CALC");
 
     expect(outcome.complete).toBe(false);
+    expect(outcome.truncated).toBe(true);
     expect(outcome.tests).toHaveLength(10_000);
     expect(outcome.errors.some((e) => e.includes("cap"))).toBe(true);
   });

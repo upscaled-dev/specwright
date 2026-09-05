@@ -2,7 +2,14 @@ import { Logger } from "../utils/logger";
 import { errMsg, maskValues, scrubJwtLike, serverText } from "../utils/text";
 import { XrayJiraCredentials } from "./xray-credential-store";
 import { describeShape } from "./xray-diagnostics";
-import { FetchLike, JiraAccessError, jiraSecrets } from "./jira-project-search";
+import {
+  FetchLike,
+  JIRA_UNREACHABLE,
+  JiraAccessError,
+  jiraAccessError,
+  JiraAccessMessages,
+  jiraSecrets,
+} from "./jira-project-search";
 import { jqlString } from "./xray-search";
 import {
   abortableRemoteSleep,
@@ -112,21 +119,12 @@ function parsePage(body: unknown): IssuePage {
   };
 }
 
-function accessErrorFor(status: number): JiraAccessError {
-  if (status === 400) {
-    return new JiraAccessError("Jira rejected the search: check the project key.");
-  }
-  if (status === 401) {
-    return new JiraAccessError("Jira authentication failed: check your Jira email and API token.");
-  }
-  if (status === 403) {
-    return new JiraAccessError("Jira denied access: the API token lacks permission to search issues.");
-  }
-  if (status === 404) {
-    return new JiraAccessError("Jira search endpoint not found: check the site host.");
-  }
-  return new JiraAccessError(`Jira issue search failed (HTTP ${status}).`);
-}
+const ISSUE_ACCESS_MESSAGES: JiraAccessMessages = {
+  badRequest: "Jira rejected the search: check the project key.",
+  forbidden: "Jira denied access: the API token lacks permission to search issues.",
+  notFound: "Jira search endpoint not found: check the site host.",
+  failed: "Jira issue search failed",
+};
 
 function buildJql(kind: JiraIssueKind, query: string, executionIssueType: string): string {
   const project = query.trim();
@@ -193,7 +191,7 @@ class JiraIssueSearch {
       });
     } catch (error) {
       throw error instanceof RetryableRemoteError
-        ? new JiraAccessError("Could not reach Jira: check your network connection.")
+        ? new JiraAccessError(JIRA_UNREACHABLE)
         : error;
     }
     if (!response.ok) {
@@ -202,7 +200,7 @@ class JiraIssueSearch {
       this.deps.logger.error(
         `Jira issue search failed (HTTP ${response.status}); response body:\n${serverText(maskValues(response.bodyText, jiraSecrets(this.deps.credentials)))}`
       );
-      throw accessErrorFor(response.status);
+      throw jiraAccessError(response.status, ISSUE_ACCESS_MESSAGES);
     }
     const body = parseBody(response.bodyText);
     const page = parsePage(body);

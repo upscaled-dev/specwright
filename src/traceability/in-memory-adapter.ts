@@ -139,6 +139,7 @@ export class InMemoryTraceabilityAdapter implements TraceabilityAdapter, vscode.
       verifiedAbsentKeys: [...this.verifiedAbsentKeys],
       syncedAt: this.syncedAt,
       stale: false,
+      truncated: false,
       errors: [...this.errors],
     };
   }

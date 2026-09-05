@@ -34,7 +34,7 @@ class ControllableClient {
   }
 
   private outcome(complete: boolean): XrayFetchOutcome {
-    return { tests: [...this.tests], pages: [], complete, errors: [...this.errors] };
+    return { tests: [...this.tests], pages: [], complete, truncated: false, errors: [...this.errors] };
   }
 
   public fetchProjectCatalogue(projectKey: string): Promise<XrayFetchOutcome> {

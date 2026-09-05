@@ -41,8 +41,17 @@ function silentLogger(): Logger {
   return Logger.create(undefined, LogLevel.ERROR);
 }
 
-function outcome(tests: XrayTestRecord[], opts: { complete?: boolean; errors?: string[] } = {}): XrayFetchOutcome {
-  return { tests, pages: [], complete: opts.complete ?? true, errors: opts.errors ?? [] };
+function outcome(
+  tests: XrayTestRecord[],
+  opts: { complete?: boolean; truncated?: boolean; errors?: string[] } = {}
+): XrayFetchOutcome {
+  return {
+    tests,
+    pages: [],
+    complete: opts.complete ?? true,
+    truncated: opts.truncated ?? false,
+    errors: opts.errors ?? [],
+  };
 }
 
 interface FakeClient {
@@ -182,6 +191,62 @@ describe("XrayMetadataCapability sync", () => {
 
     await capability.sync({ projectKeys: ["CALC"], testKeys: ["CALC-1"] });
     expect(capability.snapshot().completeProjects).toEqual([]);
+  });
+
+  it("carries the item-cap flag from the fetch into the snapshot and the cache", async () => {
+    const memento = fakeMemento();
+    const capability = makeCapability({
+      memento,
+      client: fakeClient({
+        fetchProjectCatalogue: () =>
+          Promise.resolve(outcome([{ key: "CALC-1" }], {
+            complete: false,
+            truncated: true,
+            errors: ["project = \"CALC\": reached the 10000-item pagination cap"],
+          })),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"] });
+    expect(capability.snapshot().truncated).toBe(true);
+
+    const reloaded = makeCapability({ memento, client: fakeClient({}) });
+    await flush();
+    expect(reloaded.snapshot().truncated).toBe(true);
+  });
+
+  it("keeps the cap flag through a later sync that learns nothing, since the tests are still partial", async () => {
+    let capped = true;
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: () =>
+          Promise.resolve(capped
+            ? outcome([{ key: "CALC-1" }], { complete: false, truncated: true, errors: ["cap"] })
+            : outcome([], { complete: false, errors: ["transport failure"] })),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"] });
+    capped = false;
+    await capability.sync({ projectKeys: ["CALC"] });
+
+    const snap = capability.snapshot();
+    expect(snap.errors).toEqual(["transport failure"]);
+    expect([...snap.tests.keys()]).toEqual(["CALC-1"]);
+    expect(snap.truncated).toBe(true);
+  });
+
+  it("leaves the snapshot untruncated for an incomplete fetch that never hit the cap", async () => {
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: () =>
+          Promise.resolve(outcome([{ key: "CALC-1" }], { complete: false, errors: ["page 2 failed"] })),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC"] });
+
+    expect(capability.snapshot().truncated).toBe(false);
   });
 
   it("completes only the project whose catalogue landed when a sibling project errors", async () => {
@@ -568,6 +633,17 @@ describe("XrayMetadataCapability account isolation", () => {
   function loadCacheFor(memento: vscode.Memento, account: string): Promise<CachedMetadata | undefined> {
     return new XrayMetadataCache(memento, { endpoint: ENDPOINT, account: () => Promise.resolve(account), workspaceId: "ws" }).load();
   }
+
+  it("reads a cache entry written before the flag existed as not truncated", async () => {
+    const h = harness({});
+    await seedCache(h.memento, "acct-A", [{ key: "CALC-1" }]);
+
+    h.fireCreds();
+    await flush();
+
+    expect([...h.capability.snapshot().tests.keys()]).toEqual(["CALC-1"]);
+    expect(h.capability.snapshot().truncated).toBe(false);
+  });
 
   it("resets in-memory state, drops the JWT, and reloads the new account's cache on a same-site switch", async () => {
     const h = harness({ fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1", summary: "A only" }])) });

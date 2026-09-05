@@ -182,6 +182,18 @@ describe("searchJiraIssues", () => {
     expect(truncated).toBe(true);
   });
 
+  it("words each terminal status for the issue search, not for the project list", async () => {
+    const { logger } = capturingLogger();
+    const at = (status: number): Promise<JiraIssueSearchResult> =>
+      run(() => Promise.resolve(response(status, "refused")), logger);
+
+    await expect(at(400)).rejects.toThrow("Jira rejected the search: check the project key.");
+    await expect(at(401)).rejects.toThrow("Jira authentication failed: check your Jira email and API token.");
+    await expect(at(403)).rejects.toThrow("Jira denied access: the API token lacks permission to search issues.");
+    await expect(at(404)).rejects.toThrow("Jira search endpoint not found: check the site host.");
+    await expect(at(409)).rejects.toThrow("Jira issue search failed (HTTP 409).");
+  });
+
   it("throws a value-free JiraAccessError on a 400 and masks the credentials out of the logged body", async () => {
     const { logger, lines } = capturingLogger();
     const basic = Buffer.from(`${EMAIL}:${TOKEN}`).toString("base64");

@@ -198,13 +198,17 @@ describe("searchJiraProjects", () => {
     expect(emitted).not.toContain(EMAIL);
   });
 
-  it("maps 403 and 404 to distinct value-free messages", async () => {
+  it("maps each terminal status to a value-free message, with no special 400 wording", async () => {
     const { logger } = capturingLogger();
     await expect(run(() => Promise.resolve(response(403, "denied")), logger)).rejects.toThrow(
       "Jira denied access"
     );
     await expect(run(() => Promise.resolve(response(404, "missing")), logger)).rejects.toThrow(
       "endpoint not found"
+    );
+    // The project list has no terminal-400 case of its own; it reads as the generic failure.
+    await expect(run(() => Promise.resolve(response(400, "bad")), logger)).rejects.toThrow(
+      "Jira project list failed (HTTP 400)."
     );
   });
 

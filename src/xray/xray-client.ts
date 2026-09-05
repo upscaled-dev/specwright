@@ -70,11 +70,13 @@ export interface XrayTestRecord {
 
 // The result of fetching one or more scopes. `complete` is false when any page failed or pagination
 // was cut short; the capability then leaves that project out of `completeProjects`, so orphans are
-// never derived from it.
+// never derived from it. `truncated` narrows that to the one incompleteness a surface can word as
+// "there is more": a scope that hit the item cap.
 export interface XrayFetchOutcome {
   readonly tests: XrayTestRecord[];
   readonly pages: XrayCachePage[];
   complete: boolean;
+  truncated: boolean;
   readonly errors: string[];
 }
 
@@ -306,7 +308,9 @@ function parseTestPage(body: unknown): TestPage {
   return { total, results };
 }
 
-type PageTermination = { done: true; error?: string } | { done: false; nextStart: number };
+type PageTermination =
+  | { done: true; truncated: boolean; error?: string }
+  | { done: false; nextStart: number };
 
 // Decides whether pagination continues after a page. `start + count` is the index past this page's
 // last item; reaching `total` means every item was seen. An empty page before `total`, or crossing
@@ -314,14 +318,22 @@ type PageTermination = { done: true; error?: string } | { done: false; nextStart
 function pageTermination(jql: string, start: number, page: TestPage): PageTermination {
   const seen = start + page.results.length;
   if (page.total === undefined || seen >= page.total) {
-    return { done: true };
+    return { done: true, truncated: false };
   }
   if (page.results.length === 0) {
-    return { done: true, error: `${jql}: empty page at start ${start} with total ${page.total}; pagination incomplete` };
+    return {
+      done: true,
+      truncated: false,
+      error: `${jql}: empty page at start ${start} with total ${page.total}; pagination incomplete`,
+    };
   }
   const nextStart = start + PAGE_LIMIT;
   if (nextStart >= MAX_SCOPE_ITEMS) {
-    return { done: true, error: `${jql}: reached the ${MAX_SCOPE_ITEMS}-item pagination cap; scope truncated, marked incomplete` };
+    return {
+      done: true,
+      truncated: true,
+      error: `${jql}: reached the ${MAX_SCOPE_ITEMS}-item pagination cap; scope truncated, marked incomplete`,
+    };
   }
   return { done: false, nextStart };
 }
@@ -452,7 +464,7 @@ export class XrayClient {
   }
 
   public async fetchTestsByKeys(keys: readonly string[], signal?: AbortSignal): Promise<XrayFetchOutcome> {
-    const outcome: XrayFetchOutcome = { tests: [], pages: [], complete: true, errors: [] };
+    const outcome: XrayFetchOutcome = { tests: [], pages: [], complete: true, truncated: false, errors: [] };
     for (const batch of chunk(dedupe([...keys]), PAGE_LIMIT)) {
       const page = await this.fetchScope(buildKeysJql(batch), signal);
       outcome.tests.push(...page.tests);
@@ -460,6 +472,9 @@ export class XrayClient {
       outcome.errors.push(...page.errors);
       if (!page.complete) {
         outcome.complete = false;
+      }
+      if (page.truncated) {
+        outcome.truncated = true;
       }
     }
     return outcome;
@@ -492,7 +507,7 @@ export class XrayClient {
     signal?: AbortSignal,
     onPage?: XrayPageProgress
   ): Promise<XrayFetchOutcome> {
-    const outcome: XrayFetchOutcome = { tests: [], pages: [], complete: true, errors: [] };
+    const outcome: XrayFetchOutcome = { tests: [], pages: [], complete: true, truncated: false, errors: [] };
     let start = 0;
     for (;;) {
       if (signal?.aborted) {
@@ -519,6 +534,7 @@ export class XrayClient {
       }
       const next = pageTermination(jql, start, page);
       if (next.done) {
+        outcome.truncated ||= next.truncated;
         if (next.error !== undefined) {
           this.deps.logger.warn(next.error);
           outcome.errors.push(next.error);

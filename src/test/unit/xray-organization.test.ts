@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionConfig } from "../../core/extension-config";
-import { ORGANIZATION_ITEM_LIMIT, type MetadataCapability, type RemoteMetadataSnapshot, type TestSetProject } from "../../traceability/contracts";
+import { ORGANIZATION_ITEM_LIMIT, type MetadataCapability, type RemoteMetadataSnapshot, type RepositoryProject, type TestSetProject } from "../../traceability/contracts";
 import { Logger } from "../../utils/logger";
 import {
   ORGANIZATION_SYNC_PROJECT_LIMIT,
@@ -111,6 +111,21 @@ describe("XrayOrganizationReader", () => {
 });
 
 describe("XrayOrganizationCapability cache isolation", () => {
+  // The slot existing installs already store under, spelled out: the organization payload keeps its
+  // own schema version (1), which the shared key helper must not collapse into the metadata one.
+  it("stores under the §7 organization key", async () => {
+    const state = memento();
+    const cache = new XrayOrganizationCache(state, {
+      endpoint: "xray.example",
+      account: () => Promise.resolve("account-a"),
+      workspaceId: "ws",
+    });
+
+    await cache.save("account-a", { syncedAt: 1, projects: [], omittedTestSetProjectCount: 0 });
+
+    expect(state.keys()).toEqual(["traceability:xray-organization:xray.example:account-a:ws:1"]);
+  });
+
   it("saves only under the explicitly captured account stamp", async () => {
     const state = memento();
     const liveAccount = "account-b";
@@ -337,6 +352,34 @@ describe("XrayOrganizationCapability cache isolation", () => {
     expect(repository?.tests).toHaveLength(ORGANIZATION_ITEM_LIMIT - 1);
     expect(repository).toMatchObject({ complete: false, truncated: true });
     capability.dispose();
+  });
+
+  it("reads repository truncation from the metadata flag, never from the error prose", async () => {
+    const repositoryFor = (snapshot: RemoteMetadataSnapshot): RepositoryProject | undefined => {
+      const capability = new XrayOrganizationCapability({
+        reader: { list: vi.fn(), refresh: vi.fn() } as unknown as XrayOrganizationReader,
+        metadata: metadata(snapshot),
+        cache: new XrayOrganizationCache(memento(), { endpoint: "xray.example", account: () => Promise.resolve("account-a"), workspaceId: "ws" }),
+        config: { xrayCacheTtlMinutes: 15 } as ExtensionConfig,
+        logger: Logger.create(), account: () => Promise.resolve("account-a"), onCredentialsChange: new vscode.EventEmitter<void>().event,
+        projectOf: () => "SHOP",
+      });
+      const repository = capability.snapshot().repositories[0];
+      capability.dispose();
+      return repository;
+    };
+    const partial = {
+      ...EMPTY_METADATA,
+      tests: new Map([["SHOP-1", { key: "SHOP-1" }]]),
+      catalogueProjects: ["SHOP"],
+      completeProjects: [],
+    };
+
+    expect(repositoryFor({ ...partial, truncated: true })).toMatchObject({ complete: false, truncated: true });
+    expect(repositoryFor({
+      ...partial,
+      errors: ['project = "SHOP": reached the 10000-item pagination cap; scope truncated, marked incomplete'],
+    })).toMatchObject({ complete: false, truncated: false });
   });
 
   it("notifies consumers only after a guarded exact refresh commit", async () => {

@@ -14,6 +14,9 @@ export interface CachedMetadata {
   catalogueProjects: string[];
   completeProjects: string[];
   verifiedAbsentKeys: string[];
+  // Optional because it landed without a schema bump: entries written by an earlier build of this
+  // version carry no flag, and an absent one reads as "not truncated".
+  truncated?: boolean | undefined;
   errors: string[];
   // Stored as an array (each entry carries its own key) so a plain Memento round-trips it as JSON.
   tests: TestCaseMetadata[];
@@ -28,14 +31,19 @@ export interface XrayCacheIdentity {
   readonly workspaceId: string;
 }
 
-// §7 identity: traceability:{provider}:{endpoint}:{account}:{workspace}:{schemaVersion}. Keying on
-// account + endpoint is what stops one account's cache from surfacing under another's credentials.
-export function metadataCacheStorageKey(parts: {
-  endpoint: string;
-  account: string;
-  workspaceId: string;
-}): string {
-  return `traceability:xray:${parts.endpoint}:${parts.account}:${parts.workspaceId}:${CACHE_SCHEMA_VERSION}`;
+// §7 identity: traceability:{namespace}:{endpoint}:{account}:{workspace}:{schemaVersion}. Keying on
+// account + endpoint is what stops one account's cache from surfacing under another's credentials, so
+// no account means no key at all: the caller stores and reads nothing. Each namespace carries its own
+// schema version, since the payloads version independently.
+export function cacheStorageKey(
+  identity: XrayCacheIdentity,
+  namespace: string,
+  schemaVersion: number,
+  account: string | undefined
+): string | undefined {
+  return account
+    ? `traceability:${namespace}:${identity.endpoint}:${account}:${identity.workspaceId}:${schemaVersion}`
+    : undefined;
 }
 
 // A stable per-workspace segment from the folder paths (not secret, a plain hash keeps the key
@@ -57,14 +65,7 @@ export class XrayMetadataCache {
   ) {}
 
   private keyFor(account: string | undefined): string | undefined {
-    if (!account) {
-      return undefined;
-    }
-    return metadataCacheStorageKey({
-      endpoint: this.identity.endpoint,
-      account,
-      workspaceId: this.identity.workspaceId,
-    });
+    return cacheStorageKey(this.identity, "xray", CACHE_SCHEMA_VERSION, account);
   }
 
   public async load(): Promise<CachedMetadata | undefined> {

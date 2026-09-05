@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import type * as vscode from "vscode";
 import {
   CachedMetadata,
+  cacheStorageKey,
   CACHE_SCHEMA_VERSION,
-  metadataCacheStorageKey,
   XrayCacheIdentity,
   XrayMetadataCache,
 } from "../../xray/xray-metadata-cache";
@@ -47,11 +47,24 @@ function sample(): CachedMetadata {
   };
 }
 
-describe("metadataCacheStorageKey", () => {
-  it("emits the §7 identity format with schema version last", () => {
-    expect(
-      metadataCacheStorageKey({ endpoint: "eu.xray.cloud.getxray.app", account: "client-42", workspaceId: "wsh" })
-    ).toBe(`traceability:xray:eu.xray.cloud.getxray.app:client-42:wsh:${CACHE_SCHEMA_VERSION}`);
+describe("cacheStorageKey", () => {
+  // Byte-exact, both namespaces: these are the slots existing installs already store under, so the
+  // literals stay spelled out rather than rebuilt from the constants they must agree with.
+  it("emits the §7 identity format per namespace with the schema version last", () => {
+    const site: XrayCacheIdentity = {
+      endpoint: "eu.xray.cloud.getxray.app",
+      account: () => Promise.resolve("client-42"),
+      workspaceId: "wsh",
+    };
+
+    expect(cacheStorageKey(site, "xray", 5, "client-42"))
+      .toBe("traceability:xray:eu.xray.cloud.getxray.app:client-42:wsh:5");
+    expect(cacheStorageKey(site, "xray-organization", 1, "client-42"))
+      .toBe("traceability:xray-organization:eu.xray.cloud.getxray.app:client-42:wsh:1");
+  });
+
+  it("has no key at all without an account", () => {
+    expect(cacheStorageKey(identity(undefined), "xray", CACHE_SCHEMA_VERSION, undefined)).toBeUndefined();
   });
 
   it("is at schema version 5: the bump that adds repository folder placement", () => {
@@ -66,12 +79,7 @@ describe("XrayMetadataCache", () => {
 
     await cache.save(sample());
 
-    const key = metadataCacheStorageKey({
-      endpoint: "xray.cloud.getxray.app",
-      account: "client-a",
-      workspaceId: "ws-hash",
-    });
-    expect(store.has(key)).toBe(true);
+    expect(store.has(`traceability:xray:xray.cloud.getxray.app:client-a:ws-hash:${CACHE_SCHEMA_VERSION}`)).toBe(true);
     const loaded = await cache.load();
     expect(loaded?.tests[0]?.key).toBe("CALC-1");
     expect(loaded?.catalogueProjects).toEqual(["CALC"]);
@@ -97,11 +105,7 @@ describe("XrayMetadataCache", () => {
 
   it("ignores an entry whose schema version does not match", async () => {
     const { memento, store } = fakeMemento();
-    const key = metadataCacheStorageKey({
-      endpoint: "xray.cloud.getxray.app",
-      account: "client-a",
-      workspaceId: "ws-hash",
-    });
+    const key = `traceability:xray:xray.cloud.getxray.app:client-a:ws-hash:${CACHE_SCHEMA_VERSION}`;
     store.set(key, { ...sample(), schemaVersion: CACHE_SCHEMA_VERSION + 99 });
 
     expect(await new XrayMetadataCache(memento, identity("client-a")).load()).toBeUndefined();
@@ -113,11 +117,7 @@ describe("XrayMetadataCache", () => {
     // different slot: key-segment isolation hides it even before the inner version guard runs.
     const oldKey = `traceability:xray:xray.cloud.getxray.app:client-a:ws-hash:${CACHE_SCHEMA_VERSION - 1}`;
     store.set(oldKey, { ...sample(), schemaVersion: CACHE_SCHEMA_VERSION - 1 });
-    const currentKey = metadataCacheStorageKey({
-      endpoint: "xray.cloud.getxray.app",
-      account: "client-a",
-      workspaceId: "ws-hash",
-    });
+    const currentKey = `traceability:xray:xray.cloud.getxray.app:client-a:ws-hash:${CACHE_SCHEMA_VERSION}`;
 
     expect(await new XrayMetadataCache(memento, identity("client-a")).load()).toBeUndefined();
     expect(store.has(oldKey)).toBe(true);

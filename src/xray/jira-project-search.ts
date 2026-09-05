@@ -55,6 +55,38 @@ export class JiraAccessError extends Error {
   }
 }
 
+// Every Jira path words a dead transport the same way: the site was never reached, so no status and
+// no body exist to word it from.
+export const JIRA_UNREACHABLE = "Could not reach Jira: check your network connection.";
+
+// What one endpoint means by each refusal. 401 is the same wherever Jira refuses credentials, so the
+// mapper owns it; `badRequest` is only meaningful where a 400 is terminal (a malformed JQL, say).
+export interface JiraAccessMessages {
+  readonly badRequest?: string | undefined;
+  readonly forbidden: string;
+  readonly notFound: string;
+  // Suffixed with the status: `<failed> (HTTP 409).`
+  readonly failed: string;
+}
+
+// Value-free message for each terminal Jira status; the response body may echo account details, so
+// only the status drives the wording.
+export function jiraAccessError(status: number, messages: JiraAccessMessages): JiraAccessError {
+  if (status === 400 && messages.badRequest !== undefined) {
+    return new JiraAccessError(messages.badRequest);
+  }
+  if (status === 401) {
+    return new JiraAccessError("Jira authentication failed: check your Jira email and API token.");
+  }
+  if (status === 403) {
+    return new JiraAccessError(messages.forbidden);
+  }
+  if (status === 404) {
+    return new JiraAccessError(messages.notFound);
+  }
+  return new JiraAccessError(`${messages.failed} (HTTP ${status}).`);
+}
+
 // A transient transport fault (429, 5xx, timeout, network) that backoff should retry.
 interface TimedResponse {
   status: number;
@@ -127,20 +159,11 @@ function parsePage(body: unknown): JiraPage {
   };
 }
 
-// Value-free message for each terminal Jira status; the response body may echo account details, so
-// only the status drives the wording.
-function accessErrorFor(status: number): JiraAccessError {
-  if (status === 401) {
-    return new JiraAccessError("Jira authentication failed: check your Jira email and API token.");
-  }
-  if (status === 403) {
-    return new JiraAccessError("Jira denied access: the API token lacks permission to list projects.");
-  }
-  if (status === 404) {
-    return new JiraAccessError("Jira project search endpoint not found: check the site host.");
-  }
-  return new JiraAccessError(`Jira project list failed (HTTP ${status}).`);
-}
+const PROJECT_ACCESS_MESSAGES: JiraAccessMessages = {
+  forbidden: "Jira denied access: the API token lacks permission to list projects.",
+  notFound: "Jira project search endpoint not found: check the site host.",
+  failed: "Jira project list failed",
+};
 
 class JiraProjectSearch {
   private readonly fetchImpl: FetchLike;
@@ -193,7 +216,7 @@ class JiraProjectSearch {
       });
     } catch (error) {
       throw error instanceof RetryableRemoteError
-        ? new JiraAccessError("Could not reach Jira: check your network connection.")
+        ? new JiraAccessError(JIRA_UNREACHABLE)
         : error;
     }
     if (!response.ok) {
@@ -202,7 +225,7 @@ class JiraProjectSearch {
       this.deps.logger.error(
         `Jira project search failed (HTTP ${response.status}); response body:\n${serverText(maskValues(response.bodyText, jiraSecrets(this.deps.credentials)))}`
       );
-      throw accessErrorFor(response.status);
+      throw jiraAccessError(response.status, PROJECT_ACCESS_MESSAGES);
     }
     const body = parseBody(response.bodyText);
     const page = parsePage(body);
@@ -328,7 +351,7 @@ export async function fetchJiraIdentity(
     deps.logger.error(`Jira identity check request error: ${jiraErrorText(error, deps.credentials)}`);
     throw error instanceof JiraAccessError
       ? error
-      : new JiraAccessError("Could not reach Jira: check your network connection.");
+      : new JiraAccessError(JIRA_UNREACHABLE);
   }
   finally {
     clearTimeout(deadlineTimer);

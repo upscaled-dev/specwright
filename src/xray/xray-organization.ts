@@ -14,7 +14,7 @@ import {
 import type { Logger } from "../utils/logger";
 import { graphqlErrorSummaries } from "./xray-diagnostics";
 import { XrayAbortError, type XrayClient } from "./xray-client";
-import type { XrayCacheIdentity } from "./xray-metadata-cache";
+import { cacheStorageKey, type XrayCacheIdentity } from "./xray-metadata-cache";
 import { jqlString } from "./xray-search";
 
 const LIST_LIMIT = 50;
@@ -84,9 +84,7 @@ export class XrayOrganizationCache {
   constructor(private readonly memento: vscode.Memento, private readonly identity: XrayCacheIdentity) {}
 
   private keyFor(account: string | undefined): string | undefined {
-    return account
-      ? `traceability:xray-organization:${this.identity.endpoint}:${account}:${this.identity.workspaceId}:${CACHE_SCHEMA_VERSION}`
-      : undefined;
+    return cacheStorageKey(this.identity, "xray-organization", CACHE_SCHEMA_VERSION, account);
   }
 
   public loadForAccount(account: string | undefined): CachedOrganization | undefined {
@@ -355,7 +353,7 @@ export class XrayOrganizationCapability implements OrganizationCapability, vscod
         projectKey,
         tests,
         complete: complete && bounded,
-        truncated: !bounded || !complete && metadata.errors.some((error) => error.includes("pagination cap")),
+        truncated: !bounded || !complete && (metadata.truncated ?? false),
         errors: bounded ? (complete ? [] : metadata.errors) : [...metadata.errors, `Organization snapshot reached the ${ORGANIZATION_ITEM_LIMIT}-item limit.`],
       });
     }

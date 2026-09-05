@@ -17,6 +17,7 @@ import { currentAdapterVersions } from "../../traceability/adapter-contract";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { RunResultStore } from "../../traceability/run-result-store";
 import { ConnectionCapability, RunArtifact, TraceabilityAdapter } from "../../traceability/contracts";
+import { validatedAdapter } from "../../traceability/validated-adapter";
 import { buildTraceabilitySnapshot } from "../../traceability/traceability-model";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
@@ -176,6 +177,32 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
 });
 
 const ctx: AdapterContext = { config: {} as ExtensionConfig, logger: Logger.create() };
+
+// `truncated` arrived after the metadata capability shipped, so an adapter written against the older
+// shape omits it. The boundary must let that snapshot through rather than discard the metadata.
+describe("metadata snapshot boundary", () => {
+  it("accepts a snapshot with no truncation flag and reads it as not truncated", () => {
+    const adapter = validatedAdapter({
+      id: "legacy", label: "Legacy",
+      keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: /^T-\d+$/u, canonicalizeKey: (key) => key },
+      browseUrl: () => undefined,
+      metadata: {
+        onDidChange: new vscode.EventEmitter<void>().event,
+        snapshot: () => ({
+          tests: new Map([["T-1", { key: "T-1" }]]),
+          fetchedScopes: [], catalogueProjects: [], completeProjects: [], verifiedAbsentKeys: [],
+          stale: false, errors: [],
+        }),
+        sync: () => Promise.resolve(),
+      },
+    }, () => Promise.resolve(), () => undefined);
+
+    const snapshot = adapter.metadata!.snapshot();
+
+    expect([...snapshot.tests.keys()]).toEqual(["T-1"]);
+    expect(snapshot.truncated ?? false).toBe(false);
+  });
+});
 
 describe("TraceabilityAdapterRegistry", () => {
   it("registers a factory and activates its adapter by id", async () => {
