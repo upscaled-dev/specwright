@@ -48,6 +48,7 @@ export interface RenderMessage {
   scoped: boolean;
   createVerb: Verb;
   syncVerb: Verb;
+  syncScopeVerb: Verb;
   untracedHelper: string;
   testSetVerb: Verb;
   addToTestSetVerb: Verb;
@@ -214,6 +215,7 @@ export function deps(over: Partial<BoardPanelDeps> = {}): BoardPanelDeps {
     onDidChangeActivity: new vscode.EventEmitter<void>().event,
     mutationActive: () => false,
     syncActive: () => false,
+    syncPickerActive: () => false,
     applyDrop: () => Promise.resolve(),
     applyUnlink: () => Promise.resolve(),
     pushText: () => undefined,

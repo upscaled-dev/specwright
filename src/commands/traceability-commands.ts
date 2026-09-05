@@ -71,7 +71,6 @@ export class TraceabilityCommands {
   private authoringCommands: TraceabilityAuthoringCommands | undefined;
   private connectionCommands: XrayConnectionCommands | undefined;
   private syncInFlight: Promise<void> | undefined;
-  private syncPickerInFlight: Promise<void> | undefined;
   private readonly boardChange = new vscode.EventEmitter<void>();
   private readonly operations = new BoardOperationState();
   private readonly projectSyncs: ProjectSyncScheduler;
@@ -213,6 +212,14 @@ export class TraceabilityCommands {
     await this.operations.mutation(() => this.boardPrivileged(run));
   }
 
+  // For work whose caller has nowhere to return a failure to: the board fires a button and repaints from
+  // the snapshot, and a background reconciliation answers to nobody, so the log is what carries it.
+  private fireAndForget(work: Promise<unknown>, message: string): void {
+    work.catch((error) => {
+      this.logger.warn(message, { error: errMsg(error) });
+    });
+  }
+
   public openBoard(): void {
     const subsystem = this.deps.subsystem();
     if (!subsystem?.traceabilityPanelActive) {
@@ -308,100 +315,62 @@ export class TraceabilityCommands {
       onDidChangeActivity: this.operations.onDidChange,
       mutationActive: () => this.operations.mutationActive,
       syncActive: () => this.operations.syncActive,
+      syncPickerActive: () => this.operations.pickerActive,
       applyDrop: (scenario, key) =>
         this.boardMutation(() => this.getLinkCommands().applyBoardDrop(scenario, key)),
       applyUnlink: (scenario, key) =>
         this.boardMutation(() => this.getLinkCommands().applyBoardUnlink(scenario, key)),
-      pushText: (scenario, key) => {
-        this.boardMutation(() => this.getAuthoringCommands().pushScenarioText(scenario, key))
-          .catch((error) => {
-            this.logger.warn("Push scenario text from the board failed", {
-              error: errMsg(error),
-            });
-          });
-      },
+      pushText: (scenario, key) => this.fireAndForget(
+        this.boardMutation(() => this.getAuthoringCommands().pushScenarioText(scenario, key)),
+        "Push scenario text from the board failed"
+      ),
       runSync: () => this.boardPrivileged(() => this.syncTraceability()),
       // The same resolution that run would take, off cached sources only: the working project rides as
       // `explicitKey` exactly as `syncTraceability` defaults it.
       syncProjects: () =>
         this.syncProjectKeys(this.deps.subsystem()?.getActiveAdapter(), this.selectedProject()),
-      selectSyncProjects: () => {
-        this.boardPrivileged((signal) => this.selectSyncProjectsTrusted(signal))
-          .catch((error) => {
-            this.logger.warn("Selecting sync projects from the board failed", {
-              error: errMsg(error),
-            });
-          });
-      },
+      selectSyncProjects: () => this.fireAndForget(
+        this.boardPrivileged((signal) => this.selectSyncProjectsTrusted(signal)),
+        "Selecting sync projects from the board failed"
+      ),
       autoSync: (projectKey) => this.autoSyncProject(projectKey),
       openIssue: (key) => {
         const adapter =
           this.deps.subsystem()?.getActiveAdapter() ?? this.deps.fallbackAdapter();
-        this.getLinkCommands()
-          .browseIssue(adapter, key)
-          .catch((error) => {
-            this.logger.warn("Opening the issue from the board failed", {
-              error: errMsg(error),
-            });
-          });
+        this.fireAndForget(
+          this.getLinkCommands().browseIssue(adapter, key),
+          "Opening the issue from the board failed"
+        );
       },
-      bulkCreate: () => {
-        this.boardMutation(() => this.getAuthoringCommands().bulkCreateTests())
-          .catch((error) => {
-            this.logger.warn("Bulk create from the board failed", {
-              error: errMsg(error),
-            });
-          });
-      },
-      createTestSet: () => {
-        this.boardMutation(() => this.getAuthoringCommands().createTestSet())
-          .catch((error) => {
-            this.logger.warn("Creating a test set from the board failed", {
-              error: errMsg(error),
-            });
-          });
-      },
-      addToTestSet: () => {
-        this.boardMutation(() => this.getAuthoringCommands().addToTestSet())
-          .catch((error) => {
-            this.logger.warn("Adding tests to a test set from the board failed", {
-              error: errMsg(error),
-            });
-          });
-      },
-      createTestPlan: () => {
-        this.boardMutation(() => this.getAuthoringCommands().createTestPlan())
-          .catch((error) => {
-            this.logger.warn("Creating a test plan from the board failed", {
-              error: errMsg(error),
-            });
-          });
-      },
-      addToTestPlan: () => {
-        this.boardMutation(() => this.getAuthoringCommands().addToTestPlan())
-          .catch((error) => {
-            this.logger.warn("Adding tests to a test plan from the board failed", {
-              error: errMsg(error),
-            });
-          });
-      },
-      createTestExecution: () => {
-        this.boardMutation(() => this.getAuthoringCommands().createTestExecution())
-          .catch((error) => {
-            this.logger.warn("Creating a test execution from the board failed", {
-              error: errMsg(error),
-            });
-          });
-      },
+      bulkCreate: () => this.fireAndForget(
+        this.boardMutation(() => this.getAuthoringCommands().bulkCreateTests()),
+        "Bulk create from the board failed"
+      ),
+      createTestSet: () => this.fireAndForget(
+        this.boardMutation(() => this.getAuthoringCommands().createTestSet()),
+        "Creating a test set from the board failed"
+      ),
+      addToTestSet: () => this.fireAndForget(
+        this.boardMutation(() => this.getAuthoringCommands().addToTestSet()),
+        "Adding tests to a test set from the board failed"
+      ),
+      createTestPlan: () => this.fireAndForget(
+        this.boardMutation(() => this.getAuthoringCommands().createTestPlan()),
+        "Creating a test plan from the board failed"
+      ),
+      addToTestPlan: () => this.fireAndForget(
+        this.boardMutation(() => this.getAuthoringCommands().addToTestPlan()),
+        "Adding tests to a test plan from the board failed"
+      ),
+      createTestExecution: () => this.fireAndForget(
+        this.boardMutation(() => this.getAuthoringCommands().createTestExecution()),
+        "Creating a test execution from the board failed"
+      ),
       publishDelegate: this.getPublishCommands().publishDelegate(),
-      startPublish: () => {
-        this.boardMutation((signal) => this.getPublishCommands().runPublish(undefined, signal))
-          .catch((error) => {
-            this.logger.warn("Publish from the board tab failed", {
-              error: errMsg(error),
-            });
-          });
-      },
+      startPublish: () => this.fireAndForget(
+        this.boardMutation((signal) => this.getPublishCommands().runPublish(undefined, signal)),
+        "Publish from the board tab failed"
+      ),
     };
   }
 
@@ -657,13 +626,11 @@ export class TraceabilityCommands {
   }
 
   // The palette and the board reach the same picker, and a second one would load the project list again
-  // and let whichever picker the user closed last name the scope.
+  // and let whichever picker the user closed last name the scope. Tracked as board activity so the strip's
+  // Select projects button goes dead for as long as a picker is open, whichever door opened it.
   private selectSyncProjectsTrusted(signal: AbortSignal): Promise<void> {
-    if (this.syncPickerInFlight) {return this.syncPickerInFlight;}
-    this.syncPickerInFlight = this.pickSyncProjects(signal).finally(() => {
-      this.syncPickerInFlight = undefined;
-    });
-    return this.syncPickerInFlight;
+    if (this.operations.pickerActive) {return Promise.resolve();}
+    return this.operations.picker(() => this.pickSyncProjects(signal));
   }
 
   private async pickSyncProjects(signal: AbortSignal): Promise<void> {
@@ -788,11 +755,10 @@ export class TraceabilityCommands {
       siteUrl: () => this.siteUrl(),
       workspaceTrust: this.deps.workspaceTrust,
       scheduleProjectSync: (project, diagnostics) => this.scheduleProjectSync(project, diagnostics),
-      trackReconciliation: (run) => {
-        this.operations.mutation(run).catch((error) => {
-          this.logger.warn("Created-test metadata reconciliation failed", { error: errMsg(error) });
-        });
-      },
+      trackReconciliation: (run) => this.fireAndForget(
+        this.operations.mutation(run),
+        "Created-test metadata reconciliation failed"
+      ),
     });
     return this.linkCommands;
   }

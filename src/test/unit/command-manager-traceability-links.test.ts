@@ -938,6 +938,33 @@ describe("traceability sync command handler", () => {
     );
   });
 
+  // The picker a palette entry opened is the same one the board would open, so the board's button reads as
+  // dead for as long as it is up, then comes back on its own.
+  it("paints the board's Select projects button dead while a picker is open", async () => {
+    let confirm!: (picked: unknown) => void;
+    vi.spyOn(vscode.window, "showQuickPick").mockReturnValue(
+      new Promise((resolve) => {confirm = resolve;}) as never
+    );
+    const mgr = managerFor(syncSubsystem({ tagDerived: ["CALC"] }));
+    BoardPanel.open(traceabilityBoardDeps(mgr));
+    const panel = win.__webviewPanels[0]!;
+    await receiveBoard(panel, "shell", { type: "ready" });
+    const scopeEnabled = (): boolean => {
+      const render = boardPosts(panel).filter((message) => message.type === "render").at(-1)!;
+      return (render["syncScopeVerb"] as { enabled: boolean }).enabled;
+    };
+    expect(scopeEnabled()).toBe(true);
+
+    const picking = traceabilityCommands(mgr).selectSyncProjects();
+    await flush();
+    expect(scopeEnabled()).toBe(false);
+
+    confirm(undefined);
+    await picking;
+
+    expect(scopeEnabled()).toBe(true);
+  });
+
   it("reports a finished sync as an information toast, zero tests included", async () => {
     const info = vi.spyOn(vscode.window, "showInformationMessage");
 

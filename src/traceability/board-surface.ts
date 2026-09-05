@@ -85,6 +85,7 @@ interface RenderMessage {
   scoped: boolean;
   createVerb: CreateVerb;
   syncVerb: CreateVerb;
+  syncScopeVerb: CreateVerb;
   untracedHelper: string;
   testSetVerb: CreateVerb;
   addToTestSetVerb: CreateVerb;
@@ -114,6 +115,9 @@ export interface BoardSurfaceDeps {
   readonly onDidChangeActivity: vscode.Event<void>;
   mutationActive(): boolean;
   syncActive(): boolean;
+  // Whether the sync-scope picker is already open, from here or from the palette. A second one would
+  // reload the project list and let whichever the user closed last name the scope.
+  syncPickerActive(): boolean;
   applyDrop(scenario: string, key: string): Promise<void>;
   // The unlink seam: the webview posts a test card row's {scenario, key} and the host validates and
   // removes just that `@TEST_` tag, then the snapshot rebuild re-renders (no hand-patching here).
@@ -268,10 +272,8 @@ export class BoardSurface {
     pushText: (message) => this.deps.pushText(message.scenario, message.key),
     open: (message) => this.deps.openIssue(message.key),
     sync: () => this.syncNow(),
-    // The picker writes the sync scope the next fetch reads, so it takes the same admission Sync takes
-    // rather than opening over a run that is already reading with the old scope.
     selectSyncProjects: () => {
-      if (this.deps.mutationActive() || this.deps.syncActive()) {return;}
+      if (!this.canSelectSyncProjects()) {return;}
       this.deps.selectSyncProjects();
     },
     scope: (message) => this.scopeTo(message.project),
@@ -495,6 +497,23 @@ export class BoardSurface {
     return { label: "Sync", enabled: true, hint: syncHint(this.deps.syncProjects()) };
   }
 
+  // The picker writes the scope the next fetch reads, so it takes the same admission Sync takes rather
+  // than opening over a run already reading with the old scope, plus its own: an open picker leaves
+  // nothing for a second click to do. The route and the button's state read this one answer.
+  private canSelectSyncProjects(): boolean {
+    return !this.deps.syncActive() && !this.deps.mutationActive() && !this.deps.syncPickerActive();
+  }
+
+  private syncScopeVerb(): CreateVerb {
+    return {
+      label: "Select projects...",
+      enabled: this.canSelectSyncProjects(),
+      hint: this.deps.syncPickerActive()
+        ? "The project picker is already open."
+        : "Choose the projects every sync fetches, alongside the View project.",
+    };
+  }
+
   // What a section's meta says beyond its page arithmetic: `total` is the count the header shows, before
   // the column search but after the header one, and the three flags are the ones the webview must not work
   // out from its own inputs. `cards` is the section's whole filtered set, so the select-all state answers
@@ -573,6 +592,7 @@ export class BoardSurface {
       scoped: project !== undefined,
       createVerb,
       syncVerb: this.syncVerb(),
+      syncScopeVerb: this.syncScopeVerb(),
       untracedHelper: createVerb.enabled ? createVerb.label : createVerb.hint,
       testSetVerb: this.containerVerb("Test Set", project),
       addToTestSetVerb: this.appendContainerVerb("Test Set", project),

@@ -49,6 +49,7 @@ export function installBoard(): void {
   const syncNow = element<HTMLButtonElement>('sync-now');
   const syncNowTooltip = element<HTMLElement>('sync-now-tooltip');
   const syncScope = element<HTMLButtonElement>('sync-scope');
+  const syncScopeTooltip = element<HTMLElement>('sync-scope-tooltip');
   const syncStrip = element<HTMLElement>('sync-strip');
   const syncStripText = element<HTMLElement>('sync-strip-text');
   const tables = installBoardTables();
@@ -223,6 +224,16 @@ export function installBoard(): void {
     button.textContent = verb.label || fallback;
     button.disabled = verb.enabled !== true;
     button.title = verb.hint || '';
+  }
+
+  // A toolbar verb. Not `renderVerb`: a disabled button gets no native `title` tooltip, and the hint
+  // matters most while the button is dead, so these carry the same hover span the icon verbs use.
+  function renderStripVerb(button: HTMLButtonElement, tooltip: HTMLElement, verb: BoardVerb, fallback: string): void {
+    const label = verb.label || fallback;
+    button.textContent = label;
+    button.disabled = verb.enabled !== true;
+    // Never empty: a tooltip node with no text is a node with no accessible name.
+    tooltip.textContent = verb.hint || label;
   }
 
   // Icon actions keep their static SVG; only state and accessible words change on a render.
@@ -481,16 +492,8 @@ export function installBoard(): void {
         if (action) {renderIconVerb(button, mappingVerb(action, msg), button.getAttribute('aria-label') ?? '');}
       }
       renderVerb(createExecution, msg.executionVerb, 'Create Execution');
-      // Not `renderVerb`: a disabled button gets no native `title` tooltip, and the hint matters most
-      // while the button is dead, so the toolbar verbs carry the same hover span the icon verbs use.
-      const syncLabel = msg.syncVerb.label || 'Sync';
-      syncNow.textContent = syncLabel;
-      syncNow.disabled = !msg.syncVerb.enabled;
-      // Never empty: a tooltip node with no text is a node with no accessible name.
-      syncNowTooltip.textContent = msg.syncVerb.hint || syncLabel;
-      // The picker and the sync share one admission, so the strip's two buttons go dead together rather
-      // than leaving the project picker live for a click the host would drop.
-      syncScope.disabled = !msg.syncVerb.enabled;
+      renderStripVerb(syncNow, syncNowTooltip, msg.syncVerb, 'Sync');
+      renderStripVerb(syncScope, syncScopeTooltip, msg.syncScopeVerb, 'Select projects...');
       scenarioActionHelper.textContent = msg.untracedHelper;
       for (const helper of mappingActionHelpers) {helper.textContent = msg.mappingHelper;}
       renderMapping(msg);

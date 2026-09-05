@@ -551,6 +551,21 @@ describe("traceability openBoard command handler", () => {
     expect(deps.knownProjects()).toEqual([]);
   });
 
+  // A board button has nowhere to return a failure to, so the log is the whole report: the message names
+  // the button that started the work and the payload carries the reason.
+  it("logs a rejected board mutation under the button that started it", async () => {
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn");
+    const mgr = CommandManager.create(makeContext({ logger }));
+    mgr.setTraceabilitySubsystem(fakeSubsystem());
+    vi.spyOn(publishCommands(mgr), "runPublish").mockRejectedValue(new Error("HTTP 500"));
+
+    traceabilityBoardDeps(mgr).startPublish();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(warn).toHaveBeenCalledWith("Publish from the board tab failed", { error: "HTTP 500" });
+  });
+
   it("guides the user and opens nothing when the panel is disabled (no live model)", () => {
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     const mgr = CommandManager.create(makeContext());

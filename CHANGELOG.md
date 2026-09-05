@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The Traceability panel's Repository and Test Sets tabs now date the catalogue. Each project row says "synced 5m ago", and "synced 2h ago (stale)" once the cache has passed its lifetime, in the same words as the connection row.
+- The Coverage Board's **Select projects...** button goes idle while the project picker is open, wherever it was opened from, and its hover text says the picker is already open.
 
 ### Fixed
 

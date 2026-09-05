@@ -168,6 +168,7 @@ export interface BoardRenderMessage {
   readonly scoped: boolean;
   readonly createVerb: BoardVerb;
   readonly syncVerb: BoardVerb;
+  readonly syncScopeVerb: BoardVerb;
   readonly untracedHelper: string;
   readonly testSetVerb: BoardVerb;
   readonly addToTestSetVerb: BoardVerb;
@@ -503,7 +504,7 @@ function validHostBody(surface: SurfaceName | "shell", body: Record<string, unkn
   }
   if (surface === "board") {
     if (body["type"] === "syncProgress") {return exact(body, ["type", "text"]) && text(body["text"]);}
-    const keys = ["type", "scenarios", "available", "mapped", "sections", "pageSize", "matrix", "executions", "availableEmptyText", "filtering", "projects", "project", "scoped", "createVerb", "syncVerb", "untracedHelper", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "mappingHelper", "executionVerb"];
+    const keys = ["type", "scenarios", "available", "mapped", "sections", "pageSize", "matrix", "executions", "availableEmptyText", "filtering", "projects", "project", "scoped", "createVerb", "syncVerb", "syncScopeVerb", "untracedHelper", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "mappingHelper", "executionVerb"];
     const budget: ProjectionBudget = { remaining: HOST_PROJECTION_LIMIT };
     return body["type"] === "render" && exact(body, keys) && projectedArray(body["scenarios"], validScenarioCard, budget) &&
       projectedArray(body["available"], validTestCard, budget) && projectedArray(body["mapped"], validTestCard, budget) && projectedArray(body["matrix"], validMatrixGroup, budget) &&
@@ -512,7 +513,7 @@ function validHostBody(surface: SurfaceName | "shell", body: Record<string, unkn
       projectedStrings(body["projects"], 128, budget) &&
       text(body["project"]) && text(body["availableEmptyText"]) &&
       typeof body["filtering"] === "boolean" && typeof body["scoped"] === "boolean" &&
-      ["createVerb", "syncVerb", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "executionVerb"].every((key) => validVerb(body[key])) &&
+      ["createVerb", "syncVerb", "syncScopeVerb", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "executionVerb"].every((key) => validVerb(body[key])) &&
       ["untracedHelper", "mappingHelper"].every((key) => text(body[key]));
   }
   if (body["type"] === "settled") {return exact(body, ["type"]);}

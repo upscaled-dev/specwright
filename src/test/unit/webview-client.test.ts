@@ -106,6 +106,7 @@ async function bridgeBoardSurface(
     onDidChangeActivity: never,
     mutationActive: () => false,
     syncActive: () => false,
+    syncPickerActive: () => false,
     applyDrop: () => Promise.resolve(),
     applyUnlink: () => Promise.resolve(),
     pushText: () => undefined,
@@ -138,6 +139,8 @@ async function bridgeBoardSurface(
   return { client, surface, routeClientMessages };
 }
 
+const PICKER_HINT = "Choose the projects every sync fetches, alongside the View project.";
+
 function boardRender(selected = false): Extract<BoardHostMessage, { type: "render" }> {
   const section = { total: 1, filtered: 1, page: 0, pageSize: 25, pageCount: 1, query: "", filtering: false, selection: "none" } as const;
   const verb = { label: "Action", enabled: true, hint: "" };
@@ -148,7 +151,9 @@ function boardRender(selected = false): Extract<BoardHostMessage, { type: "rende
     mapped: [], sections: { untraced: section, available: section, mapped: { ...section, total: 0, filtered: 0, pageCount: 0 } },
     pageSize: 25, matrix: [], executions: [], availableEmptyText: "No tests",
     filtering: false, projects: ["CALC"], project: "CALC", scoped: true,
-    createVerb: verb, syncVerb: { label: "Sync", enabled: true, hint: "" }, untracedHelper: "", testSetVerb: verb, addToTestSetVerb: verb,
+    createVerb: verb, syncVerb: { label: "Sync", enabled: true, hint: "" },
+    syncScopeVerb: { label: "Select projects...", enabled: true, hint: PICKER_HINT },
+    untracedHelper: "", testSetVerb: verb, addToTestSetVerb: verb,
     testPlanVerb: verb, addToTestPlanVerb: verb, mappingHelper: "", executionVerb: verb,
   };
 }
@@ -522,20 +527,36 @@ describe("coverage board browser client", () => {
     // the button is disabled, which is when the hint has the most to say, so both carry a tooltip span.
     const syncHovers = (): string[] => ["sync-now-tooltip", "sync-scope-tooltip"]
       .map((id) => client.dom.window.document.getElementById(id)?.textContent ?? "");
-    const picker = "Choose the projects every sync fetches, alongside the View project.";
+    const syncLabels = (): string[] => ["sync-now", "sync-scope"]
+      .map((id) => client.dom.window.document.getElementById(id)?.textContent ?? "");
     // The host resolves a standing SHOP plus a View project of PAY into one list; the button says so.
     client.send("board", { ...changed, syncVerb: { label: "Sync", enabled: true, hint: "Syncs PAY, SHOP." } });
     expect(syncButtons()).toEqual([false, false]);
-    expect(syncHovers()).toEqual(["Syncs PAY, SHOP.", picker]);
+    expect(syncHovers()).toEqual(["Syncs PAY, SHOP.", PICKER_HINT]);
+    expect(syncLabels()).toEqual(["Sync", "Select projects..."]);
 
     client.send("board", { ...changed, syncVerb: { label: "Sync", enabled: true, hint: "No projects in scope yet. Tag scenarios or select projects to sync." } });
-    expect(syncHovers()).toEqual(["No projects in scope yet. Tag scenarios or select projects to sync.", picker]);
+    expect(syncHovers()).toEqual(["No projects in scope yet. Tag scenarios or select projects to sync.", PICKER_HINT]);
 
-    // Sync and Select projects share the host's admission, so a sync in progress takes both.
-    client.send("board", { ...changed, syncVerb: { label: "Syncing", enabled: false, hint: "A traceability sync is in progress." } });
+    // Both toolbar verbs are the host's to decide, so a sync in progress arrives as two disabled verbs
+    // rather than the client inferring the second from the first, and an open picker says so on hover.
+    client.send("board", {
+      ...changed,
+      syncVerb: { label: "Syncing", enabled: false, hint: "A traceability sync is in progress." },
+      syncScopeVerb: { label: "Select projects...", enabled: false, hint: "The project picker is already open." },
+    });
     expect(syncButtons()).toEqual([true, true]);
-    expect(syncHovers()).toEqual(["A traceability sync is in progress.", picker]);
+    expect(syncHovers()).toEqual(["A traceability sync is in progress.", "The project picker is already open."]);
     expect(syncHovers().every((text) => text.length > 0)).toBe(true);
+
+    // A verb that arrives without words still leaves both buttons named.
+    client.send("board", {
+      ...changed,
+      syncVerb: { label: "", enabled: true, hint: "" },
+      syncScopeVerb: { label: "", enabled: true, hint: "" },
+    });
+    expect(syncLabels()).toEqual(["Sync", "Select projects..."]);
+    expect(syncHovers()).toEqual(["Sync", "Select projects..."]);
     await expectNoSeriousViolations(client.dom);
 
     const restored = await rig(client.state);

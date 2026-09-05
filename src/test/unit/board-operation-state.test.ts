@@ -33,6 +33,23 @@ describe("BoardOperationState", () => {
     expect(changed).toHaveBeenCalledTimes(4);
   });
 
+  // The strip keeps Sync live while the scope picker is up, so picker work must not read as either of the
+  // other two kinds.
+  it("reports picker work without taking mutation or sync activity", async () => {
+    const state = new BoardOperationState();
+    const picking = deferred<void>();
+
+    const run = state.picker(() => picking.promise);
+    expect(state.pickerActive).toBe(true);
+    expect(state.mutationActive).toBe(false);
+    expect(state.syncActive).toBe(false);
+
+    picking.resolve();
+    await run;
+
+    expect(state.pickerActive).toBe(false);
+  });
+
   it("retires failed and cancelled work without confusing sync activity", async () => {
     const state = new BoardOperationState();
     const sync = deferred<void>();

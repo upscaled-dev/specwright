@@ -163,11 +163,38 @@ describe("BoardPanel", () => {
       onDidChangeActivity: activity.event,
     });
     expect(lastRender(panel)?.syncVerb.enabled).toBe(false);
+    expect(lastRender(panel)?.syncScopeVerb.enabled).toBe(false);
 
     active = false;
     activity.fire();
 
     expect(lastRender(panel)?.syncVerb).toMatchObject({ enabled: true, label: "Sync" });
+    expect(lastRender(panel)?.syncScopeVerb).toMatchObject({
+      enabled: true,
+      label: "Select projects...",
+      hint: "Choose the projects every sync fetches, alongside the View project.",
+    });
+  });
+
+  // An open picker is the only state Select projects has that Sync does not, so Sync stays live while the
+  // button that would open a second picker does not.
+  it("takes only the Select projects button dead while its picker is open", async () => {
+    let picking = true;
+    const activity = new vscode.EventEmitter<void>();
+    const { panel } = await openReady({
+      syncPickerActive: () => picking,
+      onDidChangeActivity: activity.event,
+    });
+    expect(lastRender(panel)?.syncScopeVerb).toMatchObject({
+      enabled: false,
+      hint: "The project picker is already open.",
+    });
+    expect(lastRender(panel)?.syncVerb.enabled).toBe(true);
+
+    picking = false;
+    activity.fire();
+
+    expect(lastRender(panel)?.syncScopeVerb.enabled).toBe(true);
   });
 
   it("repaints once a sync settles, even when it rejects, so the button never strands the group", async () => {

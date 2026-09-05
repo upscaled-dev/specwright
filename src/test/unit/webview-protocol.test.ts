@@ -20,7 +20,7 @@ function boardRender(matrixRows = 1): Extract<BoardHostMessage, { type: "render"
       requirement: `REQ-${index}`, test: `TEST-${index}`, scenario: `Scenario ${index}`, tag: `@TEST_${index}`,
       result: "passed", file: "features/large.feature", projects: ["CALC"],
     })) }], executions: [], availableEmptyText: "No tests", filtering: false, projects: ["CALC"], project: "", scoped: false,
-    createVerb: verb, syncVerb: verb, untracedHelper: "", testSetVerb: verb, addToTestSetVerb: verb, testPlanVerb: verb,
+    createVerb: verb, syncVerb: verb, syncScopeVerb: verb, untracedHelper: "", testSetVerb: verb, addToTestSetVerb: verb, testPlanVerb: verb,
     addToTestPlanVerb: verb, mappingHelper: "", executionVerb: verb,
   };
 }
