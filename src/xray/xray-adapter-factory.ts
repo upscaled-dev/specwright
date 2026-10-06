@@ -144,6 +144,7 @@ export function createXrayAdapterFactory(
       };
       const resultPublishing = createXrayResultPublishing({
         transport: client,
+        resolveTestContainer: (kind, key, signal) => client.resolveTestContainer(kind, key, signal),
         site: () => normalizeSiteUrl(ctx.config.xraySiteUrl),
         jiraCredentials: () => credentialStore.getJiraCredentials(ctx.config.xraySiteUrl),
         resolveSteps: publishSupport.resolveSteps,

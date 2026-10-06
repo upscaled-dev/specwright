@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Publishing results with a Test Plan now checks that the plan exists and is accessible before importing. Invalid keys and failed lookups leave the form open for correction without importing results.
 - The Traceability panel keeps its connection row when a connected workspace has no tagged scenarios yet, so **Select Projects to Sync** stays in reach for a first sync instead of the panel showing only the empty message.
 - A tracker that provides no Test Repository or Test Sets now says so on those tabs instead of asking for a sync that could never fill them.
 - Running a Test Repository folder from the Traceability panel now covers that folder only. A remote path carrying `.` or `..` segments resolves to the folder it names, and a folder actually named Unfiled stays separate from the tests that sit in no folder.

@@ -29,6 +29,11 @@ import type { PreflightChoice } from "../../traceability/preflight-flow";
 import { OutcomeUnknownRecoveryPersistenceError, PublishAttachmentsModel } from "../../traceability/publish-flow";
 import { makeContext, memento, writeTempFeature } from "./helpers/command-manager-harness";
 import { RemoteOutcomeUnknownError, WorkspaceTrust } from "../../core/workspace-trust";
+import { createXrayAdapterFactory } from "../../xray/xray-adapter-factory";
+import { makeFeatureStepResolver } from "../../xray/feature-step-resolver";
+import { connectBrowserClient, type StubPanel } from "./helpers/board-panel-driver";
+import { connected, configWith, mapCredentialStore } from "./helpers/xray-setup-driver";
+import { trustedWorkspace } from "./helpers/test-workspace-trust";
 
 
 
@@ -641,6 +646,107 @@ describe("traceability publishLastRun: Publish tab", () => {
     scope.set(project);
     return scope;
   }
+
+  it.each([false, true])("publishes to a verified Test Plan through the bundled form (correct missing key: %s)", async (correctMissingKey) => {
+    const featurePath = writeTempFeature("Feature: Checkout\n\nScenario: Publish mapped checkout\n  Given a completed checkout\n");
+    const context = makeContext({ config: configWith({ "xray.siteUrl": "acme.atlassian.net" }) });
+    const store = new RunArtifactStore(memento(), context.logger);
+    const run = publishableArtifact();
+    store.append({
+      ...run,
+      results: [{ ...run.results[0]!, scenario: { filePath: featurePath, line: 3, name: "Publish mapped checkout", kind: "scenario" } }],
+    });
+    const { store: credentials } = mapCredentialStore();
+    await credentials.setCredentials("acme.atlassian.net", "client", "secret");
+    const adapter = createXrayAdapterFactory(
+      credentials,
+      () => Promise.resolve(connected("acme.atlassian.net")),
+      memento(),
+      { resolveSteps: makeFeatureStepResolver(context.featureParser), workspaceRootFor: () => path.dirname(featurePath) },
+      trustedWorkspace()
+    ).create({ config: context.config, logger: context.logger });
+    const queries: string[] = [];
+    const imports: Array<{ info: string; results: string }> = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      if (url.endsWith("/authenticate")) {return new Response(JSON.stringify("test-jwt"));}
+      if (url.endsWith("/graphql")) {
+        const { query } = JSON.parse(String(init.body)) as { query: string };
+        queries.push(query);
+        return new Response(JSON.stringify({ data: { getTestPlans: { results: query.includes("PLAN-42")
+          ? [{ issueId: "2042", jira: { key: "PLAN-42" } }]
+          : [] } } }));
+      }
+      if (url.endsWith("/import/execution/cucumber/multipart")) {
+        const parts = init.body as FormData;
+        imports.push({
+          info: await (parts.get("info") as Blob).text(),
+          results: await (parts.get("results") as Blob).text(),
+        });
+        return new Response(JSON.stringify({ key: "CALC-100", id: "2100" }));
+      }
+      throw new Error(`Unexpected remote request: ${url}`);
+    });
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const manager = CommandManager.create({ ...context, runArtifactStore: store });
+    manager.setCredentialStore(credentials);
+    manager.setTraceabilitySubsystem({
+      ...connectedSubsystem(),
+      getActiveAdapter: () => adapter,
+      rebuildNow: () => Promise.resolve(),
+    } as unknown as TraceabilitySubsystem);
+    const operation = publishCommands(manager).runPublish();
+    try {
+      await vi.waitFor(() => expect(win.__webviewPanels).toHaveLength(1));
+      const panel = win.__webviewPanels[0]!;
+      const browser = await connectBrowserClient(panel as unknown as StubPanel);
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+      await browser.pumpHost();
+      const document = browser.dom.window.document;
+      const plan = document.getElementById("plan") as unknown as { value: string; disabled: boolean };
+      const summary = document.getElementById("summary") as unknown as { value: string };
+      const publish = document.getElementById("publish") as unknown as { click(): void };
+      expect(document.getElementById("subtitle")?.textContent).toContain("1 passed");
+      summary.value = "Checkout results for the plan";
+      plan.value = correctMissingKey ? "PLAN-999" : " plan-42 ";
+      publish.click();
+      await browser.flushInbound();
+      if (correctMissingKey) {
+        await vi.waitFor(() => expect(posts(panel, "retry", "publish")).toHaveLength(1));
+        await browser.pumpHost();
+        expect(error).toHaveBeenCalledWith(expect.stringContaining("No accessible Test Plan found for PLAN-999"));
+        expect(imports).toEqual([]);
+        expect(document.getElementById("publish-form")?.hidden).toBe(false);
+        expect(document.getElementById("publish-busy")?.hidden).toBe(true);
+        expect(plan.disabled).toBe(false);
+        expect(plan.value).toBe("PLAN-999");
+        expect(summary.value).toBe("Checkout results for the plan");
+        plan.value = "plan-42";
+        publish.click();
+        await browser.flushInbound();
+      }
+      await operation;
+      await browser.pumpHost();
+      expect(imports).toHaveLength(1);
+      expect(JSON.parse(imports[0]!.info)).toMatchObject({
+        fields: { project: { key: "CALC" }, summary: "Checkout results for the plan" },
+        xrayFields: { testPlanKey: "PLAN-42" },
+      });
+      expect(imports[0]!.results).toContain("Publish mapped checkout");
+      expect(imports[0]!.results).toContain("@TEST_CALC-1");
+      expect(queries).toHaveLength(correctMissingKey ? 2 : 1);
+      expect(queries.every((query) => query.includes("getTestPlans(") && query.includes("limit: 1"))).toBe(true);
+      expect(info).toHaveBeenCalledWith(expect.stringContaining("CALC-100"), "Open in Jira");
+      expect(document.querySelector('[data-tab="executions"][role="tab"]')?.getAttribute("aria-selected")).toBe("true");
+      browser.dom.window.close();
+    } finally {
+      win.__resetWebviewPanels();
+      await operation;
+      await adapter.dispose?.();
+      credentials.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
 
   function connectedSubsystem(
     catalogueProjects: string[] = [],

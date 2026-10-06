@@ -13,6 +13,7 @@ import { EVIDENCE_MAX_FILE_BYTES, EVIDENCE_MAX_TOTAL_BYTES, EvidenceFs } from ".
 import { ScenarioRef } from "../../traceability/scenario-ref";
 import { Logger, LogLevel } from "../../utils/logger";
 import type { OutputChannel } from "vscode";
+import { XrayClient } from "../../xray/xray-client";
 
 let nextLine = 3;
 function ref(name: string): ScenarioRef {
@@ -52,6 +53,7 @@ const RESOLVE_ALL: StepResolver = (r) => (r.name === "gone" ? undefined : { feat
 function makeDeps(over: Partial<XrayResultPublishingDeps>): XrayResultPublishingDeps {
   return {
     transport: spyTransport().transport,
+    resolveTestContainer: (kind, key) => Promise.resolve({ kind, key, issueId: "plan-id" }),
     site: () => "acme.atlassian.net",
     jiraCredentials: () => Promise.resolve(undefined),
     resolveSteps: RESOLVE_ALL,
@@ -241,6 +243,139 @@ describe("createXrayResultPublishing: publish guards (fail fast before any impor
       publishing.publish(artifact([mapped("gone", "CALC-9")]), { mode: "create-new", project: "CALC", summary: "Run" })
     ).rejects.toThrow("match the current feature files");
     expect(t.postMultipart).not.toHaveBeenCalled();
+  });
+});
+
+describe("createXrayResultPublishing: Test Plan validation before import", () => {
+  const request = { mode: "create-new", project: "CALC", summary: "Run", testPlanKey: "PLAN-42" } as const;
+
+  it.each([undefined, "", "   "])("omits a blank optional plan without a lookup (%s)", async (testPlanKey) => {
+    const t = spyTransport();
+    const resolveTestContainer = vi.fn();
+    const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport, resolveTestContainer }));
+
+    await publishing.publish(artifact([mapped("a", "CALC-1")]), { ...request, testPlanKey });
+
+    expect(resolveTestContainer).not.toHaveBeenCalled();
+    const parts = t.postMultipart.mock.calls[0]![1] as { info: string };
+    expect(JSON.parse(parts.info).xrayFields).not.toHaveProperty("testPlanKey");
+  });
+
+  it.each(["PLAN", "PLAN-42 or key = CALC-1", "@PLAN-42"])("rejects a malformed key without remote reads or writes (%s)", async (testPlanKey) => {
+    const t = spyTransport();
+    const resolveTestContainer = vi.fn();
+    const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport, resolveTestContainer }));
+
+    await expect(publishing.publish(artifact([mapped("a", "CALC-1")]), { ...request, testPlanKey }))
+      .rejects.toThrow("Enter an exact Test Plan issue key");
+
+    expect(resolveTestContainer).not.toHaveBeenCalled();
+    expect(t.postMultipart).not.toHaveBeenCalled();
+    expect(t.postJson).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "missing plan or wrong issue type", body: { data: { getTestPlans: { results: [] } } }, message: "No accessible Test Plan found for PLAN-42" },
+    { name: "different returned key", body: { data: { getTestPlans: { results: [{ issueId: "2043", jira: { key: "PLAN-43" } }] } } }, message: "No accessible Test Plan found for PLAN-42" },
+    { name: "malformed protocol envelope", body: { data: { getTestPlans: {} } }, message: "malformed Test Plan lookup response" },
+    { name: "unreadable target id", body: { data: { getTestPlans: { results: [{ jira: { key: "PLAN-42" } }] } } }, message: "malformed Test Plan lookup response" },
+    { name: "GraphQL permission failure", body: { errors: [{ message: "Permission denied" }], data: null }, message: "Permission denied" },
+  ])("blocks imports after the production lookup returns $name", async ({ body, message }) => {
+    const t = spyTransport();
+    const queries: string[] = [];
+    const client = new XrayClient({
+      region: "global",
+      logger: Logger.create(),
+      credentials: () => Promise.resolve({ clientId: "id", clientSecret: "secret" }),
+      fetchImpl: (url, init) => {
+        if (url.endsWith("/authenticate")) {return Promise.resolve(new Response(JSON.stringify("test-jwt")));}
+        queries.push((JSON.parse(String(init.body)) as { query: string }).query);
+        return Promise.resolve(new Response(JSON.stringify(body)));
+      },
+    });
+    const publishing = createXrayResultPublishing(makeDeps({
+      transport: t.transport,
+      resolveTestContainer: (kind, key, signal) => client.resolveTestContainer(kind, key, signal),
+    }));
+
+    const attempt = publishing.publish(artifact([mapped("a", "CALC-1")]), request);
+    await expect(attempt).rejects.toThrow(message);
+    if (!message.startsWith("No accessible Test Plan")) {
+      await expect(attempt).rejects.not.toThrow("No accessible Test Plan");
+    }
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('getTestPlans(jql: "key = \\"PLAN-42\\"", limit: 1)');
+    expect(t.postMultipart).not.toHaveBeenCalled();
+    expect(t.postJson).not.toHaveBeenCalled();
+  });
+
+  it.each(["authentication", "HTTP permission", "network"])("blocks imports on a production %s failure without calling the plan missing", async (failure) => {
+    const t = spyTransport();
+    const client = new XrayClient({
+      region: "global",
+      logger: Logger.create(),
+      credentials: () => Promise.resolve({ clientId: "id", clientSecret: "secret" }),
+      sleep: () => Promise.resolve(),
+      fetchImpl: (url) => {
+        if (url.endsWith("/authenticate")) {
+          return Promise.resolve(failure === "authentication"
+            ? new Response("unauthorized", { status: 401 })
+            : new Response(JSON.stringify("test-jwt")));
+        }
+        return failure === "network"
+          ? Promise.reject(new Error("offline"))
+          : Promise.resolve(new Response("forbidden", { status: 403 }));
+      },
+    });
+    const publishing = createXrayResultPublishing(makeDeps({
+      transport: t.transport,
+      resolveTestContainer: (kind, key, signal) => client.resolveTestContainer(kind, key, signal),
+    }));
+
+    const attempt = publishing.publish(artifact([mapped("a", "CALC-1")]), request);
+    await expect(attempt)
+      .rejects.toThrow(failure === "authentication" ? "Authentication failed: check your client ID and secret." : failure === "HTTP permission" ? "403" : "offline");
+    await expect(attempt).rejects.not.toThrow("No accessible Test Plan");
+    expect(t.postMultipart).not.toHaveBeenCalled();
+    expect(t.postJson).not.toHaveBeenCalled();
+  });
+
+  it("does not import when cancellation arrives while the plan lookup is pending", async () => {
+    const t = spyTransport();
+    const controller = new AbortController();
+    let finishLookup!: (target: { kind: "test-plan"; key: string; issueId: string }) => void;
+    let lookupStarted!: () => void;
+    const started = new Promise<void>((resolve) => {lookupStarted = resolve;});
+    const resolveTestContainer = vi.fn(() => {
+      lookupStarted();
+      return new Promise<{ kind: "test-plan"; key: string; issueId: string }>((resolve) => {finishLookup = resolve;});
+    });
+    const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport, resolveTestContainer }));
+    const attempt = publishing.publish(artifact([mapped("a", "CALC-1")]), request, controller.signal);
+    await started;
+    controller.abort();
+    finishLookup({ kind: "test-plan", key: "PLAN-42", issueId: "2042" });
+
+    await expect(attempt).rejects.toThrow();
+
+    expect(resolveTestContainer).toHaveBeenCalledWith("test-plan", "PLAN-42", controller.signal);
+    expect(t.postMultipart).not.toHaveBeenCalled();
+    expect(t.postJson).not.toHaveBeenCalled();
+  });
+
+  it("starts no lookup or import for a cancelled publish", async () => {
+    const t = spyTransport();
+    const controller = new AbortController();
+    controller.abort();
+    const resolveTestContainer = vi.fn();
+    const publishing = createXrayResultPublishing(makeDeps({ transport: t.transport, resolveTestContainer }));
+
+    await expect(publishing.publish(artifact([mapped("a", "CALC-1")]), request, controller.signal)).rejects.toThrow();
+
+    expect(resolveTestContainer).not.toHaveBeenCalled();
+    expect(t.postMultipart).not.toHaveBeenCalled();
+    expect(t.postJson).not.toHaveBeenCalled();
   });
 });
 

@@ -32,6 +32,8 @@ import { randomUUID } from "node:crypto";
 import { JiraIssueKind, searchJiraIssues, JiraIssueSearchResult } from "./jira-issue-search";
 import { IssueTypeResolution, resolveExecutionIssueType } from "./jira-issue-types";
 import { JiraProjectSearchResult, searchJiraProjects } from "./jira-project-search";
+import { canonicalizeXrayKey, JIRA_KEY_SHAPE } from "./xray-adapter";
+import type { XrayClient } from "./xray-client";
 
 export type AttachTo = "evidence" | "issue" | "both";
 
@@ -64,6 +66,7 @@ export type IssueTypeResolver = (deps: {
 
 export interface XrayResultPublishingDeps {
   transport: ImportTransport;
+  resolveTestContainer: XrayClient["resolveTestContainer"];
   // Read fresh each call (never snapshotted): the normalized site host and its optional Jira creds.
   site: () => string;
   jiraCredentials: () => Promise<XrayJiraCredentials | undefined>;
@@ -252,6 +255,18 @@ async function publishCreate(
   if (request.summary.trim() === "") {
     throw new Error("Enter a summary for the new execution before publishing.");
   }
+  const testPlanKey = canonicalizeXrayKey(request.testPlanKey?.trim() ?? "");
+  if (testPlanKey !== "") {
+    if (!JIRA_KEY_SHAPE.test(testPlanKey)) {
+      throw new Error("Enter an exact Test Plan issue key, such as CALC-123, or clear the optional Test Plan field.");
+    }
+    const target = await deps.resolveTestContainer("test-plan", testPlanKey, signal);
+    signal?.throwIfAborted();
+    if (target?.kind !== "test-plan" || target.key !== testPlanKey) {
+      throw new Error(`No accessible Test Plan found for ${testPlanKey}. Check the key, issue type, and your Xray account's access, or clear the optional Test Plan field, then retry.`);
+    }
+  }
+  request = { ...request, testPlanKey: testPlanKey || undefined };
   const executionIssueType = deps.executionIssueType();
   // The configured name is what the create carries unless the project's own createmeta names it
   // differently (its verbatim casing), so an unreachable Jira still publishes under the right type.
@@ -282,6 +297,7 @@ async function publishCreate(
     evidenceFor: plan.evidenceFor,
     issueTypeName,
   });
+  signal?.throwIfAborted();
   const response = await cucumberImporter.import(deps.transport, payload, signal, operationId);
   const ref: ExecutionRef = { kind: "execution", key: executionKeyOf(response, request) };
   const warnings: string[] = [];
@@ -323,7 +339,7 @@ async function publishAppend(
 
 /**
  * The Xray `resultPublishing` capability: reconcile → importer → client. `searchTargets` needs Jira
- * credentials (the GraphQL schema has no execution/plan query, §5); without them it rejects with a
+ * credentials; without them it rejects with a
  * `NotSupportedError` and the dialog falls back to a plain key input. `publish` reconciles INSIDE
  * (importers never see an excluded/keyless result) and its single import POST creates the execution
  * WITH results; nothing runs remotely.
@@ -364,6 +380,7 @@ export function createXrayResultPublishing(deps: XrayResultPublishingDeps): Resu
       return result.issues.map(toPublishTarget);
     },
     async publish(artifact, request, signal): Promise<PublishOutcome> {
+      signal?.throwIfAborted();
       const operationId = randomUUID();
       const results = publishableResults(artifact).publishable;
       // Jira creds are both the issue-attachment destination's only key AND the createmeta resolver's

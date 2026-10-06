@@ -199,6 +199,8 @@ In the **Publish** tab:
 
 Creating a new execution imports results as a new Xray Test Execution. Appending imports results into the execution you selected. Publishing does not launch a remote test run.
 
+If you enter an optional Test Plan key, Specwright checks that your Xray account can read it as a Test Plan before importing results. This check uses your Xray credentials and does not require Jira credentials. A missing plan, wrong issue type, or failed lookup leaves the form open so you can correct the key, clear the field, or retry. No results are imported until the check succeeds.
+
 To create a new Test Execution, the target Jira project must have an Xray-mapped, standard-level work type named **Test Execution**, unless you configured a different name with `playwrightBddRunner.xray.executionIssueType`. A subtask work type cannot hold a standalone execution.
 
 ### Navigate the panel with the keyboard
