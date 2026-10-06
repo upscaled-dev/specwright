@@ -38,7 +38,8 @@ export function describeContainerAdd(
   noun: string,
   key: string,
   selected: number,
-  result: AddTestsToContainerResult
+  result: AddTestsToContainerResult,
+  subject: "selected" | "created" = "selected"
 ): ContainerAddReport {
   if (result.addedTests === undefined) {
     return {
@@ -49,12 +50,12 @@ export function describeContainerAdd(
   const added = result.addedTests.length;
   if (added < selected) {
     return {
-      message: `Xray reported ${added} of ${selected} selected tests added to ${noun} ${key}. The others may already be members or may not have been accepted; inspect ${key} before retrying.`,
+      message: `Xray reported ${added} of ${selected} ${subject} tests added to ${noun} ${key}. The others may already be members or may not have been accepted; inspect ${key} before retrying.`,
       inspect: true,
     };
   }
   return {
-    message: `Added ${added} of ${selected} selected tests to ${noun} ${key}.`,
+    message: `Added ${added} of ${selected} ${subject} tests to ${noun} ${key}.`,
     inspect: result.warning !== undefined,
   };
 }

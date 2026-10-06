@@ -13,6 +13,7 @@ import {
   TestAuthoringCapability,
   TestCaseMetadata,
   TestContainerKind,
+  TestContainerTarget,
   TraceabilityAdapter,
 } from "../traceability/contracts";
 import {
@@ -26,6 +27,7 @@ import type { WorkspaceTrust } from "../core/workspace-trust";
 import { providerWarnings } from "../traceability/provider-warnings";
 import { applyTagInsert } from "../traceability/tag-edit";
 import type { TraceabilitySnapshot } from "../traceability/traceability-model";
+import { associateCreatedTests, prepareTestCreateAssociations, testCreateAssociationConfirmation } from "./test-create-associations";
 
 // Everything here is read at call time: the subsystem is wired and the board opened long after the
 // CommandManager builds this.
@@ -132,13 +134,17 @@ export class TraceabilityAuthoringCommands {
       vscode.window.showWarningMessage("That selection is out of date because the board changed. Pick the scenarios again.");
       return;
     }
-    if (!(await this.confirm(project, scenarios.length, adapter.label))) {
+    const targets = await prepareTestCreateAssociations(adapter, project, this.logger);
+    if (targets === undefined) {return;}
+    if (!(await this.confirm(project, scenarios.length, adapter.label, targets))) {
       return;
     }
-    const result = await this.runBatch(scenarios, project, adapter, authoring);
+    const controller = new AbortController();
+    const result = await this.runBatch(scenarios, project, adapter, authoring, controller);
     // Counted against the selection, not the resolved list, so the scenarios that dropped out above
     // are named in the summary instead of vanishing from it.
     this.report(result, { selected: ids.length, dropped: ids.length - scenarios.length }, adapter.label);
+    await associateCreatedTests(adapter, targets, result.authored.map(({ test }) => test), project, this.logger, this.deps.workspaceTrust, controller.signal);
     this.deps.scheduleProjectSync(
       project,
       result.authored.length > 0 ? undefined : bulkFailures(result)
@@ -590,10 +596,10 @@ export class TraceabilityAuthoringCommands {
     return opensScenario(doc.getText().split("\n")[scenario.ref.line - 1], scenario.ref.name);
   }
 
-  private async confirm(project: string, count: number, providerLabel: string): Promise<boolean> {
+  private async confirm(project: string, count: number, providerLabel: string, targets: readonly TestContainerTarget[]): Promise<boolean> {
     const target = projectTarget(this.deps.siteUrl(), project);
     const choice = await vscode.window.showWarningMessage(
-      `Create ${count} new ${providerLabel} ${plural(count, "test")} in ${target}, one per selected scenario?`,
+      `Create ${count} new ${providerLabel} ${plural(count, "test")} in ${target}, one per selected scenario?${testCreateAssociationConfirmation(targets)}`,
       { modal: true },
       "Create tests"
     );
@@ -604,7 +610,8 @@ export class TraceabilityAuthoringCommands {
     scenarios: readonly BulkCreateScenario[],
     project: string,
     adapter: TraceabilityAdapter,
-    authoring: NonNullable<TraceabilityAdapter["testAuthoring"]>
+    authoring: NonNullable<TraceabilityAdapter["testAuthoring"]>,
+    controller: AbortController
   ): Thenable<BulkCreateResult> {
     return vscode.window.withProgress(
       {
@@ -613,8 +620,8 @@ export class TraceabilityAuthoringCommands {
         cancellable: true,
       },
       (progress, token) => {
-        const controller = new AbortController();
         token.onCancellationRequested(() => controller.abort());
+        if (token.isCancellationRequested) {controller.abort();}
         return runBulkCreate(
           scenarios,
           project,
@@ -668,7 +675,10 @@ export class TraceabilityAuthoringCommands {
       });
     }
     const notAttempted = counts.selected - result.created.length - result.failed.length;
-    const parts = [`Created ${result.created.length} ${providerLabel} ${plural(result.created.length, "test")}`];
+    const parts = [`Created ${result.authored.length} ${providerLabel} ${plural(result.authored.length, "test")}`];
+    if (result.created.length !== result.authored.length) {
+      parts.push(`${result.created.length} scenarios linked`);
+    }
     if (result.failed.length > 0) {
       parts.push(`${result.failed.length} ${plural(result.failed.length, "scenario")} failed`);
     }

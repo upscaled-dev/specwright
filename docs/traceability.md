@@ -144,6 +144,8 @@ There are two local-linking workflows:
 
 Confirming an existing test inserts its `@TEST_…` tag into the local feature file. **Unlink** removes only that local test tag. Neither action edits the remote Xray test.
 
+For an unlinked scenario, the same picker can offer **Create new Xray test from this scenario**. Choose **Create only**, or optionally add the new test to an existing Test Set, Test Plan, or both. Enter exact keys in the same project; Specwright resolves every chosen target before the final confirmation names the project, site, scenario, and targets. Confirmation creates one Cucumber test with the scenario name and current Gherkin, then Specwright inserts the returned `@TEST_…` tag and refreshes its metadata. Cancelling setup or confirmation creates nothing. If Xray creates the test but does not return a key, or the local tag cannot be written, Specwright reports the remote test without claiming it linked the scenario.
+
 ### Create tests and containers
 
 These actions make remote changes and always ask for confirmation:
@@ -152,7 +154,9 @@ These actions make remote changes and always ask for confirmation:
 - The Test Set and Test Plan icon pairs create a new container or add the selected tests to an existing one. Hover an icon to see its current action and state. Adding to an existing container asks for its exact key, verifies that it is the expected container type in the selected project, and names the key, project, site, and selected count before writing.
 - **Create Execution** creates an empty remote Test Execution in the selected project. It has no results until you publish a run to it later.
 
-Creating or adding container members requires every selected test to have a synced remote issue ID. If any selected test cannot be resolved, nothing is written and the message names the tests to sync. After an existing-container update, Specwright reports how many tests Xray says it added. A lower count can mean tests were already members or were not accepted; if Xray does not return a readable count, inspect the target rather than assuming zero. A cancelled or interrupted update may still have reached Xray once it was sent, so inspect the exact target before retrying.
+**Create tests** offers the same optional existing Test Set and Test Plan choices as single-scenario creation. Each chosen target receives one membership request containing the issue IDs returned by the successful creates. Membership does not wait for sync. An association failure keeps the created tests and local tags and reports the failed target separately. Missing returned IDs are named; unreadable added counts and cancellation after a request starts require inspecting the target before retrying. Cancellation or an unknown membership outcome stops further association requests and names targets that were not attempted. Specwright never retries creation or membership automatically. Adapters without existing-container support keep the create-only flow.
+
+The separate board actions that create a container or add selected existing tests require every selected test to have a synced remote issue ID. If any selected test cannot be resolved, nothing is written and the message names the tests to sync. After an existing-container update, Specwright reports how many tests Xray says it added. A lower count can mean tests were already members or were not accepted; if Xray does not return a readable count, inspect the target rather than assuming zero. A cancelled or interrupted update may still have reached Xray once it was sent, so inspect the exact target before retrying.
 
 A cancelled or partially completed bulk create can leave tests that were already created in Xray. If Specwright cannot apply the matching local tag, the remote test still exists; link it manually from the feature file or the Coverage Board.
 

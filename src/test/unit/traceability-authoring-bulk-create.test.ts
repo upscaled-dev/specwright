@@ -6,12 +6,14 @@ import { scenarioDropId } from "../../traceability/board-data";
 import {
   AuthoredTest,
   NewTestSpec,
+  TestAuthoringCapability,
   TraceabilityAdapter,
 } from "../../traceability/contracts";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { TraceabilitySnapshot } from "../../traceability/traceability-model";
 import { Logger } from "../../utils/logger";
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
+import { RemoteOutcomeUnknownError } from "../../core/workspace-trust";
 
 const FEATURE = "/ws/a.feature";
 const SOURCE = [
@@ -121,6 +123,7 @@ interface RigOptions {
   snapshot?: TraceabilitySnapshot;
   create?: (spec: NewTestSpec) => Promise<AuthoredTest>;
   scheduleProjectSync?: (project: string, diagnostics?: Iterable<string>) => void;
+  associations?: Pick<TestAuthoringCapability, "resolveTestContainer" | "addTestsToContainer">;
 }
 
 function rig(options: RigOptions = {}): Rig {
@@ -130,11 +133,15 @@ function rig(options: RigOptions = {}): Rig {
   const create = options.create ?? (() => Promise.resolve<AuthoredTest>({ key: `CALC-${specs.length}`, warnings: [] }));
   const adapter = {
     label: "Xray",
-    keyGrammar: { testPrefix: "TEST_", canonicalizeKey: (key: string) => key.toUpperCase() },
+    keyGrammar: {
+      testPrefix: "TEST_", canonicalizeKey: (key: string) => key.toUpperCase(),
+      keyShape: /^[A-Z][A-Z0-9_]*-\d+$/, projectOf: (key: string) => key.replace(/-\d+$/, ""),
+    },
     ...(options.authoring === false
       ? {}
       : {
           testAuthoring: {
+            ...options.associations,
             createTest: (spec: NewTestSpec) => {
               specs.push(spec);
               return create(spec);
@@ -500,7 +507,7 @@ describe("TraceabilityAuthoringCommands.bulkCreateTests", () => {
     await commands.bulkCreateTests();
 
     expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
-      "Created 0 Xray tests, 1 scenario failed, 1 provider warning on 1 remote create."
+      "Created 1 Xray test, 0 scenarios linked, 1 scenario failed, 1 provider warning on 1 remote create."
     );
     expect(warn.mock.calls.at(-1)?.[1]).toBe("Show Output");
     expect(logged.mock.calls[0]?.[1]).toMatchObject({ scenario: "Log in" });
@@ -526,7 +533,7 @@ describe("TraceabilityAuthoringCommands.bulkCreateTests", () => {
     await commands.bulkCreateTests();
 
     expect(String(warn.mock.calls.at(-1)?.[0])).toBe(
-      "Created 0 Xray tests, 1 scenario failed, 1 provider warning on 1 remote create."
+      "Created 1 Xray test, 0 scenarios linked, 1 scenario failed, 1 provider warning on 1 remote create."
     );
     expect(logged).toHaveBeenCalledWith(
       "Xray returned warnings creating a test",
@@ -682,5 +689,113 @@ describe("TraceabilityAuthoringCommands.bulkCreateTests", () => {
     await commands.bulkCreateTests();
 
     expect(specs).toEqual([]);
+  });
+
+  function associationSetup(): Pick<TestAuthoringCapability, "resolveTestContainer" | "addTestsToContainer"> {
+    vi.spyOn(vscode.window, "showQuickPick").mockImplementation(async (items) => (items as readonly vscode.QuickPickItem[])[3] as never);
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValueOnce("CALC-111" as never).mockResolvedValueOnce("CALC-222" as never);
+    return {
+      resolveTestContainer: vi.fn(async (kind, key) => ({ kind, key, issueId: `${kind}-id` })),
+      addTestsToContainer: vi.fn(async (_kind, _id, ids) => ({ addedTests: [...ids] })),
+    };
+  }
+
+  it.each(["picker cancelled", "second input cancelled", "invalid project", "invalid key", "wrong type", "missing target", "lookup failed", "lookup cancelled", "confirmation cancelled"])(
+    "creates and associates nothing when setup cannot complete: %s", async (failure) => {
+      const workspace = fakeWorkspace();
+      acceptConfirm();
+      const associations = associationSetup();
+      if (failure === "picker cancelled") {vi.mocked(vscode.window.showQuickPick).mockResolvedValue(undefined);}
+      if (failure === "second input cancelled") {
+        vi.mocked(vscode.window.showInputBox).mockReset().mockResolvedValueOnce("CALC-111").mockResolvedValueOnce(undefined);
+      }
+      if (failure === "invalid project") {vi.mocked(vscode.window.showInputBox).mockReset().mockResolvedValue("OTHER-111");}
+      if (failure === "invalid key") {vi.mocked(vscode.window.showInputBox).mockReset().mockResolvedValue("not a key");}
+      if (failure === "wrong type") {vi.mocked(associations.resolveTestContainer!).mockResolvedValue({ kind: "test-plan", key: "CALC-111", issueId: "bad" });}
+      if (failure === "missing target") {vi.mocked(associations.resolveTestContainer!).mockResolvedValue(undefined);}
+      if (failure === "lookup failed") {vi.mocked(associations.resolveTestContainer!).mockRejectedValue(new Error("lookup unavailable"));}
+      if (failure === "lookup cancelled") {
+        vi.spyOn(vscode.window, "withProgress").mockImplementation((_options, task) => task(
+          { report: () => {} }, { isCancellationRequested: true, onCancellationRequested: () => ({ dispose: () => {} }) }
+        ));
+      }
+      if (failure === "confirmation cancelled") {vi.mocked(vscode.window.showWarningMessage).mockResolvedValue(undefined);}
+      const { commands, specs } = rig({ associations });
+      await commands.bulkCreateTests();
+      expect(specs).toEqual([]);
+      expect(workspace.applied).toEqual([]);
+      expect(associations.addTestsToContainer).not.toHaveBeenCalled();
+    }
+  );
+
+  it("names the created key missing its returned id and associates only the other created test", async () => {
+    const workspace = fakeWorkspace();
+    acceptConfirm();
+    const associations = associationSetup();
+    let created = 0;
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands, specs } = rig({ associations, create: async () => {
+      created++;
+      return { key: `CALC-${created}`, ...(created === 1 ? { issueId: "returned-1" } : {}), warnings: [] };
+    } });
+    await commands.bulkCreateTests();
+    expect(specs).toHaveLength(2);
+    expect(workspace.text()).toContain("@TEST_CALC-1");
+    expect(workspace.text()).toContain("@TEST_CALC-2");
+    expect(associations.addTestsToContainer).toHaveBeenNthCalledWith(1, "test-set", "test-set-id", ["returned-1"], expect.any(AbortSignal));
+    expect(associations.addTestsToContainer).toHaveBeenNthCalledWith(2, "test-plan", "test-plan-id", ["returned-1"], expect.any(AbortSignal));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("No returned issue id for CALC-2"));
+  });
+
+  it("keeps a remotely created test available for association when its local tag edit is rejected", async () => {
+    fakeWorkspace();
+    vi.mocked(vscode.workspace.applyEdit).mockResolvedValue(false);
+    acceptConfirm();
+    const associations = associationSetup();
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands, specs } = rig({ associations, selected: [scenarioDropId(LOGIN)], create: async () => ({ key: "CALC-9", issueId: "returned-9", warnings: [] }) });
+    await commands.bulkCreateTests();
+    expect(specs).toHaveLength(1);
+    expect(associations.addTestsToContainer).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenCalledWith("Created 1 Xray test, 0 scenarios linked, 1 scenario failed.", "Show Output");
+  });
+
+  it("keeps created tests and tags while stopping later associations after an unknown outcome", async () => {
+    const workspace = fakeWorkspace();
+    acceptConfirm();
+    const associations = associationSetup();
+    vi.mocked(associations.addTestsToContainer!).mockRejectedValue(new RemoteOutcomeUnknownError("Adding tests", "op-1"));
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands, specs } = rig({ associations, create: async () => ({ key: "CALC-9", issueId: "returned-9", warnings: [] }) });
+    await commands.bulkCreateTests();
+    expect(specs).toHaveLength(2);
+    expect(workspace.applied).toHaveLength(2);
+    expect(associations.addTestsToContainer).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("Created tests remain: CALC-9, CALC-9. The request outcome is unknown"));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("Association not attempted for Test Plan CALC-222"));
+  });
+
+  it("keeps the first created test and tag while cancellation prevents all membership writes", async () => {
+    const workspace = fakeWorkspace();
+    acceptConfirm();
+    const associations = associationSetup();
+    let cancel = (): void => {};
+    vi.spyOn(vscode.window, "withProgress").mockImplementation((_options, task) => task(
+      { report: () => {} }, {
+        isCancellationRequested: false,
+        onCancellationRequested: (callback) => {cancel = () => callback(undefined); return { dispose: () => {} };},
+      }
+    ));
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const { commands, specs } = rig({ associations, create: async () => {
+      cancel();
+      return { key: "CALC-9", issueId: "returned-9", warnings: [] };
+    } });
+    await commands.bulkCreateTests();
+    expect(specs).toHaveLength(1);
+    expect(workspace.text()).toContain("@TEST_CALC-9");
+    expect(associations.addTestsToContainer).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith("Created 1 Xray test, 1 not attempted.");
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("Association not attempted for Test Set CALC-111 and Test Plan CALC-222"));
   });
 });

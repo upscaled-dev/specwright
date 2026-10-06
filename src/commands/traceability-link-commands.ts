@@ -7,7 +7,7 @@ import {
   resolveBoardUnlink,
 } from "../traceability/board-data";
 import { BoardPanel } from "../traceability/board-panel";
-import { AuthoredTest, KeyGrammar, NewTestSpec, TraceabilityAdapter } from "../traceability/contracts";
+import { AuthoredTest, KeyGrammar, NewTestSpec, TestContainerTarget, TraceabilityAdapter } from "../traceability/contracts";
 import { LinkedRow, runLinkPickerFlow } from "../traceability/link-picker-flow";
 import {
   authorScenarioTest,
@@ -29,6 +29,7 @@ import { Logger } from "../utils/logger";
 import { errMsg } from "../utils/text";
 import type { WorkspaceTrust } from "../core/workspace-trust";
 import { providerWarnings } from "../traceability/provider-warnings";
+import { associateCreatedTests, prepareTestCreateAssociations, testCreateAssociationConfirmation } from "./test-create-associations";
 
 const REJECTED_WRITE = "the feature file edit was not applied";
 
@@ -232,6 +233,8 @@ export class TraceabilityLinkCommands {
     if (!authoring) {return;}
     const project = await this.resolveProjectForCreate();
     if (project === undefined) {return;}
+    const targets = await prepareTestCreateAssociations(adapter, project, this.logger);
+    if (targets === undefined) {return;}
 
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(scenario.filePath));
     const spec: NewTestSpec = {
@@ -241,7 +244,7 @@ export class TraceabilityLinkCommands {
     };
     const ui: AuthorScenarioTestUi = {
       confirm: () =>
-        this.confirmCreateTest(project, this.deps.siteUrl(), scenario.name, adapter.label),
+        this.confirmCreateTest(project, this.deps.siteUrl(), scenario.name, adapter.label, targets),
       info: (message) => {
         vscode.window.showInformationMessage(message);
       },
@@ -274,9 +277,14 @@ export class TraceabilityLinkCommands {
       vscode.window.showErrorMessage(
         error instanceof TagWriteRejected
           ? error.message
-          : `Could not create the ${adapter.label} test: ${errMsg(error)}`
+          : authored !== undefined
+            ? `The ${adapter.label} test ${authored.key ?? authored.issueId ?? "with unreadable key and id"} was created, but linking the scenario failed: ${errMsg(error)}`
+            : `Could not create the ${adapter.label} test: ${errMsg(error)}`
       );
     } finally {
+      if (authored !== undefined) {
+        await associateCreatedTests(adapter, targets, [authored], project, this.logger, this.deps.workspaceTrust);
+      }
       const warnings = providerWarnings(authored?.warnings ?? []);
       if (warnings.count > 0) {
         this.logger.warn(`${adapter.label} returned warnings creating a test`, {
@@ -328,11 +336,12 @@ export class TraceabilityLinkCommands {
     project: string,
     site: string,
     scenarioName: string,
-    providerLabel: string
+    providerLabel: string,
+    targets: readonly TestContainerTarget[]
   ): Promise<boolean> {
     const target = site !== "" ? `project ${project} on ${site}` : `project ${project}`;
     const choice = await vscode.window.showWarningMessage(
-      `Create a new ${providerLabel} test in ${target} from "${scenarioName}"?`,
+      `Create a new ${providerLabel} test in ${target} from "${scenarioName}"?${testCreateAssociationConfirmation(targets)}`,
       { modal: true },
       "Create test"
     );

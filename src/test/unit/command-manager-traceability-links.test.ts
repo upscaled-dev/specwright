@@ -9,6 +9,7 @@ import { Logger } from "../../utils/logger";
 import { ExtensionConfig } from "../../core/extension-config";
 import { ExternalRef, SyncProgress, SyncScope, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
+import { createXrayAdapterFactory } from "../../xray/xray-adapter-factory";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
 import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
@@ -20,6 +21,7 @@ import type { ScenarioRef } from "../../traceability/scenario-ref";
 import { applyWsEdit, EditEntry } from "./helpers/workspace-edit";
 import { captureHandlers, fakeDoc, makeContext, memento } from "./helpers/command-manager-harness";
 import { trustedWorkspace } from "./helpers/test-workspace-trust";
+import { connected, configWith, mapCredentialStore } from "./helpers/xray-setup-driver";
 
 
 
@@ -223,6 +225,7 @@ describe("traceability linkScenario command", () => {
   afterEach(() => {
     win.__resetWebviewPanels();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   const untracedNode = {
@@ -397,6 +400,182 @@ describe("traceability linkScenario command", () => {
 
     expect(sync).toHaveBeenCalledWith({ announce: false, explicitKey: "CALC", forceProject: true });
     changed.dispose();
+  });
+
+  it.each(["single create only", "single associated", "bulk associated", "single membership failed", "single tag rejected"])("creates Cucumber tests through the live Xray adapter: %s", async (mode) => {
+    const bulk = mode === "bulk associated";
+    const associated = mode !== "single create only";
+    const membershipFailed = mode === "single membership failed";
+    const tagRejected = mode === "single tag rejected";
+    const count = bulk ? 2 : 1;
+    const config = configWith({
+      "xray.siteUrl": "acme.atlassian.net",
+      "xray.apiRegion": "global",
+      "xray.defaultProjectKey": "calc",
+    });
+    const { store: credentials } = mapCredentialStore();
+    let adapter: TraceabilityAdapter | undefined;
+    let metadataSubscription: vscode.Disposable | undefined;
+    let activitySubscription: vscode.Disposable | undefined;
+    try {
+      await credentials.setCredentials("acme.atlassian.net", "client", "secret");
+      adapter = createXrayAdapterFactory(
+        credentials,
+        () => Promise.resolve(connected("acme.atlassian.net")),
+        memento(),
+        { resolveSteps: () => undefined, workspaceRootFor: () => undefined },
+        trustedWorkspace()
+      ).create({ config, logger: Logger.create() });
+      const metadata = adapter.metadata!;
+      const metadataMerged = new Promise<void>((resolve) => {
+        metadataSubscription = metadata.onDidChange(() => {
+          if (metadata.snapshot().tests.has(`CALC-${8 + count}`)) {
+            resolve();
+          }
+        });
+      });
+      const queries: string[] = [];
+      let created = 0;
+      const remoteTests: Array<{ issueId: string; gherkin: string; testType: { name: string; kind: string }; jira: { key: string; summary: string } }> = [];
+      vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+        if (url.endsWith("/authenticate")) {
+          return Promise.resolve({ status: 200, ok: true, headers: new Headers(), text: () => Promise.resolve(JSON.stringify("token")) } as Response);
+        }
+        const query = (JSON.parse(String(init.body)) as { query: string }).query;
+        queries.push(query);
+        if (query.includes("createTest(")) {
+          const isB = query.includes('summary: "B"');
+          remoteTests.push({
+            issueId: String(45678 + created), gherkin: isB ? "Scenario: B\n  Given z" : "Scenario: A\n  Given x\n  Then y",
+            testType: { name: "Cucumber", kind: "Gherkin" }, jira: { key: `CALC-${9 + created}`, summary: isB ? "B" : "A" },
+          });
+        }
+        const tests = query.includes("key in") ? remoteTests.filter((test) => query.includes(test.jira.key)) : remoteTests;
+        const body = query.includes("getTestSets(")
+          ? { data: { getTestSets: query.includes("CALC-111")
+            ? { results: [{ issueId: "set-111", jira: { key: "CALC-111" } }] }
+            : { total: 0, results: [] } } }
+          : query.includes("getTestPlans(")
+            ? { data: { getTestPlans: { results: [{ issueId: "plan-222", jira: { key: "CALC-222" } }] } } }
+          : query.includes("addTestsToTestSet(")
+            ? membershipFailed
+              ? { errors: [{ message: "Set membership rejected" }] }
+              : { data: { addTestsToTestSet: { addedTests: Array.from({ length: count }, (_, index) => String(45678 + index)) } } }
+          : query.includes("addTestsToTestPlan(")
+            ? { data: { addTestsToTestPlan: { addedTests: Array.from({ length: count }, (_, index) => String(45678 + index)) } } }
+          : query.includes("createTest(")
+          ? { data: { createTest: { test: { issueId: String(45678 + created), jira: { key: `calc-${9 + created++}` } }, warnings: [] } } }
+          : { data: { getTests: { total: tests.length, results: tests } } };
+        return Promise.resolve({ status: 200, ok: true, headers: new Headers(), text: () => Promise.resolve(JSON.stringify(body)) } as Response);
+      });
+      const scenario = { filePath: "/ws/a.feature", line: 4, name: "A", kind: "scenario" } as const;
+      const feature = "Feature: F\n\n@smoke\nScenario: A\n  Given x\n  Then y\n" + (bulk ? "\nScenario: B\n  Given z\n" : "");
+      let text = feature;
+      vi.spyOn(vscode.workspace, "openTextDocument").mockImplementation(() => Promise.resolve(fakeDoc(text)));
+      const applied: EditEntry[][] = [];
+      vi.spyOn(vscode.workspace, "applyEdit").mockImplementation((edit) => {
+        applied.push((edit as unknown as { __entries: EditEntry[] }).__entries);
+        if (!tagRejected) {text = applyWsEdit(text, applied.at(-1)!);}
+        return Promise.resolve(!tagRejected);
+      });
+      vi.spyOn(vscode.window, "showQuickPick").mockImplementation(async (items) =>
+        (items as readonly vscode.QuickPickItem[])[associated ? 3 : 0] as never
+      );
+      vi.spyOn(vscode.window, "showInputBox").mockResolvedValueOnce("calc-111" as never).mockResolvedValueOnce("CALC-222" as never);
+      const info = vi.spyOn(vscode.window, "showInformationMessage");
+      const error = vi.spyOn(vscode.window, "showErrorMessage");
+      const confirm = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue((bulk ? "Create tests" : "Create test") as never);
+      if (bulk) {
+        const scenarios = [scenario, { ...scenario, line: 8, name: "B" }];
+        await metadata.sync({ projectKeys: ["CALC"], testKeys: [] });
+        const manager = CommandManager.create(makeContext({ traceabilityAdapter: adapter, config }));
+        manager.setCredentialStore(credentials);
+        const scope = projectScopeStore(memento(), () => {});
+        manager.setTraceabilitySubsystem({
+          traceabilityPanelActive: true, connected: true, getActiveAdapter: () => adapter, getSnapshot: () => ({
+            links: [], untraced: scenarios.map((ref) => ({ scenario: ref, reqKeys: [] })), orphans: [],
+            stale: false, completeProjects: ["CALC"], errors: [],
+          }),
+          knownTestKeys: () => [...metadata.snapshot().tests.keys()], tagDerivedProjectKeys: () => [],
+          projectScope: () => scope, mappingPageSize: () => NO_MAPPING_PAGE_SIZE, onDidChangeSnapshot: metadata.onDidChange,
+        } as unknown as TraceabilitySubsystem);
+        traceabilityCommands(manager).openBoard();
+        const panel = win.__webviewPanels.at(-1)!;
+        await receiveBoard(panel, "shell", { type: "ready" });
+        await receiveBoard(panel, "board", { type: "scope", project: "CALC" });
+        for (const ref of scenarios) {
+          await receiveBoard(panel, "board", { type: "select", target: "scenario", id: scenarioDropId(ref), on: true });
+        }
+        expect(boardPosts(panel).filter((post) => post.type === "render").at(-1)).toMatchObject({
+          project: "CALC", createVerb: { enabled: true, label: "Create 2 tests in CALC" },
+          scenarios: expect.arrayContaining(scenarios.map((ref) => expect.objectContaining({ dropId: scenarioDropId(ref), selected: true }))),
+        });
+        const activity = traceabilityBoardDeps(manager);
+        const completed = new Promise<void>((resolve) => {
+          let started = false;
+          activitySubscription = activity.onDidChangeActivity(() => {
+            if (activity.mutationActive()) {started = true;}
+            else if (started) {resolve();}
+          });
+        });
+        await receiveBoard(panel, "board", { type: "bulkCreate" });
+        await completed;
+      } else {
+        const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter, config }));
+        await confirmLink(
+          handlers.get("playwrightBddRunner.traceability.linkScenario")!({ kind: "untraced", item: { scenario } }),
+          " create"
+        );
+      }
+      await metadataMerged;
+
+      const mutations = queries.filter((query) => query.includes("createTest("));
+      expect(mutations).toHaveLength(count);
+      const mutation = mutations.at(-1)!;
+      expect(mutation).toContain('testType: { name: "Cucumber" }');
+      expect(mutation).toContain('project: { key: "CALC" }');
+      expect(mutation).toContain('summary: "A"');
+      expect(mutation).toContain('gherkin: "Scenario: A\\n  Given x\\n  Then y"');
+      expect(confirm).toHaveBeenCalledWith(
+        expect.stringContaining("project CALC on acme.atlassian.net"),
+        { modal: true },
+        bulk ? "Create tests" : "Create test"
+      );
+      expect(applied).toHaveLength(count);
+      if (tagRejected) {
+        expect(text).toBe(feature);
+        expect(error).toHaveBeenCalledWith(expect.stringContaining("CALC-9 was created, but the feature file edit was not applied"));
+      } else {expect(text).toContain(`@smoke @TEST_CALC-${8 + count}\nScenario: A`);}
+      if (bulk) {expect(text).toContain("@TEST_CALC-9\nScenario: B");}
+      if (associated) {
+        expect(String(confirm.mock.calls[0]?.[0])).toContain("Test Set CALC-111 and Test Plan CALC-222");
+        const ids = bulk ? '"45678", "45679"' : '"45678"';
+        expect(queries.filter((query) => query.includes("addTestsToTestSet("))).toEqual([
+          `mutation { addTestsToTestSet(issueId: "set-111", testIssueIds: [${ids}]) { addedTests warning } }`,
+        ]);
+        expect(queries.filter((query) => query.includes("addTestsToTestPlan("))).toEqual([
+          `mutation { addTestsToTestPlan(issueId: "plan-222", testIssueIds: [${ids}]) { addedTests warning } }`,
+        ]);
+        for (const name of membershipFailed ? ["Test Plan CALC-222"] : ["Test Set CALC-111", "Test Plan CALC-222"]) {
+          expect(info).toHaveBeenCalledWith(expect.stringContaining(`Added ${count} of ${count} created tests to ${name}.`));
+        }
+        if (membershipFailed) {
+          expect(error).toHaveBeenCalledWith(expect.stringContaining("Created tests remain: CALC-9. Could not add tests to Test Set CALC-111"));
+          expect(error.mock.calls.some(([message]) => String(message).includes("Could not create"))).toBe(false);
+        }
+      } else {
+        expect(queries.some((query) => query.includes("addTestsTo"))).toBe(false);
+      }
+      expect(metadata.snapshot().tests.get(`CALC-${8 + count}`)).toMatchObject({
+        issueId: String(45677 + count), summary: "A", gherkin: "Scenario: A\n  Given x\n  Then y",
+      });
+      if (bulk) {expect(metadata.snapshot().tests.get("CALC-9")).toMatchObject({ issueId: "45678", summary: "B", gherkin: "Scenario: B\n  Given z" });}
+    } finally {
+      activitySubscription?.dispose();
+      metadataSubscription?.dispose();
+      await adapter?.dispose?.();
+      credentials.dispose();
+    }
   });
 
   async function reMap(feature: string): Promise<string> {
@@ -1351,4 +1530,3 @@ describe("traceability bulkCreateTests wiring", () => {
 });
 
 // The board is rebuilt from settings, so a settings edit only reaches an open one through a rebuild.
-

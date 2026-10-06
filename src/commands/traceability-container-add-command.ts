@@ -42,7 +42,8 @@ export class RemoteWriteCancellation extends Error {
 
 export function runContainerWrite<T>(
   title: string,
-  write: (signal: AbortSignal) => Promise<T>
+  write: (signal: AbortSignal) => Promise<T>,
+  parentSignal?: AbortSignal
 ): Promise<T> {
   return Promise.resolve(vscode.window.withProgress(
     {
@@ -52,10 +53,12 @@ export function runContainerWrite<T>(
     },
     async (_progress, token): Promise<T> => {
       const controller = new AbortController();
-      token.onCancellationRequested(() => controller.abort());
-      if (token.isCancellationRequested) {controller.abort();}
-      if (controller.signal.aborted) {throw new RemoteWriteCancellation(false);}
+      const abort = (): void => controller.abort();
+      const subscription = token.onCancellationRequested(abort);
+      parentSignal?.addEventListener("abort", abort, { once: true });
+      if (token.isCancellationRequested || parentSignal?.aborted) {controller.abort();}
       try {
+        if (controller.signal.aborted) {throw new RemoteWriteCancellation(false);}
         const result = await write(controller.signal);
         if (controller.signal.aborted) {throw new RemoteWriteCancellation(true);}
         return result;
@@ -63,6 +66,9 @@ export function runContainerWrite<T>(
         if (error instanceof RemoteWriteCancellation) {throw error;}
         if (controller.signal.aborted) {throw new RemoteWriteCancellation(true);}
         throw error;
+      } finally {
+        subscription.dispose();
+        parentSignal?.removeEventListener("abort", abort);
       }
     }
   ));
@@ -72,7 +78,7 @@ function projectTarget(site: string, project: string): string {
   return site !== "" ? `project ${project} on ${site}` : `project ${project}`;
 }
 
-function remoteOutcomeUnknown(error: unknown): RemoteOutcomeUnknownError | undefined {
+export function remoteOutcomeUnknown(error: unknown): RemoteOutcomeUnknownError | undefined {
   let current: unknown = error;
   const seen = new Set<unknown>();
   while (current instanceof Error && !seen.has(current)) {
@@ -155,17 +161,18 @@ async function confirmAppend(
   return choice === action;
 }
 
-function reportFailure(
+export function reportContainerAddFailure(
   noun: string,
   key: string,
   project: string,
   error: unknown,
-  logger: Logger
+  logger: Logger,
+  prefix = ""
 ): void {
   if (error instanceof RemoteWriteCancellation) {
     if (error.requestStarted) {
       vscode.window.showWarningMessage(
-        `Cancelled while waiting for Xray. Tests may still have been added to ${noun} ${key}; inspect ${key} before retrying.`
+        `${prefix}Cancelled while waiting for Xray. Tests may still have been added to ${noun} ${key}; inspect ${key} before retrying.`
       );
     }
     return;
@@ -178,12 +185,54 @@ function reportFailure(
       operationId: ambiguity.operationId,
     });
     vscode.window.showWarningMessage(
-      `The request outcome is unknown. Tests may have been added to ${noun} ${key}; inspect ${key} before retrying.`
+      `${prefix}The request outcome is unknown. Tests may have been added to ${noun} ${key}; inspect ${key} before retrying.`
     );
     return;
   }
   logger.error(`Adding tests to a ${noun} failed`, { project, key, error: errMsg(error) });
-  vscode.window.showErrorMessage(`Could not add tests to ${noun} ${key}: ${errMsg(error)}`);
+  vscode.window.showErrorMessage(`${prefix}Could not add tests to ${noun} ${key}: ${errMsg(error)}`);
+}
+
+export async function promptExistingContainer(
+  kind: TestContainerKind,
+  noun: string,
+  project: string,
+  adapter: TraceabilityAdapter,
+  resolve: ResolveContainer,
+  logger: Logger
+): Promise<TestContainerTarget | undefined> {
+  const entered = await vscode.window.showInputBox({
+    title: `Add to existing ${noun}`,
+    prompt: `Enter the exact ${noun} key in project ${project}.`,
+    placeHolder: `${project}-123`,
+    validateInput: (value) => {
+      const checked = validateContainerTargetKey(value, project, adapter.keyGrammar);
+      return checked.kind === "invalid" ? checked.message : undefined;
+    },
+  });
+  if (entered === undefined) {return;}
+  const checked = validateContainerTargetKey(entered, project, adapter.keyGrammar);
+  if (checked.kind === "invalid") {
+    vscode.window.showWarningMessage(checked.message);
+    return;
+  }
+  let lookup: ContainerLookup;
+  try {
+    lookup = await resolveExistingContainer(kind, noun, checked.key, resolve);
+  } catch (error) {
+    logger.error(`Resolving a ${noun} failed`, { key: checked.key, error: errMsg(error) });
+    vscode.window.showErrorMessage(`Could not resolve ${noun} ${checked.key}: ${errMsg(error)}`);
+    return;
+  }
+  if (lookup.kind === "cancelled") {return;}
+  const resolved = lookup.target;
+  if (resolved?.kind !== kind || resolved.key !== checked.key || resolved.issueId.trim() === "") {
+    vscode.window.showWarningMessage(
+      `${checked.key} could not be resolved as a ${noun} in project ${project}. No changes were made.`
+    );
+    return;
+  }
+  return resolved;
 }
 
 export async function runContainerAddCommand(
@@ -210,37 +259,8 @@ export async function runContainerAddCommand(
     );
     return;
   }
-  const entered = await vscode.window.showInputBox({
-    title: `Add to existing ${noun}`,
-    prompt: `Enter the exact ${noun} key in project ${project}.`,
-    placeHolder: `${project}-123`,
-    validateInput: (value) => {
-      const checked = validateContainerTargetKey(value, project, adapter.keyGrammar);
-      return checked.kind === "invalid" ? checked.message : undefined;
-    },
-  });
-  if (entered === undefined) {return;}
-  const checked = validateContainerTargetKey(entered, project, adapter.keyGrammar);
-  if (checked.kind === "invalid") {
-    vscode.window.showWarningMessage(checked.message);
-    return;
-  }
-  let lookup: ContainerLookup;
-  try {
-    lookup = await resolveExistingContainer(kind, noun, checked.key, resolve);
-  } catch (error) {
-    logger.error(`Resolving a ${noun} failed`, { key: checked.key, error: errMsg(error) });
-    vscode.window.showErrorMessage(`Could not resolve ${noun} ${checked.key}: ${errMsg(error)}`);
-    return;
-  }
-  if (lookup.kind === "cancelled") {return;}
-  const resolved = lookup.target;
-  if (resolved?.kind !== kind || resolved.key !== checked.key) {
-    vscode.window.showWarningMessage(
-      `${checked.key} could not be resolved as a ${noun} in project ${project}. Nothing was added.`
-    );
-    return;
-  }
+  const resolved = await promptExistingContainer(kind, noun, project, adapter, resolve, logger);
+  if (resolved === undefined) {return;}
   if (!(await confirmAppend(noun, resolved.key, project, keys.length, adapter.label, deps.siteUrl()))) {return;}
   try {
     const result = await runContainerWrite(`Adding selected tests to ${adapter.label} ${noun} ${resolved.key}…`, (signal) =>
@@ -260,6 +280,6 @@ export async function runContainerAddCommand(
     (report.inspect ? vscode.window.showWarningMessage : vscode.window.showInformationMessage)(message);
   } catch (error) {
     deps.scheduleProjectSync(project, [errMsg(error)]);
-    reportFailure(noun, resolved.key, project, error, logger);
+    reportContainerAddFailure(noun, resolved.key, project, error, logger);
   }
 }
