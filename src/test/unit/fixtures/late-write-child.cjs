@@ -8,7 +8,7 @@ const settled = path.join(directory, "settled");
 const observed = path.join(directory, "ready-observed");
 
 function record(value) {
-  fs.writeFileSync(marker + ".part", JSON.stringify(value));
+  fs.writeFileSync(marker + ".part", JSON.stringify({ node: process.version, platform: process.platform, ...value }));
   fs.renameSync(marker + ".part", marker);
 }
 
@@ -19,10 +19,10 @@ function errorDetails(error, fallbackCode = "FIXTURE_ERROR") {
 
 if (role !== "grandchild") {
   // Keep the parent alive until the inherited pipe has carried the grandchild's ready output.
-  // POSIX needs a separate group to survive the runner's completed-command cleanup.
+  // Escape POSIX group cleanup and Windows libuv's kill-on-parent-exit job. Stdout stays inherited.
   const child = cp.spawn(process.execPath, [__filename, directory, lifetime, "grandchild"], {
     stdio: ["inherit", "inherit", "inherit", "ipc"],
-    detached: process.platform !== "win32",
+    detached: true,
   });
   let ready = false;
   const fail = (phase, error, fallbackCode) => {
@@ -46,16 +46,15 @@ if (role !== "grandchild") {
     child.unref();
   });
 } else {
-  let phase = "stdout initialization";
-  let handle;
+  let phase = "ready write";
   let poll;
   let finished = false;
-  const finish = (outcome, error) => {
+  const finish = (outcome, error, bytesWritten) => {
     if (finished) {return;}
     finished = true;
     clearInterval(poll);
     clearTimeout(timeout);
-    record({ pid: process.pid, node: process.version, platform: process.platform, phase, handle, outcome,
+    record({ pid: process.pid, phase, outcome, bytesWritten,
       ...(error ? errorDetails(error, outcome === "timeout" ? "FIXTURE_TIMEOUT" : "FIXTURE_ERROR") : {}) });
     process.exit(outcome === "write-error" ? 0 : 1);
   };
@@ -63,29 +62,30 @@ if (role !== "grandchild") {
   process.on("uncaughtException", (error) => finish("unexpected", error));
   try {
     record({ pid: process.pid, phase });
-    const stdout = process.stdout;
-    stdout.on("error", (error) => finish(phase === "late write" ? "write-error" : "unexpected", error));
-    phase = "handle probe";
-    const fd = fs.fstatSync(1);
-    handle = fd.isFIFO() ? "fifo" : fd.isSocket() ? "socket" : "other";
-    phase = "ready write";
-    stdout.write("ready\n", (error) => {
+    // Raw async writes keep the watchdog runnable, including Windows' otherwise blocking stdio.
+    const readyOutput = Buffer.from("ready\n");
+    fs.write(1, readyOutput, (error, bytesWritten) => {
       if (error) {finish("unexpected", error); return;}
+      if (bytesWritten !== readyOutput.length) {
+        finish("unexpected", { code: "FIXTURE_SHORT_WRITE", message: `Only ${bytesWritten} readiness bytes written` }, bytesWritten);
+        return;
+      }
       phase = "waiting for observation";
-      record({ pid: process.pid, phase, handle });
+      record({ pid: process.pid, phase });
       poll = setInterval(() => {
         if (phase === "waiting for observation") {
           if (!fs.existsSync(observed)) {return;}
           phase = "waiting for settlement";
-          record({ pid: process.pid, phase, handle });
+          record({ pid: process.pid, phase });
           process.send({ ready: true });
           return;
         }
         if (!fs.existsSync(settled)) {return;}
         clearInterval(poll);
         phase = "late write";
+        record({ pid: process.pid, phase });
         try {
-          stdout.write("late", (error) => finish(error ? "write-error" : "written", error));
+          fs.write(1, Buffer.from("late"), (error, bytesWritten) => finish(error ? "write-error" : "written", error, bytesWritten));
         } catch (error) {finish("write-error", error);}
       }, 50);
     });

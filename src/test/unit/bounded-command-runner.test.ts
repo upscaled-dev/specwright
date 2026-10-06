@@ -292,9 +292,9 @@ describe("runBoundedCommand", () => {
     const script = path.join(__dirname, "fixtures", "late-write-child.cjs");
     const marker = path.join(dir, LATE_WRITE_MARKER);
     const observed = path.join(dir, "ready-observed");
-    // Prove readiness while the inherited pipe is open, then observe the actual late-write callback
-    // or exception after settlement. Native Windows verification is required for this pipe lifecycle.
-    const readRecord = (): { pid?: number; phase: string; handle?: string; outcome?: string; code?: string; message?: string } | undefined =>
+    // Observed readiness bytes prove the inherited pipe, independently of platform-specific stat
+    // predicates. Require an actual late-write outcome; native Windows verification remains required.
+    const readRecord = (): { pid?: number; phase: string; outcome?: string; code?: string; message?: string; bytesWritten?: number; node: string; platform: string } | undefined =>
       fs.existsSync(marker) ? JSON.parse(fs.readFileSync(marker, "utf8")) : undefined;
     let streamed = "";
     let readyObserved = false;
@@ -321,19 +321,21 @@ describe("runBoundedCommand", () => {
       const record = await vi.waitFor(() => {
         const current = readRecord();
         if (current?.outcome === undefined) {
+          if (current?.pid !== undefined && !stillRunning(current.pid)) {
+            const completed = readRecord();
+            if (completed?.outcome !== undefined) {return completed;}
+            return { ...(completed ?? current), outcome: "exited", code: "FIXTURE_WRITER_EXITED", message: "Grandchild exited without recording its write completion" };
+          }
           throw new Error(`Grandchild late write has not completed: ${JSON.stringify(current)}; runner stderr: ${result.error}`);
         }
         return current;
       }, { timeout: LATE_WRITE_WAIT_MS, interval: MARKER_POLL_MS });
 
       expect(record, JSON.stringify(record)).toMatchObject({ phase: "late write", outcome: "write-error" });
-      // Pipe and socket backends can report peer closure differently. Setup/probe failures and
+      // Pipe and socket backends can report peer closure differently. Setup failures and
       // unrelated write errors still fail with the recorded phase, code, and message.
       expect(["EPIPE", "ECONNRESET", "ENOTCONN"], JSON.stringify(record)).toContain(record.code);
-      // The runner's stdio pipe reaches the grandchild as a socketpair on POSIX and a named pipe on
-      // Windows. A grandchild given stdio:"ignore" would land on the null device instead, so this is
-      // what makes the silence below the runner closing an inherited pipe.
-      expect(["fifo", "socket"]).toContain(record.handle);
+      expect(record.bytesWritten).toBe(0);
       expect(streamed).toBe(settledOutput);
       expect(streamed).not.toContain("late");
     } finally {
