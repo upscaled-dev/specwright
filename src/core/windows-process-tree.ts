@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileException } from "node:child_process";
 
 /** One row of the Windows process table. */
 export interface ProcessEntry {
@@ -24,38 +24,60 @@ export interface ProcessMember {
   readonly creationDate?: number | undefined;
 }
 
-export type ProcessTableReader = (script: string) => Promise<string | undefined>;
+/** PowerShell stdout for `script`; rejects with an Error that names why the query failed. */
+export type ProcessTableReader = (script: string) => Promise<string>;
 
-const QUERY_TIMEOUT_MS = 5_000;
+export const WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 5_000;
 // Three fields per process; a megabyte holds several thousand rows, and a table larger than that
 // is not one this probe can reason about anyway.
 const QUERY_MAX_BYTES = 1024 * 1024;
-const SELECTION = "Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress";
-const TABLE_QUERY = `Get-CimInstance Win32_Process | ${SELECTION}`;
+const STDERR_EXCERPT_CHARS = 200;
+const QUERY = "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process";
+// Windows PowerShell can expand DateTime properties into nested JSON. Normalize the instant in
+// the producer so every inventory and identity probe receives the same UTC string.
+const SELECTION = "-Property ProcessId,ParentProcessId,CreationDate | " +
+  "Select-Object ProcessId,ParentProcessId,@{Name='CreationDate';Expression={" +
+  "if ($null -ne $_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o', " +
+  "[System.Globalization.CultureInfo]::InvariantCulture) }}} | ConvertTo-Json -Compress";
+const TABLE_QUERY = `${QUERY} ${SELECTION}`;
 
 const DMTF = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-])(\d{3})$/;
 const DOTNET_DATE = /^\/Date\((-?\d+)(?:[+-]\d{4})?\)\/$/;
 const ISO = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$/;
 
-function runPowerShell(script: string): Promise<string | undefined> {
-  return new Promise((resolve) => {
+function powerShellFailure(error: ExecFileException, stderr: string): string {
+  if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+    return `PowerShell output exceeded ${QUERY_MAX_BYTES} bytes`;
+  }
+  if (error.killed) {return `PowerShell timed out after ${WINDOWS_PROCESS_QUERY_TIMEOUT_MS}ms`;}
+  if (typeof error.code === "number") {
+    const excerpt = stderr.replaceAll(/\s+/g, " ").trim().slice(0, STDERR_EXCERPT_CHARS);
+    return `PowerShell exited with code ${error.code}${excerpt === "" ? "" : `: ${excerpt}`}`;
+  }
+  return `PowerShell could not start: ${error.message}`;
+}
+
+function runPowerShell(script: string): Promise<string> {
+  return new Promise((resolve, reject) => {
     execFile(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", script],
       {
         encoding: "utf8",
-        timeout: QUERY_TIMEOUT_MS,
+        timeout: WINDOWS_PROCESS_QUERY_TIMEOUT_MS,
         maxBuffer: QUERY_MAX_BYTES,
         windowsHide: true,
       },
-      (error, stdout) => {resolve(error === null ? stdout : undefined);}
+      (error, stdout, stderr) => {
+        if (error === null) {resolve(stdout);}
+        else {reject(new Error(powerShellFailure(error, stderr)));}
+      }
     );
   });
 }
 
-// Get-CimInstance hands back a DateTime, which PowerShell serializes as ISO 8601 or as the .NET
-// epoch literal depending on its version, while raw CIM keeps the DMTF stamp. An unrecognized
-// shape is a failed probe, never a guess.
+// Normalize production timestamps before JSON serialization; retain the known string formats
+// for readers supplying an older snapshot. An unrecognized shape is a failed probe, never a guess.
 function parseCreationDate(value: unknown): number | undefined {
   if (typeof value !== "string") {return undefined;}
   const dmtf = DMTF.exec(value);
@@ -96,50 +118,42 @@ function readEntry(row: unknown): ProcessEntry | undefined {
   return creationDate === undefined ? undefined : { pid, parentPid, creationDate };
 }
 
-function parseProcessRows(output: string): readonly ProcessEntry[] | undefined {
+const UNREADABLE_ROWS = "PowerShell output could not be read as process rows";
+
+function parseProcessRows(output: string): readonly ProcessEntry[] {
   const text = output.trim();
   // An answer with no rows: what that means is the caller's to decide.
   if (text === "" || text === "null") {return [];}
   let parsed: unknown;
-  try {parsed = JSON.parse(text);} catch {return undefined;}
+  try {parsed = JSON.parse(text);} catch {throw new Error(UNREADABLE_ROWS);}
   if (parsed === null) {return [];}
   const entries: ProcessEntry[] = [];
   for (const row of Array.isArray(parsed) ? parsed : [parsed]) {
     const entry = readEntry(row);
-    if (entry === undefined) {return undefined;}
+    if (entry === undefined) {throw new Error(UNREADABLE_ROWS);}
     entries.push(entry);
   }
   return entries;
 }
 
-async function queryProcesses(
-  script: string,
-  read: ProcessTableReader
-): Promise<readonly ProcessEntry[] | undefined> {
-  const output = await read(script);
-  return output === undefined ? undefined : parseProcessRows(output);
-}
-
-/** The live Windows process table, or undefined when it could not be read or understood. */
+/** The live Windows process table. Rejects with the reason it could not be read or understood. */
 export async function readProcessTable(
   read: ProcessTableReader = runPowerShell
-): Promise<readonly ProcessEntry[] | undefined> {
-  const rows = await queryProcesses(TABLE_QUERY, read);
+): Promise<readonly ProcessEntry[]> {
+  const rows = parseProcessRows(await read(TABLE_QUERY));
   // A live table always lists System and Idle. PowerShell exits 0 with empty output when the CIM
   // query itself fails, so no rows is a failed probe, never an empty machine.
-  return rows === undefined || rows.length === 0 ? undefined : rows;
+  if (rows.length === 0) {throw new Error("PowerShell returned no process rows");}
+  return rows;
 }
 
-/** The identity of one live process, or undefined when it already exited or could not be read. */
+/** The identity of one live process, or undefined when it already exited. Rejects when unreadable. */
 export async function readProcessIdentity(
   pid: number,
   read: ProcessTableReader = runPowerShell
 ): Promise<ProcessIdentity | undefined> {
-  const rows = await queryProcesses(
-    `Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | ${SELECTION}`,
-    read
-  );
-  const creationDate = rows?.find((entry) => entry.pid === pid)?.creationDate;
+  const rows = parseProcessRows(await read(`${QUERY} -Filter "ProcessId=${pid}" ${SELECTION}`));
+  const creationDate = rows.find((entry) => entry.pid === pid)?.creationDate;
   return creationDate === undefined ? undefined : { pid, creationDate };
 }
 

@@ -5,12 +5,14 @@ import { StringDecoder } from "node:string_decoder";
 import { BoundedOutputTail, EXECUTION_LIMITS, truncationNotice } from "./execution-limits";
 import { errMsg, plural } from "../utils/text";
 import type { Logger } from "../utils/logger";
-import { terminationLease, type TerminationLease } from "./execution-admission";
+import type { TerminationLease } from "./execution-admission";
+import { playwrightCliInvocation, stopPlaywrightCli, PLAYWRIGHT_STOP_GRACE_MS } from "./playwright-cli-cancellation";
 import {
   readProcessIdentity,
   readProcessTable,
   survivingMembers,
   treeMembers,
+  WINDOWS_PROCESS_QUERY_TIMEOUT_MS,
   type ProcessEntry,
   type ProcessIdentity,
   type ProcessMember,
@@ -21,15 +23,16 @@ export type CommandOutputHandler = (stream: "stdout" | "stderr", text: string) =
 /** Flush grace after an exit, and the wait between kill escalations on cancellation. */
 export const TERMINATION_GRACE_MS = 2_000;
 
-// The Windows kill, confirm, retry, confirm sequence runs against this deadline; a kill already in
-// flight keeps its own TERMINATION_GRACE_MS on top of it.
-export const WINDOWS_TERMINATION_BUDGET_MS = 8_000;
+export const WINDOWS_TASKKILL_TIMEOUT_MS = 10_000;
+// A pending identity, four inventories, two kill attempts and two settle windows must fit.
+// A kill started at the deadline keeps its own timeout on top of the confirmation budget.
+export const WINDOWS_TERMINATION_BUDGET_MS =
+  5 * WINDOWS_PROCESS_QUERY_TIMEOUT_MS +
+  2 * WINDOWS_TASKKILL_TIMEOUT_MS +
+  2 * TERMINATION_GRACE_MS;
 /** The longest the Windows ladder can run: its confirmation budget plus that in-flight kill. */
 export const WINDOWS_TERMINATION_WORST_CASE_MS =
-  WINDOWS_TERMINATION_BUDGET_MS + TERMINATION_GRACE_MS;
-// A recorded member serializes to about 40 bytes, so a lease carrying 200 of them plus its failure
-// text lands near half of the durable record's MAX_ADMISSION_RECORD_BYTES.
-const RECORDED_MEMBERS = 200;
+  PLAYWRIGHT_STOP_GRACE_MS + WINDOWS_TERMINATION_BUDGET_MS + WINDOWS_TASKKILL_TIMEOUT_MS;
 // How many of them a failure message names before it counts the rest.
 const LISTED_MEMBERS = 20;
 
@@ -113,7 +116,7 @@ export interface BoundedCommandResult {
   readonly error: string;
   readonly returnCode: number;
   readonly outputStreamed?: boolean;
-  /** The owned process tree could not be proven gone; callers must keep admission closed. */
+  /** A recorded process outlived termination. Set only together with terminationLease. */
   readonly terminationFailure?: string | undefined;
   readonly terminationLease?: TerminationLease | undefined;
 }
@@ -309,7 +312,15 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
       const invocation = shell
         ? { executable: command, args: [] as string[] }
         : resolveExecutableCommand(command, workingDir);
-      const child = spawn(invocation.executable, invocation.args, {
+      const requested = shell ? undefined : packageBin(parseExecutableCommand(command));
+      const cooperative = signal !== undefined && requested?.name === "playwright" && requested.args[0] === "test"
+        ? playwrightCliInvocation(
+          process.platform === "win32" ? invocation.args[0] : invocation.executable,
+          process.platform === "win32" ? invocation.args.slice(1) : invocation.args
+        )
+        : undefined;
+      const launched = cooperative ?? invocation;
+      const child = spawn(launched.executable, launched.args, {
         cwd: workingDir,
         shell,
         // POSIX: detach so the child leads its own process group; killing that group on
@@ -317,7 +328,7 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
         // shell would orphan playwright. Windows uses awaited taskkill /T instead.
         ...(process.platform === "win32" ? {} : { detached: true }),
         env: { ...process.env, ...(extraEnv ?? {}) },
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: cooperative ? ["pipe", "pipe", "pipe", "ipc"] : ["pipe", "pipe", "pipe"],
       });
       // Windows terminates the tree only on cancellation, and only an identity captured while the
       // process is alive lets the later survivor probe tell this tree from a reused pid. The query
@@ -325,8 +336,13 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
       const windowsIdentity = process.platform === "win32" &&
         signal !== undefined &&
         child.pid !== undefined
-        ? readProcessIdentity(child.pid).catch(() => undefined)
-        : Promise.resolve(undefined);
+        ? readProcessIdentity(child.pid).then(
+          (identity): RootCapture => (identity === undefined
+            ? { reason: "the process exited or had no readable creation time when its identity was queried" }
+            : { identity }),
+          (error: unknown): RootCapture => ({ reason: errMsg(error) })
+        )
+        : Promise.resolve<RootCapture>({ reason: "no identity query ran for this command" });
       const capture = onOutput === undefined ? undefined : captures.get(onOutput);
       const checkpoint = capture?.checkpoint();
       const stdout = capture === undefined
@@ -411,12 +427,17 @@ export function runBoundedCommand(options: BoundedCommandOptions): Promise<Bound
       };
       const finishAfterTermination = (): void => {
         if (termination !== undefined) {return;}
-        termination = terminateOwnedTree(child, logger, windowsIdentity)
+        termination = (cancelled && cooperative !== undefined
+          ? stopPlaywrightCli(child).then((stopped) => (stopped
+            ? undefined
+            : terminateOwnedTree(child, logger, windowsIdentity)))
+          : terminateOwnedTree(child, logger, windowsIdentity))
           // Bookkeeping that throws proves nothing about the tree, and a run left unsettled would
           // hold the execution slot for the rest of the session.
-          .catch((error: unknown) => (child.pid === undefined
-            ? undefined
-            : unconfirmedTermination(child.pid, errMsg(error))))
+          .catch((error: unknown) => releaseUnproven(
+            logger,
+            `Process termination could not be confirmed: ${errMsg(error)}.`
+          ))
           .then((outcome) => {
             if (outcome !== undefined) {
               logger.error(outcome.failure, { command, workingDir });
@@ -531,33 +552,45 @@ async function terminatePosixTree(pid: number, logger: Logger): Promise<Terminat
   await delay(TERMINATION_GRACE_MS);
   if (!processGroupExists(pid)) {return undefined;}
   const failure = `Process-group termination could not be confirmed within ${2 * TERMINATION_GRACE_MS}ms after SIGTERM and SIGKILL.`;
-  return { failure, lease: terminationLease({ kind: "posix-group", pgid: pid, failure }) };
+  return { failure, lease: { kind: "posix-group", pgid: pid, failure } };
+}
+
+/** Proof or release: an unproven termination frees the slot and logs why. */
+function releaseUnproven(logger: Logger, reason: string): undefined {
+  const monitor = process.platform === "win32" ? "Task Manager" : "your system's process monitor";
+  logger.warn(`${reason} Cancellation was released without that proof. If Playwright or browser ` +
+    `processes remain, end them in ${monitor}.`);
+  return undefined;
 }
 
 /** taskkill's own verdict on one attempt: undefined when it reported the tree terminated. */
 function runTaskkill(pid: number): Promise<string | undefined> {
   return new Promise((resolve) => {
+    const diagnostics = new BoundedOutputTail(4096);
     let finished = false;
     const complete = (failure?: string): void => {
       if (finished) {return;}
       finished = true;
       clearTimeout(timer);
-      resolve(failure);
+      const detail = diagnostics.retained().replaceAll(/\s+/g, " ").trim().slice(0, 200);
+      resolve(failure === undefined || detail === "" ? failure : `${failure} ${detail}`);
     };
     let killer: ChildProcess;
     try {
       killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
         windowsHide: true,
-        stdio: "ignore",
+        stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {
       resolve(`Process-tree termination failed to start: ${errMsg(error)}.`);
       return;
     }
+    killer.stdout?.on("data", (data: Buffer) => diagnostics.append(data));
+    killer.stderr?.on("data", (data: Buffer) => diagnostics.append(data));
     const timer = setTimeout(() => {
       try {killer.kill("SIGKILL");} catch { /* the timeout failure is authoritative */ }
-      complete(`Process-tree termination did not complete within ${TERMINATION_GRACE_MS}ms.`);
-    }, TERMINATION_GRACE_MS);
+      complete(`Process-tree termination did not complete within ${WINDOWS_TASKKILL_TIMEOUT_MS}ms.`);
+    }, WINDOWS_TASKKILL_TIMEOUT_MS);
     timer.unref?.();
     killer.once("error", (error) => {
       complete(`Process-tree termination failed: ${errMsg(error)}.`);
@@ -573,15 +606,22 @@ function runTaskkill(pid: number): Promise<string | undefined> {
 function withDeadline<T>(work: Promise<T>, deadline: number): Promise<T | undefined> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {return Promise.resolve(undefined);}
-  return Promise.race([work, delay(remaining).then(() => undefined)]);
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), remaining);
+    timer.unref?.();
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 
 const WINDOW_ELAPSED = "Process-tree termination could not be confirmed: the " +
   `${WINDOWS_TERMINATION_BUDGET_MS}ms confirmation window elapsed.`;
-const TABLE_UNREADABLE =
-  "Process-tree termination could not be confirmed: the Windows process table could not be read.";
+/** The spawned root pinned to its creation instant, or why it could not be. */
+type RootCapture = { readonly identity: ProcessIdentity } | { readonly reason: string };
 
-const TIMED_OUT = Symbol("confirmation window elapsed");
+function unpinned(reason: string): string {
+  return `Process-tree termination could not be confirmed: the process identity is unknown (${reason}).`;
+}
 
 /** A table to confirm against, or the reason this attempt has none. Read at the moment it fails. */
 type TableProbe =
@@ -591,53 +631,29 @@ type TableProbe =
 async function probeTable(deadline: number): Promise<TableProbe> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {return { kind: "unconfirmed", failure: WINDOW_ELAPSED };}
-  const rows = await Promise.race([
-    readProcessTable(),
-    delay(remaining).then((): typeof TIMED_OUT => TIMED_OUT),
-  ]);
-  if (rows === TIMED_OUT) {return { kind: "unconfirmed", failure: WINDOW_ELAPSED };}
-  return rows === undefined
-    ? { kind: "unconfirmed", failure: TABLE_UNREADABLE }
-    : { kind: "table", rows };
-}
-
-/** Bookkeeping that could not run at all, so nothing about the tree is proven. */
-function unconfirmedTermination(pid: number, message: string): TerminationOutcome {
-  const failure = `Process termination could not be confirmed: ${message}.`;
-  return {
-    failure,
-    lease: terminationLease(process.platform === "win32"
-      ? { kind: "windows-tree", pid, failure }
-      : { kind: "posix-group", pgid: pid, failure }),
-  };
-}
-
-function windowsOutcome(
-  pid: number,
-  failure: string,
-  root?: ProcessIdentity,
-  pending?: readonly ProcessMember[] | "unconfirmable"
-): TerminationOutcome {
-  // The lease is a size-bounded durable record. A tree too large to record cannot be proven gone
-  // from a later table, so it says so instead of carrying a truncated list that would read as one.
-  const survivors = Array.isArray(pending) && pending.length > RECORDED_MEMBERS
-    ? "unconfirmable" as const
-    : pending;
-  return {
-    failure,
-    lease: terminationLease({
-      kind: "windows-tree",
-      pid,
-      failure,
-      ...(root === undefined ? {} : { root }),
-      ...(survivors === undefined ? {} : { survivors }),
-    }),
-  };
+  const probe = await withDeadline(readProcessTable().then(
+    (rows): TableProbe => ({ kind: "table", rows }),
+    (error: unknown): TableProbe => ({
+      kind: "unconfirmed",
+      failure: "Process-tree termination could not be confirmed: the Windows process table could " +
+        `not be read (${errMsg(error)}).`,
+    })
+  ), deadline);
+  return probe ?? { kind: "unconfirmed", failure: WINDOW_ELAPSED };
 }
 
 interface KillAttempt {
   readonly killed: string | undefined;
   readonly probe: TableProbe;
+}
+
+function rootMatches(snapshot: readonly ProcessEntry[], root: ProcessIdentity): boolean {
+  return snapshot.some((row) => row.pid === root.pid && row.creationDate === root.creationDate);
+}
+
+function stopOwnedRoot(child: ChildProcess, logger: Logger): void {
+  try {child.kill("SIGKILL");}
+  catch (error) {logger.warn(`The owned process could not be stopped: ${errMsg(error)}.`);}
 }
 
 /** Kill the tree, let it settle the way the POSIX escalation does, then re-read the table. */
@@ -665,47 +681,70 @@ function unprovenFailure(reason: string, members: readonly ProcessMember[]): str
 
 /**
  * Membership is fixed from a snapshot taken before the kill, because a killed tree can no longer be
- * walked; afterwards each recorded identity is checked for itself. The run is released only when
- * every one of them is gone. Membership is therefore only as complete as that snapshot: a process
- * whose own parent had already exited is not enrolled, because nothing links it to this run any
- * more. Leaving that tail out is the price of never enrolling a stranger's process.
+ * walked; afterwards each recorded identity is checked for itself. Only a recorded member that a
+ * live table still lists after cleanup blocks the run. An unreadable first confirmation releases
+ * without proof; once a survivor is confirmed, later unreadable probes retain its identity.
+ * Membership is therefore only as complete as that snapshot: a process whose own parent had
+ * already exited is not enrolled, because nothing links it to this run any more. Leaving that tail
+ * out is the price of never enrolling a stranger's process.
  */
 async function terminateWindowsTree(
-  pid: number,
-  identity: Promise<ProcessIdentity | undefined>
+  child: ChildProcess,
+  identity: Promise<RootCapture>,
+  logger: Logger
 ): Promise<TerminationOutcome | undefined> {
+  const pid = child.pid;
+  if (pid === undefined) {return undefined;}
   const deadline = Date.now() + WINDOWS_TERMINATION_BUDGET_MS;
-  const root = await withDeadline(identity, deadline);
-  // Without a captured identity nothing can tell this tree from a reused pid afterwards, so
-  // taskkill's own verdict stands and the lease it writes stays clearable only by a reboot.
-  if (root === undefined) {
-    const killed = await runTaskkill(pid);
-    return killed === undefined ? undefined : windowsOutcome(pid, killed);
+  const capture = await withDeadline(identity, deadline) ??
+    { reason: "the identity query did not answer within the confirmation window" };
+  // Without a captured identity nothing can tell this tree from a reused pid afterwards.
+  if (!("identity" in capture)) {
+    stopOwnedRoot(child, logger);
+    return releaseUnproven(logger, unpinned(capture.reason));
   }
+  const root = capture.identity;
   const before = await probeTable(deadline);
   if (before.kind === "unconfirmed") {
-    const killed = await runTaskkill(pid);
-    return windowsOutcome(pid, detailed(before.failure, killed), root, "unconfirmable");
+    stopOwnedRoot(child, logger);
+    return releaseUnproven(logger, before.failure);
+  }
+  if (!rootMatches(before.rows, root)) {
+    stopOwnedRoot(child, logger);
+    return releaseUnproven(logger, "The owned root no longer has its captured identity in the Windows process table.");
   }
   let members = treeMembers(before.rows, [root]);
   const first = await killAndProbe(pid, deadline);
   if (first.probe.kind === "unconfirmed") {
-    const failure = unprovenFailure(first.probe.failure, members);
-    return windowsOutcome(pid, detailed(failure, first.killed), root, members);
+    return releaseUnproven(logger, detailed(unprovenFailure(first.probe.failure, members), first.killed));
   }
   const remaining = survivingMembers(first.probe.rows, members);
   // A confirmed-empty tree is released whatever taskkill reported: exit code 128 means it found
   // nothing left to kill, which is exactly the state the probe just proved.
   if (remaining.length === 0) {return undefined;}
   members = treeMembers(first.probe.rows, remaining);
+  // A fresh retry inventory prevents taskkill from targeting a reused numeric root PID.
+  const retry = await probeTable(deadline);
+  if (retry.kind === "unconfirmed") {
+    const failure = unprovenFailure(retry.failure, members);
+    return { failure, lease: { kind: "windows-tree", pid, root, survivors: members, failure } };
+  }
+  const retrySurvivors = survivingMembers(retry.rows, members);
+  if (retrySurvivors.length === 0) {return undefined;}
+  members = treeMembers(retry.rows, retrySurvivors);
+  if (!rootMatches(retry.rows, root)) {
+    const failure = survivorFailure(members);
+    return { failure, lease: { kind: "windows-tree", pid, root, survivors: members, failure } };
+  }
   const second = await killAndProbe(pid, deadline);
   if (second.probe.kind === "unconfirmed") {
-    const failure = unprovenFailure(second.probe.failure, members);
-    return windowsOutcome(pid, detailed(failure, second.killed), root, members);
+    const failure = detailed(unprovenFailure(second.probe.failure, members), second.killed);
+    return { failure, lease: { kind: "windows-tree", pid, root, survivors: members, failure } };
   }
   const survivors = survivingMembers(second.probe.rows, members);
   if (survivors.length === 0) {return undefined;}
-  return windowsOutcome(pid, detailed(survivorFailure(survivors), second.killed), root, survivors);
+  const failure = detailed(survivorFailure(survivors), second.killed);
+  return { failure, lease: { kind: "windows-tree", pid, root, survivors, failure } };
 }
 
 function detailed(failure: string, killed: string | undefined): string {
@@ -716,10 +755,10 @@ function detailed(failure: string, killed: string | undefined): string {
 function terminateOwnedTree(
   child: ChildProcess,
   logger: Logger,
-  identity: Promise<ProcessIdentity | undefined>
+  identity: Promise<RootCapture>
 ): Promise<TerminationOutcome | undefined> {
   if (child.pid === undefined) {return Promise.resolve(undefined);}
   return process.platform === "win32"
-    ? terminateWindowsTree(child.pid, identity)
+    ? terminateWindowsTree(child, identity, logger)
     : terminatePosixTree(child.pid, logger);
 }

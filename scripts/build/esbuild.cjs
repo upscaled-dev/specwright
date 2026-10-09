@@ -36,6 +36,7 @@ async function main() {
     entryPoints: {
       extension: "src/extension.ts",
       "specwright-live-reporter": "src/test-providers/specwright-live-reporter.ts",
+      "playwright-cli-bootstrap": "src/core/playwright-cli-bootstrap.ts",
     },
     bundle: true,
     format: "cjs",

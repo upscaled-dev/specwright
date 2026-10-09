@@ -387,7 +387,6 @@ const bddFileData = [ // bdd-data-start
           kind: "posix-group",
           pgid: 81,
           failure,
-          systemUptime: 100,
         },
       };
     };

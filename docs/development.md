@@ -15,6 +15,12 @@ npm run build              # clean + compile + bundle
 
 Unit tests use [Vitest](https://vitest.dev/) with a minimal stub of the `vscode` module under [src/test/__mocks__/vscode.ts](../src/test/__mocks__/vscode.ts). Tests that need real VS Code APIs (`TestController`, `TestItem` trees, run-profile registration) run via `npm run test:integration`, which launches a real VS Code instance against a fixture workspace under [src/test/integration/fixtures/workspace/](../src/test/integration/fixtures/workspace/). See [CONTRIBUTING.md](../CONTRIBUTING.md#integration-tests) for details.
 
+### Windows cancellation acceptance
+
+A change to Windows cancellation is accepted only after the native integration tests `cooperatively cancels the populated Playwright fixture and admits the next named run` and `cancels an owned tree through the gateway and admits the next named command` pass on Windows with the built-in Windows PowerShell 5.1. The Playwright test starts the installed CLI with a populated resource fixture, cancels through the execution gateway, observes fixture teardown and worker exit, then passes a second named test through the same gateway and admission owner. The generic command test confirms parent and child identities are gone before the next command prints `fresh execution completed`. A process-table probe or a separate manual `taskkill` does not count. If these tests cannot run on your host, Windows acceptance stays open. Also repeat Stop followed by Run in an affected workspace and confirm the selected test runs without an admission-blocked message.
+
+The required Playwright fixture test needs no downloaded browser. To also prove browser cleanup, install the project's Playwright Chromium browser, set `SPECWRIGHT_BROWSER_CANCELLATION_ACCEPTANCE=1`, and run `npx vitest run src/test/unit/playwright-cli-cancellation.test.ts`. This opt-in test populates a real page, observes fixture teardown and worker exit after Stop, then passes a second named browser test through the same gateway. Browser acceptance requires this test to run on the affected platform; a skipped opt-in test is not evidence of browser cleanup.
+
 ## Releasing
 
 Release only from protected `main` and protect tags matching `v*` in the repository settings. The workflow cannot administer or prove those rules with its token, so verify both rules before the first release and after repository-policy changes. The workflow uses read-only repository permissions; only the tag-only promotion job receives `actions: read`, `id-token: write`, and `attestations: write`.
@@ -86,7 +92,7 @@ The script refuses a dirty tree, missing commit, or existing tag. If an artifact
 
 Protected references, GitHub alert routing, workflow-artifact access, real promotion, publication, rollback, native signing, and the Core/runtime matrix remain external release gates. Record evidence for each in the release change before publishing.
 
-The package inventory lives in [scripts/package-contents.json](../scripts/package-contents.json). It currently lists 30 files. Update it deliberately when shipping a new packaged file; the package-content gate checks the inventory rather than relying on a fixed historical count. Source: [scripts/release.mjs](../scripts/release.mjs) and [scripts/release-artifact.mjs](../scripts/release-artifact.mjs).
+The package inventory lives in [scripts/package-contents.json](../scripts/package-contents.json). It currently lists 31 files. Update it deliberately when shipping a new packaged file; the package-content gate checks the inventory rather than relying on a fixed historical count. Source: [scripts/release.mjs](../scripts/release.mjs) and [scripts/release-artifact.mjs](../scripts/release-artifact.mjs).
 
 ## Marketplace media acceptance
 

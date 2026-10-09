@@ -257,7 +257,6 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       pid: 4242,
       survivors: [{ pid: 4242, creationDate: 1_000 }],
       failure: "the tree is still running",
-      bootId: "win32:41",
     });
     const gateway = testGateway(() => Promise.reject(new Error("unused")));
     gateway.discover = vi.fn(() => Promise.reject(blocked));
@@ -619,8 +618,9 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(run.outcome.ended).toBe(true);
   });
 
-  it("fails closed when debug cancellation cannot confirm session termination", async () => {
+  it("releases a debug cancellation that cannot confirm session termination", async () => {
     // No terminate event is ever fired, so cancellation cannot claim the debug process stopped.
+    const warn = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => {});
     const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
     const { provider, controller, artifactStore } = buildProvider(shell);
     await provider.discoverTests();
@@ -644,16 +644,24 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
     const run = controller.runs.at(-1)!;
     expect(run.outcome.ended).toBe(true);
-    expect(run.outcome.skipped).toEqual([]);
-    expect(run.outcome.failed).toEqual([
-      { id: `${fixture.featurePath}:4`, message: expect.stringContaining("termination was not confirmed") },
-      { id: `${fixture.featurePath}:12`, message: expect.stringContaining("termination was not confirmed") },
-    ]);
+    expect(run.outcome.failed).toEqual([]);
     // The second item never launches a session of its own.
     expect(vscode.debug.__startDebuggingCalls).toHaveLength(1);
     expect(vscode.debug.__stopDebuggingCalls).toEqual([root]);
-    expect(artifactStore.latest()?.state).toBe("partial");
+    expect(artifactStore.latest()?.state).toBe("cancelled");
     expect(fs.existsSync(path.dirname(reportPath))).toBe(false);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(
+      /termination was not confirmed.*Test execution was not blocked/s
+    ));
+
+    const next = new vscode.CancellationTokenSource();
+    const admitted = Promise.resolve(debugProfile.runHandler(new vscode.TestRunRequest([first]), next.token));
+    await vi.waitFor(() => {
+      expect(vscode.debug.__startDebuggingCalls).toHaveLength(2);
+    });
+    next.cancel();
+    await admitted;
+    warn.mockRestore();
   });
 
   it("fails the feature parent when the run failed with no per-scenario results and no \"no tests found\"", async () => {

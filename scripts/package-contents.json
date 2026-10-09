@@ -10,6 +10,7 @@
   "dist/traceability-view.js",
   "dist/xray-setup.js",
   "dist/specwright-live-reporter.js",
+  "dist/playwright-cli-bootstrap.js",
   "icons/gherkin-dark.svg",
   "icons/gherkin-light.svg",
   "language-configuration.json",

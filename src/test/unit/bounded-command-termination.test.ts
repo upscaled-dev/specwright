@@ -32,6 +32,7 @@ vi.mock("../../core/windows-process-tree", async (importOriginal) => ({
 }));
 
 const ROOT = { pid: 4242, creationDate: 1_000 };
+const TABLE_TIMEOUT = "PowerShell timed out after 5000ms";
 const RUNNING_TREE: readonly ProcessEntry[] = [
   { pid: 4242, parentPid: 1, creationDate: 1_000 },
   { pid: 4343, parentPid: 4242, creationDate: 2_000 },
@@ -74,7 +75,7 @@ describe("runBoundedCommand cancellation", () => {
     vi.useFakeTimers();
     groupAlive = true;
     vi.mocked(readProcessIdentity).mockResolvedValue(undefined);
-    vi.mocked(readProcessTable).mockResolvedValue(undefined);
+    vi.mocked(readProcessTable).mockRejectedValue(new Error(TABLE_TIMEOUT));
     vi.spyOn(logger, "warn").mockImplementation(() => {});
     vi.spyOn(logger, "error").mockImplementation(() => {});
     vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
@@ -91,6 +92,23 @@ describe("runBoundedCommand cancellation", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
+
+  function warnings(): string {
+    return vi.mocked(logger.warn).mock.calls.map(([message]) => message).join("\n");
+  }
+
+  /** Proof or release: the run ends as a plain cancellation and one warning carries the reason. */
+  async function expectReleased(result: Promise<BoundedCommandResult>, reason: string): Promise<void> {
+    const cancelled = await result;
+    expect(cancelled).toMatchObject({ error: "Cancelled", returnCode: 130 });
+    expect(cancelled).not.toHaveProperty("terminationFailure");
+    expect(cancelled).not.toHaveProperty("terminationLease");
+    const released = vi.mocked(logger.warn).mock.calls
+      .filter(([message]) => message.includes("Cancellation was released"));
+    expect(released).toHaveLength(1);
+    expect(released[0]?.[0]).toContain(reason);
+    expect(released[0]?.[0]).toContain("end them in Task Manager");
+  }
 
   function signals(): unknown[][] {
     return vi.mocked(process.kill).mock.calls.filter(([, signal]) => signal !== 0);
@@ -202,8 +220,11 @@ describe("runBoundedCommand cancellation", () => {
     }
   );
 
-  it("awaits successful taskkill completion on Windows", async () => {
+  it("awaits successful identity-verified taskkill completion on Windows", async () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE)
+      .mockResolvedValue([{ pid: 900, parentPid: 1, creationDate: 1 }]);
     const killer = new FakeChild();
     const run = cancelledRun({ killer });
     await awaitKiller(run);
@@ -215,6 +236,7 @@ describe("runBoundedCommand cancellation", () => {
       expect.anything()
     );
     killer.emit("close", 0);
+    await settleTermination();
 
     await expect(run.result).resolves.toMatchObject({ error: "Cancelled", returnCode: 130 });
   });
@@ -222,20 +244,123 @@ describe("runBoundedCommand cancellation", () => {
   it.each([
     ["nonzero", (killer: FakeChild) => killer.emit("close", 5), "exit code 5"],
     ["error", (killer: FakeChild) => killer.emit("error", new Error("spawn EPERM")), "spawn EPERM"],
-  ])("surfaces Windows taskkill %s without confirming release", async (_kind, fail, message) => {
+  ])("retains taskkill's %s diagnostic on an identity-verified attempt", async (_kind, fail, message) => {
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE)
+      .mockRejectedValue(new Error(TABLE_TIMEOUT));
     const killer = new FakeChild();
     const run = cancelledRun({ killer });
     await awaitKiller(run);
 
     fail(killer);
+    await settleTermination();
+    await expectReleased(run.result, TABLE_TIMEOUT);
+    expect(warnings()).toContain(message);
+    expect(readProcessTable).toHaveBeenCalledTimes(2);
+  });
 
+  it("names why the spawn-time identity could not be captured in the one release warning", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockRejectedValue(new Error("PowerShell exited with code 1: Access denied"));
+
+    const run = cancelledRun({ taskkillExit: 0 });
+
+    await expectReleased(
+      run.result,
+      "the process identity is unknown (PowerShell exited with code 1: Access denied)"
+    );
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(run.child.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(run.killers).toHaveLength(0);
+  });
+
+  it.each([
+    [{ pid: 4242, parentPid: 1, creationDate: 9_000 }],
+    [{ pid: 4242, parentPid: 1, creationDate: undefined }],
+    [{ pid: 900, parentPid: 1, creationDate: 1 }],
+  ])("never targets a numeric root that lacks an exact fresh identity match: %s", async (...rows) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValue(rows);
+    const run = cancelledRun();
+    await expectReleased(run.result, "no longer has its captured identity");
+    expect(run.killers).toHaveLength(0);
+    expect(run.child.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it.each([false, true])("does not re-kill a gone or reused root while its recorded child survives (reused: %s)", async (reused) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    const child = { pid: 4343, parentPid: 4242, creationDate: 2_000 };
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE)
+      .mockResolvedValue([child, ...(reused ? [{ pid: 4242, parentPid: 1, creationDate: 9_000 }] : [])]);
+    const run = cancelledRun({ taskkillExit: 0 });
+    await settleTermination();
     await expect(run.result).resolves.toMatchObject({
-      success: false,
-      terminationFailure: expect.stringContaining(message),
-      // No captured identity, so nothing but a reboot can prove this tree gone later.
-      terminationLease: { kind: "windows-tree", pid: 4242, failure: expect.any(String) },
+      terminationLease: { survivors: [{ pid: 4343, creationDate: 2_000 }] },
     });
+    expect(run.killers).toHaveLength(1);
+  });
+
+  it("checks the root again immediately before a retry when its pid was reused after the first confirmation", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE)
+      .mockResolvedValueOnce(RUNNING_TREE)
+      .mockResolvedValue([{ pid: 4242, parentPid: 1, creationDate: 9_000 },
+        { pid: 4343, parentPid: 4242, creationDate: 2_000 }]);
+    const run = cancelledRun({ taskkillExit: 0 });
+    await settleTermination();
+    await expect(run.result).resolves.toMatchObject({
+      terminationLease: { survivors: [{ pid: 4343, creationDate: 2_000 }] },
+    });
+    expect(run.killers).toHaveLength(1);
+  });
+
+  it("retains confirmed survivors when a retry inventory becomes unreadable", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE).mockResolvedValueOnce(RUNNING_TREE)
+      .mockRejectedValue(new Error(TABLE_TIMEOUT));
+    const run = cancelledRun({ taskkillExit: 0 });
+    await settleTermination();
+    await expect(run.result).resolves.toMatchObject({
+      terminationFailure: expect.stringContaining(TABLE_TIMEOUT),
+      terminationLease: { survivors: [ROOT, { pid: 4343, creationDate: 2_000 }] },
+    });
+    expect(run.killers).toHaveLength(1);
+  });
+
+  it("retains newly observed descendants when the final confirmation becomes unreadable", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE).mockResolvedValueOnce(RUNNING_TREE)
+      .mockResolvedValueOnce([...RUNNING_TREE, { pid: 4444, parentPid: 4343, creationDate: 3_000 }])
+      .mockRejectedValue(new Error(TABLE_TIMEOUT));
+    const run = cancelledRun({ taskkillExit: 0 });
+    await settleTermination(2);
+    await expect(run.result).resolves.toMatchObject({
+      terminationLease: { survivors: [ROOT, { pid: 4343, creationDate: 2_000 },
+        { pid: 4444, creationDate: 3_000 }] },
+    });
+    expect(run.killers).toHaveLength(2);
+  });
+
+  it("retains descendants enrolled by the first confirmation when the fresh retry probe fails", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE)
+      .mockResolvedValueOnce([...RUNNING_TREE, { pid: 4444, parentPid: 4343, creationDate: 3_000 }])
+      .mockRejectedValue(new Error(TABLE_TIMEOUT));
+    const run = cancelledRun({ taskkillExit: 0 });
+    await settleTermination();
+    await expect(run.result).resolves.toMatchObject({
+      terminationFailure: expect.stringContaining("3 recorded processes"),
+      terminationLease: { survivors: [ROOT, { pid: 4343, creationDate: 2_000 },
+        { pid: 4444, creationDate: 3_000 }] },
+    });
+    expect(run.killers).toHaveLength(1);
   });
 
   it("releases a Windows run once every recorded identity is gone", async () => {
@@ -252,6 +377,37 @@ describe("runBoundedCommand cancellation", () => {
     await expect(run.result).resolves.toMatchObject({ error: "Cancelled", returnCode: 130 });
     await expect(run.result).resolves.not.toHaveProperty("terminationLease");
     expect(run.killers).toHaveLength(1);
+  });
+
+  it("allows a fresh execution after slow Windows inventory and taskkill confirm cancellation", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    let probes = 0;
+    vi.mocked(readProcessTable).mockImplementation(() => new Promise((resolve) => {
+      const rows = probes++ === 0 ? RUNNING_TREE : [{ pid: 900, parentPid: 1, creationDate: 1 }];
+      setTimeout(() => resolve(rows), 3_000);
+    }));
+    const killer = new FakeChild();
+    const run = cancelledRun({ killer });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await awaitKiller(run);
+    setTimeout(() => killer.emit("close", 0), 3_000);
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(run.settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const cancelled = await run.result;
+    expect(cancelled).toMatchObject({ error: "Cancelled", returnCode: 130 });
+    expect(cancelled).not.toHaveProperty("terminationFailure");
+    expect(cancelled).not.toHaveProperty("terminationLease");
+    expect(killer.kill).not.toHaveBeenCalled();
+
+    const freshChild = new FakeChild();
+    vi.mocked(spawn).mockReturnValue(freshChild as never);
+    const fresh = runBoundedCommand({ command: shellQuote(process.execPath), workingDir: "/ws", logger });
+    freshChild.stdout.write("fresh execution completed\n");
+    freshChild.emit("close", 0);
+    await expect(fresh).resolves.toMatchObject({ success: true, output: "fresh execution completed\n" });
   });
 
   it("retries the kill and leases the identities it could not prove gone", async () => {
@@ -276,7 +432,7 @@ describe("runBoundedCommand cancellation", () => {
     expect(run.killers).toHaveLength(2);
   });
 
-  it("records a tree too large to carry as unconfirmable", async () => {
+  it("returns every member of a large confirmed surviving tree", async () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
     vi.mocked(readProcessTable).mockResolvedValue([
@@ -294,35 +450,45 @@ describe("runBoundedCommand cancellation", () => {
 
     expect(result.terminationFailure).toContain("left 251 processes running");
     expect(result.terminationFailure).toContain("and 231 more");
-    expect(result.terminationLease).toMatchObject({ survivors: "unconfirmable" });
+    const survivors = result.terminationLease?.kind === "windows-tree" ? result.terminationLease.survivors : [];
+    expect(survivors).toHaveLength(251);
+    expect(survivors[0]).toEqual(ROOT);
   });
 
-  it("cannot enumerate the tree when the table fails before the kill", async () => {
+  it("releases with the reader's reason when the table fails before the kill", async () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
 
     const run = cancelledRun({ taskkillExit: 0 });
 
-    await expect(run.result).resolves.toMatchObject({
-      success: false,
-      terminationFailure: expect.stringContaining("process table could not be read"),
-      terminationLease: { kind: "windows-tree", root: ROOT, survivors: "unconfirmable" },
-    });
+    await expectReleased(run.result, `the Windows process table could not be read (${TABLE_TIMEOUT})`);
+    expect(run.killers).toHaveLength(0);
+    expect(run.child.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("releases the enumerated members when the confirming table cannot be read", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE)
+      .mockRejectedValue(new Error("PowerShell exited with code 1: Access denied"));
+
+    const run = cancelledRun({ taskkillExit: 0 });
+    const released = expectReleased(run.result, "could not be read (PowerShell exited with code 1: Access denied)");
+    await settleTermination();
+    await released;
+
+    expect(warnings()).toContain("2 recorded processes remain unproven: 4242, 4343");
     expect(run.killers).toHaveLength(1);
   });
 
-  it("leases the enumerated members when the confirming table cannot be read", async () => {
+  it("releases on any bookkeeping failure with the thrown reason", async () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
-    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE).mockResolvedValue(undefined);
+    vi.mocked(readProcessTable).mockResolvedValue(null as never);
 
     const run = cancelledRun({ taskkillExit: 0 });
-    await settleTermination();
 
-    await expect(run.result).resolves.toMatchObject({
-      terminationFailure: expect.stringContaining("process table could not be read"),
-      terminationLease: { survivors: [ROOT, { pid: 4343, creationDate: 2_000 }] },
-    });
+    await expectReleased(run.result, "Process termination could not be confirmed:");
   });
 
   it("treats an empty process-table answer as a failed probe", async () => {
@@ -337,13 +503,10 @@ describe("runBoundedCommand cancellation", () => {
 
     const run = cancelledRun({ taskkillExit: 0 });
 
-    await expect(run.result).resolves.toMatchObject({
-      terminationFailure: expect.stringContaining("process table could not be read"),
-      terminationLease: { survivors: "unconfirmable" },
-    });
+    await expectReleased(run.result, "could not be read (PowerShell returned no process rows)");
   });
 
-  it("leases with the deadline text when the confirmation window elapses", async () => {
+  it("releases with the deadline text when the confirmation window elapses", async () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
     vi.mocked(readProcessTable)
@@ -351,28 +514,33 @@ describe("runBoundedCommand cancellation", () => {
       .mockReturnValue(new Promise(() => { /* the probe never answers */ }));
 
     const run = cancelledRun({ taskkillExit: 0 });
+    const released = expectReleased(run.result, "confirmation window elapsed");
     await vi.advanceTimersByTimeAsync(WINDOWS_TERMINATION_BUDGET_MS + 1);
-
-    await expect(run.result).resolves.toMatchObject({
-      terminationFailure: expect.stringContaining("confirmation window elapsed"),
-      terminationLease: { survivors: [ROOT, { pid: 4343, creationDate: 2_000 }] },
-    });
+    await released;
   });
 
   it.each([
-    ["never answers", () => new Promise<undefined>(() => { /* pending */ })],
-    ["finds the process already gone", () => Promise.resolve(undefined)],
-  ])("falls back to a reboot-only lease when the identity query %s", async (_case, identity) => {
+    [
+      "never answers",
+      () => new Promise<undefined>(() => { /* pending */ }),
+      "the identity query did not answer within the confirmation window",
+    ],
+    [
+      "finds the process already gone",
+      () => Promise.resolve(undefined),
+      "the process exited or had no readable creation time when its identity was queried",
+    ],
+  ])("uses only the owned handle when the identity query %s", async (_case, identity, reason) => {
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     vi.mocked(readProcessIdentity).mockImplementation(identity);
 
     const run = cancelledRun({ taskkillExit: 5 });
+    const released = expectReleased(run.result, `the process identity is unknown (${reason})`);
     await vi.advanceTimersByTimeAsync(WINDOWS_TERMINATION_BUDGET_MS + 1);
-    const lease = (await run.result).terminationLease;
+    await released;
 
-    expect(lease).toMatchObject({ kind: "windows-tree", pid: 4242 });
-    expect(lease).not.toHaveProperty("root");
-    expect(lease).not.toHaveProperty("survivors");
+    expect(run.killers).toHaveLength(0);
+    expect(run.child.kill).toHaveBeenCalledWith("SIGKILL");
     expect(readProcessTable).not.toHaveBeenCalled();
   });
 
@@ -384,11 +552,11 @@ describe("runBoundedCommand cancellation", () => {
 
     const run = cancelledRun();
     // The table answers "unreadable" with time to spare; the kill that follows runs past the window.
+    const released = expectReleased(run.result, "process table could not be read");
     await vi.advanceTimersByTimeAsync(WINDOWS_TERMINATION_WORST_CASE_MS);
-    const failure = (await run.result).terminationFailure;
+    await released;
 
-    expect(failure).toContain("process table could not be read");
-    expect(failure).not.toContain("confirmation window elapsed");
+    expect(warnings()).not.toContain("confirmation window elapsed");
   });
 
   it("hands admission a lease that clears once the identities are gone", async () => {
@@ -400,11 +568,8 @@ describe("runBoundedCommand cancellation", () => {
     const lease = (await run.result).terminationLease;
     if (lease === undefined) {throw new Error("the surviving tree produced no lease");}
 
-    // The admission runs in the same boot session that wrote the lease, whatever boot identity
-    // this host can resolve, so nothing but the identity probe can clear it.
     let table: readonly ProcessEntry[] = RUNNING_TREE;
     const admission = new ExecutionAdmission(undefined, {
-      bootId: () => lease.bootId,
       processTable: () => Promise.resolve(table),
     });
     await admission.block(lease);
@@ -432,12 +597,12 @@ describe("runBoundedCommand cancellation", () => {
     if (lease === undefined) {throw new Error("the surviving tree produced no lease");}
 
     const store = new JsonStore();
-    await new ExecutionAdmission(store).block(lease);
+    const bootId = () => "win32:4182";
+    await new ExecutionAdmission(store, { bootId }).block(lease);
 
     let table: readonly ProcessEntry[] = [{ pid: 4343, parentPid: 1, creationDate: 9_999 }];
     const reopened = new ExecutionAdmission(store, {
-      // Same boot session as the writer; only the identity probe may clear.
-      bootId: () => lease.bootId,
+      bootId,
       processTable: () => Promise.resolve(table),
     });
 

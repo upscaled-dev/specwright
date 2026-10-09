@@ -654,10 +654,13 @@ describe("CommandManager palette run commands", () => {
   });
 
   it("preserves admission recovery through a registered run command", async () => {
-    const admission = new ExecutionAdmission();
+    const admission = new ExecutionAdmission(undefined, {
+      processTable: () => Promise.resolve([{ pid: 4242, parentPid: 1, creationDate: 1_000 }]),
+    });
     await admission.block({
-      kind: "debug-session",
-      failure: "the previous debug session did not terminate",
+      kind: "windows-tree",
+      survivors: [{ pid: 4242, creationDate: 1_000 }],
+      failure: "the previous process tree did not terminate",
     });
     const error = vi.spyOn(vscode.window, "showErrorMessage");
     const context = makeContext();
@@ -675,8 +678,8 @@ describe("CommandManager palette run commands", () => {
     expect(execute).not.toHaveBeenCalled();
     expect(error).toHaveBeenCalledOnce();
     const message = String(error.mock.calls[0]?.[0]);
-    expect(message).toContain("the previous debug session did not terminate");
-    expect(message).toContain("Restart the computer");
+    expect(message).toContain("the previous process tree did not terminate");
+    expect(message).toContain("End the leftover processes in Task Manager");
     expect(message).not.toContain("Failed to execute Run All Tests");
   });
 

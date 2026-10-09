@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Traceability panel's Repository and Test Sets tabs now date the catalogue. Each project row says "synced 5m ago", and "synced 2h ago (stale)" once the cache has passed its lifetime, in the same words as the connection row.
 - The Coverage Board's **Select projects...** button goes idle while the project picker is open, wherever it was opened from, and its hover text says the picker is already open.
+- Stopping an installed Playwright test first lets its CLI finish fixture, worker, and browser cleanup. When an initial cleanup check cannot establish survivors, cancellation releases with the reason logged. Previously confirmed survivors remain blocked through an unreadable retry and every known survivor is retained, including large trees. Windows taskkill requires a fresh match of the root's PID and creation time; weak process identities are scoped to the OS boot to avoid matching reused PIDs after a restart.
 
 ### Fixed
 
