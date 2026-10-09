@@ -271,7 +271,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const executionAdmission = new ExecutionAdmission(new CompatibleAdmissionStore(
     namespacedAdmission,
     legacyAdmission
-  ));
+  ), { logger });
   try {
     await executionAdmission.recover();
   } catch (error) {

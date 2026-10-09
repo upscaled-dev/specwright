@@ -177,11 +177,7 @@ describe("LegacyDirectExecutionGateway", () => {
     const run = vi.fn(() => Promise.resolve({
       ...output([], false, failure, failure),
       admissionUnsafe: true,
-      terminationLease: {
-        kind: "debug-session" as const,
-        failure,
-        systemUptime: Number.MAX_SAFE_INTEGER,
-      },
+      terminationLease: { kind: "posix-group" as const, pgid: 42, failure },
     }));
     const { gateway } = rig(run);
 
@@ -323,11 +319,29 @@ describe("LegacyDirectExecutionGateway", () => {
     await first;
   });
 
-  it("keeps admission closed after an unconfirmed process-tree termination", async () => {
+  it("admits the next run when an unsafe output carries no lease to prove", async () => {
+    const failure = "Process-group termination could not be confirmed.";
+    const { gateway, executor } = rig(vi.fn(() => Promise.resolve({
+      ...output([], false, failure, failure),
+      admissionUnsafe: true,
+    })));
+
+    await expect(gateway.execute(intent({
+      targets: [{ kind: "scenario", scenario: A }],
+    }))).rejects.toMatchObject({ completion: { failure } });
+
+    await expect(gateway.execute(intent())).rejects.toBeInstanceOf(ExecutionFailure);
+    expect(executor.runScenarioWithOutput).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps admission closed after a proven process-tree survivor", async () => {
+    // The recorded group still answers the liveness probe.
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
     const failure = "Process-group termination could not be confirmed.";
     const { gateway, executor, store } = rig(vi.fn(() => Promise.resolve({
       ...output([], false, failure, failure),
       admissionUnsafe: true,
+      terminationLease: { kind: "posix-group" as const, pgid: 42, failure },
     })));
 
     await expect(gateway.execute(intent({
@@ -339,6 +353,7 @@ describe("LegacyDirectExecutionGateway", () => {
     expect(executor.runScenarioWithOutput).toHaveBeenCalledOnce();
     expect(store.beginBatch).toHaveBeenCalledTimes(2);
     expect(store.sealBatch).toHaveBeenLastCalledWith(11, "partial");
+    kill.mockRestore();
   });
 
   it("seals a pre-launch cancellation without dispatching", async () => {
@@ -881,11 +896,7 @@ describe("LegacyDirectExecutionGateway", () => {
     const run = vi.fn(() => Promise.resolve({
       ...output([], false, failure, failure),
       admissionUnsafe: true,
-      terminationLease: {
-        kind: "debug-session" as const,
-        failure,
-        systemUptime: Number.MAX_SAFE_INTEGER,
-      },
+      terminationLease: { kind: "posix-group" as const, pgid: 42, failure },
     }));
     const { gateway, executor, parser } = rig(run);
     vi.mocked(parser.parseFeatureFile).mockReturnValue({ scenarios: rows } as never);

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Stopping an installed Playwright test first lets its CLI finish fixture, worker, and browser cleanup. When an initial cleanup check cannot establish survivors, cancellation releases with the reason logged. Previously confirmed survivors remain blocked through an unreadable retry and every known survivor is retained, including large trees. Windows taskkill requires a fresh match of the root's PID and creation time; weak process identities are scoped to the OS boot to avoid matching reused PIDs after a restart.
+
+### Validation
+
+- Native Windows cancellation and Stop then Run verification in the affected workspace remain pending.
+
 ## [0.7.3] - 2026-10-06
 ### Added
 

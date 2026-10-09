@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import {
   readProcessIdentity,
@@ -6,6 +7,11 @@ import {
   treeMembers,
   type ProcessEntry,
 } from "../../core/windows-process-tree";
+
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...await importOriginal<typeof import("node:child_process")>(),
+  execFile: vi.fn(),
+}));
 
 const START = Date.parse("2026-08-18T14:23:59.123Z");
 
@@ -120,8 +126,11 @@ describe("readProcessTable", () => {
 
     await expect(readProcessTable(read)).resolves.toEqual([entry(100, 4, 0)]);
     expect(read).toHaveBeenCalledWith(
-      "Get-CimInstance Win32_Process | " +
-      "Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress"
+      "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process " +
+      "-Property ProcessId,ParentProcessId,CreationDate | " +
+      "Select-Object ProcessId,ParentProcessId,@{Name='CreationDate';Expression={" +
+      "if ($null -ne $_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o', " +
+      "[System.Globalization.CultureInfo]::InvariantCulture) }}} | ConvertTo-Json -Compress"
     );
   });
 
@@ -150,8 +159,12 @@ describe("readProcessTable", () => {
     await expect(readProcessTable(read)).resolves.toEqual([entry(0, 0, undefined), entry(100, 4, 0)]);
   });
 
+  it("passes the reader's failure through", async () => {
+    await expect(readProcessTable(() => Promise.reject(new Error("PowerShell exited with code 1"))))
+      .rejects.toThrow("PowerShell exited with code 1");
+  });
+
   it.each([
-    ["the query failed", undefined],
     ["the answer is not JSON", "Get-CimInstance : Access denied"],
     ["a creation instant cannot be read", JSON.stringify([{ ProcessId: 1, ParentProcessId: 0, CreationDate: "yesterday" }])],
     ["a creation instant is not a string", JSON.stringify([{ ProcessId: 1, ParentProcessId: 0, CreationDate: 17870558 }])],
@@ -159,15 +172,17 @@ describe("readProcessTable", () => {
     ["a parent pid is missing", JSON.stringify([{ ProcessId: 1, CreationDate: null }])],
     ["a row is not an object", JSON.stringify([7])],
   ])("fails the probe when %s", async (_reason, output) => {
-    await expect(readProcessTable(() => Promise.resolve(output))).resolves.toBeUndefined();
+    await expect(readProcessTable(() => Promise.resolve(output)))
+      .rejects.toThrow("PowerShell output could not be read as process rows");
   });
 
   // PowerShell exits 0 with empty output when the CIM query fails, and a live table always lists
   // System and Idle, so no rows means the probe failed rather than the machine being empty.
   it("fails the probe when the answer has no rows", async () => {
-    await expect(readProcessTable(() => Promise.resolve(""))).resolves.toBeUndefined();
-    await expect(readProcessTable(() => Promise.resolve("null"))).resolves.toBeUndefined();
-    await expect(readProcessTable(() => Promise.resolve("[]"))).resolves.toBeUndefined();
+    for (const output of ["", "null", "[]"]) {
+      await expect(readProcessTable(() => Promise.resolve(output)))
+        .rejects.toThrow("PowerShell returned no process rows");
+    }
   });
 });
 
@@ -185,8 +200,61 @@ describe("readProcessIdentity", () => {
     ["the process already exited", ""],
     ["the answer names another process", JSON.stringify([{ ProcessId: 7, ParentProcessId: 1, CreationDate: null }])],
     ["Windows reports no creation instant", JSON.stringify([{ ProcessId: 4242, ParentProcessId: 1, CreationDate: null }])],
-    ["the query failed", undefined],
   ])("has no identity when %s", async (_reason, output) => {
     await expect(readProcessIdentity(4242, () => Promise.resolve(output))).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ["the query failed", () => Promise.reject(new Error("PowerShell timed out after 5000ms")), "timed out"],
+    ["the answer cannot be read", () => Promise.resolve("Access denied"), "could not be read as process rows"],
+  ])("rejects with the reason when %s", async (_reason, read, reason) => {
+    await expect(readProcessIdentity(4242, read)).rejects.toThrow(reason);
+  });
+});
+
+describe("the default PowerShell reader", () => {
+  type Callback = (error: Error | null, stdout: string, stderr: string) => void;
+
+  function answer(error: Error | null, stdout = "", stderr = ""): void {
+    vi.mocked(execFile).mockImplementationOnce(((...args: unknown[]) => {
+      (args.at(-1) as Callback)(error, stdout, stderr);
+    }) as unknown as typeof execFile);
+  }
+
+  function failure(fields: Record<string, unknown>, message = "Command failed"): Error {
+    return Object.assign(new Error(message), fields);
+  }
+
+  it("names a timeout", async () => {
+    answer(failure({ killed: true, signal: "SIGTERM", code: null }));
+
+    await expect(readProcessTable()).rejects.toThrow("PowerShell timed out after 5000ms");
+  });
+
+  it("names a non-zero exit with a trimmed one-line stderr excerpt", async () => {
+    answer(failure({ killed: false, code: 1 }), "", `Get-CimInstance : Access denied\r\n  ${"x".repeat(400)}`);
+
+    const message = await readProcessTable().then(() => "", (error: Error) => error.message);
+
+    expect(message).toMatch(/^PowerShell exited with code 1: Get-CimInstance : Access denied x+$/);
+    expect(message.length).toBeLessThan(260);
+  });
+
+  it("names oversized output", async () => {
+    answer(failure({ killed: true, code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }));
+
+    await expect(readProcessTable()).rejects.toThrow("PowerShell output exceeded 1048576 bytes");
+  });
+
+  it("names a spawn failure", async () => {
+    answer(failure({ code: "ENOENT" }, "spawn powershell.exe ENOENT"));
+
+    await expect(readProcessTable()).rejects.toThrow("PowerShell could not start: spawn powershell.exe ENOENT");
+  });
+
+  it("names unparsable output apart from a failed exit", async () => {
+    answer(null, "WARNING: not json");
+
+    await expect(readProcessTable()).rejects.toThrow("PowerShell output could not be read as process rows");
   });
 });

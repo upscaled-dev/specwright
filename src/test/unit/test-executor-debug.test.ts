@@ -697,15 +697,15 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
     });
   }
 
-  it("returns unsafe partial evidence when natural debug teardown rejects", async () => {
+  it("releases admission with a warning when natural debug teardown rejects", async () => {
+    const warn = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => {});
     const result = await naturalStopResult(() => Promise.reject(new Error("debug host busy")));
 
-    expect(result).toMatchObject({
-      success: false,
-      admissionUnsafe: true,
-      terminationLease: { kind: "debug-session" },
-    });
-    expect(result.infrastructureFailure).toContain("debug host busy");
+    expect(result.success).toBe(false);
+    expect(result).not.toHaveProperty("admissionUnsafe");
+    expect(result).not.toHaveProperty("terminationLease");
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/debug host busy.*Test execution was not blocked/s));
+    warn.mockRestore();
   });
 
   it("preserves an unsafe bddgen termination as debug infrastructure failure", async () => {
@@ -720,7 +720,6 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
         kind: "posix-group",
         pgid: 42,
         failure,
-        systemUptime: 100,
       },
     });
     const { executor } = makeExecutor(
@@ -741,7 +740,8 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
     });
   });
 
-  it("marks debug admission unsafe when no tracked root can be stopped", async () => {
+  it("releases debug admission with a warning when no tracked root can be stopped", async () => {
+    const warn = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => {});
     const fakeDebug: FakeDebug = makeFakeDebug(undefined, async () => {
       const config = fakeDebug.startCalls.at(-1)!.config;
       const reportPath = (config["env"] as Record<string, string>)["PLAYWRIGHT_JSON_OUTPUT_NAME"]!;
@@ -762,15 +762,15 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
       outlineName: "A",
     });
 
-    expect(result).toMatchObject({
-      success: false,
-      admissionUnsafe: true,
-      terminationLease: { kind: "debug-session" },
-    });
-    expect(result.infrastructureFailure).toContain("no tracked root session");
+    expect(result.success).toBe(false);
+    expect(result).not.toHaveProperty("admissionUnsafe");
+    expect(result).not.toHaveProperty("terminationLease");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("no tracked root session"));
+    warn.mockRestore();
   });
 
   it("stops report polling after an aborted debug run has no tracked root", async () => {
+    const warn = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => {});
     const controller = new AbortController();
     const fakeDebug = makeFakeDebug(undefined, async () => {
       controller.abort();
@@ -794,16 +794,14 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
     const callsAtReturn = access.mock.calls.length;
     await new Promise((resolve) => setTimeout(resolve, 30));
 
-    expect(result).toMatchObject({
-      success: false,
-      admissionUnsafe: true,
-      terminationLease: { kind: "debug-session" },
-    });
-    expect(result.infrastructureFailure).toContain("no tracked root session");
+    expect(result).toMatchObject({ success: false, error: "Cancelled" });
+    expect(result).not.toHaveProperty("terminationLease");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("no tracked root session"));
     expect(callsAtReturn).toBeGreaterThan(0);
     expect(access).toHaveBeenCalledTimes(callsAtReturn);
     expect(fakeDebug.stopCalls).toEqual([]);
     access.mockRestore();
+    warn.mockRestore();
   });
 
   it("keeps parsed debug results when cancellation lands before result assembly", async () => {

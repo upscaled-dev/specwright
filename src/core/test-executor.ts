@@ -37,7 +37,7 @@ import {
   type BoundedCommandResult,
   type CommandOutputHandler,
 } from "./bounded-command-runner";
-import { terminationLease, type TerminationLease } from "./execution-admission";
+import type { TerminationLease } from "./execution-admission";
 import {
   exactGeneratedTargets,
   needsGeneratedSpecs,
@@ -56,7 +56,7 @@ export type RunOutputResult = TestRunResult & {
   infrastructureFailure?: string;
   /** True when process chunks were already written to a live consumer. */
   outputStreamed?: boolean;
-  /** The executor could not prove its process tree ended; execution admission must stay closed. */
+  /** A recorded process outlived termination. Set only together with terminationLease. */
   admissionUnsafe?: boolean;
   /** Durable recovery evidence for an unsafe termination. */
   terminationLease?: TerminationLease;
@@ -268,12 +268,7 @@ export class TestExecutor {
       const workingDir = this.getWorkingDirectory(options.filePath);
       const preRunFailure = await this.runPreRunHook(workingDir, options.signal, options.progress);
       if (preRunFailure) {
-        if (preRunFailure.terminationFailure) {
-          return preRunFailure.terminationLease ?? terminationLease({
-            kind: "debug-session",
-            failure: preRunFailure.terminationFailure,
-          });
-        }
+        if (preRunFailure.terminationLease) {return preRunFailure.terminationLease;}
         if (options.signal?.aborted) {return undefined;}
         throw new Error(preRunFailure.failure);
       }
@@ -289,12 +284,7 @@ export class TestExecutor {
           options.progress?.onOutput
         );
         // A cancelled bddgen reports failure like any other non-zero exit; stopping is not an error.
-        if (result.terminationFailure) {
-          return result.terminationLease ?? terminationLease({
-            kind: "debug-session",
-            failure: result.terminationFailure,
-          });
-        }
+        if (result.terminationLease) {return result.terminationLease;}
         if (options.signal?.aborted) {return undefined;}
         if (!result.success) {
           const detail = result.error.trim() === "" ? result.output : result.error;
@@ -368,11 +358,7 @@ export class TestExecutor {
       if (options.waitForSessionEnd) {
         // The testing service treats a Debug-kind run as finished when its handler resolves;
         // resolving at session start tears the run down before the debuggee attaches.
-        return await this.waitForDebugCompletion(
-          mirrorId,
-          options.jsonReportPath,
-          options.signal
-        );
+        await this.waitForDebugCompletion(mirrorId, options.jsonReportPath, options.signal);
       }
       return undefined;
     } catch (error) {
@@ -1374,35 +1360,34 @@ export class TestExecutor {
     mirrorId: string,
     reportPath: string | undefined,
     signal?: AbortSignal
-  ): Promise<TerminationLease | undefined> {
+  ): Promise<void> {
     let finished = false;
-    const toLease = (result: Awaited<ReturnType<BreakpointMirror["forceStop"]>>): TerminationLease | undefined => (
-      result.confirmed
-        ? undefined
-        : terminationLease({ kind: "debug-session", failure: result.failure })
-    );
+    // A debug session names no process a later probe could find, so it never blocks admission.
+    const settle = (result: Awaited<ReturnType<BreakpointMirror["forceStop"]>>): void => {
+      if (!result.confirmed) {this.releaseUnconfirmed(result.failure);}
+    };
     const released = this.mirror.waitForRelease(mirrorId).then((result) => {
       finished = true;
-      return toLease(result);
+      settle(result);
     });
-    let force: Promise<TerminationLease | undefined> | undefined;
-    const forceStop = (): Promise<TerminationLease | undefined> => {
-      force ??= this.mirror.forceStop(mirrorId).then(toLease);
+    let force: Promise<void> | undefined;
+    const forceStop = (): Promise<void> => {
+      force ??= this.mirror.forceStop(mirrorId).then(settle);
       return force;
     };
     let resolveAbort: (() => void) | undefined;
-    const aborted = new Promise<TerminationLease | undefined>((resolve) => {
+    const aborted = new Promise<void>((resolve) => {
       resolveAbort = () => {
-        forceStop().then(resolve, (error) => resolve(terminationLease({
-          kind: "debug-session",
-          failure: `Debug-session termination failed: ${errMsg(error)}`,
-        })));
+        forceStop().then(resolve, (error) => {
+          this.releaseUnconfirmed(`Debug-session termination failed: ${errMsg(error)}`);
+          resolve();
+        });
       };
       signal?.addEventListener("abort", resolveAbort, { once: true });
       if (signal?.aborted) {resolveAbort();}
     });
     if (!reportPath) {
-      try {return await Promise.race([released, aborted]);}
+      try {await Promise.race([released, aborted]); return;}
       finally {
         finished = true;
         if (resolveAbort) {signal?.removeEventListener("abort", resolveAbort);}
@@ -1418,16 +1403,16 @@ export class TestExecutor {
         return false;
       }
     };
-    const watchdog = (async (): Promise<TerminationLease | undefined> => {
+    const watchdog = (async (): Promise<void> => {
       while (true) {
-        if (finished) {return undefined;}
+        if (finished) {return;}
         if (await reportExists()) {break;}
-        if (finished) {return undefined;}
+        if (finished) {return;}
         await delay(this.debugWatchdogPollMs);
       }
-      if (finished) {return undefined;}
+      if (finished) {return;}
       await delay(this.debugWatchdogGraceMs);
-      if (finished) {return undefined;}
+      if (finished) {return;}
       this.logger.info(
         "Debug session did not settle after the JSON report was written; forcing teardown",
         { mirrorId, reportPath }
@@ -1435,11 +1420,17 @@ export class TestExecutor {
       return forceStop();
     })();
     try {
-      return await Promise.race([released, aborted, watchdog]);
+      await Promise.race([released, aborted, watchdog]);
     } finally {
       finished = true;
       if (resolveAbort) {signal?.removeEventListener("abort", resolveAbort);}
     }
+  }
+
+  /** Only a proven survivor blocks admission; anything less is released with its reason logged. */
+  private releaseUnconfirmed(failure: string): void {
+    this.logger.warn(`${failure} Test execution was not blocked because no leftover process could ` +
+      "be identified. If Playwright or debug processes remain, end them before the next run.");
   }
 
   private async runPreRunHook(

@@ -27,7 +27,7 @@ import type { OutlineExampleRow } from "../types";
 import { refIdentity, scenarioRefFromResult, type ScenarioRef } from "../traceability/scenario-ref";
 import type { ScenarioResult, StepResult } from "../utils/playwright-json-parser";
 import { BoundedCommandOutput } from "./bounded-command-runner";
-import { ExecutionAdmission, terminationLease } from "./execution-admission";
+import { ExecutionAdmission } from "./execution-admission";
 import type { WorkspaceTrust } from "./workspace-trust";
 import type { LegacyDiscoveryPort } from "./legacy-discovery";
 
@@ -417,14 +417,12 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
           });
         }
       }
-      if (output.admissionUnsafe) {
+      // Only a proven survivor blocks; the producer logged why anything less was released.
+      if (output.terminationLease !== undefined) {
         const unsafeFailure = output.infrastructureFailure
           ?? "The previous process tree could not be confirmed stopped.";
         try {
-          await this.admission.block(output.terminationLease ?? terminationLease({
-            kind: "debug-session",
-            failure: unsafeFailure,
-          }));
+          await this.admission.block(output.terminationLease);
           failure = unsafeFailure;
         } catch (error) {
           failure = `${unsafeFailure} ${errorMessage(error)}`;

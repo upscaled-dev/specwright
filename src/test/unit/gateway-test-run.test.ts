@@ -249,9 +249,9 @@ describe("runGatewayTestRequest", () => {
 
   it("leaves the tree untouched and gives recovery guidance when a termination lease blocks it", async () => {
     const executionGateway = gateway(vi.fn(() => Promise.reject(new ExecutionAdmissionBlockedError({
-        kind: "debug-session",
-        failure: "the previous debug session did not terminate",
-        bootId: "win32:4182",
+        kind: "windows-tree",
+        survivors: [{ pid: 4242, creationDate: 1_000 }],
+        failure: "the previous process tree did not terminate",
       }))));
     const error = vi.spyOn(vscode.window, "showErrorMessage");
     const { run, cancelled, applied } = rig({ roots: [leaf(FILE_A, 3, "A")], gateway: executionGateway });
@@ -264,10 +264,10 @@ describe("runGatewayTestRequest", () => {
     expect(testRun?.outcome.skipped).toEqual([]);
     expect(testRun?.outcome.ended).toBe(true);
     expect(error).toHaveBeenCalledWith(expect.stringContaining(
-      "Restart the computer to terminate any leftover Playwright or debug processes"
+      "the previous process tree did not terminate"
     ));
     expect(error).toHaveBeenCalledWith(expect.stringContaining(
-      "If execution remains blocked after restarting, close every VS Code window"
+      "End the leftover processes in Task Manager"
     ));
     expect(error).not.toHaveBeenCalledWith(expect.stringContaining("Terminate and confirm"));
   });
@@ -287,12 +287,11 @@ describe("runGatewayTestRequest", () => {
     expect(testRun?.outcome.skipped).toEqual([]);
     expect(testRun?.outcome.ended).toBe(true);
     const message = String(error.mock.calls[0]?.[0]);
-    expect(message).toContain("Restart the computer to terminate any leftover Playwright or debug processes");
-    expect(message).toContain("while every VS Code window is closed");
+    expect(message).toContain("close every VS Code window");
     expect(message).toContain(
       "move the execution-admission directory out of this extension's globalStorage directory"
     );
-    expect(message.indexOf("Restart the computer")).toBeLessThan(message.indexOf("move the execution-admission"));
+    expect(message).not.toMatch(/restart/i);
   });
 
   it("fails the run on an unknown error instead of skipping the subtree", async () => {
@@ -349,10 +348,13 @@ describe("runGatewayTestRequest", () => {
   });
 
   it("shows admission recovery from the real legacy diagnose path before opening a run", async () => {
-    const admission = new ExecutionAdmission();
+    const admission = new ExecutionAdmission(undefined, {
+      processTable: () => Promise.resolve([{ pid: 4242, parentPid: 1, creationDate: 1_000 }]),
+    });
     await admission.block({
-      kind: "debug-session",
-      failure: "the previous debug session did not terminate",
+      kind: "windows-tree",
+      survivors: [{ pid: 4242, creationDate: 1_000 }],
+      failure: "the previous process tree did not terminate",
     });
     const execute = vi.fn();
     const executionGateway = new LegacyDirectExecutionGateway(
@@ -370,7 +372,7 @@ describe("runGatewayTestRequest", () => {
     expect(controller.runs).toHaveLength(0);
     expect(execute).not.toHaveBeenCalled();
     expect(error).toHaveBeenCalledWith(expect.stringContaining(
-      "Restart the computer to terminate any leftover Playwright or debug processes"
+      "End the leftover processes in Task Manager"
     ));
   });
 });

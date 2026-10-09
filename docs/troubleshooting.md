@@ -196,34 +196,66 @@ exit stops the test run by design.
 - Check that the command is valid from the same working directory as Playwright.
 - Clear `preRunCommand` if that setup step is no longer required.
 
-## Test execution remains blocked by admission storage
+## Test execution remains blocked after stopping a run
 
 Specwright keeps an `execution-admission` directory in its extension
-`globalStorage` so an unconfirmed Playwright process or debug session cannot be
-silently forgotten across a VS Code restart. An unreadable or corrupt record,
-an interrupted temporary write, or too many or oversized records blocks a run
+`globalStorage` so a Playwright process that is still running after a stop is
+not forgotten across a VS Code restart. An unreadable or corrupt record, an
+interrupted temporary write, or too many or oversized records blocks a run
 without assigning a test outcome.
 
-For a POSIX process-group block, terminate and confirm every leftover
-Playwright or debug process before retrying. If termination cannot be
-confirmed, use the reboot-first storage repair below.
+For an installed `playwright test` command launched through a package runner,
+Stop first asks the Playwright CLI to interrupt its run and finish worker,
+fixture, and browser cleanup. Specwright waits up to five seconds for an
+acknowledged stop and a complete CLI close. If that request is unsupported,
+the control channel fails, or cleanup does not finish in time, cancellation
+uses the process-tree cleanup below. Pre-run hooks, bddgen, and other commands
+use process-tree cleanup directly. Failed Windows cleanup includes the
+bounded PowerShell or `taskkill` error text and exit code in the output.
 
-A Windows process-tree block records each leftover process together with the
-instant it started, and re-checks the live process table on every attempt. End
-those processes in Task Manager and run again; no restart is needed. A
-debug-session block still clears only after a restart, as does a process-tree
-block whose leftovers could not be recorded, which the message calls out by
-asking for a restart instead.
+Stopping a run releases it once Specwright confirms that the process tree is
+gone. If cancellation cannot establish any surviving processes, the run ends
+as an ordinary cancellation and the Specwright output channel logs a warning
+with the reason, such as a Windows process inventory that timed out, a
+PowerShell error with its exit code, output that could not be read, or a debug
+session that never reported its end. If Playwright or browser processes are
+still running after that warning, end them in Task Manager or your system's
+process monitor before the next run.
 
-For unconfirmed POSIX termination, an absent or unreadable boot identity, or a
-message that identifies admission storage, use **Developer: Open User Data
+Once Specwright confirms that a process survived cleanup, it blocks the next run. On
+Windows the block lists each leftover process with the instant it started and
+re-checks the live process table on every attempt. On macOS and Linux it
+re-checks the process group. End those processes and run again: the block
+clears on its own once they are gone, and no restart is needed. If the process
+table cannot be read during that re-check, confirmed survivor records stay
+blocked and the exact reason is logged. Every known survivor is recorded,
+including trees requiring more than one bounded admission record.
+Those records form one group and stay together until every member is gone.
+An interrupted write or removal that leaves an incomplete group requires the
+admission storage repair below, rather than silently admitting a new run.
+
+Process groups and Windows processes without a creation time are scoped to
+the current boot so a reused PID after a restart cannot match an old record.
+If the boot cannot be identified, those weak identities remain blocked only
+in the current extension host. Legacy records that name no checkable process
+or lack a boot scope for a weak identity are discarded with a warning.
+
+Windows inventory uses the built-in `powershell.exe` with explicit UTC creation
+timestamps, so Windows PowerShell's DateTime JSON shape does not determine
+whether a process can be identified. Each inventory query is limited to five
+seconds, and each `taskkill` attempt to ten seconds.
+Before each `taskkill`, the live root must match its captured PID and creation
+time. When that identity cannot be verified, Specwright stops the root through
+its owned process handle and warns that descendant cleanup could not be
+confirmed. If the root has exited but a recorded child remains, the child
+continues to block execution; a reused root PID is never killed.
+
+If the message identifies admission storage, use **Developer: Open User Data
 Folder** and note the location of
-`User/globalStorage/upscaled-dev.specwright/execution-admission`. Restart the
-computer first so no leftover Playwright or debug process can survive. Then,
-before reopening VS Code, move that `execution-admission` directory to a backup
-location. Reopen VS Code and retry only after the restart and move are both
-complete. Keeping the backup makes the repair reversible and preserves the
-records for diagnosis.
+`User/globalStorage/upscaled-dev.specwright/execution-admission`. Close every
+VS Code window, move that `execution-admission` directory to a backup
+location, then reopen VS Code and retry. Keeping the backup makes the repair
+reversible and preserves the records for diagnosis.
 
 ## Xray reports that a project needs administrator attention
 
