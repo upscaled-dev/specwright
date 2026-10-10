@@ -1,37 +1,21 @@
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
   resolveExecutableCommand,
   runBoundedCommand,
 } from "../../../core/bounded-command-runner";
 import { Logger } from "../../../utils/logger";
-import { shellQuote } from "../../../utils/shell";
-
-function installedBddgenTarget(projectDir: string): string {
-  const manifestPath = path.join(projectDir, "node_modules", "playwright-bdd", "package.json");
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
-    bin: { bddgen: string };
-  };
-  const target = path.resolve(path.dirname(manifestPath), manifest.bin.bddgen);
-  assert.equal(fs.existsSync(target), true, "fixture does not contain the installed bddgen binary");
-  return target;
-}
 
 suite("Bounded command runner (real Extension Host)", () => {
   const logger = Logger.create();
+  const checkoutDir = path.resolve(__dirname, "../../../..");
   let projectDir: string;
   let generatedDir: string;
 
   setup(() => {
-    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-host-bddgen-"));
+    projectDir = fs.mkdtempSync(path.join(checkoutDir, ".specwright-host-bddgen-"));
     generatedDir = path.join(projectDir, ".features-gen");
-    fs.symlinkSync(
-      path.resolve(__dirname, "../../../..", "node_modules"),
-      path.join(projectDir, "node_modules"),
-      process.platform === "win32" ? "junction" : "dir"
-    );
     fs.mkdirSync(path.join(projectDir, "features"), { recursive: true });
     fs.mkdirSync(path.join(projectDir, "steps"), { recursive: true });
     fs.writeFileSync(
@@ -64,22 +48,19 @@ suite("Bounded command runner (real Extension Host)", () => {
 
   test("launches the installed bddgen binary with only its requested argv", async () => {
     assert.ok(process.versions["electron"], "test is not running in an Electron Extension Host");
-    const bddgenTarget = installedBddgenTarget(projectDir);
-    const legacy = await runBoundedCommand({
-      command: `${shellQuote(process.execPath)} ${shellQuote(bddgenTarget)}`,
-      workingDir: projectDir,
-      logger,
-      signal: AbortSignal.timeout(10_000),
-    });
-    assert.equal(legacy.success, false, "Electron unexpectedly launched bddgen with Node argv");
-    assert.match(
-      legacy.error,
-      /too many arguments for 'test'\. Expected 0 arguments but got 1\./u,
-      `historical Electron failure changed: ${legacy.error}`
-    );
-
     const invocation = resolveExecutableCommand("npx bddgen", projectDir);
     assert.notEqual(invocation.executable, process.execPath, "bddgen resolved through Electron");
+    const installedBddgen = process.platform === "win32" ? invocation.args[0] : invocation.executable;
+    assert.ok(installedBddgen, "bddgen target was not resolved");
+    const packageDir = path.join(checkoutDir, "node_modules", "playwright-bdd");
+    const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8")) as {
+      bin: { bddgen: string };
+    };
+    assert.equal(
+      fs.realpathSync(installedBddgen),
+      fs.realpathSync(path.resolve(packageDir, manifest.bin.bddgen)),
+      `bddgen did not resolve from the checkout: ${installedBddgen}`
+    );
     const result = await runBoundedCommand({
       command: "npx bddgen",
       workingDir: projectDir,
