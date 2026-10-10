@@ -1,13 +1,13 @@
 import type { ExtensionConfig } from "../core/extension-config";
 import type { Logger } from "../utils/logger";
-import type { TraceabilityAdapter } from "./contracts";
+import { ORGANIZATION_ITEM_LIMIT, type TraceabilityAdapter } from "./contracts";
 
 export const INTEGRATION_ADAPTER_API_VERSION = 1;
 export const INTEGRATION_ADAPTER_CAPABILITY_VERSION = 1;
 
 export const INTEGRATION_ADAPTER_RESPONSE_LIMITS = Object.freeze({
-  collectionItems: 10_000,
-  totalItems: 50_000,
+  collectionItems: ORGANIZATION_ITEM_LIMIT,
+  totalItems: 1_000_000,
   stringLength: 1_000_000,
 });
 

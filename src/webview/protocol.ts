@@ -16,7 +16,7 @@ export type ShellClientMessage = { type: "ready" } | { type: "tab"; tab: ShellTa
 export type BoardClientMessage =
   | { type: "search"; value: string }
   | { type: "columnSearch"; section: "untraced" | "available" | "mapped"; value: string }
-  | { type: "page"; section: "untraced" | "available" | "mapped"; step: "prev" | "next" }
+  | { type: "page"; section: "untraced" | "available" | "mapped" | "matrix"; step: "prev" | "next" }
   | { type: "pageSize"; size: number }
   | { type: "drop"; scenario: string; key: string }
   | { type: "unlink"; scenario: string; key: string }
@@ -92,12 +92,15 @@ export interface SelectableTestCard {
 
 export type SectionSelection = "none" | "some" | "all";
 
-export interface BoardSectionMeta {
-  readonly total: number;
+export interface BoardPageMeta {
   readonly filtered: number;
   readonly page: number;
   readonly pageSize: number;
   readonly pageCount: number;
+}
+
+export interface BoardSectionMeta extends BoardPageMeta {
+  readonly total: number;
   readonly query: string;
   readonly filtering: boolean;
   readonly selection: SectionSelection;
@@ -160,6 +163,7 @@ export interface BoardRenderMessage {
   readonly sections: Record<"untraced" | "available" | "mapped", BoardSectionMeta>;
   readonly pageSize: number;
   readonly matrix: readonly MatrixGroup[];
+  readonly matrixPage: BoardPageMeta;
   readonly executions: readonly ExecutionRow[];
   readonly availableEmptyText: string;
   readonly filtering: boolean;
@@ -303,7 +307,7 @@ function validBoard(body: Record<string, unknown>): boolean {
   if (noArgs(body, ["sync", "selectSyncProjects", "bulkCreate", "createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan", "createTestExecution"])) {return true;}
   if (body["type"] === "search") {return exact(body, ["type", "value"]) && text(body["value"]);}
   if (body["type"] === "columnSearch") {return exact(body, ["type", "section", "value"]) && oneOf(body["section"], section) && text(body["value"]);}
-  if (body["type"] === "page") {return exact(body, ["type", "section", "step"]) && oneOf(body["section"], section) && oneOf(body["step"], ["prev", "next"] as const);}
+  if (body["type"] === "page") {return exact(body, ["type", "section", "step"]) && oneOf(body["section"], [...section, "matrix"] as const) && oneOf(body["step"], ["prev", "next"] as const);}
   if (body["type"] === "pageSize") {return exact(body, ["type", "size"]) && Number.isSafeInteger(body["size"]) && (body["size"] as number) >= 1 && (body["size"] as number) <= 100;}
   if (oneOf(body["type"], ["drop", "unlink", "pushText"] as const)) {return exact(body, ["type", "scenario", "key"]) && text(body["scenario"]) && text(body["key"]);}
   // Both the Executions rows and the test cards post this; an issue key is the whole request, so an empty
@@ -417,6 +421,11 @@ function validSection(value: unknown): boolean {
     oneOf(value["selection"], ["none", "some", "all"] as const);
 }
 
+function validPage(value: unknown): boolean {
+  return record(value) && exact(value, ["filtered", "page", "pageSize", "pageCount"]) &&
+    number(value["filtered"]) && number(value["page"]) && number(value["pageSize"], 1) && number(value["pageCount"]);
+}
+
 function validMatrixRow(value: Record<string, unknown>, budget: ProjectionBudget): boolean {
   return exact(value, ["requirement", "test", "scenario", "tag", "result", "file", "projects"]) &&
     ["requirement", "test", "scenario", "tag", "result"].every((key) => text(value[key])) &&
@@ -504,10 +513,10 @@ function validHostBody(surface: SurfaceName | "shell", body: Record<string, unkn
   }
   if (surface === "board") {
     if (body["type"] === "syncProgress") {return exact(body, ["type", "text"]) && text(body["text"]);}
-    const keys = ["type", "scenarios", "available", "mapped", "sections", "pageSize", "matrix", "executions", "availableEmptyText", "filtering", "projects", "project", "scoped", "createVerb", "syncVerb", "syncScopeVerb", "untracedHelper", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "mappingHelper", "executionVerb"];
+    const keys = ["type", "scenarios", "available", "mapped", "sections", "pageSize", "matrix", "matrixPage", "executions", "availableEmptyText", "filtering", "projects", "project", "scoped", "createVerb", "syncVerb", "syncScopeVerb", "untracedHelper", "testSetVerb", "addToTestSetVerb", "testPlanVerb", "addToTestPlanVerb", "mappingHelper", "executionVerb"];
     const budget: ProjectionBudget = { remaining: HOST_PROJECTION_LIMIT };
     return body["type"] === "render" && exact(body, keys) && projectedArray(body["scenarios"], validScenarioCard, budget) &&
-      projectedArray(body["available"], validTestCard, budget) && projectedArray(body["mapped"], validTestCard, budget) && projectedArray(body["matrix"], validMatrixGroup, budget) &&
+      projectedArray(body["available"], validTestCard, budget) && projectedArray(body["mapped"], validTestCard, budget) && projectedArray(body["matrix"], validMatrixGroup, budget) && validPage(body["matrixPage"]) &&
       projectedArray(body["executions"], validExecution, budget) && record(body["sections"]) && exact(body["sections"], ["untraced", "available", "mapped"]) &&
       validSection(body["sections"]["untraced"]) && validSection(body["sections"]["available"]) && validSection(body["sections"]["mapped"]) && Number.isSafeInteger(body["pageSize"]) &&
       projectedStrings(body["projects"], 128, budget) &&

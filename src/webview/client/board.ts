@@ -1,6 +1,7 @@
 import type {
   BoardClientMessage,
   BoardHostMessage,
+  BoardPageMeta,
   BoardRenderMessage,
   BoardSectionMeta,
   BoardTestLink,
@@ -46,6 +47,7 @@ export function installBoard(): void {
   const availablePaginator = element<HTMLElement>('available-paginator');
   const mappedPaginator = element<HTMLElement>('mapped-paginator');
   const pageSizeSelect = element<HTMLSelectElement>('page-size-select');
+  const matrixPaginator = element<HTMLElement>('matrix-paginator');
   const syncNow = element<HTMLButtonElement>('sync-now');
   const syncNowTooltip = element<HTMLElement>('sync-now-tooltip');
   const syncScope = element<HTMLButtonElement>('sync-scope');
@@ -53,6 +55,7 @@ export function installBoard(): void {
   const syncStrip = element<HTMLElement>('sync-strip');
   const syncStripText = element<HTMLElement>('sync-strip-text');
   const tables = installBoardTables();
+  search.dataset["focusKey"] = "board-search";
   scenarioSearch.dataset["focusKey"] = "untraced-search";
   availableSearch.dataset["focusKey"] = "available-search";
   mappedSearch.dataset["focusKey"] = "mapped-search";
@@ -370,21 +373,21 @@ export function installBoard(): void {
   // A section's paginator: a prev/next pair the host clamps (so a button only disables at its end) and a
   // "12-24 of 130" range over the filtered set. An empty section carries no range, so the row never reads
   // a window over nothing; the empty state under it says why.
-  function pageButton(label: string, section: MappingSection, step: "prev" | "next", disabled: boolean): HTMLButtonElement {
+  function pageButton(label: string, section: MappingSection | "matrix", step: "prev" | "next", disabled: boolean): HTMLButtonElement {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'pill-button';
     btn.textContent = label;
     btn.disabled = disabled;
     btn.dataset["focusKey"] = `page:${section}:${step}`;
-    btn.dataset["focusFallback"] = `${section}-search`;
+    btn.dataset["focusFallback"] = section === "matrix" ? "board-search" : `${section}-search`;
     btn.addEventListener('click', () => {
       window.__spec.post('board', { type: 'page', section, step });
     });
     return btn;
   }
 
-  function renderPaginator(container: HTMLElement, section: MappingSection, meta: BoardSectionMeta): void {
+  function renderPaginator(container: HTMLElement, section: MappingSection | "matrix", meta: BoardPageMeta): void {
     container.textContent = '';
     if (meta.filtered === 0) { return; }
     const first = meta.page * meta.pageSize + 1;
@@ -498,6 +501,7 @@ export function installBoard(): void {
       for (const helper of mappingActionHelpers) {helper.textContent = msg.mappingHelper;}
       renderMapping(msg);
       tables.renderMatrix(msg.matrix, filtering);
+      renderPaginator(matrixPaginator, "matrix", msg.matrixPage);
       tables.renderExecutions(msg.executions, filtering);
       renderSyncProgress('');
     } else if (msg.type === 'syncProgress') {

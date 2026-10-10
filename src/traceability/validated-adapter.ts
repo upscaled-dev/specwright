@@ -50,9 +50,14 @@ interface AdapterState {
 
 type Validator<T> = (value: unknown, budget: ValidationBudget) => value is T;
 type BoundaryReporter = (error: IntegrationAdapterError) => void;
+// One fully populated Xray test takes at most 37 visits with 20 coverage links. The extra room
+// keeps the boundary compatible with other adapters while limiting work above the materialized map.
+const METADATA_TEST_VISITS = 50;
+const nativeMapSize = (value: Map<unknown, unknown>): number =>
+  Reflect.get(Map.prototype, "size", value) as number;
 
 class ValidationBudget {
-  private remaining = INTEGRATION_ADAPTER_RESPONSE_LIMITS.totalItems;
+  constructor(private remaining: number = INTEGRATION_ADAPTER_RESPONSE_LIMITS.totalItems) {}
 
   public item(): boolean {
     this.remaining -= 1;
@@ -79,15 +84,17 @@ class ValidationBudget {
     value: unknown,
     validKey: Validator<K>,
     validValue: Validator<V>,
-    validEntry?: (key: K, value: V) => boolean
+    validEntry?: (key: K, value: V) => boolean,
+    maxItems: number = INTEGRATION_ADAPTER_RESPONSE_LIMITS.collectionItems
   ): value is ReadonlyMap<K, V> {
     if (!this.item() || !(value instanceof Map)) {return false;}
-    if (value.size > INTEGRATION_ADAPTER_RESPONSE_LIMITS.collectionItems) {return false;}
+    const size = nativeMapSize(value);
+    if (size > maxItems) {return false;}
     let seen = 0;
-    for (const [key, item] of value.entries()) {
+    for (const [key, item] of Map.prototype.entries.call(value)) {
       seen += 1;
       if (
-        seen > INTEGRATION_ADAPTER_RESPONSE_LIMITS.collectionItems
+        seen > size
         || !validKey(key, this)
         || !validValue(item, this)
         || (validEntry !== undefined && !validEntry(key, item))
@@ -95,7 +102,7 @@ class ValidationBudget {
         return false;
       }
     }
-    return seen === value.size;
+    return seen === size && nativeMapSize(value) === size;
   }
 }
 
@@ -239,7 +246,10 @@ function testMetadata(value: unknown, budget: ValidationBudget): value is TestCa
 function snapshot(value: unknown, budget: ValidationBudget): value is RemoteMetadataSnapshot {
   if (!object(value, budget)) {return false;}
   const tests = value["tests"];
-  return budget.map(tests, text, testMetadata, (key, item) => item.key === key)
+  if (!(tests instanceof Map)) {return false;}
+  const count = nativeMapSize(tests);
+  const testBudget = new ValidationBudget(INTEGRATION_ADAPTER_RESPONSE_LIMITS.totalItems + count * METADATA_TEST_VISITS);
+  return testBudget.map(tests, text, testMetadata, (key, item) => item.key === key, count)
     && texts(value["fetchedScopes"], budget)
     && texts(value["catalogueProjects"], budget)
     && texts(value["completeProjects"], budget)

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Large Xray catalogues no longer fail metadata or organization snapshot validation after syncing. Metadata from all synced projects remains available without a new global test-count cutoff.
+- The Coverage Board pages Matrix rows in file order, keeping All Projects usable with large catalogues. Search covers every row, including rows beyond the current page.
+
+### Validation
+
+- Automated acceptance covers 30,000 populated tests across three projects. Verification against the affected live Xray account remains pending. The existing 10,000-tests-per-project fetch limit still applies.
+
 
 ## [0.7.4] - 2026-10-09
 ### Changed

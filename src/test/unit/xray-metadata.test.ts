@@ -5,6 +5,7 @@ import { ExtensionConfig } from "../../core/extension-config";
 import { XrayFetchOutcome, XrayPageProgress, XrayTestRecord, XrayClient } from "../../xray/xray-client";
 import { CachedMetadata, CACHE_SCHEMA_VERSION, XrayMetadataCache } from "../../xray/xray-metadata-cache";
 import { XrayMetadataCapability } from "../../xray/xray-metadata";
+import { validatedAdapter } from "../../traceability/validated-adapter";
 import { JiraProjectSearchResult } from "../../xray/jira-project-search";
 import { SyncProgressEvent, TestCaseMetadata } from "../../traceability/contracts";
 
@@ -103,6 +104,56 @@ function makeCapability(options: CapabilityOptions): XrayMetadataCapability {
 }
 
 describe("XrayMetadataCapability sync", () => {
+  it("retains all complete catalogues beyond the organization display limit", async () => {
+    const testsFor = (project: string, count: number): XrayTestRecord[] =>
+      Array.from({ length: count }, (_, index) => ({ key: `${project}-${index + 1}` }));
+    const catalogues = new Map([
+      ["CALC", testsFor("CALC", 10_000)],
+      ["MATH", testsFor("MATH", 10_000)],
+      ["SHOP", testsFor("SHOP", 2)],
+    ]);
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: (project) => Promise.resolve(outcome(catalogues.get(project) ?? [])),
+        fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "SHOP-2" }])),
+      }),
+    });
+
+    await capability.sync({ projectKeys: ["CALC", "MATH", "SHOP"], testKeys: ["SHOP-2", "MISSING-1"] });
+
+    const snapshot = capability.snapshot();
+    expect(snapshot.tests.size).toBe(20_002);
+    expect(snapshot.completeProjects).toEqual(["CALC", "MATH", "SHOP"]);
+    expect(snapshot.catalogueProjects).toEqual(["CALC", "MATH", "SHOP"]);
+    expect(snapshot.truncated).toBe(false);
+    expect(snapshot.errors).toEqual([]);
+    expect(snapshot.verifiedAbsentKeys).toEqual(["MISSING-1"]);
+    expect(snapshot.tests.has("SHOP-2")).toBe(true);
+    await capability.dispose();
+  });
+
+  it("reloads a cached catalogue beyond the organization display limit", async () => {
+    const memento = fakeMemento();
+    const cache = cacheFor(memento);
+    await cache.saveForAccount("account-a", {
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      syncedAt: 1,
+      tests: Array.from({ length: 20_001 }, (_, index) => ({ key: `CALC-${index + 1}` })),
+      fetchedScopes: ["CALC"], catalogueProjects: ["CALC"], completeProjects: ["CALC"],
+      verifiedAbsentKeys: [], truncated: false, errors: [], pages: [],
+    });
+    const capability = makeCapability({ client: fakeClient({}), cache });
+    await new Promise<void>((resolve) => {capability.onDidChange(() => resolve());});
+
+    const snapshot = capability.snapshot();
+    expect(snapshot.tests.size).toBe(20_001);
+    expect(snapshot.tests.has("CALC-20001")).toBe(true);
+    expect(snapshot.completeProjects).toEqual(["CALC"]);
+    expect(snapshot.truncated).toBe(false);
+    expect(snapshot.errors).toEqual([]);
+    await capability.dispose();
+  });
+
   it("marks a full project-catalogue fetch complete and merges the tests", async () => {
     const capability = makeCapability({
       client: fakeClient({
@@ -1107,6 +1158,39 @@ describe("XrayMetadataCapability lifecycle", () => {
 });
 
 describe("XrayMetadataCapability.mergeKeys", () => {
+  it("keeps a remotely found key when merging beyond the organization display limit", async () => {
+    let keyFetches = 0;
+    const capability = makeCapability({
+      client: fakeClient({
+        fetchProjectCatalogue: (project) => Promise.resolve(outcome(
+          Array.from({ length: 10_000 }, (_, index) => ({ key: `${project}-${index + 1}` }))
+        )),
+        fetchTestsByKeys: () => Promise.resolve(outcome(++keyFetches === 1 ? [] : [{ key: "SHOP-1" }])),
+      }),
+    });
+    await capability.sync({ projectKeys: ["CALC", "MATH"], testKeys: ["SHOP-1"] });
+    expect(capability.snapshot().verifiedAbsentKeys).toEqual(["SHOP-1"]);
+
+    await capability.mergeKeys(["SHOP-1"]);
+    await capability.mergeKeys(["SHOP-1"]);
+
+    const snapshot = capability.snapshot();
+    expect(snapshot.tests.size).toBe(20_001);
+    expect(snapshot.tests.has("SHOP-1")).toBe(true);
+    expect(snapshot.verifiedAbsentKeys).toEqual([]);
+    expect(snapshot.completeProjects).toEqual(["CALC", "MATH"]);
+    expect(snapshot.truncated).toBe(false);
+    expect(snapshot.errors).toEqual([]);
+    const boundary = validatedAdapter({
+      id: "xray", label: "Xray",
+      keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: /^[A-Z]+-\d+$/u, canonicalizeKey: (key) => key.toUpperCase() },
+      browseUrl: () => undefined,
+      metadata: capability,
+    }, () => Promise.resolve(), () => undefined);
+    expect(boundary.metadata!.snapshot().tests.get("SHOP-1")?.key).toBe("SHOP-1");
+    await capability.dispose();
+  });
+
   it("additively folds a fetched test into the snapshot and fires onDidChange", async () => {
     const memento = fakeMemento();
     const capability = makeCapability({

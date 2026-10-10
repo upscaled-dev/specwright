@@ -18,6 +18,7 @@ import { renderTraceabilityViewDocument } from "../../traceability/traceability-
 import { projectTraceabilityTree } from "../../traceability/traceability-tree-projection";
 import { TraceabilityModel, type TraceabilitySnapshot } from "../../traceability/traceability-model";
 import { TraceabilityViewProvider } from "../../traceability/traceability-view-provider";
+import { validatedAdapter } from "../../traceability/validated-adapter";
 import { Logger } from "../../utils/logger";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { TRACEABILITY_VIEW_PROTOCOL_VERSION, type TraceabilityHostBody, type TraceabilityWireRow } from "../../webview/traceability-view-protocol";
@@ -210,6 +211,20 @@ describe("traceability view client", () => {
       ["SHOP-124", "Pay with saved card"],
       ["SHOP-130", "Payment confirmation email"],
     ] as const;
+    const bulkTests = Array.from({ length: 3_000 }, (_, index) => ({
+      issueId: `bulk-${index + 1}`, jira: { key: `SHOP-${index + 1000}`, summary: `Bulk test ${index + 1}` },
+      gherkin: "Scenario: Bulk\n  Given a step",
+      folder: { name: "Bulk", path: "/ZBulk" },
+      testType: { name: "Cucumber", kind: "Gherkin" }, status: { name: "PASS", color: "#0f0" },
+      coverableIssues: { results: [{ jira: { key: `REQ-${index + 1}` } }] },
+    }));
+    const allTests = [
+      ...remoteTests.map(([key, summary]) => ({
+        issueId: `${key}-id`, jira: { key, summary }, folder: { name: "Smoke", path: "/Checkout/Smoke" },
+        testType: { name: "Cucumber", kind: "Gherkin" }, status: { name: "TODO" }, coverableIssues: { results: [] },
+      })),
+      ...bulkTests,
+    ];
     const fetchImpl: FetchLike = (_url, init) => {
       if (!init.body || !String(init.body).includes("query")) {return Promise.resolve(jsonResponse("token"));}
       const query = (JSON.parse(String(init.body)) as { query: string }).query;
@@ -219,10 +234,8 @@ describe("traceability view client", () => {
           tests: { total: 4, results: remoteTests.map(([key, summary]) => ({ jira: { key, summary } })) },
         }] } } }));
       }
-      return Promise.resolve(jsonResponse({ data: { getTests: { total: 4, results: remoteTests.map(([key, summary]) => ({
-        issueId: `${key}-id`, jira: { key, summary }, folder: { name: "Smoke", path: "/Checkout/Smoke" },
-        testType: { name: "Cucumber", kind: "Gherkin" }, status: { name: "TODO" }, coverableIssues: { results: [] },
-      })) } } }));
+      const start = Number(/start: (\d+)/u.exec(query)?.[1] ?? 0);
+      return Promise.resolve(jsonResponse({ data: { getTests: { total: allTests.length, results: allTests.slice(start, start + 100) } } }));
     };
     const logger = Logger.create();
     const client = new XrayClient({
@@ -245,11 +258,12 @@ describe("traceability view client", () => {
       onCredentialsChange: changed.event, projectOf: (key) => key.replace(/-\d+$/u, ""),
     });
     const discovery = { discoverTestFiles: () => Promise.resolve([feature]), dispose: () => undefined } as unknown as TestDiscoveryManager;
-    const adapter: TraceabilityAdapter = {
+    const source: TraceabilityAdapter = {
       id: "xray", label: "Xray",
       keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: /^[A-Z]+-\d+$/u, canonicalizeKey: (key) => key.toUpperCase(), projectOf: (key) => key.replace(/-\d+$/u, "") },
       browseUrl: () => undefined, metadata, organization,
     };
+    const adapter = validatedAdapter(source, () => Promise.resolve(), () => undefined);
     const model = new TraceabilityModel(FeatureParser.create(logger), discovery, PlaywrightJsonParser.create(logger), adapter, new RunResultStore(), logger);
     let cachedOrganization: XrayOrganizationCapability | undefined;
     try {
@@ -266,7 +280,8 @@ describe("traceability view client", () => {
       });
       await model.rebuild();
       const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), logger);
-      provider.attach(model, "Xray", "test", cachedOrganization);
+      const cachedAdapter = validatedAdapter({ ...source, organization: cachedOrganization }, () => Promise.resolve(), () => undefined);
+      provider.attach(model, "Xray", "test", cachedAdapter.organization);
       provider.setConnected(true);
       const mounted = await mountProviderClient(provider);
       await focusCommittedGeneration(provider);
@@ -338,7 +353,9 @@ describe("traceability view client", () => {
 
       document.querySelector<HTMLButtonElement>('[data-view="repository"]')?.click();
       expect(document.getElementById("tree")?.textContent).toContain("Checkout");
-      document.querySelector<HTMLElement>('[data-id][aria-expanded="false"]')?.querySelector<HTMLButtonElement>(".twisty")?.click();
+      [...document.querySelectorAll<HTMLElement>('[data-id][aria-expanded="false"]')]
+        .find((row) => row.textContent?.includes("Checkout"))
+        ?.querySelector<HTMLButtonElement>(".twisty")?.click();
       expect(document.getElementById("tree")?.textContent).toContain("Smoke");
       document.querySelector<HTMLButtonElement>('button[aria-label="Run folder and publish: Smoke"]')?.click();
       await mutation(mounted.dom, () => document.getElementById("preview")?.hasAttribute("open") === true);

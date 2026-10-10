@@ -3,11 +3,19 @@
 import axe from "axe-core";
 import { build } from "esbuild";
 import { JSDOM } from "jsdom";
-import type * as vscode from "vscode";
+import * as vscode from "vscode";
 import { describe, expect, it } from "vitest";
 import { boardFragment } from "../../traceability/board-fragment";
 import { BoardSurface, type BoardSurfaceDeps } from "../../traceability/board-surface";
-import type { BoardViewModel } from "../../traceability/board-data";
+import { buildBoardViewModel, type BoardViewModel } from "../../traceability/board-data";
+import { buildTraceabilitySnapshot } from "../../traceability/traceability-model";
+import { validatedAdapter } from "../../traceability/validated-adapter";
+import type { TraceabilityAdapter } from "../../traceability/contracts";
+import type { ExtensionConfig } from "../../core/extension-config";
+import { Logger } from "../../utils/logger";
+import { XrayMetadataCapability } from "../../xray/xray-metadata";
+import type { XrayClient } from "../../xray/xray-client";
+import type { XrayMetadataCache } from "../../xray/xray-metadata-cache";
 import { LINK_FRAGMENT } from "../../traceability/link-picker-panel";
 import { PUBLISH_FRAGMENT } from "../../traceability/publish-dialog-panel";
 import type { SurfaceHost } from "../../traceability/webview-host";
@@ -84,12 +92,15 @@ async function rig(state: Record<string, unknown> = {}): Promise<ClientRig> {
 
 async function bridgeBoardSurface(
   model: BoardViewModel,
-  onContainerAction: (action: "createTestSet" | "addToTestSet" | "createTestPlan" | "addToTestPlan", surface: BoardSurface) => void
+  onContainerAction: (action: "createTestSet" | "addToTestSet" | "createTestPlan" | "addToTestPlan", surface: BoardSurface) => void,
+  scope?: { projects: readonly string[]; project?: string }
 ): Promise<{ readonly client: ClientRig; readonly surface: BoardSurface; routeClientMessages(): void }> {
   const client = await rig();
   client.send("shell", { type: "activate", tab: "mapping" });
   let messageHandler = (_message: BoardClientMessage): void => undefined;
   const board = { surface: undefined as BoardSurface | undefined };
+  let selectedProject = scope ? scope.project : "CALC";
+  let pageSize = 50;
   const never: vscode.Event<void> = () => ({ dispose: () => undefined });
   const host: SurfaceHost<"board"> = {
     post: (message) => client.send("board", message),
@@ -111,7 +122,7 @@ async function bridgeBoardSurface(
     applyUnlink: () => Promise.resolve(),
     pushText: () => undefined,
     runSync: () => Promise.resolve(),
-    syncProjects: () => ["CALC"],
+    syncProjects: () => scope?.projects ?? ["CALC"],
     selectSyncProjects: () => undefined,
     autoSync: () => Promise.resolve(),
     openIssue: () => undefined,
@@ -121,9 +132,9 @@ async function bridgeBoardSurface(
     createTestPlan: () => onContainerAction("createTestPlan", board.surface!),
     addToTestPlan: () => onContainerAction("addToTestPlan", board.surface!),
     createTestExecution: () => undefined,
-    knownProjects: () => ["CALC"],
-    projectScope: { get: () => "CALC", set: () => undefined },
-    mappingPageSize: { get: () => 50, set: () => undefined },
+    knownProjects: () => scope?.projects ?? ["CALC"],
+    projectScope: { get: () => selectedProject, set: (project) => { selectedProject = project; } },
+    mappingPageSize: { get: () => pageSize, set: (size) => { pageSize = size; } },
   };
   const surface = new BoardSurface(host, deps);
   board.surface = surface;
@@ -148,6 +159,7 @@ function boardRender(selected = false): Extract<BoardHostMessage, { type: "rende
     type: "render",
     scenarios: [{ name: "Login", location: "features/login.feature:3", dropId: "scenario-1", pills: [], reqKeys: [], selected }],
     available: [{ key: "CALC-1", pills: [], links: [], selected }],
+    matrixPage: { filtered: 0, page: 0, pageSize: 25, pageCount: 0 },
     mapped: [], sections: { untraced: section, available: section, mapped: { ...section, total: 0, filtered: 0, pageCount: 0 } },
     pageSize: 25, matrix: [], executions: [], availableEmptyText: "No tests",
     filtering: false, projects: ["CALC"], project: "CALC", scoped: true,
@@ -220,6 +232,110 @@ async function expectNoSeriousViolations(dom: JSDOM): Promise<void> {
 }
 
 describe("coverage board browser client", () => {
+  it("filters a named test from the last of three synced projects in All Projects", async () => {
+    const projects = ["CALC", "MATH", "SHOP"];
+    const catalogues = new Map(projects.map((project) => [project,
+      Array.from({ length: 10_000 }, (_, index) => ({
+        key: `${project}-${index + 1}`,
+        summary: `${project} test ${index + 1}`,
+        issueId: `${project}-${index + 1}-id`,
+        status: { category: "passed" as const, providerValue: "PASS", color: "#0f0" },
+        gherkin: "Scenario: Check\n  Given a step",
+        coverageKeys: Array.from({ length: 20 }, (_, key) => `REQ-${index + 1}-${key}`),
+        repositoryFolder: { name: "Smoke", path: "/Smoke" },
+        testType: { name: "Cucumber", kind: "Gherkin" },
+      })),
+    ]));
+    const metadata = new XrayMetadataCapability({
+      client: {
+        fetchProjectCatalogue: (project: string) => Promise.resolve({
+          tests: catalogues.get(project) ?? [], pages: [], complete: true, truncated: false, errors: [],
+        }),
+        invalidateAuth: () => undefined,
+      } as unknown as XrayClient,
+      cache: { load: () => Promise.resolve(undefined), saveForAccount: () => Promise.resolve() } as unknown as XrayMetadataCache,
+      config: { xrayCacheTtlMinutes: 15 } as ExtensionConfig,
+      logger: Logger.create(),
+      account: () => Promise.resolve("account"),
+      onCredentialsChange: new vscode.EventEmitter<void>().event,
+      listProjects: () => Promise.resolve(undefined),
+    });
+    const grammar = {
+      testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: /^[A-Z]+-\d+$/u,
+      canonicalizeKey: (key: string) => key.toUpperCase(),
+      projectOf: (key: string) => key.replace(/-\d+$/u, ""),
+    };
+    const source: TraceabilityAdapter = {
+      id: "xray", label: "Xray", keyGrammar: grammar, browseUrl: () => undefined, metadata,
+    };
+    const adapter = validatedAdapter(source, () => Promise.resolve(), () => undefined);
+    try {
+      await adapter.metadata!.sync({ projectKeys: projects });
+      const remote = adapter.metadata!.snapshot();
+      const snapshot = buildTraceabilitySnapshot([], {}, grammar, remote);
+      const model = buildBoardViewModel(snapshot, [], "TEST_", true, grammar.projectOf);
+      expect(model.available).toHaveLength(30_000);
+      expect(model.available.find((card) => card.key === "SHOP-10000")?.summary).toBe("SHOP test 10000");
+      const bridge = await bridgeBoardSurface(model, () => undefined, { projects });
+      const doc = bridge.client.dom.window.document;
+      expect(remote.tests.size).toBe(30_000);
+      expect((doc.getElementById("scope-select") as HTMLSelectElement).value).toBe("");
+      expect(doc.querySelector("#available-cards .key-link")?.textContent).toBe("CALC-1");
+
+      const search = doc.getElementById("available-search") as HTMLInputElement;
+      search.value = "SHOP-10000";
+      search.dispatchEvent(new bridge.client.dom.window.Event("input", { bubbles: true }));
+      expect(clientBodies(bridge.client, "board").at(-1)).toMatchObject({ type: "columnSearch", section: "available", value: "SHOP-10000" });
+      bridge.routeClientMessages();
+
+      expect(doc.getElementById("available-cards")?.textContent).toContain("SHOP-10000");
+      expect(doc.getElementById("available-cards")?.textContent).toContain("SHOP test 10000");
+      bridge.client.send("shell", { type: "activate", tab: "matrix" });
+      const matrixPager = doc.getElementById("matrix-paginator")!;
+      expect(matrixPager.textContent).toContain("1-50 of 30000");
+      search.value = "";
+      search.dispatchEvent(new bridge.client.dom.window.Event("input", { bubbles: true }));
+      bridge.routeClientMessages();
+      matrixPager.querySelectorAll("button")[1]?.click();
+      bridge.routeClientMessages();
+      expect(matrixPager.textContent).toContain("51-100 of 30000");
+      doc.querySelector<HTMLButtonElement>("#matrix-rows .group-toggle")?.click();
+      expect(doc.getElementById("matrix-rows")?.textContent).toContain(model.matrix[50]?.test);
+
+      const scopeSelect = doc.getElementById("scope-select") as HTMLSelectElement;
+      scopeSelect.value = "SHOP";
+      scopeSelect.dispatchEvent(new bridge.client.dom.window.Event("change", { bubbles: true }));
+      bridge.routeClientMessages();
+      expect(matrixPager.textContent).toContain("1-50 of 10000");
+      scopeSelect.value = "";
+      scopeSelect.dispatchEvent(new bridge.client.dom.window.Event("change", { bubbles: true }));
+      bridge.routeClientMessages();
+      expect(matrixPager.textContent).toContain("1-50 of 30000");
+
+      matrixPager.querySelectorAll("button")[1]?.click();
+      bridge.routeClientMessages();
+      expect(matrixPager.textContent).toContain("51-100 of 30000");
+      const rows = doc.getElementById("page-size-select") as HTMLSelectElement;
+      rows.value = "25";
+      rows.dispatchEvent(new bridge.client.dom.window.Event("change", { bubbles: true }));
+      bridge.routeClientMessages();
+      expect(matrixPager.textContent).toContain("1-25 of 30000");
+
+      matrixPager.querySelectorAll("button")[1]?.click();
+      bridge.routeClientMessages();
+      expect(matrixPager.textContent).toContain("26-50 of 30000");
+      const headerSearch = doc.getElementById("search") as HTMLInputElement;
+      headerSearch.value = "SHOP-10000";
+      headerSearch.dispatchEvent(new bridge.client.dom.window.Event("input", { bubbles: true }));
+      bridge.routeClientMessages();
+      expect(matrixPager.textContent).toContain("1-1 of 1");
+      expect(doc.getElementById("matrix-rows")?.textContent).toContain("SHOP-10000");
+      bridge.client.dom.window.close();
+    } finally {
+      await metadata.dispose();
+    }
+  });
+
   it("executes the bundled browser IIFE in JSDOM", async () => {
     const client = await rig();
     expect(client.posted).toContainEqual({ version: 1, session: "local", revision: 0, surface: "shell", body: { type: "ready" } });
