@@ -315,9 +315,10 @@ and disposal are asynchronous and deadline-bound, and capability responses are c
 traceability model consumes them.
 
 Metadata snapshots retain tests from every synced project. The boundary validates each entry of
-the already materialized test map, so validation work grows with the number of tests while the
-per-test shape, nested collection size, and string length remain bounded. Repository and Test Set
-organization snapshots keep their separate 20,000-item limit and report truncation when reached.
+the already materialized test map and each synced key or verified absence, so validation work grows
+with those collections while the per-test shape, nested collection size, and string length remain
+bounded. Live and cached Repository and Test Set organization snapshots share a separate
+20,000-item limit and report truncation when reached.
 
 This boundary limits cooperative asynchronous code. It does not isolate the extension host from a
 process crash or blocked event loop. A bundled adapter must not load native add-ons, block the event

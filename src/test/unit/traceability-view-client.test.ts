@@ -12,7 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { buildBoardViewModel } from "../../traceability/board-data";
-import type { TraceabilityAdapter } from "../../traceability/contracts";
+import { ORGANIZATION_ITEM_LIMIT, type TraceabilityAdapter } from "../../traceability/contracts";
 import { RunResultStore } from "../../traceability/run-result-store";
 import { renderTraceabilityViewDocument } from "../../traceability/traceability-view-document";
 import { projectTraceabilityTree } from "../../traceability/traceability-tree-projection";
@@ -211,6 +211,10 @@ describe("traceability view client", () => {
       ["SHOP-124", "Pay with saved card"],
       ["SHOP-130", "Payment confirmation email"],
     ] as const;
+    const retainedMembers = [2, 3].map((group) => Array.from({ length: 9_998 }, (_, index) => ({
+      key: `SHOP-${group * 10_000 + index}`,
+    })));
+    let syncRetainedSets = false;
     const bulkTests = Array.from({ length: 3_000 }, (_, index) => ({
       issueId: `bulk-${index + 1}`, jira: { key: `SHOP-${index + 1000}`, summary: `Bulk test ${index + 1}` },
       gherkin: "Scenario: Bulk\n  Given a step",
@@ -229,10 +233,16 @@ describe("traceability view client", () => {
       if (!init.body || !String(init.body).includes("query")) {return Promise.resolve(jsonResponse("token"));}
       const query = (JSON.parse(String(init.body)) as { query: string }).query;
       if (query.includes("getTestSets")) {
-        return Promise.resolve(jsonResponse({ data: { getTestSets: { total: 1, results: [{
+        const namedSet = {
           issueId: "301", jira: { key: "SHOP-301", summary: "Checkout smoke", description: "Critical checkout path" },
           tests: { total: 4, results: remoteTests.map(([key, summary]) => ({ jira: { key, summary } })) },
-        }] } } }));
+        };
+        const retained = retainedMembers.map((members, index) => ({
+          issueId: String(index + 302), jira: { key: `SHOP-${index + 302}`, summary: `Retained set ${index + 1}` },
+          tests: { total: members.length, results: members.slice(0, 50).map((member) => ({ jira: member })) },
+        }));
+        const results = syncRetainedSets ? [namedSet, ...retained] : [namedSet];
+        return Promise.resolve(jsonResponse({ data: { getTestSets: { total: results.length, results } } }));
       }
       const start = Number(/start: (\d+)/u.exec(query)?.[1] ?? 0);
       return Promise.resolve(jsonResponse({ data: { getTests: { total: allTests.length, results: allTests.slice(start, start + 100) } } }));
@@ -266,6 +276,7 @@ describe("traceability view client", () => {
     const adapter = validatedAdapter(source, () => Promise.resolve(), () => undefined);
     const model = new TraceabilityModel(FeatureParser.create(logger), discovery, PlaywrightJsonParser.create(logger), adapter, new RunResultStore(), logger);
     let cachedOrganization: XrayOrganizationCapability | undefined;
+    let retainedOrganization: XrayOrganizationCapability | undefined;
     try {
       await metadata.sync({ projectKeys: ["SHOP"] });
       await organization.sync(["SHOP"]);
@@ -376,9 +387,48 @@ describe("traceability view client", () => {
       expect(artifacts[0]?.selection.kind === "test-set" ? artifacts[0].selection.scenarios : []).toHaveLength(3);
       expect(artifacts[1]?.selection.kind === "repository-folder" ? artifacts[1].selection.scenarios : []).toHaveLength(3);
       expect(JSON.stringify(artifacts.map((artifact) => artifact.selection))).not.toContain("memberKeys");
+
+      await organizationCache.save("account-a", {
+        syncedAt: 1,
+        projects: [{
+          projectKey: "SHOP", complete: true, truncated: false, errors: [],
+          testSets: retainedMembers.map((members, index) => ({
+            key: `SHOP-${index + 302}`, issueId: String(index + 302), members,
+            remoteMemberCount: members.length, membershipComplete: true, truncated: false, errors: [],
+          })),
+        }],
+        omittedTestSetProjectCount: 0,
+      });
+      retainedOrganization = new XrayOrganizationCapability({
+        reader, metadata, cache: organizationCache, config, logger, account,
+        onCredentialsChange: changed.event, projectOf: (key) => key.replace(/-\d+$/u, ""),
+      });
+      await new Promise<void>((resolve) => {
+        if (retainedOrganization?.snapshot().testSetProjects.length) {resolve(); return;}
+        const subscription = retainedOrganization?.onDidChange(() => {subscription?.dispose(); resolve();});
+      });
+      syncRetainedSets = true;
+      await retainedOrganization.sync(["SHOP"]);
+      const retainedAdapter = validatedAdapter({ ...source, organization: retainedOrganization }, () => Promise.resolve(), () => undefined);
+      const live = retainedAdapter.organization!.snapshot();
+      const saved = organizationCache.loadForAccount("account-a");
+      expect(live.testSetProjects[0]?.testSets.map((set) => set.key)).toEqual(["SHOP-301", "SHOP-302", "SHOP-303"]);
+      expect(live.testSetProjects[0]?.truncated).toBe(true);
+      expect(live.testSetProjects[0]?.errors).toContain(`Organization cache reached the ${ORGANIZATION_ITEM_LIMIT}-item limit.`);
+      expect(live.testSetProjects[0]?.testSets[2]).toMatchObject({ membershipComplete: false, truncated: true, remoteMemberCount: 9_998 });
+      expect(live.testSetProjects[0]?.testSets[2]?.members).toHaveLength(9_994);
+      expect(saved?.projects).toEqual(live.testSetProjects);
+      expect(live.omittedTestSetProjectCount).toBe(0);
+      provider.attach(model, "Xray", "test", retainedAdapter.organization);
+      document.querySelector<HTMLButtonElement>('[data-view="test-sets"]')?.click();
+      await mutation(mounted.dom, () => document.getElementById("tree")?.textContent?.includes("SHOP-302") === true);
+      expect(document.getElementById("tree")?.textContent).toContain("SHOP-302");
+      expect(document.getElementById("tree")?.textContent).toContain("3 Test Sets · truncated");
+      expect(document.getElementById("tree")?.textContent).toContain("9998 cached · membership incomplete");
       execute.mockRestore();
       provider.dispose();
     } finally {
+      retainedOrganization?.dispose();
       cachedOrganization?.dispose();
       model.dispose();
       await metadata.dispose();

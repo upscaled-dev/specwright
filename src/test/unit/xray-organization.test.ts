@@ -301,6 +301,49 @@ describe("XrayOrganizationCapability cache isolation", () => {
     capability.dispose();
   });
 
+  it("counts requested and item-bound project omissions together after retaining complete sets", async () => {
+    const cache = new XrayOrganizationCache(memento(), {
+      endpoint: "xray.example", account: () => Promise.resolve("account-a"), workspaceId: "ws",
+    });
+    const sets = [9_999, 9_998].map((count, index) => ({
+      ...SHOP_301,
+      key: `SHOP-${index + 301}`,
+      issueId: String(index + 301),
+      members: Array.from({ length: count }, (_, member) => ({ key: `SHOP-${(index + 2) * 10_000 + member}` })),
+      remoteMemberCount: count,
+    }));
+    await cache.save("account-a", { syncedAt: 1, projects: [project(sets)], omittedTestSetProjectCount: 0 });
+    const list = vi.fn((projectKey: string) => Promise.resolve(projectKey === "SHOP"
+      ? project(sets.map((set) => ({
+        ...set, members: set.members.slice(0, 50), membershipComplete: false, truncated: true,
+      })))
+      : { projectKey, testSets: [], complete: true, truncated: false, errors: [] }));
+    const capability = new XrayOrganizationCapability({
+      reader: { list, refresh: vi.fn() } as unknown as XrayOrganizationReader,
+      metadata: metadata(), cache,
+      config: { xrayCacheTtlMinutes: 15 } as ExtensionConfig,
+      logger: Logger.create(), account: () => Promise.resolve("account-a"),
+      onCredentialsChange: new vscode.EventEmitter<void>().event,
+      projectOf: (key) => key.split("-")[0] ?? key,
+    });
+    await new Promise<void>((resolve) => {
+      if (capability.snapshot().testSetProjects.length) {resolve(); return;}
+      const subscription = capability.onDidChange(() => {subscription.dispose(); resolve();});
+    });
+
+    await capability.sync(["SHOP", ...Array.from({ length: 9 }, (_, index) => `P${index + 1}`)]);
+
+    const live = capability.snapshot();
+    const saved = cache.loadForAccount("account-a");
+    expect(list).toHaveBeenCalledTimes(ORGANIZATION_SYNC_PROJECT_LIMIT);
+    expect(live.testSetProjects.map((item) => item.projectKey)).toEqual(["SHOP"]);
+    expect(live.testSetProjects[0]?.testSets.map((set) => set.members.length)).toEqual([9_999, 9_998]);
+    expect(live.omittedTestSetProjectCount).toBe(9);
+    expect(saved?.omittedTestSetProjectCount).toBe(9);
+    expect(saved?.projects).toEqual(live.testSetProjects);
+    capability.dispose();
+  });
+
   it("keeps the omitted-project count on the current bounding across repeated refreshes", async () => {
     const cache = new XrayOrganizationCache(memento(), {
       endpoint: "xray.example", account: () => Promise.resolve("account-a"), workspaceId: "ws",

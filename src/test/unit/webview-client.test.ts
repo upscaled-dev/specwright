@@ -246,10 +246,14 @@ describe("coverage board browser client", () => {
         testType: { name: "Cucumber", kind: "Gherkin" },
       })),
     ]));
+    const explicitKeys = [...catalogues.values()].flatMap((tests) => tests.map((test) => test.key));
     const metadata = new XrayMetadataCapability({
       client: {
         fetchProjectCatalogue: (project: string) => Promise.resolve({
           tests: catalogues.get(project) ?? [], pages: [], complete: true, truncated: false, errors: [],
+        }),
+        fetchTestsByKeys: () => Promise.resolve({
+          tests: [...catalogues.values()].flat(), pages: [], complete: true, truncated: false, errors: [],
         }),
         invalidateAuth: () => undefined,
       } as unknown as XrayClient,
@@ -270,8 +274,10 @@ describe("coverage board browser client", () => {
     };
     const adapter = validatedAdapter(source, () => Promise.resolve(), () => undefined);
     try {
-      await adapter.metadata!.sync({ projectKeys: projects });
+      await adapter.metadata!.sync({ projectKeys: projects, testKeys: explicitKeys });
       const remote = adapter.metadata!.snapshot();
+      expect(remote.fetchedScopes).toHaveLength(30_003);
+      expect(remote.fetchedScopes.at(-1)).toBe("SHOP-10000");
       const snapshot = buildTraceabilitySnapshot([], {}, grammar, remote);
       const model = buildBoardViewModel(snapshot, [], "TEST_", true, grammar.projectOf);
       expect(model.available).toHaveLength(30_000);

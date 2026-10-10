@@ -251,6 +251,45 @@ describe("populated Xray snapshot boundary", () => {
     }
   });
 
+  it("keeps every explicit key scope beyond 20,000 in a validated Xray snapshot", async () => {
+    const harness = xrayHarness();
+    const tests = Array.from({ length: 20_001 }, (_, index) => richTest("CALC", index + 1));
+    const keys = tests.map((test) => test.key);
+    harness.seedCatalogue(tests, []);
+    const adapter = validatedAdapter(harness.adapter, () => Promise.resolve(), () => undefined);
+    try {
+      await adapter.metadata!.sync({ testKeys: keys });
+      const remote = adapter.metadata!.snapshot();
+      expect(remote.tests.size).toBe(20_001);
+      expect(remote.fetchedScopes).toEqual(keys);
+      expect(remote.verifiedAbsentKeys).toEqual([]);
+      const parsed = FeatureParser.create().parseFeatureContent("Feature: Calculations\n\n@TEST_CALC-20001\nScenario: Last calculation\n  Given two numbers\n");
+      const model = buildTraceabilitySnapshot([{ filePath: "/ws/last.feature", scenarios: parsed?.scenarios ?? [] }], {}, adapter.keyGrammar, remote);
+      expect(model.links.find((link) => link.testKey === "CALC-20001")?.meta?.summary).toBe("Calculation 20001");
+    } finally {
+      await harness.adapter.dispose?.();
+    }
+  });
+
+  it("keeps more than 20,000 verified absent keys even when no test was returned", async () => {
+    const harness = xrayHarness();
+    const keys = Array.from({ length: 20_001 }, (_, index) => `CALC-${index + 1}`);
+    harness.seedCatalogue([], []);
+    const adapter = validatedAdapter(harness.adapter, () => Promise.resolve(), () => undefined);
+    try {
+      await adapter.metadata!.sync({ testKeys: keys });
+      const remote = adapter.metadata!.snapshot();
+      expect(remote.tests.size).toBe(0);
+      expect(remote.fetchedScopes).toEqual(keys);
+      expect(remote.verifiedAbsentKeys).toEqual(keys);
+      const parsed = FeatureParser.create().parseFeatureContent("Feature: Calculations\n\n@TEST_CALC-20001\nScenario: Missing calculation\n  Given two numbers\n");
+      const model = buildTraceabilitySnapshot([{ filePath: "/ws/missing.feature", scenarios: parsed?.scenarios ?? [] }], {}, adapter.keyGrammar, remote);
+      expect(model.links.find((link) => link.testKey === "CALC-20001")?.remoteMissing).toBe(true);
+    } finally {
+      await harness.adapter.dispose?.();
+    }
+  });
+
   it("uses native Map traversal and rejects entries added during validation", () => {
     const harness = xrayHarness();
     const guarded = new Map([["CALC-1", { key: "CALC-1" }]]);
@@ -275,6 +314,30 @@ describe("populated Xray snapshot boundary", () => {
 
     expect(adapterFor(guarded).metadata!.snapshot().tests.get("CALC-1")?.key).toBe("CALC-1");
     expect(() => adapterFor(mutating).metadata!.snapshot()).toThrowError(
+      'Integration adapter "xray" returned malformed metadata.snapshot response.'
+    );
+  });
+
+  it("rejects malformed and growing metadata key lists", () => {
+    const harness = xrayHarness();
+    const scopes = ["CALC-1"];
+    Object.defineProperty(scopes, 0, {
+      get: () => {scopes.push("CALC-2"); return "CALC-1";},
+    });
+    const adapterFor = (fetchedScopes: unknown): TraceabilityAdapter => validatedAdapter({
+      id: "xray", label: "Xray", keyGrammar: harness.adapter.keyGrammar,
+      browseUrl: harness.adapter.browseUrl,
+      metadata: {
+        onDidChange: new vscode.EventEmitter<void>().event,
+        snapshot: () => ({ tests: new Map(), fetchedScopes, catalogueProjects: [], completeProjects: [], verifiedAbsentKeys: [], stale: false, errors: [] }),
+        sync: () => Promise.resolve(),
+      },
+    } as TraceabilityAdapter, () => Promise.resolve(), () => undefined);
+
+    expect(() => adapterFor(["CALC-1", 2]).metadata!.snapshot()).toThrowError(
+      'Integration adapter "xray" returned malformed metadata.snapshot response.'
+    );
+    expect(() => adapterFor(scopes).metadata!.snapshot()).toThrowError(
       'Integration adapter "xray" returned malformed metadata.snapshot response.'
     );
   });

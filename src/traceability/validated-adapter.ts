@@ -71,13 +71,18 @@ class ValidationBudget {
       && (allowEmpty || value.trim() !== "");
   }
 
-  public array<T>(value: unknown, valid: Validator<T>): value is readonly T[] {
+  public array<T>(
+    value: unknown,
+    valid: Validator<T>,
+    maxItems: number = INTEGRATION_ADAPTER_RESPONSE_LIMITS.collectionItems
+  ): value is readonly T[] {
     if (!this.item() || !Array.isArray(value)) {return false;}
-    if (value.length > INTEGRATION_ADAPTER_RESPONSE_LIMITS.collectionItems) {return false;}
-    for (let index = 0; index < value.length; index += 1) {
-      if (!valid(value[index], this)) {return false;}
+    const length = value.length;
+    if (length > maxItems) {return false;}
+    for (let index = 0; index < length; index += 1) {
+      if (!valid(value[index], this) || value.length !== length) {return false;}
     }
-    return true;
+    return value.length === length;
   }
 
   public map<K, V>(
@@ -120,6 +125,12 @@ const optional = <T>(value: unknown, budget: ValidationBudget, valid: Validator<
   value === undefined || valid(value, budget);
 const texts = (value: unknown, budget: ValidationBudget): value is readonly string[] =>
   budget.array(value, text);
+const metadataTexts = (value: unknown, budget: ValidationBudget): value is readonly string[] => {
+  if (!budget.item() || !Array.isArray(value)) {return false;}
+  const length = value.length;
+  if (!Number.isSafeInteger(length) || length < 0 || length > 0xffff_ffff) {return false;}
+  return new ValidationBudget(length + 1).array(value, text, length);
+};
 
 function boundaryError(
   code: "malformed-adapter" | "malformed-response" | "provider-failed" | "adapter-disposed",
@@ -250,10 +261,10 @@ function snapshot(value: unknown, budget: ValidationBudget): value is RemoteMeta
   const count = nativeMapSize(tests);
   const testBudget = new ValidationBudget(INTEGRATION_ADAPTER_RESPONSE_LIMITS.totalItems + count * METADATA_TEST_VISITS);
   return testBudget.map(tests, text, testMetadata, (key, item) => item.key === key, count)
-    && texts(value["fetchedScopes"], budget)
-    && texts(value["catalogueProjects"], budget)
-    && texts(value["completeProjects"], budget)
-    && texts(value["verifiedAbsentKeys"], budget)
+    && metadataTexts(value["fetchedScopes"], budget)
+    && metadataTexts(value["catalogueProjects"], budget)
+    && metadataTexts(value["completeProjects"], budget)
+    && metadataTexts(value["verifiedAbsentKeys"], budget)
     && optional(value["syncedAt"], budget, finiteNumber)
     && boolean(value["stale"], budget)
     && optional(value["truncated"], budget, boolean)

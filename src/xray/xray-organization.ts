@@ -401,10 +401,11 @@ export class XrayOrganizationCapability implements OrganizationCapability, vscod
       }
     }
     if (combined.aborted || epoch !== this.epoch || this.accountStamp !== account) {return;}
+    const bounded = boundProjects(projects);
     const nextState = {
       syncedAt: this.now(),
-      projects,
-      omittedTestSetProjectCount: Math.max(0, requested.length - hydrated.length),
+      projects: bounded.projects,
+      omittedTestSetProjectCount: requested.length - hydrated.length + bounded.omitted,
     } satisfies OrganizationState;
     await this.deps.cache.save(account, nextState).catch((error) => this.deps.logger.warn(`Xray organization cache save failed: ${String(error)}`));
     if (combined.aborted || epoch !== this.epoch || this.accountStamp !== account) {return;}
