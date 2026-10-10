@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.7.6] - 2026-10-11
 ### Fixed
 
 - Xray metadata sync retains more than 20,000 explicitly queried keys and verified absences without rejecting the snapshot.
