@@ -190,7 +190,7 @@ function boardPanesHtml(providerLabel: string): string {
           <span class="icon-verb-tooltip"><button id="sync-scope" class="verb" type="button" disabled aria-describedby="sync-scope-tooltip">Select projects...</button><span id="sync-scope-tooltip" class="icon-verb-tooltip-content" role="tooltip">Choose the projects every sync fetches, alongside the View project.</span></span>
           <div class="page-size">
             <label for="page-size-select">Rows</label>
-            <select id="page-size-select" title="How many cards each list shows">
+            <select id="page-size-select" title="Rows per page">
               <option value="25">25</option>
               <option value="50">50</option>
               <option value="100">100</option>
@@ -217,6 +217,7 @@ ${mapped}
           <tbody id="matrix-rows"></tbody>
         </table>
       </div>
+      <div id="matrix-paginator" class="paginator"></div>
     </section>
     <section id="pane-executions" class="pane board-pane" data-tab="executions" role="tabpanel" aria-labelledby="tab-executions" hidden>
       <div class="verbs">

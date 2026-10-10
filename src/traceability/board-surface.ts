@@ -69,9 +69,10 @@ interface RenderMessage {
   available: readonly SelectableTestCard[];
   mapped: readonly SelectableTestCard[];
   sections: Record<MappingSection, BoardSectionMeta>;
-  // The one page size every section runs on, for the pane's dropdown to show as selected.
+  // The one page size Mapping and Matrix run on, for the pane's dropdown to show as selected.
   pageSize: number;
   matrix: readonly MatrixGroup[];
+  matrixPage: BoardPageMeta;
   executions: readonly ExecutionRow[];
   availableEmptyText: string;
   // Whether these lists came out of a query. The webview cannot read this off its own search box: a
@@ -208,6 +209,7 @@ function prune(selection: Set<string>, live: readonly string[]): void {
 export class BoardSurface {
   private query = "";
   private mapping: MappingViewState = { query: { ...NO_COLUMN_QUERIES }, page: { ...FIRST_PAGES } };
+  private matrixPage = 0;
   private model: BoardViewModel;
   private executions: readonly ExecutionRow[];
   private projects: readonly string[];
@@ -244,6 +246,7 @@ export class BoardSurface {
     search: (message) => {
       this.query = message.value;
       this.mapping.page = { ...FIRST_PAGES };
+      this.matrixPage = 0;
       this.render();
     },
     columnSearch: (message) => {
@@ -254,12 +257,17 @@ export class BoardSurface {
     // The step lands on the host's own index, and `paginate` clamps it, so both ends hold without the
     // webview knowing how many pages there are.
     page: (message) => {
-      this.mapping.page[message.section] += message.step === "next" ? 1 : -1;
+      if (message.section === "matrix") {
+        this.matrixPage += message.step === "next" ? 1 : -1;
+      } else {
+        this.mapping.page[message.section] += message.step === "next" ? 1 : -1;
+      }
       this.render();
     },
     pageSize: (message) => {
       this.deps.mappingPageSize.set(message.size);
       this.mapping.page = { ...FIRST_PAGES };
+      this.matrixPage = 0;
       this.render();
     },
     // The write, its snapshot rebuild, and the follow-up re-render are the host's job. Nothing is posted
@@ -329,6 +337,7 @@ export class BoardSurface {
   private scopeTo(project: string): void {
     this.deps.projectScope.set(project === "" ? undefined : project);
     this.mapping.page = { ...FIRST_PAGES };
+    this.matrixPage = 0;
     this.render();
     // Picking a project is also a load instruction. The key rides the request, so the run covers what was
     // just picked whether or not the store's write has settled; All projects asks for nothing.
@@ -391,6 +400,7 @@ export class BoardSurface {
   public rehydrate(): void {
     this.query = "";
     this.mapping = { query: { ...NO_COLUMN_QUERIES }, page: { ...FIRST_PAGES } };
+    this.matrixPage = 0;
     this.refresh();
   }
 
@@ -564,6 +574,8 @@ export class BoardSurface {
     const untraced = paginate(columns.untraced, this.mapping.page.untraced, pageSize);
     const available = paginate(columns.available, this.mapping.page.available, pageSize);
     const mapped = paginate(columns.mapped, this.mapping.page.mapped, pageSize);
+    const orderedMatrix = groupMatrixRows(filtered.matrix).flatMap((group) => group.rows);
+    const matrix = paginate(orderedMatrix, this.matrixPage, pageSize);
     // Adopt the clamped indexes. A clamp that lived only in the render would resurface the stale index the
     // moment a search cleared and the section grew back.
     this.mapping.page = {
@@ -571,6 +583,7 @@ export class BoardSurface {
       available: available.meta.page,
       mapped: mapped.meta.page,
     };
+    this.matrixPage = matrix.meta.page;
     const createVerb = this.createVerb(project);
     const message: RenderMessage = {
       type: "render",
@@ -583,7 +596,8 @@ export class BoardSurface {
         mapped: this.sectionMeta("mapped", mapped.meta, filtered.mapped.length, columns.mapped),
       },
       pageSize,
-      matrix: groupMatrixRows(filtered.matrix),
+      matrix: groupMatrixRows(matrix.items),
+      matrixPage: matrix.meta,
       executions: filterExecutionRows(this.executions, this.query),
       availableEmptyText: filtered.availableEmptyText,
       filtering: sectionFiltering(this.query, ""),

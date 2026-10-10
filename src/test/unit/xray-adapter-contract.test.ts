@@ -1,5 +1,7 @@
-import type * as vscode from "vscode";
+import * as vscode from "vscode";
+import { describe, expect, it } from "vitest";
 import { AdapterContractHarness, runAdapterContractTests } from "./helpers/adapter-contract-suite";
+import { FeatureParser } from "../../parsers/feature-parser";
 import { ExtensionConfig } from "../../core/extension-config";
 import { Logger, LogLevel } from "../../utils/logger";
 import { XrayAdapter } from "../../xray/xray-adapter";
@@ -7,7 +9,11 @@ import { XrayClient, XrayFetchOutcome, XrayTestRecord } from "../../xray/xray-cl
 import { XrayMetadataCapability } from "../../xray/xray-metadata";
 import { XrayMetadataCache } from "../../xray/xray-metadata-cache";
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
-import { TestCaseMetadata } from "../../traceability/contracts";
+import { TestCaseMetadata, type TraceabilityAdapter } from "../../traceability/contracts";
+import { buildTraceabilitySnapshot } from "../../traceability/traceability-model";
+import { projectTraceabilityOrganization } from "../../traceability/traceability-organization-projection";
+import { validatedAdapter } from "../../traceability/validated-adapter";
+import { XrayOrganizationCache, XrayOrganizationCapability, XrayOrganizationReader } from "../../xray/xray-organization";
 import { trustedWorkspace } from "./helpers/test-workspace-trust";
 import { currentAdapterVersions } from "../../traceability/adapter-contract";
 
@@ -33,12 +39,15 @@ class ControllableClient {
     this.errors = [message];
   }
 
-  private outcome(complete: boolean): XrayFetchOutcome {
-    return { tests: [...this.tests], pages: [], complete, truncated: false, errors: [...this.errors] };
+  private outcome(complete: boolean, tests = this.tests): XrayFetchOutcome {
+    return { tests: [...tests], pages: [], complete, truncated: false, errors: [...this.errors] };
   }
 
   public fetchProjectCatalogue(projectKey: string): Promise<XrayFetchOutcome> {
-    return Promise.resolve(this.outcome(this.landed.includes(projectKey)));
+    return Promise.resolve(this.outcome(
+      this.landed.includes(projectKey),
+      this.tests.filter((test) => test.key.startsWith(`${projectKey}-`))
+    ));
   }
 
   public fetchTestsByKeys(): Promise<XrayFetchOutcome> {
@@ -165,3 +174,108 @@ function xrayHarness(): AdapterContractHarness {
 }
 
 runAdapterContractTests(xrayHarness);
+
+function richTest(project: string, index: number, coverageCount = 1): TestCaseMetadata {
+  return {
+    key: `${project}-${index}`,
+    issueId: String(index),
+    summary: `Calculation ${index}`,
+    status: { category: "passed", providerValue: "PASS", color: "#0f0" },
+    gherkin: "Scenario: Calculate\n  Given two numbers",
+    coverageKeys: Array.from({ length: coverageCount }, (_, key) => `REQ-${index}-${key}`),
+    repositoryFolder: { name: "Smoke", path: "/Smoke" },
+    testType: { name: "Cucumber", kind: "Gherkin" },
+  };
+}
+
+describe("populated Xray snapshot boundary", () => {
+  it("carries a mapped test from a rich synced catalogue into metadata and repository consumers", async () => {
+    const harness = xrayHarness();
+    const tests = Array.from({ length: 3_000 }, (_, index) => richTest("CALC", index + 1));
+    harness.seedCatalogue(tests, ["CALC"]);
+    const sourceMetadata = harness.adapter.metadata!;
+    const organization = new XrayOrganizationCapability({
+      reader: new XrayOrganizationReader({ readGraphql: () => Promise.resolve({ data: { getTestSets: { total: 0, results: [] } } }) }),
+      metadata: sourceMetadata,
+      cache: new XrayOrganizationCache(fakeMemento(), { endpoint: "xray.cloud.getxray.app", account: () => Promise.resolve("account"), workspaceId: "ws" }),
+      config: harness.services.config,
+      logger: harness.services.logger,
+      account: () => Promise.resolve("account"),
+      onCredentialsChange: new vscode.EventEmitter<void>().event,
+      projectOf: (key) => key.split("-")[0]!,
+    });
+    const source: TraceabilityAdapter = {
+      id: "xray", label: "Xray", keyGrammar: harness.adapter.keyGrammar,
+      browseUrl: harness.adapter.browseUrl, metadata: sourceMetadata, organization,
+    };
+    const adapter = validatedAdapter(source, () => Promise.resolve(), () => undefined);
+    try {
+      await adapter.metadata!.sync({ projectKeys: ["CALC"] });
+      const remote = adapter.metadata!.snapshot();
+      const parsed = FeatureParser.create().parseFeatureContent("Feature: Calculations\n\n@TEST_CALC-3000\nScenario: Calculate\n  Given two numbers\n");
+      const model = buildTraceabilitySnapshot([{ filePath: "/ws/calculations.feature", scenarios: parsed?.scenarios ?? [] }], {}, adapter.keyGrammar, remote);
+      expect(model.links.find((link) => link.testKey === "CALC-3000")?.meta?.summary).toBe("Calculation 3000");
+
+      const repository = adapter.organization!.snapshot();
+      const projection = projectTraceabilityOrganization(repository, model);
+      expect(projection.rows.find((row) => row.label === "CALC-3000")?.description).toContain("Calculation 3000");
+    } finally {
+      organization.dispose();
+      await harness.adapter.dispose?.();
+    }
+  });
+
+  it("carries a fully populated test from the third complete project beyond 20,000 tests", async () => {
+    const harness = xrayHarness();
+    const tests = ["CALC", "MATH", "SHOP"].flatMap((project) =>
+      Array.from({ length: 10_000 }, (_, index) => richTest(project, index + 1, 20))
+    );
+    harness.seedCatalogue(tests, ["CALC", "MATH", "SHOP"]);
+    const source: TraceabilityAdapter = {
+      id: "xray", label: "Xray", keyGrammar: harness.adapter.keyGrammar,
+      browseUrl: harness.adapter.browseUrl, metadata: harness.adapter.metadata,
+    };
+    const adapter = validatedAdapter(source, () => Promise.resolve(), () => undefined);
+    try {
+      await adapter.metadata!.sync({ projectKeys: ["CALC", "MATH", "SHOP"] });
+      const snapshot = adapter.metadata!.snapshot();
+      expect(snapshot.tests.size).toBe(30_000);
+      expect(snapshot.tests.get("SHOP-10000")?.coverageKeys).toHaveLength(20);
+      expect(snapshot.completeProjects).toEqual(["CALC", "MATH", "SHOP"]);
+      expect(snapshot.truncated).toBe(false);
+      const parsed = FeatureParser.create().parseFeatureContent("Feature: Shop\n\n@TEST_SHOP-10000\nScenario: Checkout\n  Given a cart\n");
+      const model = buildTraceabilitySnapshot([{ filePath: "/ws/shop.feature", scenarios: parsed?.scenarios ?? [] }], {}, adapter.keyGrammar, snapshot);
+      expect(model.links.find((link) => link.testKey === "SHOP-10000")?.meta?.summary).toBe("Calculation 10000");
+    } finally {
+      await harness.adapter.dispose?.();
+    }
+  });
+
+  it("uses native Map traversal and rejects entries added during validation", () => {
+    const harness = xrayHarness();
+    const guarded = new Map([["CALC-1", { key: "CALC-1" }]]);
+    Object.defineProperty(guarded, "size", { get: () => {throw new Error("size override used");} });
+    Object.defineProperty(guarded, "entries", { value: () => {throw new Error("iterator override used");} });
+    const mutating = new Map<string, { key: string }>();
+    mutating.set("CALC-1", {
+      get key(): string {
+        mutating.set("CALC-2", { key: "CALC-2" });
+        return "CALC-1";
+      },
+    });
+    const adapterFor = (tests: Map<string, { key: string }>): TraceabilityAdapter => validatedAdapter({
+      id: "xray", label: "Xray", keyGrammar: harness.adapter.keyGrammar,
+      browseUrl: harness.adapter.browseUrl,
+      metadata: {
+        onDidChange: new vscode.EventEmitter<void>().event,
+        snapshot: () => ({ tests, fetchedScopes: [], catalogueProjects: [], completeProjects: [], verifiedAbsentKeys: [], stale: false, errors: [] }),
+        sync: () => Promise.resolve(),
+      },
+    }, () => Promise.resolve(), () => undefined);
+
+    expect(adapterFor(guarded).metadata!.snapshot().tests.get("CALC-1")?.key).toBe("CALC-1");
+    expect(() => adapterFor(mutating).metadata!.snapshot()).toThrowError(
+      'Integration adapter "xray" returned malformed metadata.snapshot response.'
+    );
+  });
+});

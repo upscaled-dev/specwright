@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.7.5] - 2026-10-11
+
+### Fixed
+
+- Large Xray catalogues no longer fail metadata or organization snapshot validation after syncing. Metadata from all synced projects remains available without a new global test-count cutoff.
+- The Coverage Board pages Matrix rows in file order, keeping All Projects usable with large catalogues. Search covers every row, including rows beyond the current page.
+
+### Validation
+
+- Automated acceptance covers 30,000 populated tests across three projects. Verification against the affected live Xray account remains pending. The existing 10,000-tests-per-project fetch limit still applies. Repository and Test Set organization snapshots retain their separate 20,000-item limit and report truncation when reached.
+
+
+## [0.7.4] - 2026-10-09
+### Changed
+
+- Stopping an installed Playwright test first lets its CLI finish fixture, worker, and browser cleanup. When an initial cleanup check cannot establish survivors, cancellation releases with the reason logged. Previously confirmed survivors remain blocked through an unreadable retry and every known survivor is retained, including large trees. Windows taskkill requires a fresh match of the root's PID and creation time; weak process identities are scoped to the OS boot to avoid matching reused PIDs after a restart.
+
+### Validation
+
+- Native Windows cancellation and Stop then Run verification in the affected workspace remain pending.
+
+## [0.7.3] - 2026-10-06
 ### Added
 
 - Creating an Xray test from a scenario or the Coverage Board can now add it to an existing Test Set, Test Plan, or both. Targets are checked before creation, and a failed association keeps the created test and any local tag.
@@ -15,7 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Traceability panel's Repository and Test Sets tabs now date the catalogue. Each project row says "synced 5m ago", and "synced 2h ago (stale)" once the cache has passed its lifetime, in the same words as the connection row.
 - The Coverage Board's **Select projects...** button goes idle while the project picker is open, wherever it was opened from, and its hover text says the picker is already open.
-- Stopping an installed Playwright test first lets its CLI finish fixture, worker, and browser cleanup. When an initial cleanup check cannot establish survivors, cancellation releases with the reason logged. Previously confirmed survivors remain blocked through an unreadable retry and every known survivor is retained, including large trees. Windows taskkill requires a fresh match of the root's PID and creation time; weak process identities are scoped to the OS boot to avoid matching reused PIDs after a restart.
 
 ### Fixed
 

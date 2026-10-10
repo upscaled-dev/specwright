@@ -129,6 +129,8 @@ Run **Specwright: Open Coverage Board** from the Command Palette or the Traceabi
 
 Use the **View project** selector at the top of the board to choose the project the board works in. It narrows what the board shows, loads that project, and is the target for create and publish actions. It leaves the standing sync scope alone, and every sync fetches it alongside that scope. Use **Select projects...** next to **Sync** in the Mapping toolbar to change the standing list.
 
+The Matrix shows one page of rows at a time. Use its **Prev** and **Next** controls to reach later rows, or use the board search to filter all synced results before paging. A feature file can appear on more than one page; its Matrix group count shows rows on the current page.
+
 ![Coverage Board Mapping tab](../images/mapping-xray.png)
 
 ![Coverage Board Matrix tab](../images/matrix-xray.png)
@@ -311,6 +313,11 @@ host. Registration requires an exact integration API version and an exact versio
 capability. Duplicate IDs and incompatible versions are rejected before activation. Initialization
 and disposal are asynchronous and deadline-bound, and capability responses are checked before the
 traceability model consumes them.
+
+Metadata snapshots retain tests from every synced project. The boundary validates each entry of
+the already materialized test map, so validation work grows with the number of tests while the
+per-test shape, nested collection size, and string length remain bounded. Repository and Test Set
+organization snapshots keep their separate 20,000-item limit and report truncation when reached.
 
 This boundary limits cooperative asynchronous code. It does not isolate the extension host from a
 process crash or blocked event loop. A bundled adapter must not load native add-ons, block the event

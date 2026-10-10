@@ -19,7 +19,8 @@ function boardRender(matrixRows = 1): Extract<BoardHostMessage, { type: "render"
     matrix: [{ file: "features/large.feature", count: matrixRows, rows: Array.from({ length: matrixRows }, (_, index) => ({
       requirement: `REQ-${index}`, test: `TEST-${index}`, scenario: `Scenario ${index}`, tag: `@TEST_${index}`,
       result: "passed", file: "features/large.feature", projects: ["CALC"],
-    })) }], executions: [], availableEmptyText: "No tests", filtering: false, projects: ["CALC"], project: "", scoped: false,
+    })) }], matrixPage: { filtered: matrixRows, page: 0, pageSize: 25, pageCount: Math.ceil(matrixRows / 25) },
+    executions: [], availableEmptyText: "No tests", filtering: false, projects: ["CALC"], project: "", scoped: false,
     createVerb: verb, syncVerb: verb, syncScopeVerb: verb, untracedHelper: "", testSetVerb: verb, addToTestSetVerb: verb, testPlanVerb: verb,
     addToTestPlanVerb: verb, mappingHelper: "", executionVerb: verb,
   };
@@ -61,6 +62,14 @@ describe("webview protocol", () => {
     const base = boardRender();
     const body = { ...base, sections: { ...base.sections, available: { ...base.sections.available, selection: "most" } } };
     expect(isHostEnvelope({ version: 1, session: "session", revision: 2, surface: "board", body }, "session", 1)).toBe(false);
+  });
+
+  it("accepts Matrix page requests and rejects malformed Matrix page metadata", () => {
+    expect(parseClientEnvelope(client("board", { type: "page", section: "matrix", step: "next" }))).toBeDefined();
+    const base = boardRender();
+    const envelope = { version: 1, session: "session", revision: 2, surface: "board" };
+    expect(isHostEnvelope({ ...envelope, body: { ...base, matrixPage: { ...base.matrixPage, pageSize: 0 } } }, "session", 1)).toBe(false);
+    expect(isHostEnvelope({ ...envelope, body: { ...base, matrixPage: { ...base.matrixPage, extra: true } } }, "session", 1)).toBe(false);
   });
 
   it("rejects malformed, wrong-version, wrong-session and unknown-surface envelopes", () => {

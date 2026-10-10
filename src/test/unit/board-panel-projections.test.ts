@@ -19,6 +19,34 @@ describe("BoardPanel", () => {
     ]);
   });
 
+  it("pages matrix rows in displayed file order without exceeding the page size for a large file", async () => {
+    const zetaRows = Array.from({ length: 52 }, (_, index) => ({
+      requirement: `A-${index + 1}`,
+      test: `ZETA-${index + 1}`,
+      scenario: "",
+      tag: "",
+      result: "no coverage",
+      file: "features/zeta.feature",
+      projects: ["CALC"],
+    }));
+    const alphaRow = {
+      requirement: "Z-1", test: "ALPHA-1", scenario: "", tag: "", result: "no coverage",
+      file: "features/alpha.feature", projects: ["CALC"],
+    };
+    const { panel } = await openReady({ buildModel: () => ({ ...MODEL, matrix: [...zetaRows, alphaRow] }) });
+
+    expect(lastRender(panel)!.matrix.map((group) => [group.file, group.count])).toEqual([
+      ["features/alpha.feature", 1],
+      ["features/zeta.feature", 49],
+    ]);
+    expect(matrixTests(lastRender(panel)!)).toEqual(["ALPHA-1", ...zetaRows.slice(0, 49).map((row) => row.test)]);
+
+    await receive(panel, { surface: "board", type: "page", section: "matrix", step: "next" });
+
+    expect(lastRender(panel)!.matrix.map((group) => [group.file, group.count])).toEqual([["features/zeta.feature", 3]]);
+    expect(matrixTests(lastRender(panel)!)).toEqual(zetaRows.slice(49).map((row) => row.test));
+  });
+
   it("posts the executions rows from the ledger on render", async () => {
     const { panel } = await openReady();
 
