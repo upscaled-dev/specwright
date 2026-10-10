@@ -514,7 +514,9 @@ describe("CommandManager run commands: single execution (no double-run)", () => 
 
     expect(beginExternalRun).toHaveBeenCalledWith("/abs/x.feature", undefined);
     expect(runPathFilterWithOutput).not.toHaveBeenCalled();
-    expect(complete).toHaveBeenCalledWith(expect.objectContaining(cancelled));
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({
+      ...cancelled, duration: expect.any(Number),
+    }));
     expect(end).not.toHaveBeenCalled();
   });
 });

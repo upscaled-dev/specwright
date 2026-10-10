@@ -9,6 +9,7 @@
 //   node scripts/release.mjs --type major          # 0.1.5 -> 1.0.0
 //   node scripts/release.mjs --version 0.2.0       # explicit version
 //   node scripts/release.mjs --type patch --dry-run
+//   node scripts/release.mjs --type patch --date 2026-10-11
 //
 // Exit codes:
 //   0 success
@@ -116,6 +117,19 @@ function resolveNewVersion(currentVersion) {
   return bumpVersion(currentVersion, args.type ?? "patch");
 }
 
+function resolveReleaseDate() {
+  if (!Object.hasOwn(args, "date")) return new Date().toISOString().slice(0, 10);
+  const value = args.date;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    die(3, `--date must be a valid YYYY-MM-DD date, got '${value}'`);
+  }
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    die(3, `--date must be a valid YYYY-MM-DD date, got '${value}'`);
+  }
+  return value;
+}
+
 // 3. Tag pre-check
 function ensureTagFree(newVersion) {
   const tag = `v${newVersion}`;
@@ -140,8 +154,7 @@ function updatePackageVersion(newVersion) {
 
 // 5. Update CHANGELOG: move ## [Unreleased] content into a dated header,
 //    leave a fresh empty ## [Unreleased] above for the next round.
-function updateChangelog(newVersion) {
-  const today = new Date().toISOString().slice(0, 10);
+function updateChangelog(newVersion, releaseDate) {
   const original = readFileSync(CHANGELOG_PATH, "utf-8");
   // Accept both `## Unreleased` and `## [Unreleased]` (Keep-a-Changelog style).
   const unreleasedHeader = /^## \[?Unreleased\]?\s*$/m;
@@ -154,14 +167,14 @@ function updateChangelog(newVersion) {
   const preservedHeader = match[0];
   const updated = original.replace(
     unreleasedHeader,
-    `${preservedHeader}\n\n## [${newVersion}] - ${today}`
+    `${preservedHeader}\n\n## [${newVersion}] - ${releaseDate}`
   );
   if (isDryRun) {
-    log(`(dry-run) would insert '## [${newVersion}] - ${today}' below '${preservedHeader}'`);
+    log(`(dry-run) would insert '## [${newVersion}] - ${releaseDate}' below '${preservedHeader}'`);
     return;
   }
   writeFileSync(CHANGELOG_PATH, updated);
-  log(`CHANGELOG.md → new section '## [${newVersion}] - ${today}'`);
+  log(`CHANGELOG.md → new section '## [${newVersion}] - ${releaseDate}'`);
 }
 
 // 6. Run source and contract gates before creating the release commit.
@@ -210,6 +223,7 @@ function rollbackReleaseCommit(newVersion) {
 
 (function main() {
   log(`release.mjs ${isDryRun ? "(dry-run)" : ""}`);
+  const releaseDate = resolveReleaseDate();
 
   const pkg = JSON.parse(readFileSync(PKG_PATH, "utf-8"));
   const current = pkg.version;
@@ -220,7 +234,7 @@ function rollbackReleaseCommit(newVersion) {
   ensureTagFree(next);
 
   updatePackageVersion(next);
-  updateChangelog(next);
+  updateChangelog(next, releaseDate);
   runPipeline();
   commitRelease(next);
   try {

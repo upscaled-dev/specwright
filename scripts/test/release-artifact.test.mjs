@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, posix, resolve } from "node:path";
@@ -469,6 +469,27 @@ test("release orchestration keeps artifact gates mandatory and ordered", () => {
     release.includes('--commit "$(git rev-parse v${next}^{})" --version ${next}'),
     true
   );
+});
+
+test("release dry run uses an explicit validated changelog date", () => {
+  const output = execFileSync(process.execPath, [
+    "scripts/release.mjs", "--version", "9999.0.0", "--date", "2026-10-11", "--dry-run",
+  ], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.match(output, /would insert '## \[9999\.0\.0\] - 2026-10-11'/u);
+});
+
+test("invalid release dates fail before version or changelog changes", () => {
+  const files = ["package.json", "package-lock.json", "CHANGELOG.md"];
+  const before = files.map((name) => readFileSync(resolve(REPO_ROOT, name), "utf8"));
+  for (const date of ["2026-02-30", "2026-2-3", undefined]) {
+    const args = ["scripts/release.mjs", "--version", "9999.0.0", "--date"];
+    if (date !== undefined) args.push(date);
+    const result = spawnSync(process.execPath, args, { cwd: REPO_ROOT, encoding: "utf8" });
+    assert.equal(result.status, 3);
+    assert.match(result.stderr, /--date must be a valid YYYY-MM-DD date/u);
+    assert.doesNotMatch(result.stdout, /bumping|\$ npm version/u);
+  }
+  assert.deepEqual(files.map((name) => readFileSync(resolve(REPO_ROOT, name), "utf8")), before);
 });
 
 test("workflow policy parses discovered YAML semantics", () => {

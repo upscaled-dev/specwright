@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Xray metadata sync retains more than 20,000 explicitly queried keys and verified absences without rejecting the snapshot.
+- Test Set sync applies the same organization item limit to live and cached state, preserves incomplete membership details, and reports omitted projects accurately when both limits apply.
+- The Extension Host test harness reads the installed bddgen entry point from its fixture dependency manifest and verifies the generated scenario.
+
 ## [0.7.5] - 2026-10-11
 
 ### Fixed

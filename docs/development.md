@@ -66,7 +66,10 @@ Or with explicit version:
 
 ```bash
 node scripts/release.mjs --version 0.5.0
+node scripts/release.mjs --type patch --date 2026-10-11
 ```
+
+`--date` sets the changelog date when the release calendar date differs from UTC. Omit it to use the current UTC date.
 
 After the script completes:
 
