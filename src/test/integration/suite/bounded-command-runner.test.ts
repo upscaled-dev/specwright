@@ -10,11 +10,13 @@ import { Logger } from "../../../utils/logger";
 import { shellQuote } from "../../../utils/shell";
 
 function installedBddgenTarget(projectDir: string): string {
-  const manifestPath = require.resolve("playwright-bdd/package.json", { paths: [projectDir] });
+  const manifestPath = path.join(projectDir, "node_modules", "playwright-bdd", "package.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
     bin: { bddgen: string };
   };
-  return path.resolve(path.dirname(manifestPath), manifest.bin.bddgen);
+  const target = path.resolve(path.dirname(manifestPath), manifest.bin.bddgen);
+  assert.equal(fs.existsSync(target), true, "fixture does not contain the installed bddgen binary");
+  return target;
 }
 
 suite("Bounded command runner (real Extension Host)", () => {
@@ -91,6 +93,12 @@ suite("Bounded command runner (real Extension Host)", () => {
       `stdout: ${result.output}`,
       `stderr: ${result.error}`,
     ].join("\n"));
-    assert.equal(fs.existsSync(generatedDir), true, "bddgen did not generate .features-gen");
+    const generatedSpec = path.join(generatedDir, "features", "runner.feature.spec.js");
+    assert.equal(fs.existsSync(generatedSpec), true, "bddgen did not generate runner.feature.spec.js");
+    assert.match(
+      fs.readFileSync(generatedSpec, "utf8"),
+      /test\('Installed binary',/u,
+      "bddgen did not generate the named scenario"
+    );
   });
 });
