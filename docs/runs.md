@@ -78,6 +78,8 @@ When you debug a feature-file breakpoint, Specwright:
 
 The debugger pauses in the generated specification, or in your step definition after you step in, rather than in the `.feature` file. This is expected: the JavaScript debugger can bind only to executable JavaScript.
 
+Debug requests one attempt with Playwright's `--retries=0` flag, even when `playwrightCommand` includes a retry count. Ordinary Run keeps the project's retry policy. A retry count set inside a test suite with `test.describe.configure()` can still override Playwright's project and CLI setting.
+
 If your project writes generated specs outside `.features-gen`, set `playwrightBddRunner.featuresGenDir` to the matching directory. Step-definition breakpoints still work if a feature-file breakpoint cannot be mapped.
 
 ## Read results

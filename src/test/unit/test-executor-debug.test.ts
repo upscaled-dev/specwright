@@ -171,6 +171,7 @@ describe("TestExecutor debugScenario", () => {
     expect(command).toContain(".features-gen");
     expect(config["runtimeArgs"]).toContain("--grep");
     expect(config["runtimeArgs"]).toContain("Passing");
+    expect(config["runtimeArgs"]).toContain("--retries=0");
     // The session key is stamped even when nothing mirrors, so session-end tracking always works.
     expect(typeof config[BreakpointMirror.SESSION_KEY]).toBe("string");
   });

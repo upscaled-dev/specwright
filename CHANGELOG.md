@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Debug requests zero Playwright CLI retries for standard project settings; ordinary Run keeps configured retries.
+
 
 ## [0.7.7] - 2026-10-11
 ### Fixed

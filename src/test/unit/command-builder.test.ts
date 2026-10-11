@@ -256,6 +256,20 @@ describe("CommandBuilder", () => {
     expect(playwrightCommand).toContain('--grep "Passing"');
   });
 
+  it("overrides configured CLI retries only for Debug", () => {
+    const builder = CommandBuilder.create(makeConfig({
+      playwrightCommand: "npx playwright test --retries=2",
+    }) as never, loggerStub());
+    const options = { filePath: "/abs/features/a.feature", outlineName: "Passing" };
+    const debug = builder.buildDebugCommandParts(options).playwrightCommand;
+    const run = builder.buildScenarioCommandParts(options).playwrightCommand;
+
+    expect(debug).toMatch(/--retries=2.*--retries=0/u);
+    expect(debug).not.toContain("--debug");
+    expect(run).toContain("--retries=2");
+    expect(run).not.toContain("--retries=0");
+  });
+
   it("carries --tags on the bddgen half of the debug command", () => {
     const builder = CommandBuilder.create(makeConfig() as never, loggerStub());
     const { bddgenCommand, playwrightCommand } = builder.buildDebugCommandParts({

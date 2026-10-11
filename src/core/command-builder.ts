@@ -172,6 +172,8 @@ export class CommandBuilder {
       const reporters = reporter ? `${reporter},json` : "json";
       playwrightParts.push(`--reporter=${reporters}`);
     }
+    // Keep a paused debug attempt from launching another copy after it fails.
+    playwrightParts.push("--retries=0");
     return { bddgenCommand, playwrightCommand: playwrightParts.join(" ") };
   }
 

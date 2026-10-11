@@ -32,6 +32,7 @@ import { LegacyArtifactGateway } from "../../ui/legacy-artifact-gateway";
 import { WorkspaceTrust } from "../../core/workspace-trust";
 import { FakeTestController, FakeTestItem } from "./helpers/fake-test-controller";
 import { parseExecutableCommand, runBoundedCommand } from "../../core/bounded-command-runner";
+import { shellQuote } from "../../utils/shell";
 
 
 
@@ -67,7 +68,11 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     executionGateway?: ExecutionGateway,
     runBddgen = false,
     artifactOwnership: readonly ScenarioRef[] = [],
-    options: { testFilePattern?: () => string; localCapability?: () => boolean } = {}
+    options: {
+      testFilePattern?: () => string;
+      playwrightCommand?: () => string;
+      localCapability?: () => boolean;
+    } = {}
   ): {
     provider: PlaywrightBddTestProvider;
     controller: FakeTestController;
@@ -82,6 +87,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       get: <T>(key: string, defaultValue?: T): T | undefined => {
         if (key === "bddgenCommand" && !runBddgen) {return "" as T;}
         if (key === "testFilePattern" && options.testFilePattern) {return options.testFilePattern() as T;}
+        if (key === "playwrightCommand" && options.playwrightCommand) {return options.playwrightCommand() as T;}
         return defaultValue;
       },
       update: (): Promise<void> => Promise.resolve(),
@@ -159,7 +165,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     );
   }
 
-  it("finishes a real generated outline run before admitting the next run", async () => {
+  it("finishes a retried outline run and debugs one failing attempt", async () => {
     fs.rmSync(fixture.root, { recursive: true, force: true });
     const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../.."), ".specwright-outline-"));
     fixture = {
@@ -229,7 +235,10 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       return result;
     };
     try {
-      const { provider, controller, gateway } = buildProvider(shell, undefined, true);
+      let playwrightCommand = "npx playwright test";
+      const { provider, controller, gateway, executor } = buildProvider(shell, undefined, true, [], {
+        playwrightCommand: () => playwrightCommand,
+      });
       await provider.discoverTests();
       const outline = controller.find(`${fixture.featurePath}${OUTLINE_ID_SEPARATOR}3:Add (<a>/<b>) widgets`);
       expect(outline, "the named outline is discovered").toBeTruthy();
@@ -282,6 +291,26 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
         true, true, true, true,
       ]);
       expect(controller.runs.at(-1)!.outcome.ended).toBe(true);
+
+      fs.rmSync(retryStarted);
+      playwrightCommand = "npx playwright test --retries=2";
+      let debugCommand = "";
+      let debugResult: Awaited<ReturnType<typeof runBoundedCommand>> | undefined;
+      const startDebugging = vi.spyOn(vscode.debug, "startDebugging").mockImplementation(async (_folder, config) => {
+        const launch = config as { runtimeExecutable: string; runtimeArgs: string[] };
+        debugCommand = [launch.runtimeExecutable, ...launch.runtimeArgs.map((arg) => shellQuote(arg))].join(" ");
+        debugResult = await runBoundedCommand({ command: debugCommand, workingDir: root, logger });
+        return true;
+      });
+      try {
+        await executor.debugScenario({ filePath: fixture.featurePath, outlineName: "Add (<a>/<b>) widgets" });
+      } finally {
+        startDebugging.mockRestore();
+      }
+      expect(debugResult?.success).toBe(false);
+      expect(debugCommand).toMatch(/--retries=2.*--retries=0/u);
+      expect(`${debugResult?.output}\n${debugResult?.error}`).toContain("Add (3/3) widgets");
+      expect(fs.existsSync(retryStarted), "Debug ran a retry").toBe(false);
     } finally {
       logger.dispose();
     }

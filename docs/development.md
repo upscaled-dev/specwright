@@ -29,6 +29,8 @@ The native Windows Extension Host run must also preserve the installed bddgen sh
 
 For an outline completion report, run a populated outline through installed bddgen, Playwright, the gateway, and a Testing run with a configured retry held at a controlled gate. The live count may reach its total while the retry is pending; the Testing run and execution slot must remain open until Playwright closes. After release, assert the named final example statuses, `TestRun.end()`, and a second named run through the same gateway. Repeat on the affected native platform before closing a platform-specific report.
 
+For Debug retry policy, pass the executor's structured `startDebugging` arguments to installed Playwright against a named failing-then-passing outline with project retries enabled. Debug must execute one failed attempt; ordinary Run must retry and pass. Confirm breakpoint behavior in a native Extension Host separately, since a captured launch does not exercise VS Code's JavaScript debugger.
+
 ## Releasing
 
 Release only from protected `main` and protect tags matching `v*` in the repository settings. The workflow cannot administer or prove those rules with its token, so verify both rules before the first release and after repository-policy changes. The workflow uses read-only repository permissions; only the tag-only promotion job receives `actions: read`, `id-token: write`, and `attestations: write`.

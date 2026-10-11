@@ -12,7 +12,7 @@ Run, debug, generation, credential access, sync, publishing, attachments, and re
 
 | Setting | Default | Use it when… |
 | --- | --- | --- |
-| `playwrightCommand` | `npx playwright test` | Your project runs Playwright through another executable and argument list, such as `pnpm exec playwright test`. Shell operators are rejected. |
+| `playwrightCommand` | `npx playwright test` | Your project runs Playwright through another executable and argument list, such as `pnpm exec playwright test`. Shell operators are rejected. Debug appends `--retries=0`; Run keeps configured retries. |
 | `bddgenCommand` | `npx bddgen` | You need a different code-generation executable and argument list. Shell operators are rejected. Leave it empty only when current generated specs already exist before a targeted run. |
 | `preRunCommand` | empty | A trusted compatibility shell command must finish before every test run, for example to build fixtures or generate current BDD specs. A non-zero exit stops the run. |
 | `featuresGenDir` | `.features-gen` | Your `playwright-bdd` output directory differs from the default. This is needed for feature-file breakpoint mapping. |
