@@ -27,6 +27,8 @@ The required Playwright fixture test needs no downloaded browser. To also prove 
 
 The native Windows Extension Host run must also preserve the installed bddgen shim, target, and package manifest through cancellation, then generate the named `Installed binary` scenario in the later bounded-command-runner test. The cancellation fixture uses a checkout-local directory so it resolves ancestor dependencies without a disposable junction to `node_modules`. A passing cancellation test alone does not prove that later tests can still use the installation.
 
+For an outline completion report, run a populated outline through installed bddgen, Playwright, the gateway, and a Testing run with a configured retry held at a controlled gate. The live count may reach its total while the retry is pending; the Testing run and execution slot must remain open until Playwright closes. After release, assert the named final example statuses, `TestRun.end()`, and a second named run through the same gateway. Repeat on the affected native platform before closing a platform-specific report.
+
 ## Releasing
 
 Release only from protected `main` and protect tags matching `v*` in the repository settings. The workflow cannot administer or prove those rules with its token, so verify both rules before the first release and after repository-policy changes. The workflow uses read-only repository permissions; only the tag-only promotion job receives `actions: read`, `id-token: write`, and `attestations: write`.

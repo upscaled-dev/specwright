@@ -111,20 +111,23 @@ export async function runGatewayTestRequest(options: {
     }
   } finally {
     cancelSub.dispose();
-    if (completion !== undefined) {
-      appendFailureLine(live, completion);
+    try {
+      if (completion !== undefined) {
+        appendFailureLine(live, completion);
+      }
+      live.finishOutput();
+      if (unrecoverable !== undefined) {
+        const message = new vscode.TestMessage(unrecoverable);
+        options.roots.forEach((root) => run.failed(root, message));
+      } else if (completion?.state === "cancelled") {
+        options.roots.forEach((root) => options.cancel(root, run, live));
+      } else if (completion !== undefined) {
+        const result = runOutputFromCompletion(completion, options.parser, options.workingDir);
+        options.summarize(run, result, options.roots);
+        options.roots.forEach((root) => options.apply(root, run, live, result));
+      }
+    } finally {
+      run.end();
     }
-    live.finishOutput();
-    if (unrecoverable !== undefined) {
-      const message = new vscode.TestMessage(unrecoverable);
-      options.roots.forEach((root) => run.failed(root, message));
-    } else if (completion?.state === "cancelled") {
-      options.roots.forEach((root) => options.cancel(root, run, live));
-    } else if (completion !== undefined) {
-      const result = runOutputFromCompletion(completion, options.parser, options.workingDir);
-      options.summarize(run, result, options.roots);
-      options.roots.forEach((root) => options.apply(root, run, live, result));
-    }
-    run.end();
   }
 }

@@ -90,6 +90,7 @@ function gateway(
 function rig(options: {
   readonly roots: readonly FakeTestItem[];
   readonly gateway: ExecutionGateway;
+  readonly apply?: () => void;
 }) {
   const controller = new FakeTestController();
   const summaries: Array<{ text: string; roots: number }> = [];
@@ -116,7 +117,10 @@ function rig(options: {
       summarize: (_testRun, result, roots) => {
         summaries.push({ text: result.output, roots: roots.length });
       },
-      apply: (root) => applied.push(root.id),
+      apply: (root) => {
+        options.apply?.();
+        applied.push(root.id);
+      },
       cancel: (root) => cancelled.push(root.id),
     });
     return controller.runs.at(-1);
@@ -125,6 +129,21 @@ function rig(options: {
 }
 
 describe("runGatewayTestRequest", () => {
+  it("ends the Testing run when final outline status projection fails", async () => {
+    const root = leaf(FILE_A, 3, "Scenario Outline: Add (<a>/<b>) widgets");
+    const { controller, run } = rig({
+      roots: [root],
+      gateway: gateway(() => Promise.resolve(completion({
+        results: [caseResult(FILE_A, 8, "Add (2/2) widgets")],
+        passed: 1,
+      }))),
+      apply: () => {throw new Error("outline projection failed");},
+    });
+
+    await expect(run()).rejects.toThrow("outline projection failed");
+    expect(controller.runs.at(-1)?.outcome.ended).toBe(true);
+  });
+
   // Text that lands while the runner tears down is streamed like any other line, so the terminal
   // shows it once and the roots still end up cancelled.
   it("shows a cancelled run's teardown output once", async () => {

@@ -31,7 +31,7 @@ import { LegacyExecutionDiscovery } from "../../core/legacy-discovery";
 import { LegacyArtifactGateway } from "../../ui/legacy-artifact-gateway";
 import { WorkspaceTrust } from "../../core/workspace-trust";
 import { FakeTestController, FakeTestItem } from "./helpers/fake-test-controller";
-import { parseExecutableCommand } from "../../core/bounded-command-runner";
+import { parseExecutableCommand, runBoundedCommand } from "../../core/bounded-command-runner";
 
 
 
@@ -57,7 +57,9 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
   afterEach(() => {
     (vscode.workspace.fs as { readFile: unknown }).readFile = origReadFile;
     (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
-    try { fs.rmSync(fixture.root, { recursive: true, force: true }); } catch { /* ignore */ }
+    try {
+      fs.rmSync(fixture.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch { /* ignore */ }
   });
 
   function buildProvider(
@@ -144,14 +146,146 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     return { provider, controller, executor, artifactStore, gateway, discoveryManager, config };
   }
 
-  async function runItem(controller: FakeTestController, item: FakeTestItem): Promise<void> {
+  async function runItem(
+    controller: FakeTestController,
+    item: FakeTestItem,
+    token = new vscode.CancellationTokenSource().token
+  ): Promise<void> {
     const runProfile = controller.profile("Run");
     if (!runProfile) {throw new Error("Run profile not registered");}
     await runProfile.runHandler(
       new vscode.TestRunRequest([item]),
-      new vscode.CancellationTokenSource().token
+      token
     );
   }
+
+  it("finishes a real generated outline run before admitting the next run", async () => {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+    const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../.."), ".specwright-outline-"));
+    fixture = {
+      root,
+      featurePath: path.join(root, "features", "test.feature"),
+      genSpecPath: path.join(root, ".features-gen", "features", "test.feature.spec.js"),
+    };
+    fs.mkdirSync(path.join(root, "features"));
+    fs.mkdirSync(path.join(root, "steps"));
+    fs.writeFileSync(fixture.featurePath, [
+      "Feature: Outline completion",
+      "",
+      "  Scenario Outline: Add (<a>/<b>) widgets",
+      "    Given <a> plus <b>",
+      "",
+      "    Examples:",
+      "      | a | b |",
+      "      | 2 | 2 |",
+      "      | 3 | 3 |",
+    ].join("\n"));
+    fs.writeFileSync(path.join(root, "steps", "test.steps.ts"), [
+      'import { createBdd } from "playwright-bdd";',
+      'import * as fs from "node:fs";',
+      "const { Given } = createBdd();",
+      'Given("{int} plus {int}", async ({ $testInfo }, a: number) => {',
+      '  if (a !== 3) {return;}',
+      '  if ($testInfo.retry === 0) {throw new Error("retry this row");}',
+      `  const started = ${JSON.stringify(path.join(root, "retry-started"))};`,
+      `  const release = ${JSON.stringify(path.join(root, "release-retry"))};`,
+      '  fs.writeFileSync(started, "ready");',
+      '  await new Promise<void>((resolve) => {',
+      '    if (fs.existsSync(release)) {resolve(); return;}',
+      '    const poll = setInterval(() => {',
+      '      if (fs.existsSync(release)) {clearInterval(poll); resolve();}',
+      '    }, 10);',
+      '  });',
+      '});',
+    ].join("\n"));
+    fs.writeFileSync(path.join(root, "playwright.config.ts"), [
+      'import { defineConfig } from "@playwright/test";',
+      'import { defineBddConfig } from "playwright-bdd";',
+      'const testDir = defineBddConfig({ features: "features/*.feature", steps: "steps/*.ts" });',
+      "export default defineConfig({ testDir, workers: 1, retries: 1 });",
+    ].join("\n"));
+    const reporterPath = path.join(root, "specwright-live-reporter.cjs");
+    await (await import("esbuild")).build({
+      entryPoints: [path.resolve(__dirname, "../../test-providers/specwright-live-reporter.ts")],
+      outfile: reporterPath,
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+    });
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+      { uri: { fsPath: root } },
+    ];
+
+    const commands: Array<{ command: string; success: boolean; output: string; error: string }> = [];
+    const logger = Logger.create();
+    const shell: ShellRunner = async (command, workingDir, extraEnv, signal, onOutput) => {
+      const result = await runBoundedCommand({
+        command, workingDir, logger,
+        ...(extraEnv ? { extraEnv: { ...extraEnv, PW_TEST_REPORTER: reporterPath } } : {}),
+        ...(signal ? { signal } : {}),
+        ...(onOutput ? { onOutput } : {}),
+      });
+      commands.push({ command, success: result.success, output: result.output, error: result.error });
+      return result;
+    };
+    try {
+      const { provider, controller, gateway } = buildProvider(shell, undefined, true);
+      await provider.discoverTests();
+      const outline = controller.find(`${fixture.featurePath}${OUTLINE_ID_SEPARATOR}3:Add (<a>/<b>) widgets`);
+      expect(outline, "the named outline is discovered").toBeTruthy();
+
+      const firstToken = new vscode.CancellationTokenSource();
+      const first = runItem(controller, outline!, firstToken.token);
+      const retryStarted = path.join(root, "retry-started");
+      const releaseRetry = path.join(root, "release-retry");
+      let stopWaiting = (): void => undefined;
+      try {
+        const retryReady = new Promise<void>((resolve, reject) => {
+          const poll = setInterval(() => {
+            if (!fs.existsSync(retryStarted) ||
+                !controller.runs.at(-1)?.outcome.output.join("").includes("[2 / 2]")) {return;}
+            stopWaiting();
+            resolve();
+          }, 10);
+          const timeout = setTimeout(() => {
+            stopWaiting();
+            reject(new Error(`retry progress did not arrive: ${JSON.stringify(commands)}`));
+          }, 20_000);
+          stopWaiting = () => {clearInterval(poll); clearTimeout(timeout);};
+        });
+        await Promise.race([
+          retryReady,
+          first.then(() => {throw new Error(`run ended before retry: ${JSON.stringify(commands)}`);}),
+        ]);
+        expect(controller.runs.at(-1)?.outcome.ended).toBe(false);
+        expect(gateway.running).toBe(true);
+        expect(commands.map((entry) => entry.success)).toEqual([true]);
+        expect(controller.runs.at(-1)?.outcome.output.join(""))
+          .toMatch(/\[2 \/ 2\].*failed/u);
+      } catch (error) {
+        firstToken.cancel();
+        throw error;
+      } finally {
+        stopWaiting();
+        fs.writeFileSync(releaseRetry, "go");
+        await first;
+      }
+      expect(commands.map((entry) => entry.success), JSON.stringify(commands)).toEqual([true, true]);
+      expect(controller.runs.at(-1)!.outcome.passed).toEqual(expect.arrayContaining([
+        `${fixture.featurePath}:8`, `${fixture.featurePath}:9`,
+      ]));
+      expect(controller.runs.at(-1)!.outcome.ended).toBe(true);
+      expect(gateway.running).toBe(false);
+
+      await runItem(controller, outline!);
+      expect(commands.map((entry) => entry.success), JSON.stringify(commands)).toEqual([
+        true, true, true, true,
+      ]);
+      expect(controller.runs.at(-1)!.outcome.ended).toBe(true);
+    } finally {
+      logger.dispose();
+    }
+  }, 60_000);
 
   it("writes one run summary for a multi-root selection", async () => {
     const shell: ShellRunner = async (_cmd, _dir, env) => {
