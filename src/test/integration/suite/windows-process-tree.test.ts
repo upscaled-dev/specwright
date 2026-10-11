@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  resolveExecutableCommand,
   runBoundedCommand,
   WINDOWS_TASKKILL_TIMEOUT_MS,
   WINDOWS_TERMINATION_WORST_CASE_MS,
@@ -110,7 +111,23 @@ function taskkill(pid: number): Promise<void> {
 
     test("cooperatively cancels the populated Playwright fixture and admits the next named run", async function () {
       this.timeout(90_000);
+      const checkoutDir = path.resolve(__dirname, "../../../..");
+      const shim = path.join(checkoutDir, "node_modules", ".bin", "bddgen.cmd");
+      const manifest = path.join(checkoutDir, "node_modules", "playwright-bdd", "package.json");
+      assert.ok(fs.existsSync(shim), "installed bddgen shim was missing before cancellation");
+      assert.ok(fs.existsSync(manifest), "installed bddgen manifest was missing before cancellation");
+      const invocation = resolveExecutableCommand("npx bddgen", checkoutDir);
+      const target = invocation.args[0];
+      assert.ok(target, "installed bddgen target was missing before cancellation");
+      const dependencies = [shim, manifest, target];
+      const before = dependencies.map((file) => fs.readFileSync(file));
       await provePlaywrightCancellation();
+      for (const [index, file] of dependencies.entries()) {
+        assert.ok(fs.existsSync(file), `installed bddgen file was removed by cancellation fixture: ${file}`);
+        assert.deepEqual(fs.readFileSync(file), before[index], `installed bddgen file changed during cancellation fixture: ${file}`);
+      }
+      assert.deepEqual(resolveExecutableCommand("npx bddgen", checkoutDir), invocation,
+        "installed bddgen resolution changed during cancellation fixture");
     });
 
     test("cancels an owned tree through the gateway and admits the next named command", async function () {

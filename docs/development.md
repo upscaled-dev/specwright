@@ -25,6 +25,8 @@ A change to Windows cancellation is accepted only after the native integration t
 
 The required Playwright fixture test needs no downloaded browser. To also prove browser cleanup, install the project's Playwright Chromium browser, set `SPECWRIGHT_BROWSER_CANCELLATION_ACCEPTANCE=1`, and run `npx vitest run src/test/unit/playwright-cli-cancellation.test.ts`. This opt-in test populates a real page, observes fixture teardown and worker exit after Stop, then passes a second named browser test through the same gateway. Browser acceptance requires this test to run on the affected platform; a skipped opt-in test is not evidence of browser cleanup.
 
+The native Windows Extension Host run must also preserve the installed bddgen shim, target, and package manifest through cancellation, then generate the named `Installed binary` scenario in the later bounded-command-runner test. The cancellation fixture uses a checkout-local directory so it resolves ancestor dependencies without a disposable junction to `node_modules`. A passing cancellation test alone does not prove that later tests can still use the installation.
+
 ## Releasing
 
 Release only from protected `main` and protect tags matching `v*` in the repository settings. The workflow cannot administer or prove those rules with its token, so verify both rules before the first release and after repository-policy changes. The workflow uses read-only repository permissions; only the tag-only promotion job receives `actions: read`, `id-token: write`, and `attestations: write`.

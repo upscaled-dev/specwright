@@ -1,6 +1,5 @@
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { runBoundedCommand } from "../../core/bounded-command-runner";
 import { ExecutionAdmission } from "../../core/execution-admission";
@@ -14,13 +13,11 @@ import { Logger } from "../../utils/logger";
 /** Real installed CLI, populated resource, fixture teardown, worker exit and next gateway admission. */
 export async function provePlaywrightCancellation(options: { withBrowser?: boolean } = {}): Promise<void> {
   const { withBrowser = false } = options;
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-playwright-stop-"));
+  const directory = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../.."), ".specwright-playwright-stop-"));
   const logger = Logger.create();
   const controller = new AbortController();
   let pending: Promise<unknown> | undefined;
   try {
-    fs.symlinkSync(path.resolve(__dirname, "../../../node_modules"), path.join(directory, "node_modules"),
-      process.platform === "win32" ? "junction" : "dir");
     fs.writeFileSync(path.join(directory, "playwright.config.cjs"),
       'module.exports={testDir:".",timeout:60000,workers:1,reporter:"line"};');
     fs.writeFileSync(path.join(directory, "cancellation.spec.cjs"), [

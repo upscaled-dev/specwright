@@ -18,6 +18,8 @@ test-results/
 
 # Integration-test scratch fixtures (created/torn down per run)
 **/watcher-scratch/
+/.specwright-playwright-stop-*/
+/.specwright-host-bddgen-*/
 
 # OS / editor noise
 .DS_Store
