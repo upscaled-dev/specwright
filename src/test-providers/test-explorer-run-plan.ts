@@ -55,16 +55,16 @@ export function describeTestSelection(
   return batchSelectionFromScenarios(scenarioRefsUnder(roots, scenarioFor));
 }
 
-// The outline node is backed by its first example row, so only the id shape says whether the user
-// picked the whole outline or one row.
+// The outline node is backed by its first example row. Its id shape distinguishes the whole
+// outline from one row, while the declaration line distinguishes same-titled outlines.
 function itemRunRef(item: vscode.TestItem, scenario: Scenario): ScenarioRef {
   return item.id.includes(OUTLINE_ID_SEPARATOR) && scenario.isScenarioOutline
-    ? outlineRef(scenario.filePath, scenario.outlineName)
+    ? { ...outlineRef(scenario.filePath, scenario.outlineName), line: scenario.outlineLineNumber }
     : scenarioRefFromScenario(scenario);
 }
 
-function outlineKey(ref: ScenarioRef): string {
-  return `${normalizePath(ref.filePath)}\0${ref.outlineName ?? ref.name}`;
+function outlineKey(filePath: string, declarationLine: number): string {
+  return `${normalizePath(filePath)}\0${declarationLine}`;
 }
 
 function scenarioRefsUnder(
@@ -73,11 +73,18 @@ function scenarioRefsUnder(
 ): ScenarioRef[] {
   const seen = new Set<string>();
   const refs: ScenarioRef[] = [];
+  const wholeOutlines = new Set<string>();
+  const rowOwners = new Map<string, string>();
   const visit = (item: vscode.TestItem): void => {
     const scenario = scenarioFor(item.id);
     if (scenario) {
       const ref = itemRunRef(item, scenario);
       const identity = refIdentity(ref);
+      if (scenario.isScenarioOutline) {
+        const key = outlineKey(scenario.filePath, scenario.outlineLineNumber);
+        if (item.id.includes(OUTLINE_ID_SEPARATOR)) {wholeOutlines.add(key);}
+        else {rowOwners.set(identity, key);}
+      }
       if (!seen.has(identity)) {
         seen.add(identity);
         refs.push(ref);
@@ -86,12 +93,9 @@ function scenarioRefsUnder(
     item.children.forEach(visit);
   };
   roots.forEach(visit);
-  // A selected outline already runs every row, so keeping its rows as well would run them twice.
-  const wholeOutlines = new Set(
-    refs.filter((ref) => ref.kind === "outline" && ref.line === 0).map(outlineKey)
-  );
+  // A selected outline already runs its own rows; retain rows of another same-titled outline.
   return refs.filter(
-    (ref) => ref.kind !== "outline" || ref.line === 0 || !wholeOutlines.has(outlineKey(ref))
+    (ref) => !wholeOutlines.has(rowOwners.get(refIdentity(ref)) ?? "")
   );
 }
 

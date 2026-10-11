@@ -27,7 +27,7 @@ If the Testing view is empty, start with [Troubleshooting: features do not appea
 2. Expand a feature until you reach the scope you want to run.
 3. Select the **Run** icon, or use the action in the feature editor.
 
-Specwright creates the required specs, starts Playwright, and maps each scenario result to the item you selected as soon as it finishes. During a long run, the Test Results output and status bar show the live completed count. Editor-triggered feature and scenario runs show the same count in a progress notification. A configured retry can still be running after the count reaches its total; the Testing run closes only after Playwright exits and the final JSON report is reconciled. Select the status bar item to open the Specwright output channel.
+Specwright creates the required specs, starts Playwright, and maps each scenario result to the item you selected as soon as it finishes. During a long run, the Test Results output and status bar show the live completed count. Editor-triggered feature and scenario runs show the same count in a progress notification. Finishing the steps does not finish the run: After hooks, browser context and video cleanup, and worker shutdown may remain. The live count can also reach its total before configured retries finish. The Testing run closes only after Playwright exits and the final JSON report is reconciled. Select the status bar item to open the Specwright output channel.
 
 ![Run a scenario directly from its editor action](../images/running_scenario_side.gif)
 

@@ -887,9 +887,9 @@ export class TestExecutor {
   }
 
   /**
-   * Enrich a line-bearing target with its precise generated-test line. A target without a source
-   * line intentionally keeps the command builder's name path (for example, a whole outline). A
-   * line-bearing target must never widen to that path when exact resolution fails.
+   * Enrich one source line or a selected outline's source rows with precise generated-test lines.
+   * A target without source lines keeps the command builder's name path. An exact target never
+   * widens to a name grep when resolution fails.
    */
   private withSpecLineTargets(
     options: TestExecutionOptions,
@@ -898,17 +898,23 @@ export class TestExecutor {
     if (options.specLineTargets !== undefined) {
       return options;
     }
-    const resolution = this.resolveSpecLineTargets(options.filePath, options.lineNumber, specPaths);
+    const resolution = this.resolveSpecLineTargets(
+      options.filePath,
+      options.sourceLineTargets ?? options.lineNumber,
+      specPaths
+    );
     if ("targets" in resolution) {
       return { ...options, specLineTargets: resolution.targets };
     }
     if (
-      options.lineNumber !== undefined &&
-      options.lineNumber > 0 &&
-      (options.scenarioName !== undefined || options.outlineName !== undefined)
+      options.sourceLineTargets !== undefined ||
+      (options.lineNumber !== undefined &&
+        options.lineNumber > 0 &&
+        (options.scenarioName !== undefined || options.outlineName !== undefined))
     ) {
+      const source = options.sourceLineTargets?.join(",") ?? options.lineNumber;
       throw new Error(
-        `Could not resolve the exact test at ${options.filePath}:${options.lineNumber}: ${resolution.reason}. ` +
+        `Could not resolve the exact test at ${options.filePath}:${source}: ${resolution.reason}. ` +
           "No broader target was executed."
       );
     }
@@ -938,7 +944,7 @@ export class TestExecutor {
       workingDir,
       this.config.featuresGenDir,
       options.filePath,
-      options.lineNumber,
+      options.sourceLineTargets ?? options.lineNumber,
       options.outlineName,
       options.scenarioName,
       options.specLineTargets !== undefined
@@ -947,7 +953,7 @@ export class TestExecutor {
 
   private resolveSpecLineTargets(
     filePath: string,
-    lineNumber?: number,
+    lineNumber?: number | readonly number[],
     specPathArgs?: readonly string[]
   ): { targets: string[] } | { reason: string } {
     const workingDir = this.getWorkingDirectory(filePath);

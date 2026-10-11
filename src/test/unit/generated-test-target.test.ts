@@ -58,6 +58,34 @@ describe("generated test targets", () => {
     });
   });
 
+  it("resolves every outline row in every project and rejects one missing mapping", () => {
+    const browser = path.join(root, ".features-gen", "browser/features/a.feature.spec.js");
+    const mobile = path.join(root, ".features-gen", "mobile/features/a.feature.spec.js");
+    for (const [spec, first, second] of [[browser, 11, 15], [mobile, 21, 25]] as const) {
+      fs.mkdirSync(path.dirname(spec), { recursive: true });
+      fs.writeFileSync(spec, [
+        "// Generated from: features/a.feature",
+        "const bddFileData = [ // bdd-data-start",
+        `  {"pwTestLine":${first},"pickleLine":7,"steps":[]},`,
+        `  {"pwTestLine":${second},"pickleLine":8,"steps":[]},`,
+        "]; // bdd-data-end",
+      ].join("\n"));
+    }
+    expect(exactGeneratedTargets(root, ".features-gen", feature, [7, 8])).toEqual({
+      targets: [
+        ".features-gen/browser/features/a.feature.spec.js:11",
+        ".features-gen/browser/features/a.feature.spec.js:15",
+        ".features-gen/mobile/features/a.feature.spec.js:21",
+        ".features-gen/mobile/features/a.feature.spec.js:25",
+      ],
+    });
+
+    fs.writeFileSync(mobile, fs.readFileSync(mobile, "utf8").replace(/.*"pickleLine":8.*\n/u, ""));
+    expect(exactGeneratedTargets(root, ".features-gen", feature, [7, 8])).toEqual({
+      reason: expect.stringContaining(`line 8 has no bddFileData mapping in ${mobile}`),
+    });
+  });
+
   it("requires current generated specs for a missing or stale exact map", () => {
     expect(needsGeneratedSpecs(
       root,

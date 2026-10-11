@@ -240,6 +240,145 @@ const bddFileData = [ // bdd-data-start
     expect(calls[0]).toContain(".features-gen/browser/a.feature.spec.js:13");
   });
 
+  it("runs all selected outline rows in one command across projects", async () => {
+    const feature = write("features/a.feature", "Feature: F");
+    for (const [project, first, second] of [["browser", 9, 13], ["mobile", 19, 23]] as const) {
+      write(`.features-gen/${project}/a.feature.spec.js`, [
+        "// Generated from: features/a.feature",
+        "const bddFileData = [ // bdd-data-start",
+        `  {"pwTestLine":${first},"pickleLine":7,"steps":[]},`,
+        `  {"pwTestLine":${second},"pickleLine":8,"steps":[]},`,
+        "]; // bdd-data-end",
+      ].join("\n"));
+    }
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "" }), shell, {
+      workspace: makeWorkspace(),
+    });
+
+    await executor.runScenarioWithOutput({
+      filePath: feature,
+      outlineName: "Outline",
+      sourceLineTargets: [7, 8],
+    });
+
+    expect(calls).toHaveLength(1);
+    for (const target of ["browser/a.feature.spec.js:9", "browser/a.feature.spec.js:13",
+      "mobile/a.feature.spec.js:19", "mobile/a.feature.spec.js:23"]) {
+      expect(calls[0]).toContain(target);
+    }
+    expect(calls[0]).not.toContain("--grep");
+  });
+
+  it("does not launch Playwright when a selected outline row lacks a generated mapping", async () => {
+    const feature = write("features/a.feature", "Feature: F");
+    write(".features-gen/features/a.feature.spec.js", [
+      "// Generated from: features/a.feature",
+      "const bddFileData = [ // bdd-data-start",
+      '  {"pwTestLine":9,"pickleLine":7,"steps":[]},',
+      "]; // bdd-data-end",
+    ].join("\n"));
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      return { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig(), shell, { workspace: makeWorkspace() });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature,
+      outlineName: "Outline",
+      sourceLineTargets: [7, 8],
+    });
+
+    expect(calls).toEqual(["npx bddgen"]);
+    expect(result.infrastructureFailure).toContain("line 8 has no bddFileData mapping");
+    expect(result.infrastructureFailure).toContain("No broader target was executed");
+  });
+
+  it("re-resolves every outline row together after a stale no-tests result", async () => {
+    const feature = write("features/a.feature", "Feature: F");
+    const spec = ".features-gen/features/a.feature.spec.js";
+    const writeRows = (first: number, second?: number): void => {
+      write(spec, [
+        "// Generated from: features/a.feature",
+        "const bddFileData = [ // bdd-data-start",
+        `  {"pwTestLine":${first},"pickleLine":7,"steps":[]},`,
+        ...(second === undefined ? [] : [`  {"pwTestLine":${second},"pickleLine":8,"steps":[]},`]),
+        "]; // bdd-data-end",
+      ].join("\n"));
+    };
+    writeRows(9, 13);
+    const calls: string[] = [];
+    let generations = 0;
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      if (command === "npx bddgen") {
+        generations += 1;
+        if (generations === 2) {writeRows(11, 15);}
+        return { success: true, output: "", error: "", returnCode: 0 };
+      }
+      return command.includes(`${spec}:9`)
+        ? { success: false, output: "Error: no tests found", error: "", returnCode: 1 }
+        : { success: true, output: "{}", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(makeConfig(), shell, { workspace: makeWorkspace() });
+
+    await executor.runScenarioWithOutput({ filePath: feature, outlineName: "Outline", sourceLineTargets: [7, 8] });
+
+    expect(calls).toHaveLength(4);
+    expect(calls[1]).toContain(`${spec}:9`);
+    expect(calls[1]).toContain(`${spec}:13`);
+    expect(calls[3]).toContain(`${spec}:11`);
+    expect(calls[3]).toContain(`${spec}:15`);
+    expect(calls.filter((command) => command.includes("--grep"))).toEqual([]);
+  });
+
+  it("fails closed if refresh loses one row from an outline batch", async () => {
+    const feature = write("features/a.feature", "Feature: F");
+    const spec = ".features-gen/features/a.feature.spec.js";
+    write(spec, [
+      "// Generated from: features/a.feature",
+      "const bddFileData = [ // bdd-data-start",
+      '  {"pwTestLine":9,"pickleLine":7,"steps":[]},',
+      '  {"pwTestLine":13,"pickleLine":8,"steps":[]},',
+      "]; // bdd-data-end",
+    ].join("\n"));
+    const calls: string[] = [];
+    let generations = 0;
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      if (command === "npx bddgen") {
+        generations += 1;
+        if (generations === 2) {
+          write(spec, [
+            "// Generated from: features/a.feature",
+            "const bddFileData = [ // bdd-data-start",
+            '  {"pwTestLine":11,"pickleLine":7,"steps":[]},',
+            "]; // bdd-data-end",
+          ].join("\n"));
+        }
+        return { success: true, output: "", error: "", returnCode: 0 };
+      }
+      return { success: false, output: "Error: no tests found", error: "", returnCode: 1 };
+    };
+    const { executor } = makeExecutor(makeConfig(), shell, { workspace: makeWorkspace() });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature, outlineName: "Outline", sourceLineTargets: [7, 8],
+    });
+
+    expect(calls).toHaveLength(3);
+    expect(calls[1]).toContain(`${spec}:9`);
+    expect(calls[1]).toContain(`${spec}:13`);
+    expect(result.infrastructureFailure).toContain("line 8 has no bddFileData mapping");
+    expect(calls.filter((command) => command.includes("--grep"))).toEqual([]);
+  });
+
   it("regenerates and re-resolves a drifted generated line without grepping sibling rows", async () => {
     writeSpec();
     const feature = write("features/a.feature", "Feature: F");

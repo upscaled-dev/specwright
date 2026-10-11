@@ -104,15 +104,16 @@ export function missingStepSkipLines(
   return lines;
 }
 
-/** Resolve the exact generated test in every BDD project that owns the feature. */
+/** Resolve every selected source row in every BDD project that owns the feature. */
 export function exactGeneratedTargets(
   workingDir: string,
   featuresGenDir: string,
   featurePath: string,
-  lineNumber: number | undefined,
+  sourceLineNumbers: number | readonly number[] | undefined,
   specPaths = generatedSpecPaths(workingDir, featuresGenDir, featurePath)
 ): ExactGeneratedTargets {
-  if (lineNumber === undefined || lineNumber <= 0) {
+  const sourceLines = typeof sourceLineNumbers === "number" ? [sourceLineNumbers] : sourceLineNumbers;
+  if (!sourceLines?.length || sourceLines.some((line) => !Number.isInteger(line) || line <= 0)) {
     return { reason: "the test item has no line number" };
   }
   if (specPaths.length === 0) {
@@ -127,17 +128,20 @@ export function exactGeneratedTargets(
   if ("reason" in verified) {return verified;}
   const targets: string[] = [];
   for (const { path: specPath, content } of verified.specs) {
-    const pwTestLine = parseBddFileData(content)?.testLines.get(lineNumber);
-    if (pwTestLine === undefined) {
-      return {
-        reason: `line ${lineNumber} has no bddFileData mapping in ${specPath} (stale spec or feature/spec drift)`,
-      };
-    }
+    const testLines = parseBddFileData(content)?.testLines;
     const relative = path.relative(workingDir, specPath);
     const specArg = relative === "" || relative.startsWith("..") || path.isAbsolute(relative)
       ? specPath
       : relative;
-    targets.push(`${specArg.split(path.sep).join("/")}:${pwTestLine}`);
+    for (const sourceLine of sourceLines) {
+      const pwTestLine = testLines?.get(sourceLine);
+      if (pwTestLine === undefined) {
+        return {
+          reason: `line ${sourceLine} has no bddFileData mapping in ${specPath} (stale spec or feature/spec drift)`,
+        };
+      }
+      targets.push(`${specArg.split(path.sep).join("/")}:${pwTestLine}`);
+    }
   }
   return { targets };
 }
@@ -146,7 +150,7 @@ export function needsGeneratedSpecs(
   workingDir: string,
   featuresGenDir: string,
   featurePath: string,
-  lineNumber: number | undefined,
+  sourceLineNumbers: number | readonly number[] | undefined,
   outlineName: string | undefined,
   scenarioName: string | undefined,
   hasProvidedTargets: boolean
@@ -157,8 +161,8 @@ export function needsGeneratedSpecs(
     return false;
   }
   if (
-    lineNumber !== undefined &&
-    lineNumber > 0 &&
+    sourceLineNumbers !== undefined &&
+    (typeof sourceLineNumbers !== "number" || sourceLineNumbers > 0) &&
     (scenarioName !== undefined || outlineName !== undefined)
   ) {
     const verified = verifiedGeneratedSpecPaths(
@@ -171,7 +175,7 @@ export function needsGeneratedSpecs(
       workingDir,
       featuresGenDir,
       featurePath,
-      lineNumber,
+      sourceLineNumbers,
       verified.paths
     );
   }

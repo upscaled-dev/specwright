@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Debug requests zero Playwright CLI retries for standard project settings; ordinary Run keeps configured retries.
 
+### Fixed
+
+- Test Explorer runs only the selected same-titled Scenario Outline's rows in one Playwright invocation.
+
 
 ## [0.7.7] - 2026-10-11
 ### Fixed

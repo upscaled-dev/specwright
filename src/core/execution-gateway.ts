@@ -206,9 +206,8 @@ function tally(results: readonly ExecutionCaseResult[]): { passed: number; faile
   return { passed, failed };
 }
 
-// Only a line that names a generated test can be targeted. An outline declaration line and an
-// Examples-block line have none, so passing one would trip the stale-spec fallback on a healthy run;
-// the runner greps the outline title instead and every row of that scope runs.
+// Only an example-row line names a generated test. An outline declaration or Examples-block line
+// has none; its owned rows must be resolved separately before Playwright starts.
 function targetLine(scenario: ScenarioRef, rows: readonly OutlineExampleRow[]): number {
   if (scenario.kind === "scenario") {return scenario.line;}
   return rows.some((row) => row.lineNumber === scenario.line) ? scenario.line : 0;
@@ -612,20 +611,14 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
   ): Promise<boolean> {
     const rows = this.outlineRows(scenario.filePath);
     const capture = artifactCaptureTarget(scenario, rows, scenarioScopes);
-    const exactLines = scenario.kind === "examplesBlock"
-      ? capture.resultLines
-      : scenario.kind === "outline" && scenario.line > 0 && targetLine(scenario, rows) === 0
-        ? capture.resultLines
-        : undefined;
+    const exactLines = scenario.kind === "examplesBlock" ? capture.resultLines : undefined;
     if (exactLines === undefined) {
-      const options = scenarioOptions(
-        scenario,
-        rows,
-        signal,
-        artifactBatch,
-        progress,
-        tagExpression
-      );
+      const options = {
+        ...scenarioOptions(scenario, rows, signal, artifactBatch, progress, tagExpression),
+        ...(scenario.kind === "outline" && scenario.line > 0 && targetLine(scenario, rows) === 0
+          ? { sourceLineTargets: capture.resultLines ?? [] }
+          : {}),
+      };
       return consume(mode === "debug"
         ? await this.executor.debugScenarioWithOutput(options, capture)
         : await this.executor.runScenarioWithOutput(options, capture));

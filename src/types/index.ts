@@ -92,6 +92,8 @@ export interface TestExecutionOptions {
    * Scenario Outline example row after playwright-bdd substitutes its title placeholders.
    */
   specLineTargets?: readonly string[];
+  /** Source example-row lines selected as one outline invocation after bddgen refreshes its maps. */
+  sourceLineTargets?: readonly number[];
   /**
    * Regex positional filters scoping a name-based `--grep` to the feature's generated specs.
    */

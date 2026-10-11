@@ -792,13 +792,12 @@ describe("LegacyDirectExecutionGateway", () => {
     ));
 
     expect(completion.results).toHaveLength(2);
-    expect(executor.runScenarioWithOutput).toHaveBeenCalledTimes(2);
+    expect(executor.runScenarioWithOutput).toHaveBeenCalledTimes(1);
     expect(vi.mocked(executor.runScenarioWithOutput).mock.calls.map(([options, target]) => ({
-      line: (options as { lineNumber?: number }).lineNumber,
+      lines: (options as { sourceLineTargets?: readonly number[] }).sourceLineTargets,
       target,
     }))).toEqual([
-      { line: 9, target: { scenario: outline, resultLines: [9] } },
-      { line: 10, target: { scenario: outline, resultLines: [10] } },
+      { lines: [9, 10], target: { scenario: outline, resultLines: [9, 10] } },
     ]);
     expect(store.beginBatch).toHaveBeenCalledWith(
       { kind: "scenario", scenario: outline },
@@ -847,7 +846,7 @@ describe("LegacyDirectExecutionGateway", () => {
 
     expect(executor.runScenarioWithOutput).toHaveBeenCalledOnce();
     expect(executor.runScenarioWithOutput).toHaveBeenCalledWith(
-      expect.objectContaining({ lineNumber: 9 }),
+      expect.objectContaining({ sourceLineTargets: [9] }),
       { scenario: outline, resultLines: [9] }
     );
   });
@@ -872,7 +871,7 @@ describe("LegacyDirectExecutionGateway", () => {
     expect(executor.runScenarioWithOutput).not.toHaveBeenCalled();
   });
 
-  it("does not dispatch a second outline row after an unsafe output", async () => {
+  it("does not retry an unsafe whole-outline invocation", async () => {
     const outline = {
       filePath: A.filePath,
       line: 4,

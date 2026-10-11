@@ -391,7 +391,7 @@ describe("testExplorerRunIntent", () => {
       });
     }
 
-    it("runs the whole outline with no line from a declaration CodeLens and the outline node", () => {
+    it("keeps the Test Explorer outline declaration while CodeLens retains its title target", () => {
       const { parser, parsed } = parseOutline();
       const declarationLens = parser.provideScenarioCodeLenses(content, filePath)
         .find((lens) => lens.command?.command === "playwrightBddRunner.runScenario" &&
@@ -406,15 +406,19 @@ describe("testExplorerRunIntent", () => {
 
       const explorer = explorerIntent(node, parsed.scenarios[0]!);
 
-      // Line 0 is the honest "no generated test on this line", so the runner greps the outline title.
+      // CodeLens still uses the title target; the Test Explorer node knows its declaration line.
       expect(codeLens.selection).toEqual({
         kind: "scenario",
         scenario: { filePath, line: 0, name: "Divide", kind: "outline", outlineName: "Divide" },
       });
-      expect({ selection: explorer.selection, targets: explorer.targets }).toEqual({
-        selection: codeLens.selection,
-        targets: codeLens.targets,
+      expect(explorer.selection).toEqual({
+        kind: "scenario",
+        scenario: { filePath, line: 3, name: "Divide", kind: "outline", outlineName: "Divide" },
       });
+      expect(explorer.targets).toEqual([{
+        kind: "scenario",
+        scenario: { filePath, line: 3, name: "Divide", kind: "outline", outlineName: "Divide" },
+      }]);
     });
 
     it("keeps an example row's own line from the palette and the Test Explorer leaf", () => {
@@ -483,7 +487,7 @@ describe("testExplorerRunIntent", () => {
 
       expect(intent.targets).toEqual([{
         kind: "scenario",
-        scenario: { filePath, line: 0, name: "Divide", kind: "outline", outlineName: "Divide" },
+        scenario: { filePath, line: 3, name: "Divide", kind: "outline", outlineName: "Divide" },
       }]);
     });
 
@@ -509,8 +513,41 @@ describe("testExplorerRunIntent", () => {
 
       expect(intent.targets).toEqual([{
         kind: "scenarios",
-        scenarios: [{ filePath, line: 0, name: "Divide", kind: "outline", outlineName: "Divide" }],
+        scenarios: [{ filePath, line: 3, name: "Divide", kind: "outline", outlineName: "Divide" }],
       }]);
+    });
+
+    it("keeps a row of another same-titled outline beside the selected whole outline", () => {
+      const parser = FeatureParser.create();
+      const parsed = parser.parseFeatureContent([
+        "Feature: Calculator", "",
+        "Scenario Outline: Divide", "  Given <n>", "", "  Examples:", "    | n |", "    | 1 |", "    | 2 |", "",
+        "Scenario Outline: Divide", "  Given <n>", "", "  Examples:", "    | n |", "    | 3 |", "    | 4 |",
+      ].join("\n"))!;
+      parsed.scenarios.forEach((scenario) => {scenario.filePath = filePath;});
+      const ownRow = parsed.scenarios.find((row) => row.isScenarioOutline && row.outlineLineNumber === 3)!;
+      const otherRow = parsed.scenarios.find((row) => row.isScenarioOutline && row.outlineLineNumber === 11)!;
+      const node = new FakeTestItem(`${filePath}${OUTLINE_ID_SEPARATOR}3:Divide`, "Divide");
+      const ownLeaf = new FakeTestItem(`${filePath}:${ownRow.lineNumber}`, "own row");
+      const otherLeaf = new FakeTestItem(`${filePath}:${otherRow.lineNumber}`, "other row");
+      const byId = new Map([
+        [node.id, ownRow], [ownLeaf.id, ownRow], [otherLeaf.id, otherRow],
+      ]);
+
+      const intent = planIntent({
+        request: new vscode.TestRunRequest([node, ownLeaf, otherLeaf] as unknown as vscode.TestItem[]),
+        roots: [node, ownLeaf, otherLeaf] as unknown as vscode.TestItem[],
+        mode: "run",
+        scenarioFor: (id) => byId.get(id),
+        isFeatureFile: () => false,
+      });
+
+      expect(intent.targets).toEqual([
+        { kind: "scenario", scenario: { filePath, line: 3, name: "Divide", kind: "outline", outlineName: "Divide" } },
+        { kind: "scenario", scenario: {
+          filePath, line: otherRow.lineNumber, name: "Divide", kind: "outline", outlineName: "Divide",
+        } },
+      ]);
     });
   });
 });

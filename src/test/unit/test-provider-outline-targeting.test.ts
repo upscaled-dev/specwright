@@ -165,6 +165,18 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     );
   }
 
+  async function buildLiveReporter(root: string): Promise<string> {
+    const reporterPath = path.join(root, "specwright-live-reporter.cjs");
+    await (await import("esbuild")).build({
+      entryPoints: [path.resolve(__dirname, "../../test-providers/specwright-live-reporter.ts")],
+      outfile: reporterPath,
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+    });
+    return reporterPath;
+  }
+
   it("finishes a retried outline run and debugs one failing attempt", async () => {
     fs.rmSync(fixture.root, { recursive: true, force: true });
     const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../.."), ".specwright-outline-"));
@@ -210,14 +222,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       'const testDir = defineBddConfig({ features: "features/*.feature", steps: "steps/*.ts" });',
       "export default defineConfig({ testDir, workers: 1, retries: 1 });",
     ].join("\n"));
-    const reporterPath = path.join(root, "specwright-live-reporter.cjs");
-    await (await import("esbuild")).build({
-      entryPoints: [path.resolve(__dirname, "../../test-providers/specwright-live-reporter.ts")],
-      outfile: reporterPath,
-      bundle: true,
-      platform: "node",
-      format: "cjs",
-    });
+    const reporterPath = await buildLiveReporter(root);
     (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
       { uri: { fsPath: root } },
     ];
@@ -315,6 +320,244 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       logger.dispose();
     }
   }, 60_000);
+
+  it("runs only the selected same-titled outline's rows through installed Playwright", async () => {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+    const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../.."), ".specwright-outline-"));
+    fixture = {
+      root,
+      featurePath: path.join(root, "features", "test.feature"),
+      genSpecPath: path.join(root, ".features-gen", "features", "test.feature.spec.js"),
+    };
+    fs.mkdirSync(path.join(root, "features"));
+    fs.mkdirSync(path.join(root, "steps"));
+    fs.writeFileSync(fixture.featurePath, [
+      "Feature: Same title",
+      "",
+      "  Scenario Outline: Record a row <row>",
+      '    Given I record "<row>"',
+      "",
+      "    Examples:",
+      "      | row |",
+      "      | A1  |",
+      "      | A2  |",
+      "",
+      "  Scenario Outline: Record a row <row>",
+      '    Given I record "<row>"',
+      "",
+      "    Examples:",
+      "      | row |",
+      "      | B1  |",
+      "      | B2  |",
+    ].join("\n"));
+    const marker = path.join(root, "executed.txt");
+    fs.writeFileSync(path.join(root, "steps", "test.steps.ts"), [
+      'import { createBdd } from "playwright-bdd";',
+      'import * as fs from "node:fs";',
+      'const { Given } = createBdd();',
+      `Given("I record {string}", async ({}, row: string) => fs.appendFileSync(${JSON.stringify(marker)}, row + "\\n"));`,
+    ].join("\n"));
+    fs.writeFileSync(path.join(root, "playwright.config.ts"), [
+      'import { defineConfig } from "@playwright/test";',
+      'import { defineBddConfig } from "playwright-bdd";',
+      'const testDir = defineBddConfig({ features: "features/*.feature", steps: "steps/*.ts" });',
+      'export default defineConfig({ testDir, workers: 1 });',
+    ].join("\n"));
+    const reporterPath = await buildLiveReporter(root);
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+      { uri: { fsPath: root } },
+    ];
+
+    const commands: Array<{ command: string; success: boolean; output: string; error: string }> = [];
+    const logger = Logger.create();
+    const shell: ShellRunner = async (command, workingDir, extraEnv, signal, onOutput) => {
+      const result = await runBoundedCommand({
+        command, workingDir, logger,
+        ...(extraEnv ? { extraEnv: { ...extraEnv, PW_TEST_REPORTER: reporterPath } } : {}),
+        ...(signal ? { signal } : {}),
+        ...(onOutput ? { onOutput } : {}),
+      });
+      commands.push({ command, success: result.success, output: result.output, error: result.error });
+      return result;
+    };
+    try {
+      const { provider, controller, gateway } = buildProvider(shell, undefined, true);
+      await provider.discoverTests();
+      const selected = controller.find(`${fixture.featurePath}${OUTLINE_ID_SEPARATOR}3:Record a row <row>`);
+      expect(selected, "the first outline is discovered").toBeTruthy();
+
+      await runItem(controller, selected!);
+
+      expect(fs.existsSync(marker), JSON.stringify(commands)).toBe(true);
+      expect(fs.readFileSync(marker, "utf8").trim().split("\n")).toEqual(["A1", "A2"]);
+      expect(controller.runs.at(-1)?.outcome.passed).toEqual(expect.arrayContaining([
+        `${fixture.featurePath}:8`, `${fixture.featurePath}:9`,
+      ]));
+      expect(controller.runs.at(-1)?.outcome.ended).toBe(true);
+      expect(gateway.running).toBe(false);
+      expect(commands.filter(({ command }) => command === "npx bddgen")).toHaveLength(1);
+      expect(commands.some(({ command }) => command.includes("playwright test"))).toBe(true);
+      expect(commands.filter(({ command }) => command.includes("playwright test"))).toHaveLength(1);
+    } finally {
+      logger.dispose();
+    }
+  }, 60_000);
+
+  it.skipIf(process.env["SPECWRIGHT_BROWSER_OUTLINE_ACCEPTANCE"] !== "1")(
+    "finishes a browser-video outline after teardown and admits a second named Run", async () => {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+      const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../.."), ".specwright-outline-"));
+      fixture = {
+        root,
+        featurePath: path.join(root, "features", "test.feature"),
+        genSpecPath: path.join(root, ".features-gen", "features", "test.feature.spec.js"),
+      };
+      fs.mkdirSync(path.join(root, "features"));
+      fs.mkdirSync(path.join(root, "steps"));
+      fs.writeFileSync(fixture.featurePath, [
+        "Feature: Browser video completion",
+        "",
+        "  Scenario Outline: Open browser <row>",
+        '    Given I open browser row "<row>"',
+        '    Then browser row "<row>" is visible',
+        "",
+        "    Examples:",
+        "      | row   |",
+        "      | alpha |",
+        "      | beta  |",
+      ].join("\n"));
+      fs.writeFileSync(path.join(root, "steps", "test.steps.ts"), [
+        'import { createBdd } from "playwright-bdd";',
+        'import { expect } from "@playwright/test";',
+        'import * as fs from "node:fs";',
+        'const mark = (event: string, row: string) => fs.appendFileSync(process.env.SPECWRIGHT_OUTLINE_EVENTS!, `${Date.now()}:${event}:${row}\\n`);',
+        'const { Given, Then, After } = createBdd();',
+        'Given("I open browser row {string}", async ({ page }, row: string) => {',
+        '  page.on("close", () => mark("page-close", row));',
+        '  page.context().on("close", () => mark("context-close", row));',
+        '  await page.setContent(`<main>${row}</main>`);',
+        '});',
+        'Then("browser row {string} is visible", async ({ page }, row: string) => {',
+        '  await expect(page.locator("main")).toHaveText(row);',
+        '  mark("step-end", row);',
+        '});',
+        'After(async ({ $testInfo }) => mark("after", $testInfo.title));',
+      ].join("\n"));
+      fs.writeFileSync(path.join(root, "playwright.config.ts"), [
+        'import { defineConfig } from "@playwright/test";',
+        'import { defineBddConfig } from "playwright-bdd";',
+        'const testDir = defineBddConfig({ features: "features/*.feature", steps: "steps/*.ts" });',
+        `export default defineConfig({ testDir, outputDir: ${JSON.stringify(path.join(root, "test-results"))}, fullyParallel: true, workers: 2, retries: 0, reporter: "list", use: { headless: true, video: "on", channel: process.env.SPECWRIGHT_CHANNEL === "chrome" ? "chrome" : undefined } });`,
+      ].join("\n"));
+      const reporterPath = await buildLiveReporter(root);
+      (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+        { uri: { fsPath: root } },
+      ];
+      const events = path.join(root, "provider-events.txt");
+      const directEvents = path.join(root, "direct-events.txt");
+      const outputDir = path.join(root, "test-results");
+      const logDir = process.env["SPECWRIGHT_OUTLINE_LOG_DIR"];
+      if (logDir) {fs.mkdirSync(logDir, { recursive: true });}
+      const logger = Logger.create();
+      const commands: Array<{ command: string; startedAt: number; endedAt: number; success: boolean }> = [];
+      const shell: ShellRunner = async (command, workingDir, extraEnv, signal, onOutput) => {
+        const startedAt = Date.now();
+        const result = await runBoundedCommand({
+          command, workingDir, logger,
+          ...(extraEnv ? { extraEnv: {
+            ...extraEnv,
+            PW_TEST_REPORTER: reporterPath,
+            SPECWRIGHT_OUTLINE_EVENTS: events,
+          } } : {}),
+          ...(signal ? { signal } : {}),
+          ...(onOutput ? { onOutput } : {}),
+        });
+        commands.push({ command, startedAt, endedAt: Date.now(), success: result.success });
+        return result;
+      };
+      try {
+        const { provider, controller, gateway } = buildProvider(shell, undefined, true);
+        const createRun = controller.createTestRun.bind(controller);
+        let endedAt = 0;
+        vi.spyOn(controller, "createTestRun").mockImplementation((request) => {
+          const run = createRun(request);
+          const end = run.end.bind(run);
+          vi.spyOn(run, "end").mockImplementation(() => {end(); endedAt = Date.now();});
+          return run;
+        });
+        await provider.discoverTests();
+        const outline = controller.find(`${fixture.featurePath}${OUTLINE_ID_SEPARATOR}3:Open browser <row>`);
+        expect(outline, "the browser outline is discovered").toBeTruthy();
+
+        await runItem(controller, outline!);
+
+        const run = controller.runs.at(-1)!;
+        const playwrightRun = commands.find(({ command }) => command.includes("playwright test"));
+        expect(playwrightRun, "Playwright was launched").toBeTruthy();
+        expect(commands).toHaveLength(2);
+        const providerEvents = fs.readFileSync(events, "utf8").trim().split("\n");
+        for (const event of ["step-end", "after", "page-close", "context-close"]) {
+          expect(providerEvents.filter((entry) => entry.includes(`:${event}:`))).toHaveLength(2);
+        }
+        expect(run.outcome.passed).toEqual(expect.arrayContaining([
+          `${fixture.featurePath}:9`, `${fixture.featurePath}:10`,
+        ]));
+        expect(run.outcome.failed).toEqual([]);
+        expect(run.outcome.output.join("")).toContain("Open browser alpha");
+        expect(run.outcome.output.join("")).toContain("Open browser beta");
+        expect(run.outcome.output.join("")).toContain("2 passed");
+        expect(run.outcome.ended).toBe(true);
+        expect(endedAt).toBeGreaterThanOrEqual(playwrightRun!.endedAt);
+        expect(gateway.running).toBe(false);
+        const firstTestRunEndedAt = endedAt;
+        const videos = fs.readdirSync(outputDir, { recursive: true }).filter((name): name is string =>
+          typeof name === "string" && name.endsWith(".webm"));
+        expect(videos).toHaveLength(2);
+        for (const video of videos) {
+          expect(fs.statSync(path.join(outputDir, video)).size).toBeGreaterThan(0);
+        }
+
+        const directStartedAt = Date.now();
+        const direct = await runBoundedCommand({
+          command: playwrightRun!.command,
+          workingDir: root,
+          logger,
+          signal: new AbortController().signal,
+          extraEnv: {
+            PLAYWRIGHT_JSON_OUTPUT_NAME: path.join(root, "direct-report.json"),
+            PW_TEST_REPORTER: reporterPath,
+            SPECWRIGHT_OUTLINE_EVENTS: directEvents,
+          },
+        });
+        const directEndedAt = Date.now();
+        expect(direct.success, `${direct.output}\n${direct.error}`).toBe(true);
+        expect(fs.readFileSync(directEvents, "utf8").match(/:context-close:/gu)).toHaveLength(2);
+
+        await runItem(controller, outline!);
+        expect(controller.runs.at(-1)?.outcome.passed).toEqual(expect.arrayContaining([
+          `${fixture.featurePath}:9`, `${fixture.featurePath}:10`,
+        ]));
+        expect(controller.runs.at(-1)?.outcome.ended).toBe(true);
+        expect(gateway.running).toBe(false);
+        if (logDir) {
+          fs.copyFileSync(events, path.join(logDir, "provider-events.txt"));
+          fs.copyFileSync(directEvents, path.join(logDir, "direct-events.txt"));
+          fs.writeFileSync(path.join(logDir, "provider-output.log"), run.outcome.output.join(""));
+          fs.writeFileSync(path.join(logDir, "direct-output.log"), `${direct.output}\n${direct.error}`);
+          fs.writeFileSync(path.join(logDir, "timing.json"), JSON.stringify({
+            commands,
+            firstTestRunEndedAt,
+            directStartedAt,
+            directEndedAt,
+            secondTestRunEndedAt: endedAt,
+            videos: videos.length,
+          }, null, 2));
+        }
+      } finally {
+        logger.dispose();
+      }
+    }, 90_000
+  );
 
   it("writes one run summary for a multi-root selection", async () => {
     const shell: ShellRunner = async (_cmd, _dir, env) => {
@@ -517,7 +760,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       expect(warn.mock.calls.map(String).join("\n")).not.toContain("Could not target example row");
     });
 
-    it("runs a whole outline by title with no line and no stale-spec warning", async () => {
+    it("runs a whole outline in one invocation using its exact generated row lines", async () => {
       const commands: string[] = [];
       const warn = vi.spyOn(Logger.prototype, "warn");
       const { provider, controller } = buildProvider(recordingShell(commands));
@@ -527,8 +770,10 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
       await runItem(controller, node!);
 
-      expect(commands.at(-1)).toContain('--grep "Math"');
-      expect(commands.at(-1)).not.toContain("test.feature.spec.js:");
+      expect(commands.at(-1)).toContain("test.feature.spec.js:18");
+      expect(commands.at(-1)).toContain("test.feature.spec.js:24");
+      expect(commands.at(-1)).not.toContain("--grep");
+      expect(commands.filter((command) => command.includes("playwright test"))).toHaveLength(1);
       expect(warn.mock.calls.map(String).join("\n")).not.toContain("Could not target example row");
     });
 
