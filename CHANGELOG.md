@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Test Explorer runs only the selected same-titled Scenario Outline's rows in one Playwright invocation.
+- Scenario Outline rows that pass on retry show passed in Test Explorer instead of retaining an earlier timeout or failure icon.
 
 
 ## [0.7.7] - 2026-10-11
