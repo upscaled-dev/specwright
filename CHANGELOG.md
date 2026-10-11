@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test Set sync applies the same organization item limit to live and cached state, preserves incomplete membership details, and reports omitted projects accurately when both limits apply.
 - The Extension Host test harness resolves installed dependencies from checkout-local fixtures, preserves bddgen through Playwright cancellation, and verifies the generated named scenario.
 
+### Validation
+
+- Native Windows, macOS, and Linux CI passed. The user also confirmed the fix on a Windows machine after release.
+
 ## [0.7.5] - 2026-10-11
 
 ### Fixed
