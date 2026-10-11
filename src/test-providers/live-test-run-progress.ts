@@ -53,8 +53,8 @@ interface TrackedItem {
  * Applies Playwright scenario results to an already-open VS Code TestRun as they arrive.
  *
  * Only leaf items receive terminal states. A final report can still roll up parents after the
- * process exits. Reporter revisions replace earlier states, so a retry can move from failed to
- * passed while project copies remain aggregated before they reach this layer.
+ * process exits. Failed attempts stay in output until completion because VS Code cannot change a
+ * failed TestRun item to passed when a retry succeeds.
  */
 export class LiveTestRunProgress {
   private readonly run: vscode.TestRun;
@@ -64,6 +64,7 @@ export class LiveTestRunProgress {
   private readonly items: readonly TrackedItem[];
   private readonly statusByItem = new Map<vscode.TestItem, ScenarioStatus>();
   private readonly resultByItem = new Map<vscode.TestItem, ScenarioResult>();
+  private readonly publishedByItem = new Map<vscode.TestItem, ScenarioStatus>();
   private readonly startedItems = new Set<vscode.TestItem>();
   private readonly pendingCarriageReturn = { stdout: false, stderr: false };
 
@@ -119,9 +120,12 @@ export class LiveTestRunProgress {
 
       this.statusByItem.set(tracked.item, result.status);
       this.resultByItem.set(tracked.item, result);
-      this.mark(tracked, result);
+      if (result.status !== "failed") {
+        this.mark(tracked, result);
+        this.publishedByItem.set(tracked.item, result.status);
+        this.onStatus?.(tracked.item, result.status);
+      }
       this.appendProgress(tracked, result.status, completed ?? this.completed, total ?? this.total);
-      this.onStatus?.(tracked.item, result.status);
       changed = true;
     }
 
@@ -130,6 +134,7 @@ export class LiveTestRunProgress {
 
   /** Settle the selected roots when their run is cancelled without touching filtered siblings. */
   public cancel(): void {
+    this.publishPendingFailures();
     for (const tracked of this.items) {
       if (!this.statusByItem.has(tracked.item)) {
         this.run.skipped(tracked.item);
@@ -150,6 +155,19 @@ export class LiveTestRunProgress {
 
   public hasResult(item: vscode.TestItem): boolean {
     return this.statusByItem.has(item);
+  }
+
+  /** Keep a failed row visible when its run is cancelled before final reconciliation. */
+  public publishPendingFailures(): void {
+    for (const tracked of this.items) {
+      const result = this.resultByItem.get(tracked.item);
+      if (result?.status !== "failed" || this.publishedByItem.get(tracked.item) === "failed") {
+        continue;
+      }
+      this.mark(tracked, result);
+      this.publishedByItem.set(tracked.item, "failed");
+      this.onStatus?.(tracked.item, "failed");
+    }
   }
 
   public statusFor(item: vscode.TestItem): ScenarioStatus | undefined {
@@ -178,13 +196,13 @@ export class LiveTestRunProgress {
     detail?: ScenarioResult
   ): boolean {
     const live = this.resultByItem.get(item);
-    if (live?.status !== status) {return true;}
+    if (this.publishedByItem.get(item) !== status) {return true;}
     if (status === "passed" && detail?.durationMs !== undefined) {
-      return detail.durationMs !== live.durationMs;
+      return detail.durationMs !== live?.durationMs;
     }
     if (status !== "failed" || !detail) {return false;}
-    return hasNewText(detail.errorMessage, live.errorMessage) ||
-      hasNewText(detail.errorStack, live.errorStack);
+    return hasNewText(detail.errorMessage, live?.errorMessage) ||
+      hasNewText(detail.errorStack, live?.errorStack);
   }
 
   private collectTrackedItems(

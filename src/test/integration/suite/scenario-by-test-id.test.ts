@@ -61,7 +61,8 @@ suite("scenarioByTestId map across organization strategies", () => {
       );
 
       const outlineEntries = [...map.entries()].filter(([id, s]) =>
-        s.isScenarioOutline && id.includes(OUTLINE_ID_SEPARATOR)
+        s.isScenarioOutline && s.outlineName === "Test scenario outline"
+          && id.includes(OUTLINE_ID_SEPARATOR)
       );
       if (key === "hierarchical") {
         assert.ok(

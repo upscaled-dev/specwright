@@ -19,21 +19,35 @@ class RecordingRun {
   public readonly failed: FailureCall[] = [];
   public readonly skipped: vscode.TestItem[] = [];
   public readonly output: Array<{ text: string; item?: vscode.TestItem | undefined }> = [];
+  private readonly states = new Map<vscode.TestItem, ScenarioStatus>();
+
+  private accepts(item: vscode.TestItem, status: ScenarioStatus): boolean {
+    // VS Code does not accept a terminal state with lower priority in the same TestRun.
+    const priority = { passed: 0, skipped: 1, failed: 2 };
+    const previous = this.states.get(item);
+    if (previous !== undefined && priority[status] < priority[previous]) {return false;}
+    this.states.set(item, status);
+    return true;
+  }
+
+  public statusFor(item: vscode.TestItem): ScenarioStatus | undefined {
+    return this.states.get(item);
+  }
 
   public startedItem(item: vscode.TestItem): void {
     this.started.push(item);
   }
 
   public passedItem(item: vscode.TestItem, duration?: number): void {
-    this.passed.push({ item, duration });
+    if (this.accepts(item, "passed")) {this.passed.push({ item, duration });}
   }
 
   public failedItem(item: vscode.TestItem, message: vscode.TestMessage, duration?: number): void {
-    this.failed.push({ item, message, duration });
+    if (this.accepts(item, "failed")) {this.failed.push({ item, message, duration });}
   }
 
   public skippedItem(item: vscode.TestItem): void {
-    this.skipped.push(item);
+    if (this.accepts(item, "skipped")) {this.skipped.push(item);}
   }
 
   public appendOutput(text: string, _location?: vscode.Location, item?: vscode.TestItem): void {
@@ -174,6 +188,8 @@ describe("LiveTestRunProgress", () => {
       errorStack: "Error: expected true\n    at steps.ts:2:3",
     }))).toBe(true);
 
+    expect(run.failed).toEqual([]);
+    progress.publishPendingFailures();
     expect(run.failed).toHaveLength(1);
     const failure = run.failed[0]!;
     expect(failure.item.id).toBe("failed");
@@ -186,7 +202,7 @@ describe("LiveTestRunProgress", () => {
     expect(onStatus).toHaveBeenCalledWith(asTestItem(failed), "failed");
   });
 
-  it("applies reporter revisions while deduping an unchanged status", () => {
+  it("records a failed attempt without publishing an irreversible TestRun failure", () => {
     const scenario = item("scenario", "Scenario", "/repo/features/sample.feature", 4);
     const run = new RecordingRun();
     const statuses: ScenarioStatus[] = [];
@@ -196,21 +212,16 @@ describe("LiveTestRunProgress", () => {
 
     expect(progress.apply(result({ status: "passed" }))).toBe(true);
     expect(progress.apply(result({ status: "passed" }))).toBe(false);
-    expect(progress.apply(result({ status: "skipped" }))).toBe(true);
-    expect(progress.apply(result({ status: "passed" }))).toBe(true);
     expect(progress.apply(result({ status: "failed" }))).toBe(true);
-    expect(progress.apply(result({ status: "skipped" }))).toBe(true);
+    expect(progress.apply(result({ status: "failed" }))).toBe(false);
 
-    expect(run.passed).toHaveLength(2);
-    expect(run.skipped).toHaveLength(2);
-    expect(run.failed).toHaveLength(1);
-    expect(statuses).toEqual(["passed", "skipped", "passed", "failed", "skipped"]);
+    expect(run.passed).toHaveLength(1);
+    expect(run.skipped).toEqual([]);
+    expect(run.failed).toEqual([]);
+    expect(statuses).toEqual(["passed"]);
     expect(run.output.map(({ text }) => text)).toEqual([
       "[1 / 1] Scenario: passed\r\n",
-      "[1 / 1] Scenario: skipped\r\n",
-      "[1 / 1] Scenario: passed\r\n",
       "[1 / 1] Scenario: failed\r\n",
-      "[1 / 1] Scenario: skipped\r\n",
     ]);
     expect(progress.completed).toBe(1);
   });
@@ -276,6 +287,21 @@ describe("LiveTestRunProgress", () => {
     expect(run.skipped.map((test) => test.id)).toEqual(["second", "feature"]);
   });
 
+  it("publishes a recorded failure when cancellation ends the retry window", () => {
+    const scenario = item("scenario", "Scenario", "/repo/features/sample.feature", 4);
+    const run = new RecordingRun();
+    const progress = progressFor(run, [scenario], {
+      scenario: { source: { filePath: "/repo/features/sample.feature", lineNumber: 4 } },
+    });
+    progress.apply(result({ status: "failed", errorMessage: "attempt failed" }));
+
+    progress.cancel();
+
+    expect(run.statusFor(asTestItem(scenario))).toBe("failed");
+    expect(run.failed[0]?.message.message).toContain("attempt failed");
+    expect(run.skipped).toEqual([]);
+  });
+
   it("settles nested parents when cancelled", () => {
     const feature = item("feature", "Sample feature", "/repo/features/sample.feature", 1);
     const outline = item("outline", "Outline", "/repo/features/sample.feature", 4);
@@ -317,10 +343,12 @@ describe("LiveTestRunProgress", () => {
     });
 
     progress.apply(result({ status: "failed" }), 1, 1);
+    expect(run.failed).toEqual([]);
     progress.apply(result({ status: "passed" }), 1, 1);
 
-    expect(run.failed).toHaveLength(1);
+    expect(run.failed).toEqual([]);
     expect(run.passed).toHaveLength(1);
+    expect(run.statusFor(asTestItem(scenario))).toBe("passed");
     expect(run.output.map(({ text }) => text)).toEqual([
       "[1 / 1] Scenario: failed\r\n",
       "[1 / 1] Scenario: passed\r\n",
@@ -340,9 +368,12 @@ describe("LiveTestRunProgress", () => {
       errorStack: "Error: failed\n    at steps.ts:1:1",
     };
     expect(progress.apply(revised)).toBe(true);
-    expect(run.failed).toHaveLength(2);
+    expect(run.failed).toEqual([]);
     const exhausted = { ...revised, durationMs: 80, attempts: 2 };
     expect(progress.apply(exhausted)).toBe(true);
+    expect(progress.shouldApplyFinal(asTestItem(scenario), "failed", exhausted)).toBe(true);
+    progress.publishPendingFailures();
+    expect(run.failed).toHaveLength(1);
     expect(run.failed.at(-1)?.duration).toBe(80);
 
     expect(progress.shouldApplyFinal(asTestItem(scenario), "failed", exhausted)).toBe(false);

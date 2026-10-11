@@ -325,6 +325,49 @@ describe("runGatewayTestRequest", () => {
     expect(cancelled).toEqual([]);
   });
 
+  it("keeps a streamed failed row when the gateway throws before final reconciliation", async () => {
+    const root = new FakeTestItem(FILE_A, "Feature A", { fsPath: FILE_A });
+    const row = leaf(FILE_A, 3, "A");
+    root.children.add(row);
+    const executionGateway = gateway(vi.fn((_intent: RunIntent, options?: ExecutionOptions) => {
+      options?.onEvent?.({
+        kind: "case-finished",
+        result: { ...caseResult(FILE_A, 3, "A"), outcome: "failed", errorMessage: "first attempt failed" },
+        completed: 1,
+        total: 1,
+      });
+      return Promise.reject(new Error("spawn refused"));
+    }));
+    const { run } = rig({ roots: [root], gateway: executionGateway });
+
+    const testRun = await run();
+
+    expect(testRun?.outcome.failed).toContainEqual({ id: row.id, message: "first attempt failed" });
+    expect(testRun?.outcome.failed).toContainEqual({ id: root.id, message: "spawn refused" });
+    expect(testRun?.outcome.ended).toBe(true);
+  });
+
+  it("keeps a streamed failed row when cancellation prevents final reconciliation", async () => {
+    const root = new FakeTestItem(FILE_A, "Feature A", { fsPath: FILE_A });
+    const row = leaf(FILE_A, 3, "A");
+    root.children.add(row);
+    const executionGateway = gateway(vi.fn((_intent: RunIntent, options?: ExecutionOptions) => {
+      options?.onEvent?.({
+        kind: "case-finished",
+        result: { ...caseResult(FILE_A, 3, "A"), outcome: "failed", errorMessage: "attempt failed" },
+        completed: 1,
+        total: 1,
+      });
+      return Promise.resolve(completion({ state: "cancelled" }));
+    }));
+    const { run } = rig({ roots: [root], gateway: executionGateway });
+
+    const testRun = await run();
+
+    expect(testRun?.outcome.failed).toContainEqual({ id: row.id, message: "attempt failed" });
+    expect(testRun?.outcome.ended).toBe(true);
+  });
+
   it("does not open a run when the selected engine is unavailable", async () => {
     const execute = vi.fn(() => Promise.resolve(completion()));
     const executionGateway = gateway(execute, {

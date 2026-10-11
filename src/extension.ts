@@ -78,6 +78,7 @@ export interface ExtensionApi {
         readonly registeredRunProfiles: readonly vscode.TestRunProfile[];
         readonly commandBuilder: CommandBuilder;
         /** @internal — integration-test hooks for the run→status path. */
+        getFeatureItem(filePath: string): vscode.TestItem | undefined;
         getItemStatus(id: string): "started" | "passed" | "failed" | undefined;
         overrideShellRunner(runner: ShellRunner): void;
         restoreShellRunner(): void;
@@ -193,6 +194,7 @@ function buildApi(
       get testIdToScenarioMap() { return provider.testIdToScenarioMap; },
       get registeredRunProfiles() { return provider.registeredRunProfiles; },
       get commandBuilder() { return provider.commandBuilder; },
+      getFeatureItem: (filePath: string) => provider.getDiscoveredTests().get(filePath),
       getItemStatus: (id: string) => provider.getItemStatus(id),
       overrideShellRunner: (runner: ShellRunner) => provider.overrideShellRunner(runner),
       restoreShellRunner: () => provider.restoreShellRunner(),

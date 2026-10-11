@@ -443,11 +443,13 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
         '});',
         'After(async ({ $testInfo }) => mark("after", $testInfo.title));',
       ].join("\n"));
+      const workers = Number(process.env["SPECWRIGHT_OUTLINE_WORKERS"] ?? "2");
+      expect([1, 2]).toContain(workers);
       fs.writeFileSync(path.join(root, "playwright.config.ts"), [
         'import { defineConfig } from "@playwright/test";',
         'import { defineBddConfig } from "playwright-bdd";',
         'const testDir = defineBddConfig({ features: "features/*.feature", steps: "steps/*.ts" });',
-        `export default defineConfig({ testDir, outputDir: ${JSON.stringify(path.join(root, "test-results"))}, fullyParallel: true, workers: 2, retries: 0, reporter: "list", use: { headless: true, video: "on", channel: process.env.SPECWRIGHT_CHANNEL === "chrome" ? "chrome" : undefined } });`,
+        `export default defineConfig({ testDir, outputDir: ${JSON.stringify(path.join(root, "test-results"))}, fullyParallel: true, workers: ${workers}, retries: 0, reporter: "list", use: { headless: true, video: "on", channel: process.env.SPECWRIGHT_CHANNEL === "chrome" ? "chrome" : undefined } });`,
       ].join("\n"));
       const reporterPath = await buildLiveReporter(root);
       (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
@@ -459,9 +461,13 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       const logDir = process.env["SPECWRIGHT_OUTLINE_LOG_DIR"];
       if (logDir) {fs.mkdirSync(logDir, { recursive: true });}
       const logger = Logger.create();
-      const commands: Array<{ command: string; startedAt: number; endedAt: number; success: boolean }> = [];
+      const commands: Array<{
+        command: string; startedAt: number; endedAt: number; success: boolean;
+        signalAtStart: boolean | undefined; signalAtEnd: boolean | undefined;
+      }> = [];
       const shell: ShellRunner = async (command, workingDir, extraEnv, signal, onOutput) => {
         const startedAt = Date.now();
+        const signalAtStart = signal?.aborted;
         const result = await runBoundedCommand({
           command, workingDir, logger,
           ...(extraEnv ? { extraEnv: {
@@ -472,7 +478,8 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
           ...(signal ? { signal } : {}),
           ...(onOutput ? { onOutput } : {}),
         });
-        commands.push({ command, startedAt, endedAt: Date.now(), success: result.success });
+        commands.push({ command, startedAt, endedAt: Date.now(), success: result.success,
+          signalAtStart, signalAtEnd: signal?.aborted });
         return result;
       };
       try {
@@ -517,6 +524,27 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
           expect(fs.statSync(path.join(outputDir, video)).size).toBeGreaterThan(0);
         }
 
+        const secondStartedAt = Date.now();
+        await runItem(controller, outline!);
+        const secondRun = controller.runs.at(-1)!;
+        const secondPlaywrightRun = commands.at(-1)!;
+        expect(secondPlaywrightRun.command).toContain("playwright test");
+        expect(commands).toHaveLength(4);
+        expect(commands.filter(({ command }) => command.includes("playwright test")).every(({ signalAtStart, signalAtEnd }) =>
+          signalAtStart === false && signalAtEnd === false)).toBe(true);
+        expect(secondRun.outcome.passed).toEqual(expect.arrayContaining([
+          `${fixture.featurePath}:9`, `${fixture.featurePath}:10`,
+        ]));
+        expect(secondRun.outcome.output.join("")).toContain("2 passed");
+        expect(secondRun.outcome.ended).toBe(true);
+        expect(endedAt).toBeGreaterThanOrEqual(secondPlaywrightRun.endedAt);
+        expect(gateway.running).toBe(false);
+        const secondTestRunEndedAt = endedAt;
+        const repeatedEvents = fs.readFileSync(events, "utf8").trim().split("\n");
+        for (const event of ["step-end", "after", "page-close", "context-close"]) {
+          expect(repeatedEvents.filter((entry) => entry.includes(`:${event}:`))).toHaveLength(4);
+        }
+
         const directStartedAt = Date.now();
         const direct = await runBoundedCommand({
           command: playwrightRun!.command,
@@ -533,23 +561,20 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
         expect(direct.success, `${direct.output}\n${direct.error}`).toBe(true);
         expect(fs.readFileSync(directEvents, "utf8").match(/:context-close:/gu)).toHaveLength(2);
 
-        await runItem(controller, outline!);
-        expect(controller.runs.at(-1)?.outcome.passed).toEqual(expect.arrayContaining([
-          `${fixture.featurePath}:9`, `${fixture.featurePath}:10`,
-        ]));
-        expect(controller.runs.at(-1)?.outcome.ended).toBe(true);
-        expect(gateway.running).toBe(false);
         if (logDir) {
           fs.copyFileSync(events, path.join(logDir, "provider-events.txt"));
           fs.copyFileSync(directEvents, path.join(logDir, "direct-events.txt"));
           fs.writeFileSync(path.join(logDir, "provider-output.log"), run.outcome.output.join(""));
+          fs.writeFileSync(path.join(logDir, "second-provider-output.log"), secondRun.outcome.output.join(""));
           fs.writeFileSync(path.join(logDir, "direct-output.log"), `${direct.output}\n${direct.error}`);
           fs.writeFileSync(path.join(logDir, "timing.json"), JSON.stringify({
+            workers,
             commands,
             firstTestRunEndedAt,
+            secondStartedAt,
+            secondTestRunEndedAt,
             directStartedAt,
             directEndedAt,
-            secondTestRunEndedAt: endedAt,
             videos: videos.length,
           }, null, 2));
         }

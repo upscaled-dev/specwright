@@ -116,6 +116,9 @@ export async function runGatewayTestRequest(options: {
         appendFailureLine(live, completion);
       }
       live.finishOutput();
+      if (unrecoverable !== undefined || completion?.state === "cancelled") {
+        live.publishPendingFailures();
+      }
       if (unrecoverable !== undefined) {
         const message = new vscode.TestMessage(unrecoverable);
         options.roots.forEach((root) => run.failed(root, message));
