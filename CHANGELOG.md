@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh the locked VS Code API declarations to 1.140.0 while retaining the declared VS Code 1.99 minimum and existing API usage.
 - Update the release-policy YAML parser to an exact js-yaml 5.4.3 pin while preserving workflow and dependency-automation rejection checks. Keep Mocha 11 for the minimum VS Code host's embedded Node runtime.
 - Update the VS Code test runner to test-electron 3.1.0 on the pinned development Node runtime, retaining exact minimum and current host targets.
 - Update VSIX packaging to VSCE 4.0.0 on the pinned development Node runtime, retaining the existing artifact inventory and provenance checks.

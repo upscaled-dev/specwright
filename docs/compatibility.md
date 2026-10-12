@@ -15,6 +15,7 @@ This record names exact tested versions. It does not turn a declared package ran
 | `@vscode/vsce` | `4.0.0` | Release-artifact production and verification passed on Node 24.21.0; the same VSIX passed installation, activation, and named fixture discovery on both pinned VS Code hosts. |
 | `@vscode/test-electron` | `3.1.0` | Fresh download and cached reuse passed; both pinned hosts passed 30 native tests with rendered progress enabled and installed-VSIX activation and named fixture discovery. |
 | `js-yaml` | `5.4.3` | Exactly pinned; all 18 release contracts pass, including actual workflow parsing and merged-value and duplicate-key rejection checks. |
+| `@types/vscode` | `1.140.0` | Locked declarations pass all four TypeScript projects without source changes; declared range and VS Code minimum remain `^1.99.0`. |
 
 The supported VS Code range is `^1.99.0`, matching the `engines.vscode` declaration. The table records the minimum lane and the pinned current lane; it does not extend support to an untested host merely because that host satisfies the range.
 
@@ -24,7 +25,14 @@ Keep Playwright and playwright-bdd as a tested pair. During the 2026-10-12 compa
 
 These are the repository's development dependencies. Commands in user workspaces continue to resolve their workspace's installed packages. The declared VS Code minimum is unchanged. Node development tooling and typings now follow the 24 LTS line.
 
-Mocha stays at `11.8.0`. The 2026-10-12 registry check found Mocha `12.0.3` requires Node `^20.19.0 || >=22.12.0`, which excludes the minimum VS Code host's embedded Node `20.18.3`. Its migration is deferred until the supported host baseline changes. Mocha 11's `^18.18.0 || ^20.9.0 || >=21.1.0` requirement supports that host.
+The 2026-10-12 `npm outdated` check reports only the two direct dependencies below. Each installed version matches its latest version within the declared range. The dependency update pass is complete under the current compatibility policy; these newer major versions remain deferred.
+
+| Dependency | Retained | Registry latest | Reason |
+| --- | --- | --- | --- |
+| `mocha` | `11.8.0` | `12.0.3` | Mocha 12 requires Node `^20.19.0 || >=22.12.0`, excluding the minimum VS Code host's embedded Node `20.18.3`. Revisit when the supported host baseline changes. |
+| `@types/node` | `24.19.2` | `26.6.5` | Keep typings aligned with the pinned Node 24 development runtime and LTS policy. Revisit with a deliberate Node runtime migration. |
+
+Mocha 11's `^18.18.0 || ^20.9.0 || >=21.1.0` requirement supports the minimum host. Node 24 remains Active LTS on this date; Node 26 is Current, with LTS scheduled for 2026-10-28 in the [official release schedule](https://github.com/nodejs/Release#release-schedule).
 
 playwright-bdd 9 requires Node.js 20 or newer and validates step callback argument counts against captured parameters, doc strings, and data tables. With captures, a Playwright-style callback includes the fixtures object before its captured parameters. Its Cucumber JSON reporter omits attachments by default; this does not change the Playwright JSON report consumed by Specwright. These changes are described in the [upstream release notes](https://github.com/vitalets/playwright-bdd/blob/main/CHANGELOG.md).
 
@@ -63,6 +71,14 @@ The VS Code targets remain `1.99.0` and `1.132.0`, and the extension version rem
 The release contracts use an exact js-yaml `5.4.3` pin to parse the actual CI workflow and Dependabot configuration. Version 5's default loader uses YAML 1.2 core semantics and does not expand merge keys. The shared policy loader uses the [migration guide's](https://github.com/nodeca/js-yaml/blob/master/docs/migrate_v4_to_v5.md) `CORE_SCHEMA.withTags(mergeTag)` option to retain merged values. Regression probes confirmed that the default loader let merged job permissions and dependency-update limits bypass their guards; the explicit schema restores rejection. Valid alias merges pass, while merged mutable action references and duplicate mapping keys are rejected. Other existing security and candidate-promotion checks remain intact.
 
 All 18 focused release contracts pass, including the actual CI and Dependabot files. The complete gate passed all four TypeScript projects, lint, 3,510 unit tests with three existing skips, 18 release contracts, and production bundling. Coverage percentages and all 203 reported files remain unchanged. The package contains exactly 31 payload files, and its six production JavaScript bundles are byte-identical to the accepted archived VSIX. A real Mocha suite passed in the minimum VS Code `1.99.0` host. The same VSIX passed clean-profile installation, activation, and named fixture discovery on both `1.99.0` and `1.132.0`, with its digest unchanged. Independent Astra review accepted the migration with no remaining findings. This parser is used by the release contract tests; it does not change extension runtime behavior.
+
+## VS Code API declarations
+
+The lockfile resolves `@types/vscode` to `1.140.0`; `package.json` still declares `^1.99.0`, matching the unchanged `engines.vscode` floor. Compared with the previously locked `1.120.0`, the declarations change documentation and enum ordering without changing signatures or enum values. All four TypeScript projects pass without typing adaptations or new API calls.
+
+VSCE checks the declared type range's major/minor floor against `engines.vscode`, not the installed declaration version. Keeping those ranges aligned passes packaging validation, but does not enforce a compiler API ceiling. New VS Code API usage still requires compatibility checks against the minimum host. Type declarations do not change VS Code's runtime or the supported host baseline.
+
+On both pinned hosts, the focused native navigation test selected a feature step, invoked Go to Step Definition, and opened `sample.steps.ts` in the active editor. The complete gate passed all four TypeScript projects, lint, 3,510 unit tests with three existing skips, 18 release contracts, and production bundling. Coverage percentages, floors, and all 203 reported files remain unchanged. The VSIX contains exactly 31 payload files, and all six production JavaScript bundles are byte-identical to the accepted YAML migration archive. This typings-only change preserves the prior full native-suite evidence. The same VSIX passed installed activation and named fixture discovery on both hosts, with its digest unchanged. Independent Astra review accepted the migration with no remaining findings.
 
 ## TypeScript compiler and API
 
