@@ -10,6 +10,8 @@ This record names exact tested versions. It does not turn a declared package ran
 | `playwright-bdd` | `9.2.1` | Used by the 2026-10-12 local generation, outline targeting, retry, actual Debug, and both full native host checks on macOS. |
 | `vitest` | `5.0.3` | Real BDD targeting, retry/Debug, mock/timer checks, watch pass/fail/recovery, and the complete validation gate passed on development Node 24.21.0. |
 | `@vitest/coverage-v8` | `5.0.3` | Reports the same 203 source files as the previous provider. Interim floors follow the reviewed AST mapper baseline; the future 95% target is separate work. |
+| `jsdom` | `30.1.2` | Populated bundled Board, Traceability, and Xray setup clients pass their existing rendering, interaction, keyboard/focus, and accessibility checks on Node 24.21.0. |
+| `@types/jsdom` | `30.0.0` | Installed with jsdom 30.1.2; all four TypeScript projects pass. |
 
 The supported VS Code range is `^1.99.0`, matching the `engines.vscode` declaration. The table records the minimum lane and the pinned current lane; it does not extend support to an untested host merely because that host satisfies the range.
 
@@ -17,7 +19,7 @@ The supported VS Code range is `^1.99.0`, matching the `engines.vscode` declarat
 
 Keep Playwright and playwright-bdd as a tested pair. During the 2026-10-12 compatible dependency update, Playwright `1.64.0` with playwright-bdd `8.5.1` failed in the installed bddgen command while loading `registerESMLoader`, before tests could be generated. The paired migration replaces that combination with Playwright `1.64.0` and playwright-bdd `9.2.1`. Playwright is bounded to `~1.64.0` so a dependency update cannot silently select an untested minor.
 
-These are the repository's development dependencies. Commands in user workspaces continue to resolve their workspace's installed packages. The declared VS Code minimum is unchanged. Node development tooling and typings now follow the 24 LTS line. Major upgrades to jsdom and extension packaging or test-host tooling remain separate migrations.
+These are the repository's development dependencies. Commands in user workspaces continue to resolve their workspace's installed packages. The declared VS Code minimum is unchanged. Node development tooling and typings now follow the 24 LTS line. Major upgrades to extension packaging or test-host tooling remain separate migrations.
 
 playwright-bdd 9 requires Node.js 20 or newer and validates step callback argument counts against captured parameters, doc strings, and data tables. With captures, a Playwright-style callback includes the fixtures object before its captured parameters. Its Cucumber JSON reporter omits attachments by default; this does not change the Playwright JSON report consumed by Specwright. These changes are described in the [upstream release notes](https://github.com/vitalets/playwright-bdd/blob/main/CHANGELOG.md).
 
@@ -30,6 +32,14 @@ Vitest and its V8 coverage provider use the matching `5.0.3` versions. Vitest 5'
 The new AST mapper reports lines `83.56%`, statements `81.22%`, functions `83.07%`, and branches `77.22%` after the same 3,510 tests pass. All 203 reported source files and the coverage include/exclude patterns remain unchanged. The temporary migration floors are statements `81%`, branches `77%`, and functions and lines `83%`, rounded down from this reviewed mapper baseline. This records a measurement change without adding coverage tests. Expanding meaningful source coverage and raising all four floors to `95%` is deferred to a separate task. See the [Vitest 4 coverage migration notes](https://v4.vitest.dev/guide/migration.html#v8-code-coverage-major-changes) and [Vitest 5 migration guide](https://vitest.dev/guide/migration/).
 
 The final gate passed all four TypeScript projects, lint, 3,510 unit tests with three existing skips, the temporary coverage floors, and production bundling. A separate negative probe rejected each coverage floor, and the report retained the same 203 files. Both VS Code hosts (`1.99.0` and `1.132.0`) passed 30 native tests, with three Windows-only cases pending on macOS. All six production JavaScript bundles were unchanged. The VSIX contained exactly the expected 31 payload files without configuration or source leakage; clean-profile installation, activation, and named fixture discovery passed on `1.132.0`. Independent Astra review accepted the migration with no remaining findings.
+
+## Browser-test DOM
+
+jsdom `30.1.2` and `@types/jsdom` `30.0.0` are development-only dependencies. The pinned Node `24.21.0` runtime meets jsdom's Node `^22.22.2 || ^24.15.0 || >=26.0.0` requirement. This does not change VS Code's embedded runtime or the extension's declared minimum.
+
+The migration from jsdom 26 crosses changes to CSS selectors and computed styles, default click events, and focus behavior. Existing tests execute the actual bundled clients. They render the named `SHOP-10000` test from three synced projects, filter and page the Matrix, retain keyboard focus through repaints, run named `SHOP-301` and nested repository selections, and keep setup secrets out of persisted client state. All 221 tests across the eight jsdom consumer suites pass without production or test-helper changes. See the [jsdom 27 changes](https://github.com/jsdom/jsdom/releases/tag/27.0.0), [jsdom 30 requirements](https://github.com/jsdom/jsdom/releases/tag/v30.0.0), and [30.1.2 fixes](https://github.com/jsdom/jsdom/releases/tag/v30.1.2).
+
+Clean installation and the complete gate passed: all four TypeScript projects, lint, 3,510 unit tests with three existing skips, coverage, 18 release contracts, and production bundling. The coverage metrics and all 203 reported files are unchanged from the Vitest 5 baseline above. All six production JavaScript bundles are byte-identical to that accepted baseline, so its passing evidence on both native VS Code hosts remains applicable. The VSIX contains exactly the expected 31 payload files. Clean-profile installation, activation, and named fixture discovery passed on VS Code `1.132.0`. Independent Astra review accepted the migration with no remaining findings.
 
 ## TypeScript compiler and API
 
