@@ -4,18 +4,22 @@ This record names exact tested versions. It does not turn a declared package ran
 
 | Component | Exact version | Evidence |
 | --- | --- | --- |
-| VS Code declared minimum | `1.99.0` | The 2026-10-12 compatible dependency validation passed 29 native tests on macOS. Earlier hosted run `30704907718` passed the minimum lane at commit `6a7fb97d0f93263a7f9bc5099379d4a85fc24b9b`. |
-| VS Code pinned current target | `1.132.0` | The 2026-10-12 compatible dependency validation passed 29 native tests on macOS, including rendered progress and named outline retry results. |
-| `@playwright/test` | `1.60.0` | Used by the 2026-10-12 local generation, outline targeting, retry, Debug, and native integration checks. |
-| `playwright-bdd` | `8.5.1` | Used by the 2026-10-12 local generation, outline targeting, retry, Debug, and native integration checks. |
+| VS Code declared minimum | `1.99.0` | The 2026-10-12 paired dependency migration passed 30 native tests on macOS, including actual Debug of one named outline row. Earlier hosted run `30704907718` passed the minimum lane at commit `6a7fb97d0f93263a7f9bc5099379d4a85fc24b9b`. |
+| VS Code pinned current target | `1.132.0` | The 2026-10-12 paired dependency migration passed 30 native tests on macOS, including rendered progress, named outline retry results, and actual Debug. |
+| `@playwright/test` | `1.64.0` | Used by the 2026-10-12 local generation, outline targeting, retry, actual Debug, and both full native host checks on macOS. |
+| `playwright-bdd` | `9.2.1` | Used by the 2026-10-12 local generation, outline targeting, retry, actual Debug, and both full native host checks on macOS. |
 
 The supported VS Code range is `^1.99.0`, matching the `engines.vscode` declaration. The table records the minimum lane and the pinned current lane; it does not extend support to an untested host merely because that host satisfies the range.
 
 ## Dependency updates
 
-Keep Playwright and playwright-bdd as a tested pair. During the 2026-10-12 compatible dependency update, Playwright `1.64.0` with playwright-bdd `8.5.1` failed in the installed bddgen command while loading `registerESMLoader`, before tests could be generated. The repository stays on the Playwright `1.60` minor line until the playwright-bdd major migration is validated.
+Keep Playwright and playwright-bdd as a tested pair. During the 2026-10-12 compatible dependency update, Playwright `1.64.0` with playwright-bdd `8.5.1` failed in the installed bddgen command while loading `registerESMLoader`, before tests could be generated. The paired migration replaces that combination with Playwright `1.64.0` and playwright-bdd `9.2.1`. Playwright is bounded to `~1.64.0` so a dependency update cannot silently select an untested minor.
 
-This pass updates compatible development dependency lines. Major upgrades to playwright-bdd, Vitest and coverage, jsdom, and extension packaging or test-host tooling remain separate migrations. The declared VS Code minimum and Node API type line are unchanged.
+These are the repository's development dependencies. Commands in user workspaces continue to resolve their workspace's installed packages. The declared VS Code minimum and Node API type line are unchanged. Major upgrades to Vitest and coverage, jsdom, and extension packaging or test-host tooling remain separate migrations.
+
+playwright-bdd 9 requires Node.js 20 or newer and validates step callback argument counts against captured parameters, doc strings, and data tables. With captures, a Playwright-style callback includes the fixtures object before its captured parameters. Its Cucumber JSON reporter omits attachments by default; this does not change the Playwright JSON report consumed by Specwright. These changes are described in the [upstream release notes](https://github.com/vitalets/playwright-bdd/blob/main/CHANGELOG.md).
+
+Focused acceptance passed installed bddgen and Playwright for same-titled outline targeting, successful retries, and Debug. Native acceptance passed Testing and editor progress, distinct generic outline retry identities, green retry results, and actual Debug of the named first row without running its siblings. The complete gate passed all four type-check projects, lint, 3,510 unit tests with enforced coverage, production bundling, and 18 release contracts. Both VS Code hosts (`1.99.0` and `1.132.0`) passed 30 native tests. Three unit tests were skipped, and three Windows-only native cases remain pending on macOS. Exact VSIX inventory and installation, activation, and fixture discovery passed. Windows and Linux execution remain with their native CI lanes.
 
 ## TypeScript compiler and API
 
