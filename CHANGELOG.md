@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.7.9] - 2026-10-12
 ### Changed
 
 - Refresh the locked VS Code API declarations to 1.140.0 while retaining the declared VS Code 1.99 minimum and existing API usage.
