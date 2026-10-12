@@ -61,6 +61,8 @@ The release script bumps `package.json` and `package-lock.json` together, update
 
 The release artifact set contains the VSIX, its checksum, a CycloneDX SBOM, and a manifest with a `components` array. The manifest binds the source commit, component version, VSIX digest, and SBOM digest. The current component is the VS Code extension; future Core Service and execution-provider packages can add components without changing the manifest shape. Candidate and promoted artifact sets are retained for 90 days. Production source maps are excluded from the VSIX and retained as a separate CI artifact for 30 days. Restrict workflow-artifact access as part of the repository's release permissions.
 
+Packaging uses VSCE 4 on the pinned Node runtime. When updating VSCE, run the release contracts, then the existing release-artifact producer and verifier from a clean source commit. Confirm the exact package inventory, SBOM and manifest bindings, and installed behavior on both pinned VS Code hosts. VSCE 4 can prompt to migrate legacy PAT credentials during authentication; check that separately before authorized Marketplace publication.
+
 ## Core execution dependency
 
 `legacy-direct` remains the execution default. An Extension Development Host may set `SPECWRIGHT_EXECUTION_ENGINE=core-client` to exercise the fail-closed preview selection. Workspace settings and workspace launch files cannot select an engine or replace its executable.

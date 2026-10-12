@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update VSIX packaging to VSCE 4.0.0 on the pinned development Node runtime, retaining the existing artifact inventory and provenance checks.
 - Update the browser-test DOM to jsdom 30.1.2 with matching major-version typings, preserving the bundled webview rendering and interaction checks.
 - Update development Node to 24.21.0, Node typings to the 24 line, and Vitest with matching V8 coverage to 5.0.3.
 - Set temporary coverage floors for Vitest 5's AST mapper at 81% statements, 77% branches, and 83% functions and lines. Keep the source scope intact and defer the 95% target to separate coverage work.
