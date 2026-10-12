@@ -1,4 +1,4 @@
-import { build } from "esbuild";
+import { browserClientCode } from "./browser-client-bundle.mjs";
 import { JSDOM } from "jsdom";
 import * as vscode from "vscode";
 import type { Memento } from "vscode";
@@ -21,7 +21,7 @@ export const noopDelegate: PublishDialogDelegate = {
 // webview message, `webview.__posted` records outbound ones, `__revealCount` counts reveals, and
 // `dispose()` fires the onDidDispose seam. The shell routes tagged messages by `surface` and reserves
 // the untagged `ready`/`tab`/`activate` shell types; outbound posts are held until the webview signals
-// `ready`, then flushed in order. The webview JS carries no decision logic, so it isn't run.
+// `ready`, then flushed in order. connectBrowserClient also runs the bundled client for UI acceptance.
 export interface StubPanel {
   title: string;
   webview: { html: string; options: { enableScripts: boolean; localResourceRoots: vscode.Uri[] }; __posted: Array<{ session: string; revision: number; surface: string; body: Posted }> };
@@ -257,19 +257,6 @@ export async function openReady(over: Partial<BoardPanelDeps> = {}): Promise<{ i
   return { instance, panel };
 }
 
-export let browserClientCode: Promise<string> | undefined;
-
-export function bundledBrowserClient(): Promise<string> {
-  browserClientCode ??= build({
-    entryPoints: ["src/webview/coverage-board.ts"],
-    bundle: true,
-    platform: "browser",
-    format: "iife",
-    write: false,
-  }).then((output) => output.outputFiles[0]!.text);
-  return browserClientCode;
-}
-
 export async function connectBrowserClient(panel: StubPanel): Promise<{
   readonly dom: JSDOM;
   flushInbound(): Promise<void>;
@@ -285,7 +272,7 @@ export async function connectBrowserClient(panel: StubPanel): Promise<{
       setState: () => undefined,
     }),
   });
-  dom.window.eval(await bundledBrowserClient());
+  dom.window.eval(await browserClientCode("coverage-board"));
   let delivered = 0;
   const flushInbound = async (): Promise<void> => {
     await inbound;

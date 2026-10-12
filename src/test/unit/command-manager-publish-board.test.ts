@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as vscode from "vscode";
@@ -13,6 +14,7 @@ import { ExtensionConfig } from "../../core/extension-config";
 import { TestExecutor } from "../../core/test-executor";
 import { RunArtifact, TraceabilityAdapter } from "../../traceability/contracts";
 import { XrayAdapter } from "../../xray/xray-adapter";
+import { XrayImportError } from "../../xray/execution-importers";
 import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { NO_MAPPING_PAGE_SIZE } from "../../traceability/mapping-page-size";
@@ -21,7 +23,7 @@ import {
   ArtifactCaptureTarget,
   RunArtifactStore,
 } from "../../traceability/run-artifact-store";
-import { PublishLedger } from "../../traceability/publish-ledger";
+import { PublishLedger, PublishLedgerPersistenceError } from "../../traceability/publish-ledger";
 import { AttachmentSpool } from "../../traceability/attachment-spool";
 import type { TraceabilitySnapshot, TraceLink } from "../../traceability/traceability-model";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
@@ -101,7 +103,11 @@ describe("traceability run-and-publish entry points", () => {
     const commands = traceabilityCommands(manager);
     const run = vi.spyOn(publishCommands(manager), "runAndPublishSelection")
       .mockResolvedValue(undefined);
-    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(" @smoke and not @wip ");
+    vi.spyOn(vscode.window, "showInputBox").mockImplementation(async (options) => {
+      expect(await options?.validateInput?.("   ")).toBe("A tag expression is required.");
+      expect(await options?.validateInput?.(" @smoke and not @wip ")).toBeUndefined();
+      return " @smoke and not @wip ";
+    });
 
     await commands.runAndPublishFeature({ fsPath: "/ws/a.feature" });
     await commands.runAndPublishFolder({ fsPath: "/ws/features" });
@@ -112,6 +118,18 @@ describe("traceability run-and-publish entry points", () => {
       [{ kind: "folder", folderPath: "/ws/features" }, "explorer", expect.anything()],
       [{ kind: "tag-expression", expression: " @smoke and not @wip " }, "palette", expect.anything()],
     ]);
+  });
+
+  it("does not start an Explorer batch when no feature or folder resource is supplied", async () => {
+    const manager = CommandManager.create(makeContext());
+    const commands = traceabilityCommands(manager);
+    const run = vi.spyOn(publishCommands(manager), "runAndPublishSelection")
+      .mockResolvedValue(undefined);
+
+    await commands.runAndPublishFeature();
+    await commands.runAndPublishFolder({});
+
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("treats a cancelled tag prompt as a quiet no-op", async () => {
@@ -198,6 +216,19 @@ describe("traceability runAndPublish: preflight batch flow", () => {
       return Promise.resolve(picked as unknown as vscode.QuickPickItem | undefined);
     });
   }
+
+  it("guides both tree and board batch actions while traceability has not synced", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const mgr = CommandManager.create(makeContext());
+
+    await publishCommands(mgr).runAndPublish({ kind: "all-mapped" });
+    await publishCommands(mgr).runAndPublishSelection({ kind: "all-mapped" });
+
+    expect(info.mock.calls.map(([message]) => message)).toEqual([
+      "Enable and sync the Traceability panel before running a batch.",
+      "Enable and sync the Traceability panel before running a batch.",
+    ]);
+  });
 
   it("runs each mapped scenario in a tree multi-selection once", async () => {
     const { mgr, store, runScenarioWithOutput } = harness([READY_LINK, READY_B_LINK]);
@@ -687,7 +718,9 @@ describe("traceability publishLastRun: Publish tab", () => {
       throw new Error(`Unexpected remote request: ${url}`);
     });
     const error = vi.spyOn(vscode.window, "showErrorMessage");
-    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const info = vi.spyOn(vscode.window, "showInformationMessage")
+      .mockResolvedValue("Open in Jira" as never);
+    const opened = vi.spyOn(vscode.env, "openExternal");
     const manager = CommandManager.create({ ...context, runArtifactStore: store });
     manager.setCredentialStore(credentials);
     manager.setTraceabilitySubsystem({
@@ -737,6 +770,8 @@ describe("traceability publishLastRun: Publish tab", () => {
       expect(queries).toHaveLength(correctMissingKey ? 2 : 1);
       expect(queries.every((query) => query.includes("getTestPlans(") && query.includes("limit: 1"))).toBe(true);
       expect(info).toHaveBeenCalledWith(expect.stringContaining("CALC-100"), "Open in Jira");
+      await vi.waitFor(() => expect(opened).toHaveBeenCalledOnce());
+      expect(opened.mock.calls[0]![0].toString()).toBe("https://acme.atlassian.net/browse/CALC-100");
       expect(document.querySelector('[data-tab="executions"][role="tab"]')?.getAttribute("aria-selected")).toBe("true");
       browser.dom.window.close();
     } finally {
@@ -748,17 +783,217 @@ describe("traceability publishLastRun: Publish tab", () => {
     }
   });
 
+  it.each([
+    { failedUploads: 0, retriesAccepted: 0, attempts: 1, pending: 0, openInJira: false, extraFile: false },
+    { failedUploads: 1, retriesAccepted: 1, attempts: 2, pending: 0, openInJira: false, extraFile: false },
+    { failedUploads: 2, retriesAccepted: 2, attempts: 3, pending: 0, openInJira: false, extraFile: false },
+    { failedUploads: 2, retriesAccepted: 1, attempts: 2, pending: 1, openInJira: false, extraFile: false },
+    { failedUploads: 1, retriesAccepted: 0, attempts: 1, pending: 1, openInJira: true, extraFile: false },
+    { failedUploads: 1, retriesAccepted: 0, attempts: 2, pending: 1, openInJira: false, extraFile: true },
+  ])("carries Browse files into Jira with $retriesAccepted accepted retries, $pending pending files, and open $openInJira", async ({ failedUploads, retriesAccepted, attempts, pending, openInJira, extraFile }) => {
+    const fixture = writeTempFeature("Feature: Evidence\nScenario: publishes\n  Given evidence\n");
+    const chosen = path.join(path.dirname(fixture), "browser-evidence.json");
+    fs.writeFileSync(chosen, '{"passed":true}');
+    const second = path.join(path.dirname(fixture), "second-evidence.txt");
+    if (extraFile) {fs.writeFileSync(second, "extra evidence");}
+    const chosenFiles = extraFile ? [chosen, second] : [chosen];
+    const { store: credentials } = mapCredentialStore();
+    await credentials.setJiraCredentials("acme.atlassian.net", "qa@example.com", "jira-token");
+    const picked = vi.spyOn(vscode.window, "showOpenDialog")
+      .mockResolvedValue(chosenFiles.map((file) => vscode.Uri.file(file)));
+    const spoolRoot = path.join(path.dirname(fixture), "storage");
+    const noFollowFlag = process.platform === "win32"
+      ? fs.constants.UV_FS_O_FILEMAP
+      : fs.constants.O_NOFOLLOW;
+    const supportedSpool = new AttachmentSpool(
+      spoolRoot, Logger.create(), Date.now, { noFollowFlag }
+    );
+    const realSeal = AttachmentSpool.prototype.seal;
+    const realRead = AttachmentSpool.prototype.read;
+    const seal = vi.spyOn(AttachmentSpool.prototype, "seal")
+      .mockImplementation((paths) => realSeal.call(supportedSpool, paths));
+    vi.spyOn(AttachmentSpool.prototype, "read")
+      .mockImplementation((snapshot) => realRead.call(supportedSpool, snapshot));
+    const ledger = new PublishLedger(memento(), Logger.create());
+    const publish = vi.fn().mockResolvedValue({
+      ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [],
+    });
+    const uploads: Array<{ url: string; name: string; contents: string }> = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      if (url.endsWith("/attachment/meta")) {
+        return new Response(JSON.stringify({ enabled: true, uploadLimit: 1024 }));
+      }
+      if (url.endsWith("/issue/XNP-1/attachments")) {
+        const file = (init.body as FormData).get("file") as File;
+        uploads.push({ url, name: file.name, contents: await file.text() });
+        if (uploads.length <= failedUploads) {
+          return new Response("Attachment rejected", { status: 400 });
+        }
+        return new Response(JSON.stringify([{ id: "attachment-1" }]));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const context = makeContext({
+      runArtifactStore: store,
+      config: configWith({ "xray.siteUrl": "acme.atlassian.net" }),
+      attachmentSpoolRoot: spoolRoot,
+    });
+    const manager = CommandManager.create(context);
+    manager.setCredentialStore(credentials);
+    manager.setPublishLedger(ledger);
+    manager.setTraceabilitySubsystem({
+      ...connectedSubsystem([], NO_PROJECT_SCOPE, publish,
+        openInJira ? "https://acme.atlassian.net/browse/XNP-1" : undefined),
+      rebuildNow: () => Promise.resolve(),
+    } as TraceabilitySubsystem);
+    const operation = publishCommands(manager).runPublish();
+
+    try {
+      await vi.waitFor(() => expect(win.__webviewPanels).toHaveLength(1));
+      const panel = win.__webviewPanels[0]!;
+      const received = vi.spyOn(panel, "__receive");
+      const browser = await connectBrowserClient(panel as unknown as StubPanel);
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+      await browser.pumpHost();
+      const document = browser.dom.window.document;
+      expect(document.getElementById("browse")?.hidden).toBe(false);
+
+      document.getElementById("browse")!.click();
+      await browser.flushInbound();
+      expect(picked).toHaveBeenCalledWith({ canSelectMany: true, openLabel: "Attach" });
+      await browser.pumpHost();
+      expect(document.getElementById("attach-list")?.textContent).toContain("browser-evidence.json");
+      expect(document.getElementById("attach-list")?.textContent).toContain("15 B");
+
+      (document.getElementById("project") as HTMLInputElement).value = "CALC";
+      (document.getElementById("summary") as HTMLInputElement).value = "Evidence run";
+      const warning = vi.spyOn(vscode.window, "showWarningMessage");
+      const opened = vi.spyOn(vscode.env, "openExternal");
+      for (let attempt = 0; attempt < retriesAccepted; attempt += 1) {
+        warning.mockResolvedValueOnce("Retry" as never);
+      }
+      if (openInJira) {warning.mockResolvedValueOnce("Open in Jira" as never);}
+      document.getElementById("publish")!.click();
+      await browser.flushInbound();
+      await operation;
+      if (failedUploads > 0) {
+        await vi.waitFor(() => expect(uploads).toHaveLength(attempts));
+        expect(warning).toHaveBeenCalledWith(
+          expect.stringContaining(extraFile
+            ? "1 file attached · 1 attachment failed"
+            : "1 attachment failed"), "Retry",
+          ...(openInJira ? ["Open in Jira"] : [])
+        );
+      }
+      if (openInJira) {
+        await vi.waitFor(() => expect(opened).toHaveBeenCalledOnce());
+        expect(opened.mock.calls[0]?.[0].toString()).toBe("https://acme.atlassian.net/browse/XNP-1");
+      }
+
+      expect(received).toHaveBeenCalledWith(expect.objectContaining({
+        surface: "publish",
+        body: expect.objectContaining({ type: "confirm", attachments: chosenFiles }),
+      }));
+      expect(seal).toHaveBeenCalledWith(chosenFiles);
+      expect(uploads).toEqual(Array.from({ length: attempts }, (_, index) => ({
+        url: "https://acme.atlassian.net/rest/api/3/issue/XNP-1/attachments",
+        name: extraFile && index === 1 ? "second-evidence.txt" : "browser-evidence.json",
+        contents: extraFile && index === 1 ? "extra evidence" : '{"passed":true}',
+      })));
+      expect(publish).toHaveBeenCalledOnce();
+      expect(ledger.find("run-1", "acme.atlassian.net")?.pendingAttachments).toEqual(pending === 0
+        ? []
+        : [expect.objectContaining({ name: "browser-evidence.json", size: 15 })]);
+      browser.dom.window.close();
+    } finally {
+      win.__resetWebviewPanels();
+      credentials.dispose();
+      vi.unstubAllGlobals();
+      fs.rmSync(path.dirname(fixture), { recursive: true, force: true });
+    }
+  });
+
+  it("uses a tracker search suggestion as the plan key in the confirmed publish request", async () => {
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const { store: credentials } = mapCredentialStore();
+    await credentials.setJiraCredentials("acme.atlassian.net", "qa@example.com", "jira-token");
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.endsWith("/attachment/meta")) {
+        return new Response(JSON.stringify({ enabled: false }));
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const subsystem = connectedSubsystem();
+    const publishing = subsystem.getActiveAdapter()!.resultPublishing!;
+    const search = vi.spyOn(publishing, "searchTargets").mockResolvedValue([{
+      id: "2042",
+      label: "PLAN-42 · Checkout release",
+      ref: { key: "PLAN-42" },
+    }]);
+    const publish = vi.spyOn(publishing, "publish").mockResolvedValue({
+      ref: { kind: "execution", key: "XNP-9" }, imported: 1, warnings: [],
+    });
+    const manager = CommandManager.create(makeContext({
+      runArtifactStore: store,
+      config: configWith({ "xray.siteUrl": "acme.atlassian.net" }),
+    }));
+    manager.setCredentialStore(credentials);
+    manager.setTraceabilitySubsystem({
+      ...subsystem,
+      rebuildNow: () => Promise.resolve(),
+    } as TraceabilitySubsystem);
+    const operation = publishCommands(manager).runPublish();
+
+    try {
+      await vi.waitFor(() => expect(win.__webviewPanels).toHaveLength(1));
+      const panel = win.__webviewPanels[0]!;
+      const browser = await connectBrowserClient(panel as unknown as StubPanel);
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+      await browser.pumpHost();
+      const document = browser.dom.window.document;
+      const plan = document.getElementById("plan") as HTMLInputElement;
+      plan.value = "PLAN";
+      plan.dispatchEvent(new browser.dom.window.Event("input", { bubbles: true }));
+      await vi.waitFor(() => expect(search).toHaveBeenCalledWith("test-plan", "PLAN", expect.anything()));
+      await browser.pumpHost();
+      const suggestion = document.querySelector("#plan-results li");
+      expect(suggestion?.textContent).toBe("PLAN-42 · Checkout release");
+      suggestion!.dispatchEvent(new browser.dom.window.MouseEvent("mousedown", { bubbles: true }));
+      expect(plan.value).toBe("PLAN-42");
+
+      (document.getElementById("project") as HTMLInputElement).value = "CALC";
+      (document.getElementById("summary") as HTMLInputElement).value = "Checkout release results";
+      document.getElementById("publish")!.click();
+      await browser.flushInbound();
+      await operation;
+
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "run-1" }),
+        expect.objectContaining({ testPlanKey: "PLAN-42", summary: "Checkout release results" }),
+        expect.anything()
+      );
+      browser.dom.window.close();
+    } finally {
+      win.__resetWebviewPanels();
+      await operation;
+      credentials.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
   function connectedSubsystem(
     catalogueProjects: string[] = [],
     scope: ProjectScopeStore = NO_PROJECT_SCOPE,
     publish: () => Promise<unknown> = () =>
-      Promise.resolve({ ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [] })
+      Promise.resolve({ ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [] }),
+    browseUrl?: string
   ): TraceabilitySubsystem {
     const adapter = {
       id: "xray",
       label: "Xray",
       keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", projectOf: (k: string) => k.split("-")[0] },
-      browseUrl: () => undefined,
+      browseUrl: () => browseUrl,
       metadata: { snapshot: () => ({ catalogueProjects }) },
       resultPublishing: {
         searchTargets: () => Promise.resolve([]),
@@ -792,6 +1027,82 @@ describe("traceability publishLastRun: Publish tab", () => {
     // Cancel resolves the present so the flow (and its finally) unwinds.
     await receive(panel, { surface: "publish", type: "cancel" });
     await promise;
+  });
+
+  it("shows discovered report bundles with real sizes in the Publish form", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-report-suggestions-"));
+    const report = path.join(root, "report.zip");
+    fs.writeFileSync(report, "zip contents");
+    const missing = path.join(root, "removed.zip");
+    const findFiles = vi.spyOn(vscode.workspace, "findFiles").mockImplementation(async (glob) =>
+      glob === "artifacts/*.zip"
+        ? [vscode.Uri.file(report), vscode.Uri.file(missing)]
+        : [vscode.Uri.file(report)]
+    );
+    const { store: credentials } = mapCredentialStore();
+    await credentials.setJiraCredentials("acme.atlassian.net", "qa@example.com", "jira-token");
+    vi.stubGlobal("fetch", async (url: string) => {
+      expect(url).toBe("https://acme.atlassian.net/rest/api/3/attachment/meta");
+      return new Response(JSON.stringify({ enabled: true, uploadLimit: 1024 }));
+    });
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({
+      runArtifactStore: store,
+      config: configWith({
+        "xray.siteUrl": "acme.atlassian.net",
+        "xray.reportGlob": ["artifacts/*.zip", "playwright-report/*.zip"],
+        "xray.attachTo": "both",
+      }),
+    }));
+    mgr.setCredentialStore(credentials);
+    mgr.setTraceabilitySubsystem(connectedSubsystem());
+    const operation = publishCommands(mgr).runPublish();
+
+    try {
+      await vi.waitFor(() => expect(win.__webviewPanels).toHaveLength(1));
+      const panel = win.__webviewPanels[0]!;
+      await receive(panel, { type: "ready" });
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+      const model = posts(panel, "model", "publish")[0]?.["model"] as { attachments: PublishAttachmentsModel };
+      expect(model.attachments).toMatchObject({
+        available: true,
+        uploadLimitBytes: 1024,
+        evidenceStream: "both",
+        suggestions: [{ path: report, name: "report.zip", size: 12 }],
+      });
+      expect(findFiles.mock.calls.map(([glob]) => glob)).toEqual(["artifacts/*.zip", "playwright-report/*.zip"]);
+      await receive(panel, { surface: "publish", type: "cancel" });
+      await operation;
+    } finally {
+      credentials.dispose();
+      vi.unstubAllGlobals();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("explains missing Jira credentials in the Publish form without discovering report files", async () => {
+    const findFiles = vi.spyOn(vscode.workspace, "findFiles");
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({
+      runArtifactStore: store,
+      config: configWith({ "xray.reportGlob": ["artifacts/*.zip"] }),
+    }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem());
+    const operation = publishCommands(mgr).runPublish();
+
+    await vi.waitFor(() => expect(win.__webviewPanels).toHaveLength(1));
+    const panel = win.__webviewPanels[0]!;
+    await receive(panel, { type: "ready" });
+    await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+    const model = posts(panel, "model", "publish")[0]?.["model"] as { attachments: PublishAttachmentsModel };
+    expect(model.attachments).toMatchObject({
+      available: false,
+      reason: expect.stringContaining("Add Jira access"),
+      suggestions: [],
+    });
+    expect(findFiles).not.toHaveBeenCalled();
+    await receive(panel, { surface: "publish", type: "cancel" });
+    await operation;
   });
 
   it("seeds the dialog's project keys from the sync config, the catalogue snapshot and the default key", async () => {
@@ -1047,11 +1358,14 @@ describe("traceability publishLastRun: Publish tab", () => {
       publish?: () => Promise<unknown>;
       rebuild?: () => Promise<void>;
       attachments?: PublishAttachmentsModel;
+      ledger?: PublishLedger;
+      signal?: AbortSignal;
     } = {}
   ): Promise<{ tabs: Array<string | undefined>; rebuilds: number }> {
     let rebuilds = 0;
     const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
     const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    if (over.ledger) {mgr.setPublishLedger(over.ledger);}
     mgr.setTraceabilitySubsystem({
       ...connectedSubsystem([], NO_PROJECT_SCOPE, over.publish),
       rebuildNow: () => {
@@ -1067,7 +1381,7 @@ describe("traceability publishLastRun: Publish tab", () => {
       ).mockResolvedValue(over.attachments);
     }
 
-    const promise = commands.runPublish();
+    const promise = commands.runPublish(undefined, over.signal);
     await flush();
     const panel = win.__webviewPanels[0]!;
     await receive(panel, { type: "ready" });
@@ -1112,6 +1426,37 @@ describe("traceability publishLastRun: Publish tab", () => {
     expect(tabs).not.toContain("executions");
   });
 
+  it("records a pending attachment when cancellation follows a landed import", async () => {
+    const evidence = path.join("/tmp/specwright-command-tests", "evidence.png");
+    const snapshot = {
+      ref: "00000001-0000-4000-8000-000000000000",
+      name: "evidence.png", size: 8, sha256: "a".repeat(64), createdAt: 1,
+    };
+    vi.spyOn(AttachmentSpool.prototype, "seal").mockReturnValue([snapshot]);
+    const signal = new AbortController();
+    const ledger = new PublishLedger(memento(), Logger.create());
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const publish = vi.fn(async () => {
+      signal.abort(new Error("The board closed after import"));
+      return { ref: { kind: "execution" as const, key: "XNP-1" }, imported: 1, warnings: [] };
+    });
+
+    await publishOnce([{ ...CONFIRM, attachments: [evidence] }], {
+      signal: signal.signal, ledger, publish,
+      attachments: {
+        available: true,
+        suggestions: [{ path: evidence, name: "evidence.png", size: 8 }],
+        uploadLimitBytes: 1_024,
+        evidenceStream: "evidence",
+      },
+    });
+
+    expect(publish).toHaveBeenCalledOnce();
+    expect(ledger.find("run-1", "")?.pendingAttachments).toEqual([snapshot]);
+    expect(info.mock.calls.map((call) => String(call[0])).join("\n"))
+      .toContain("Publish cancelled · 1 attachment pending");
+  });
+
   // A failed import keeps the dialog on the run the user picked, so the flow ends only once they answer
   // the retry; cancelling it settles the tab with nothing rebuilt.
   it("neither rebuilds nor switches tabs when the publish fails", async () => {
@@ -1121,6 +1466,62 @@ describe("traceability publishLastRun: Publish tab", () => {
 
     expect(rebuilds).toBe(0);
     expect(tabs).not.toContain("executions");
+  });
+
+  it.each([
+    { status: 400, detail: "Project CALC is not permitted", toast: "Publish failed: Project CALC is not permitted" },
+    { status: 503, detail: undefined, toast: "Publish failed: HTTP 503" },
+  ])("shows the tracker import error without claiming a published run (HTTP $status)", async ({ status, detail, toast }) => {
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const { rebuilds } = await publishOnce([CONFIRM, { type: "cancel" }], {
+      publish: () => Promise.reject(new XrayImportError(status, detail)),
+    });
+
+    expect(error).toHaveBeenCalledWith(toast);
+    expect(rebuilds).toBe(0);
+  });
+
+  it("shows a rejection from an unexpected tracker integration as a publish failure", async () => {
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+
+    const { rebuilds } = await publishOnce([CONFIRM, { type: "cancel" }], {
+      publish: () => Promise.reject("tracker gateway unavailable"),
+    });
+
+    expect(error).toHaveBeenCalledWith("Publish failed: tracker gateway unavailable");
+    expect(rebuilds).toBe(0);
+  });
+
+  it("warns that the remote result may have landed when its recovery record cannot be saved", async () => {
+    const ledger = new PublishLedger(memento(), Logger.create());
+    const record = vi.spyOn(ledger, "record")
+      .mockRejectedValue(new PublishLedgerPersistenceError(new Error("disk full")));
+    const publish = vi.fn().mockResolvedValue({
+      ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [],
+    });
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+
+    await publishOnce([CONFIRM], { ledger, publish });
+
+    expect(publish).toHaveBeenCalledOnce();
+    expect(record).toHaveBeenCalledOnce();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Results may have been published, but recovery state was not saved"));
+    expect(error.mock.calls.at(-1)?.[0]).toContain("disk full");
+  });
+
+  it("keeps the published execution on the ledger when issue evidence cannot be sealed", async () => {
+    const ledger = new PublishLedger(memento(), Logger.create());
+    const publish = vi.fn().mockResolvedValue({
+      ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [],
+      issueEvidenceFiles: ["/ws/missing-evidence.json"],
+    });
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+
+    await publishOnce([CONFIRM], { ledger, publish });
+
+    expect(publish).toHaveBeenCalledOnce();
+    expect(ledger.find("run-1", "")?.executionRef).toBe("XNP-1");
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Results were published to XNP-1, but local attachment sealing failed"));
   });
 
   it("publishes the picked run again on the retry that follows a failure", async () => {
@@ -1151,32 +1552,21 @@ describe("traceability publishLastRun: Publish tab", () => {
     expect(error.mock.calls.flat().map(String).join("\n")).not.toContain("Publish failed");
   });
 
-  it("keeps a recovery persistence failure visibly outcome unknown", () => {
+  it("keeps a recovery persistence failure visibly outcome unknown", async () => {
     const warning = vi.spyOn(vscode.window, "showWarningMessage");
     const error = vi.spyOn(vscode.window, "showErrorMessage");
-    const logger = Logger.create();
-    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-    const mgr = CommandManager.create(makeContext({ logger }));
     const combined = new OutcomeUnknownRecoveryPersistenceError(
       new RemoteOutcomeUnknownError("Publishing results", "publish-unknown"),
       new Error("disk full")
     );
 
-    (
-      publishCommands(mgr) as unknown as {
-        reportPublishFailure(error: unknown): void;
-      }
-    ).reportPublishFailure(combined);
+    await publishOnce([CONFIRM, { type: "cancel" }], { publish: () => Promise.reject(combined) });
 
     const message = String(warning.mock.calls.at(-1)?.[0]);
     expect(message).toContain("Publish outcome unknown");
     expect(message).toContain("possibly succeeded");
     expect(message).toContain("publish-unknown");
     expect(message).toContain("local recovery record could not be saved");
-    expect(warn).toHaveBeenCalledWith(
-      "Publish outcome unknown; local recovery record was not saved",
-      { operationId: "publish-unknown", persistenceCause: "disk full" }
-    );
     expect(error).not.toHaveBeenCalled();
   });
 
@@ -1221,6 +1611,29 @@ describe("traceability publishLastRun: Publish tab", () => {
 
     expect(info.mock.calls.map((call) => String(call[0]))).toContain("Publish cancelled.");
     expect(error).not.toHaveBeenCalled();
+  });
+
+  it("does not start a publish when the command signal is already cancelled", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const publish = vi.fn().mockResolvedValue({
+      ref: { kind: "execution", key: "XNP-1" }, imported: 1, warnings: [],
+    });
+    const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem([], NO_PROJECT_SCOPE, publish));
+    const signal = new AbortController();
+    signal.abort();
+
+    const operation = publishCommands(mgr).runPublish(undefined, signal.signal);
+    await vi.waitFor(() => expect(win.__webviewPanels).toHaveLength(1));
+    const panel = win.__webviewPanels[0]!;
+    await receive(panel, { type: "ready" });
+    await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+    await receive(panel, { surface: "publish", ...CONFIRM });
+    await operation;
+
+    expect(publish).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith("Publish cancelled.");
   });
 
   it("guides the user and opens no board when no publishing capability is connected", async () => {
@@ -1574,6 +1987,95 @@ describe("traceability pending attachments against a reference the response neve
     expect(result).toEqual({ remaining: 1 });
     expect(manage).toHaveBeenCalledWith("workbench.trust.manage");
     expect(ledger.find("run-1", site)?.pendingAttachments).toEqual(["/ws/report.zip"]);
+  });
+
+  it("keeps a refused upload pending, then replays the sealed bytes without republishing results", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-pending-upload-"));
+    const evidence = path.join(root, "evidence.json");
+    fs.writeFileSync(evidence, '{"passed":true}');
+    const spoolRoot = path.join(root, "storage");
+    const supportedSpool = new AttachmentSpool(spoolRoot, Logger.create(), Date.now, {
+      noFollowFlag: process.platform === "win32" ? fs.constants.UV_FS_O_FILEMAP : fs.constants.O_NOFOLLOW,
+    });
+    const [snapshot] = supportedSpool.seal([evidence]);
+    const realRead = AttachmentSpool.prototype.read;
+    vi.spyOn(AttachmentSpool.prototype, "read")
+      .mockImplementation((file) => realRead.call(supportedSpool, file));
+    const ledger = new PublishLedger(memento(), Logger.create());
+    await ledger.record({
+      artifactId: "run-1",
+      executionRef: "XNP-9",
+      site: SITE,
+      account: "id",
+      publishedAt: Date.now(),
+      pendingAttachments: [snapshot!],
+    });
+    const { store: credentials } = mapCredentialStore();
+    await credentials.setJiraCredentials(SITE, "qa@example.com", "jira-token");
+    const uploads: Array<{ url: string; name: string; body: string }> = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      const file = (init.body as FormData).get("file") as File;
+      uploads.push({ url, name: file.name, body: await file.text() });
+      return uploads.length === 1
+        ? new Response("Attachment rejected", { status: 400 })
+        : new Response(JSON.stringify([{ id: "attachment-9" }]));
+    });
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const warn = vi.spyOn(vscode.window, "showWarningMessage");
+    const manager = CommandManager.create(makeContext({
+      config: configWith({ "xray.siteUrl": SITE }),
+      attachmentSpoolRoot: spoolRoot,
+    }));
+    manager.setCredentialStore(credentials);
+    manager.setPublishLedger(ledger);
+
+    try {
+      const delegate = publishCommands(manager).publishDelegate();
+      expect(await delegate.attachPending("run-1")).toEqual({ remaining: 1 });
+      expect(ledger.find("run-1", SITE)?.pendingAttachments).toEqual([snapshot]);
+      expect(warn).toHaveBeenCalledWith("XNP-9: 1 attachment(s) still failed.");
+
+      expect(await delegate.attachPending("run-1")).toEqual({ remaining: 0 });
+      expect(ledger.find("run-1", SITE)?.pendingAttachments).toEqual([]);
+      expect(info).toHaveBeenCalledWith("XNP-9: 1 pending attachment(s) uploaded.");
+      expect(uploads).toEqual([
+        { url: `https://${SITE}/rest/api/3/issue/XNP-9/attachments`, name: "evidence.json", body: '{"passed":true}' },
+        { url: `https://${SITE}/rest/api/3/issue/XNP-9/attachments`, name: "evidence.json", body: '{"passed":true}' },
+      ]);
+    } finally {
+      credentials.dispose();
+      vi.unstubAllGlobals();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("publish attachment picker", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("offers selected files with their real names and sizes, including files removed before selection returns", async () => {
+    const existing = writeTempFeature("report body");
+    const removed = path.join(path.dirname(existing), "removed.json");
+    const picker = vi.spyOn(vscode.window, "showOpenDialog").mockResolvedValue([
+      vscode.Uri.file(existing),
+      vscode.Uri.file(removed),
+    ]);
+    const manager = CommandManager.create(makeContext());
+
+    const files = await publishCommands(manager).publishDelegate().browseFiles();
+
+    expect(picker).toHaveBeenCalledWith({ canSelectMany: true, openLabel: "Attach" });
+    expect(files).toEqual([
+      { path: existing, name: "tmp.feature", size: fs.statSync(existing).size },
+      { path: removed, name: "removed.json", size: 0 },
+    ]);
+  });
+
+  it("returns no attachments when the user dismisses the picker", async () => {
+    vi.spyOn(vscode.window, "showOpenDialog").mockResolvedValue(undefined);
+    const manager = CommandManager.create(makeContext());
+
+    await expect(publishCommands(manager).publishDelegate().browseFiles()).resolves.toEqual([]);
   });
 });
 

@@ -384,6 +384,8 @@ export function installPublish(): void {
     if (event.key === 'Escape') { clearResults(projectResults); }
   });
 
+  browseButton.addEventListener('click', () => { window.__spec.post('publish', { type: 'browse' }); });
+
   element<HTMLButtonElement>('cancel').addEventListener('click', () => {
     window.__spec.post('publish', { type: 'cancel' });
   });
