@@ -13,6 +13,7 @@ This record names exact tested versions. It does not turn a declared package ran
 | `jsdom` | `30.1.2` | Populated bundled Board, Traceability, and Xray setup clients pass their existing rendering, interaction, keyboard/focus, and accessibility checks on Node 24.21.0. |
 | `@types/jsdom` | `30.0.0` | Installed with jsdom 30.1.2; all four TypeScript projects pass. |
 | `@vscode/vsce` | `4.0.0` | Release-artifact production and verification passed on Node 24.21.0; the same VSIX passed installation, activation, and named fixture discovery on both pinned VS Code hosts. |
+| `@vscode/test-electron` | `3.1.0` | Fresh download and cached reuse passed; both pinned hosts passed 30 native tests with rendered progress enabled. Installed activation and named fixture discovery passed on both hosts. |
 
 The supported VS Code range is `^1.99.0`, matching the `engines.vscode` declaration. The table records the minimum lane and the pinned current lane; it does not extend support to an untested host merely because that host satisfies the range.
 
@@ -20,7 +21,9 @@ The supported VS Code range is `^1.99.0`, matching the `engines.vscode` declarat
 
 Keep Playwright and playwright-bdd as a tested pair. During the 2026-10-12 compatible dependency update, Playwright `1.64.0` with playwright-bdd `8.5.1` failed in the installed bddgen command while loading `registerESMLoader`, before tests could be generated. The paired migration replaces that combination with Playwright `1.64.0` and playwright-bdd `9.2.1`. Playwright is bounded to `~1.64.0` so a dependency update cannot silently select an untested minor.
 
-These are the repository's development dependencies. Commands in user workspaces continue to resolve their workspace's installed packages. The declared VS Code minimum is unchanged. Node development tooling and typings now follow the 24 LTS line. The test-host tooling major upgrade remains a separate migration.
+These are the repository's development dependencies. Commands in user workspaces continue to resolve their workspace's installed packages. The declared VS Code minimum is unchanged. Node development tooling and typings now follow the 24 LTS line.
+
+The 2026-10-12 registry check leaves Mocha `12.0.3` and js-yaml `5.4.3` for separate migrations. This slice retains Mocha `11.8.0` and the explicit js-yaml `4.1.1` pin.
 
 playwright-bdd 9 requires Node.js 20 or newer and validates step callback argument counts against captured parameters, doc strings, and data tables. With captures, a Playwright-style callback includes the fixtures object before its captured parameters. Its Cucumber JSON reporter omits attachments by default; this does not change the Playwright JSON report consumed by Specwright. These changes are described in the [upstream release notes](https://github.com/vitalets/playwright-bdd/blob/main/CHANGELOG.md).
 
@@ -44,9 +47,15 @@ Clean installation and the complete gate passed: all four TypeScript projects, l
 
 ## VSIX packaging
 
-VSCE `4.0.0` requires Node 22 or newer; the pinned development runtime is Node `24.21.0`. The extension version stays `0.7.8`, the declared VS Code minimum stays `1.99.0`, and `@vscode/test-electron` stays `2.5.2` for this packaging migration. The [upstream release](https://github.com/microsoft/vscode-vsce/releases/tag/v4.0.0) replaces glob handling and introduces prompted migration of legacy PAT credentials.
+VSCE `4.0.0` requires Node 22 or newer; the pinned development runtime is Node `24.21.0`. The extension version stays `0.7.8`, and the declared VS Code minimum stays `1.99.0`. Packaging acceptance used `@vscode/test-electron` `2.5.2`; its subsequent runner migration is recorded below. The [upstream release](https://github.com/microsoft/vscode-vsce/releases/tag/v4.0.0) replaces glob handling and introduces prompted migration of legacy PAT credentials.
 
 The existing release-artifact producer passed from a clean isolated source commit, preserving exactly 31 payload files. Verification passed for version `0.7.8`, the source commit, VSIX and SBOM digests, and the required codicons SBOM component. All six packaged JavaScript bundles match the build output and accepted jsdom baseline. The same VSIX passed clean-profile installation, activation, and named fixture discovery on both VS Code `1.99.0` and `1.132.0`. The unchanged runtime preserves the prior native-suite evidence. Clean installation and the complete gate passed all four TypeScript projects, lint, 3,510 unit tests with three existing skips, unchanged coverage percentages and source scope, 18 release contracts, and verification of the tested artifact. Independent Astra review accepted the migration with no remaining findings. Marketplace authentication and publication are external release gates; this migration does not exercise credential storage or login.
+
+## VS Code test runner
+
+The published `@vscode/test-electron` `3.1.0` package requires Node 22 or newer, met by the pinned Node `24.21.0` development runtime. Its `downloadAndUnzipVSCode`, `runVSCodeCommand`, and `runTests` APIs retain the options used by the integration runner and installed-VSIX smoke script. An explicit `cachePath` remains available for fresh-download acceptance. The package now resolves the macOS executable through the application bundle metadata, including the current `Code` binary name. These observations come from the published package declarations and implementation; its bundled changelog does not describe version 3.
+
+The VS Code targets remain `1.99.0` and `1.132.0`, and the extension version remains `0.7.8`. A fresh current-host download passed real archive extraction and resolved the `Code` executable; a second call reused the completed cache. Both hosts passed all 30 native tests with rendered progress enabled, including actual Debug, with three Windows-only cases pending on macOS. The VSIX contains exactly 31 payload files, and all six production JavaScript bundles are byte-identical to the immutable accepted VSCE 4 VSIX. The same VSIX passed clean-profile installation, activation, and named fixture discovery on both hosts. The complete gate passed all four TypeScript projects, lint, 3,510 unit tests with three existing skips, unchanged coverage percentages and 203-file scope, 18 release contracts, and production bundling. The tested VSIX digest remained unchanged. Independent Astra review accepted the migration with no remaining findings. See the [published package](https://www.npmjs.com/package/@vscode/test-electron/v/3.1.0) for this exact runner version.
 
 ## TypeScript compiler and API
 

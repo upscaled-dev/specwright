@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update the VS Code test runner to test-electron 3.1.0 on the pinned development Node runtime, retaining exact minimum and current host targets.
 - Update VSIX packaging to VSCE 4.0.0 on the pinned development Node runtime, retaining the existing artifact inventory and provenance checks.
 - Update the browser-test DOM to jsdom 30.1.2 with matching major-version typings, preserving the bundled webview rendering and interaction checks.
 - Update development Node to 24.21.0, Node typings to the 24 line, and Vitest with matching V8 coverage to 5.0.3.
