@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { dirname, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { load } from "js-yaml";
+import { CORE_SCHEMA, load, mergeTag } from "js-yaml";
 import test from "node:test";
 import {
   artifactSet,
@@ -98,10 +98,14 @@ function hasActionVersionComment(stepSource, reference) {
   return line.test(stepSource);
 }
 
+function loadPolicyYaml(source) {
+  return load(source, { schema: CORE_SCHEMA.withTags(mergeTag) });
+}
+
 function assertWorkflowSupplyPolicy(workflows) {
   assert.ok(workflows.size > 0, "repository has no workflows");
   for (const [filename, source] of workflows) {
-    const workflow = load(source);
+    const workflow = loadPolicyYaml(source);
     assert.ok(isRecord(workflow), `${filename} must contain an object`);
     assert.deepEqual(workflow.permissions, { contents: "read" }, `${filename} must default to contents: read`);
     assert.ok(isRecord(workflow.jobs), `${filename} must contain jobs`);
@@ -153,7 +157,7 @@ function assertWorkflowSupplyPolicy(workflows) {
 }
 
 function assertDependencyAutomation(config) {
-  const parsed = load(config);
+  const parsed = loadPolicyYaml(config);
   assert.ok(isRecord(parsed), "Dependabot config must be a YAML object");
   assert.equal(parsed.version, 2, "Dependabot config must use version 2");
   assert.ok(Array.isArray(parsed.updates), "Dependabot config needs updates");
@@ -504,7 +508,8 @@ test("workflow policy parses discovered YAML semantics", () => {
   };
   try {
     write("local.yml", `name: Local
-permissions: { contents: read }
+defaults: &readOnly { contents: read }
+permissions: { <<: *readOnly }
 jobs:
   local:
     runs-on: ubuntu-latest
@@ -627,6 +632,33 @@ jobs:
     permissions: write-all
     steps: [{ uses: ./local-action }]
 `, /ci.yml: promote must use its approved permissions/u, "ci.yml");
+    failure(`name: Merged permissions
+permissions: { contents: read }
+jobs:
+  job:
+    <<: { permissions: write-all }
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps: [{ uses: ./local-action }]
+`, /has no approved job permissions/u);
+    failure(`name: Merged mutable action
+permissions: { contents: read }
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - <<: { uses: actions/checkout@v4 }
+`, /must use an immutable commit SHA/u);
+    failure(`name: Duplicate permissions
+permissions: { contents: read }
+permissions: write-all
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps: [{ uses: ./local-action }]
+`, /duplicat(?:e|ed) mapping key/u);
     failure(`name: Comment only
 permissions: { contents: read }
 jobs:
@@ -664,7 +696,7 @@ test("CI builds the candidate after its gates and promotes it without rebuilding
   const packageJson = JSON.parse(readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"));
   assertWorkflowSupplyPolicy(workflows);
   assertDependencyAutomation(dependabot);
-  assert.equal(packageJson.devDependencies["js-yaml"], "4.1.1");
+  assert.equal(packageJson.devDependencies["js-yaml"], "5.4.3");
   assert.equal(readFileSync(resolve(REPO_ROOT, ".node-version"), "utf8").trim(), "24.21.0");
   assert.match(readFileSync(resolve(REPO_ROOT, ".devcontainer", "Dockerfile"), "utf8"), /^FROM node:24\.21\.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20$/mu);
   assert.throws(
@@ -681,6 +713,10 @@ test("CI builds the candidate after its gates and promotes it without rebuilding
   );
   assert.throws(
     () => assertDependencyAutomation(dependabot.replace("groups:\n", "open-pull-requests-limit: 0\n    groups:\n")),
+    /must omit open-pull-requests-limit or use a positive integer/u
+  );
+  assert.throws(
+    () => assertDependencyAutomation(dependabot.replace("groups:\n", "<<: { open-pull-requests-limit: 0 }\n    groups:\n")),
     /must omit open-pull-requests-limit or use a positive integer/u
   );
   assert.throws(
