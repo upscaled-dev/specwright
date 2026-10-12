@@ -82,6 +82,20 @@ suite("observed native run progress", () => {
         for (const [stage, text] of stages) {
           await waitUntil(() => fs.existsSync(path.join(root, `${stage}-ready`)) || ended,
             30_000, `${entry} ${stage} gate`);
+          if (ended) {
+            let stopped: SavedRun | undefined;
+            try {
+              await waitUntil(() => {
+                stopped = savedTestRuns().find((run) => !previousIds.has(run.id) && run.completedAt !== undefined);
+                return stopped !== undefined;
+              }, 15_000, `${entry} early completion output`);
+              assert.ok(stopped);
+              console.error(`${entry} run ended at ${stage}; observed gates: ${fs.readdirSync(root).join(", ")}\n` +
+                (await openTestRunOutput(stopped.id)).getText());
+            } catch (error) {
+              console.error(`Could not read ${entry} run output after completion at ${stage}: ${String(error)}`);
+            }
+          }
           assert.equal(ended, false, `${entry} must remain open at ${stage}`);
           await ui?.expectStatus(text);
           if (entry === "editor") {await ui?.expectNotification(text);}
