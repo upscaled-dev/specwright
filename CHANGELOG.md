@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update compatible development dependencies and keep Playwright on its tested minor line until the paired playwright-bdd migration.
 - Run progress shows observed preparation, generation, execution, retry activity, and finishing stages in the status bar, Test Results output, and editor-run notifications.
 - Passing retries keep their green result and show the successful attempt number in the scenario summary. Combined multi-project results use a general retry annotation.
 
