@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { formatSyncedAgo, projectTraceabilityTree } from "../../traceability/traceability-tree-projection";
 import type { TraceabilityModel, TraceabilitySnapshot } from "../../traceability/traceability-model";
@@ -50,7 +51,7 @@ describe("traceability tree projection", () => {
     const folders = vi.spyOn(vscode.workspace, "workspaceFolders", "get").mockReturnValue([{ uri: vscode.Uri.file("/workspace"), name: "shop", index: 0 }]);
     try {
       const projection = projectTraceabilityTree(model, "Xray", "file", true, undefined, true);
-      expect(projection.rows[0]?.label).toBe("features/math.feature");
+      expect(projection.rows[0]?.label).toBe(path.join("features", "math.feature"));
       expect(projection.rows[0]?.actions.map((action) => action.id)).toEqual(["run"]);
     } finally {folders.mockRestore();}
   });

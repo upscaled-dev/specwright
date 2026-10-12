@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as nodePath from "node:path";
 import { TestExecutor, ShellRunner } from "../../core/test-executor";
 import { Logger } from "../../utils/logger";
-import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
+import { normalizePathKey, PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { LIVE_REPORT_FILE_ENV } from "../../core/live-reporter-protocol";
 import { EXECUTION_LIMITS } from "../../core/execution-limits";
 
@@ -45,7 +45,7 @@ describe("TestExecutor tagged batch execution", () => {
     expect(calls[0]).toContain("@smoke and not @wip");
     expect(calls[1]).toContain("playwright test");
     expect(result.success).toBe(true);
-    expect(result.scenarioResults).toMatchObject({ [`${fixture.featurePath}:4`]: "passed" });
+    expect(result.scenarioResults).toMatchObject({ [`${normalizePathKey(fixture.featurePath)}:4`]: "passed" });
   });
 
   it.each(["", "SyntaxError in checkout.steps.ts"])("surfaces a generator failure with stderr %j and runs no tests", async (stderr) => {
@@ -111,7 +111,7 @@ describe("TestExecutor tagged batch execution", () => {
 
     expect(commands).toHaveLength(1);
     expect(commands[0]).not.toContain("--reporter");
-    expect(result.scenarioResults).toMatchObject({ [`${fixture.featurePath}:4`]: "passed" });
+    expect(result.scenarioResults).toMatchObject({ [`${normalizePathKey(fixture.featurePath)}:4`]: "passed" });
   });
 
   it("explains a missing JSON report when the project owns its reporter configuration", async () => {
@@ -155,7 +155,7 @@ describe("TestExecutor tagged batch execution", () => {
     expect(commands).toHaveLength(1);
     expect(commands[0]).not.toContain("--reporter");
     expect(commands[0]).toContain(":6");
-    expect(result.scenarioResults).toMatchObject({ [`${fixture.featurePath}:4`]: "passed" });
+    expect(result.scenarioResults).toMatchObject({ [`${normalizePathKey(fixture.featurePath)}:4`]: "passed" });
   });
 
   it("applies and releases the requested worker count across suite runs", async () => {

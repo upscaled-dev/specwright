@@ -1020,17 +1020,24 @@ describe("traceability view client", () => {
     }
     view.send({ type: "end", generation: 1 });
     const tree = view.dom.window.document.getElementById("tree") as HTMLElement;
-    for (let index = 0; index < rows.length; index += 1) {
+    const row = (index: number): HTMLElement => {
       tree.scrollTop = index * 28;
       tree.dispatchEvent(new view.dom.window.Event("scroll"));
-      const item = view.dom.window.document.querySelector<HTMLElement>(`[data-id="row-${index}"]`)!;
-      item.dispatchEvent(new view.dom.window.MouseEvent("click", { bubbles: true, ctrlKey: true }));
-    }
+      return view.dom.window.document.querySelector<HTMLElement>(`[data-id="row-${index}"]`)!;
+    };
+    row(0).click();
+    row(127).dispatchEvent(new view.dom.window.MouseEvent("click", { bubbles: true, shiftKey: true }));
+    const selected = rows.slice(0, 128).map(item => item.id);
+    expect((view.states.at(-1) as { selected: string[] }).selected).toEqual(selected);
+    row(128).dispatchEvent(new view.dom.window.MouseEvent("click", { bubbles: true, ctrlKey: true }));
     expect(view.dom.window.document.getElementById("status")?.textContent).toBe("Selection is limited to 128 rows.");
-    const last = view.dom.window.document.querySelector<HTMLElement>('[data-id="row-256"]')!;
+    expect(view.dom.window.document.querySelector('[data-id="row-128"]')?.getAttribute("aria-selected")).toBe("false");
+    const last = row(256);
     last.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: " ", bubbles: true, metaKey: true }));
     expect(view.dom.window.document.getElementById("status")?.textContent).toBe("Selection is limited to 128 rows.");
-    expect((view.states.at(-1) as { selected: string[] }).selected).toHaveLength(128);
+    expect(view.dom.window.document.querySelector('[data-id="row-256"]')?.getAttribute("aria-selected")).toBe("false");
+    expect((view.states.at(-1) as { selected: string[] }).selected).toEqual(selected);
+    view.dom.window.close();
   });
 
   it("keeps the newest collapsed root when the saved collapse history reaches its bound", async () => {

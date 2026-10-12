@@ -14,7 +14,7 @@ import * as vscode from "../__mocks__/vscode";
 import { PlaywrightBddTestProvider } from "../../test-providers/playwright-bdd-test-provider";
 import { TestExecutor, ShellRunner } from "../../core/test-executor";
 import { CommandBuilder } from "../../core/command-builder";
-import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
+import { normalizePathKey, PlaywrightJsonParser } from "../../utils/playwright-json-parser";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { TestOrganizationManager } from "../../core/test-organization";
 import { ExtensionConfig } from "../../core/extension-config";
@@ -352,7 +352,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
     provider.applyExternalRunResult(fixture.featurePath, {
       success: true, output: "", duration: 5,
-      scenarioResults: { [`${fixture.featurePath}:4`]: "passed" },
+      scenarioResults: { [`${normalizePathKey(fixture.featurePath)}:4`]: "passed" },
     }, { lineNumber: 4 });
     expect(controller.runs.at(-1)!.outcome.passed).toContain(`${fixture.featurePath}:4`);
   });
@@ -590,7 +590,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       success: true,
       output: "",
       duration: 1,
-      scenarioResults: { [keyFor(fixture.featurePath)]: "passed" },
+      scenarioResults: { [normalizePathKey(keyFor(fixture.featurePath))]: "passed" },
     });
 
     const run = controller.runs.at(-1)!;
@@ -626,7 +626,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       error: "One example failed",
       duration: 1,
       scenarioResults: {
-        [`${fixture.featurePath}::Add apple`]: "passed",
+        [`${normalizePathKey(fixture.featurePath)}::Add apple`]: "passed",
         "features/test.feature::Add pear": "failed",
       },
     });
@@ -656,7 +656,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
 
     provider.applyExternalRunResult(fixture.featurePath, {
       success: true, output: "", duration: 1,
-      scenarioResults: { [`${fixture.featurePath}:4`]: "passed" },
+      scenarioResults: { [`${normalizePathKey(fixture.featurePath)}:4`]: "passed" },
     });
 
     expect(controller.runs.at(-1)!.outcome.passed).toContain(`${fixture.featurePath}:4`);
@@ -675,9 +675,9 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       error: "One example failed",
       duration: 1,
       scenarioResults: {
-        [`${fixture.featurePath}:4`]: "passed",
-        [`${fixture.featurePath}:12`]: "skipped",
-        [`${fixture.featurePath}:13`]: "failed",
+        [`${normalizePathKey(fixture.featurePath)}:4`]: "passed",
+        [`${normalizePathKey(fixture.featurePath)}:12`]: "skipped",
+        [`${normalizePathKey(fixture.featurePath)}:13`]: "failed",
       },
       scenarioDetails: [{
         featurePath: fixture.featurePath,
@@ -754,7 +754,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       success: true,
       output: "",
       duration: 1,
-      scenarioResults: Object.fromEntries(everyCase.map((id) => [id, "passed"])),
+      scenarioResults: Object.fromEntries(everyCase.map((id) => [normalizePathKey(id), "passed"])),
     });
     expect(provider.getItemStatus(fixture.featurePath)).toBe("passed");
 
@@ -762,7 +762,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       success: true,
       output: "",
       duration: 1,
-      scenarioResults: Object.fromEntries(everyCase.map((id) => [id, "skipped"])),
+      scenarioResults: Object.fromEntries(everyCase.map((id) => [normalizePathKey(id), "skipped"])),
     });
 
     const run = controller.runs.at(-1)!;

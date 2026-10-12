@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import * as vscode from "vscode";
+import * as path from "node:path";
 import { BddgenDiagnosticsProvider } from "../../providers/bddgen-diagnostics-provider";
 
 interface MockableLanguages {
@@ -46,7 +47,7 @@ describe("BddgenDiagnosticsProvider", () => {
     const provider = new BddgenDiagnosticsProvider();
     const probe = probeCollection(provider);
     provider.publish("features/draft.feature:3: missing Scenario", "/repo");
-    expect(probe.setCalls).toEqual([{ fsPath: "/repo/features/draft.feature", diags: [expect.objectContaining({
+    expect(probe.setCalls).toEqual([{ fsPath: path.resolve("/repo", "features/draft.feature"), diags: [expect.objectContaining({
       message: "missing Scenario", range: expect.objectContaining({ start: expect.objectContaining({ line: 2, character: 0 }) }),
     })] }]);
     provider.dispose();
