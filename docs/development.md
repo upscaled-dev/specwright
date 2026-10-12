@@ -13,6 +13,10 @@ npm run lint
 npm run build              # clean + compile + bundle
 ```
 
+The `tsc` commands use the native TypeScript 7 compiler through the `@typescript/native` npm alias. ESLint still imports the TypeScript 6 compiler API through the `typescript` alias for `@typescript/typescript6`; its separate CLI is `tsc6`. Keep both aliases until API-dependent tools support the native compiler. This follows [Microsoft's side-by-side migration guidance](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-6-0).
+
+When changing the compiler, check all four TypeScript projects and compile the integration runner before native tests. Exercise both `watch:tsc` and `watch:webview`: observe a clean compilation, introduce a deliberate type error, and observe recovery after correcting it. Use compiler output to detect completion. Verify the emitted integration tests on both pinned VS Code hosts, along with lint, coverage, production bundling, and installed VSIX behavior.
+
 Unit tests use [Vitest](https://vitest.dev/) with a minimal stub of the `vscode` module under [src/test/__mocks__/vscode.ts](../src/test/__mocks__/vscode.ts). Tests that need real VS Code APIs (`TestController`, `TestItem` trees, run-profile registration) run via `npm run test:integration`, which launches a real VS Code instance against a fixture workspace under [src/test/integration/fixtures/workspace/](../src/test/integration/fixtures/workspace/). See [CONTRIBUTING.md](../CONTRIBUTING.md#integration-tests) for details.
 
 Changes to executable resolution need a real Extension Host test on Windows, macOS, and Linux. Put a temporary fixture beneath the checkout when it needs the checkout's installed dependency, so normal package resolution can find the parent `node_modules` without a temp-to-checkout junction. Run the configured command through the production command runner and assert its generated output.

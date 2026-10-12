@@ -15,7 +15,15 @@ The supported VS Code range is `^1.99.0`, matching the `engines.vscode` declarat
 
 Keep Playwright and playwright-bdd as a tested pair. During the 2026-10-12 compatible dependency update, Playwright `1.64.0` with playwright-bdd `8.5.1` failed in the installed bddgen command while loading `registerESMLoader`, before tests could be generated. The repository stays on the Playwright `1.60` minor line until the playwright-bdd major migration is validated.
 
-This pass updates compatible development dependency lines. Major upgrades to playwright-bdd, Vitest and coverage, TypeScript, jsdom, and extension packaging or test-host tooling remain separate migrations. The declared VS Code minimum and Node API type line are unchanged.
+This pass updates compatible development dependency lines. Major upgrades to playwright-bdd, Vitest and coverage, jsdom, and extension packaging or test-host tooling remain separate migrations. The declared VS Code minimum and Node API type line are unchanged.
+
+## TypeScript compiler and API
+
+The `@typescript/native` alias installs TypeScript `7.0.2` and supplies `tsc` for type checking, watch mode, and integration compilation. The `typescript` alias installs `@typescript/typescript6` version `6.0.2`, which supplies the TypeScript `6.0.3` API used by ESLint and the separate `tsc6` command. A clean install verifies that each command and the ESLint parser resolve to the intended version.
+
+The esbuild projects use bundler resolution. Browser code uses ESNext modules, while the integration project uses Node16 module resolution and emits CommonJS for the existing Extension Host runner. Strict checking remains enabled.
+
+The 2026-10-12 migration passed clean installation, all four type-check projects, lint, watch-mode error detection and recovery, 3,510 unit tests with enforced coverage, and 18 release contracts on macOS. The native suite passed 29 tests on each VS Code host (`1.99.0` and `1.132.0`), with three Windows-only cases pending on macOS. The packaged extension passed installation, activation, and fixture discovery. Windows and Linux execution remain with their native CI lanes.
 
 ## Ownership and review
 
