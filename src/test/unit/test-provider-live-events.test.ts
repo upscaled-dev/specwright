@@ -335,6 +335,8 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       scenarioName: "Passing scenario",
       status: "passed" as const,
       durationMs: 5,
+      attempts: 2,
+      flaky: true,
     };
     session.progress.onTestEnd?.(detail, 1, 3);
     expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
@@ -350,6 +352,9 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(run.outcome.passed.filter((id) => id === `${fixture.featurePath}:4`)).toHaveLength(1);
     expect(run.outcome.passed).toContain(fixture.featurePath);
     expect(run.outcome.ended).toBe(true);
+    const summaries = run.outcome.output.filter((text) => text.includes("Passed on attempt 2"));
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toContain("Scenario: Passing scenario");
   });
 
   it("keeps an all-skipped live feature skipped when the final report is empty", async () => {

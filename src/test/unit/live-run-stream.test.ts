@@ -76,6 +76,32 @@ describe("LiveRunStream", () => {
     });
   }
 
+  it("isolates malformed lifecycle records and failing optional progress consumers", () => {
+    const progress = vi.fn(() => {throw new Error("closed");});
+    const finished = vi.fn();
+    const errors = vi.fn();
+    fs.writeFileSync(reportPath, [
+      JSON.stringify({ kind: "run-progress", retrying: -1 }),
+      JSON.stringify({ kind: "run-progress", retrying: 0.5 }),
+      JSON.stringify({ kind: "run-progress", retrying: 1, retry: { title: "row", attempt: 0, projectName: "" } }),
+      JSON.stringify({ kind: "run-progress", retrying: 1, retry: { title: "row", attempt: 2, projectName: "" } }),
+      JSON.stringify(testEndRecord()),
+      JSON.stringify({ kind: "run-end" }),
+    ].join("\n"));
+    stream = LiveRunStream.watch(reportPath, {
+      onBegin: () => undefined,
+      onTestEnd: (result, record) => ended.push({ result, record }),
+      onProgress: progress, onEnd: finished, onError: errors,
+      onMalformedLine: (line) => malformed.push(line),
+    });
+    stream.finish();
+    expect(malformed).toHaveLength(3);
+    expect(progress).toHaveBeenCalledOnce();
+    expect(errors).toHaveBeenCalledOnce();
+    expect(ended).toHaveLength(1);
+    expect(finished).toHaveBeenCalledOnce();
+  });
+
   it("tails completed records and maps a generated outline row back to its feature line", async () => {
     watch();
     fs.appendFileSync(reportPath, `${JSON.stringify(beginRecord())}\n`);

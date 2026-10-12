@@ -7,7 +7,7 @@ import type {
   TestCase,
   TestResult,
 } from "@playwright/test/reporter";
-import { parseBddSourceData, type BddSourceData } from "../parsers/bdd-file-data-parser";
+import { bddExampleOutlineName, parseBddSourceData, type BddSourceData } from "../parsers/bdd-file-data-parser";
 import { resolveTestStatus, type LogicalTestStatus } from "../core/test-result-status";
 import {
   LIVE_REPORT_FILE_ENV,
@@ -50,6 +50,7 @@ export class SpecwrightLiveReporter implements Reporter {
   private writable = true;
   private readonly groupByTestId = new Map<string, LiveScenarioGroup>();
   private readonly sourceBySpecPath = new Map<string, BddSourceData | undefined>();
+  private readonly activeRetries = new Set<string>();
 
   public printsToStdio(): boolean {
     return false;
@@ -58,6 +59,7 @@ export class SpecwrightLiveReporter implements Reporter {
   public onBegin(config: FullConfig, suite: Suite): void {
     this.groupByTestId.clear();
     this.sourceBySpecPath.clear();
+    this.activeRetries.clear();
     const groupsByKey = new Map<string, LiveScenarioGroup>();
     const projectDir = config.configFile ? path.dirname(config.configFile) : config.rootDir;
     for (const test of suite.allTests()) {
@@ -85,7 +87,26 @@ export class SpecwrightLiveReporter implements Reporter {
     this.write(record);
   }
 
+  public onTestBegin(test: TestCase, result: TestResult): void {
+    if (result.retry === 0 || !this.groupByTestId.has(test.id)) {return;}
+    this.activeRetries.add(test.id);
+    const outlineName = bddExampleOutlineName(test.title, test.titlePath().at(-2));
+    const title = outlineName ? `${outlineName} (${test.title})` : test.title;
+    this.write({
+      kind: "run-progress",
+      retrying: this.activeRetries.size,
+      retry: { title, attempt: result.retry + 1, projectName: test.parent.project()?.name ?? "" },
+    });
+  }
+
+  public onEnd(): void {
+    this.write({ kind: "run-end" });
+  }
+
   public onTestEnd(test: TestCase, result: TestResult): void {
+    if (this.activeRetries.delete(test.id)) {
+      this.write({ kind: "run-progress", retrying: this.activeRetries.size });
+    }
     const group = this.groupByTestId.get(test.id);
     if (!group) {return;}
     const errorMessage = result.error?.message ?? result.error?.value;

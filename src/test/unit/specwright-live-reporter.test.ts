@@ -136,6 +136,64 @@ describe("SpecwrightLiveReporter", () => {
     });
   });
 
+  it("keeps parallel retries active independently and ends only at onEnd", () => {
+    const first = testCase({ retries: 1 });
+    const second = testCase({ id: "other-row", title: "other row", retries: 1,
+      location: { file: first.location.file, line: 29, column: 1 } });
+    const reporter = new SpecwrightLiveReporter();
+    reporter.onBegin(config(), suite([first, second]));
+    reporter.onTestEnd(first, testResult({ status: "failed" }));
+    reporter.onTestEnd(second, testResult({ status: "failed" }));
+    expect(records().at(-1)).toMatchObject({ completed: 2, total: 2 });
+    expect(records().some((record) => record.kind === "run-end")).toBe(false);
+    reporter.onTestBegin(first, testResult({ retry: 1 }));
+    reporter.onTestBegin(second, testResult({ retry: 1 }));
+    reporter.onTestEnd(first, testResult({ retry: 1 }));
+    expect(records().filter((record) => record.kind === "run-progress")).toEqual([
+      { kind: "run-progress", retrying: 1, retry: { title: "logs in", attempt: 2, projectName: "chromium" } },
+      { kind: "run-progress", retrying: 2, retry: { title: "other row", attempt: 2, projectName: "chromium" } },
+      { kind: "run-progress", retrying: 1 },
+    ]);
+    reporter.onTestEnd(second, testResult({ retry: 1 }));
+    expect(records().filter((record) => record.kind === "run-progress").at(-1))
+      .toEqual({ kind: "run-progress", retrying: 0 });
+    reporter.onEnd();
+    expect(records().at(-1)).toEqual({ kind: "run-end" });
+  });
+
+  it("distinguishes generic example retries by their enclosing outline and preserves project and attempt", () => {
+    const tests = ["Pay by card", "Pay by cash"].map((outline, index) => testCase({
+      id: `payment-${index}`,
+      title: "Example #1",
+      titlePath: () => ["chromium", "payment.feature.spec.ts", "Payment", outline, "Example #1"],
+      location: { file: "/repo/.features-gen/payment.feature.spec.ts", line: 17 + index, column: 1 },
+      retries: 1,
+    }));
+    const reporter = new SpecwrightLiveReporter();
+    reporter.onBegin(config(), suite(tests));
+    for (const test of tests) {reporter.onTestBegin(test, testResult({ retry: 1 }));}
+    expect(records().filter((record) => record.kind === "run-progress")).toEqual([
+      { kind: "run-progress", retrying: 1,
+        retry: { title: "Pay by card (Example #1)", attempt: 2, projectName: "chromium" } },
+      { kind: "run-progress", retrying: 2,
+        retry: { title: "Pay by cash (Example #1)", attempt: 2, projectName: "chromium" } },
+    ]);
+  });
+
+  it("keeps the substituted title of a placeholder outline retry", () => {
+    const test = testCase({
+      title: "Pay by card",
+      titlePath: () => ["chromium", "payment.feature.spec.ts", "Payment", "Pay by <method>", "Pay by card"],
+      retries: 1,
+    });
+    const reporter = new SpecwrightLiveReporter();
+    reporter.onBegin(config(), suite([test]));
+    reporter.onTestBegin(test, testResult({ retry: 1 }));
+    expect(records().at(-1)).toMatchObject({
+      retry: { title: "Pay by card", attempt: 2, projectName: "chromium" },
+    });
+  });
+
   it("emits an exhausted retry with its error", () => {
     const test = testCase({ retries: 1 });
     const reporter = new SpecwrightLiveReporter();

@@ -29,7 +29,7 @@ import {
   type ArtifactCaptureTarget,
 } from "../traceability/run-artifact-store";
 import { openLiveRunSession, type LiveRunHandle } from "./live-run-session";
-import type { RunProgressObserver } from "./run-progress";
+import { reportRunProgress, type RunProgressObserver } from "./run-progress";
 import { TemporaryReport } from "./temporary-report";
 import {
   resolveExecutableCommand,
@@ -276,6 +276,7 @@ export class TestExecutor {
       const { bddgenCommand } = this.commandBuilder().buildDebugCommandParts(options);
 
       if (bddgenCommand !== undefined) {
+        reportRunProgress(options.progress, { phase: "generating" });
         const result = await this.shellRunner(
           bddgenCommand,
           workingDir,
@@ -283,6 +284,7 @@ export class TestExecutor {
           options.signal,
           options.progress?.onOutput
         );
+        reportRunProgress(options.progress, { phase: "preparing" });
         // A cancelled bddgen reports failure like any other non-zero exit; stopping is not an error.
         if (result.terminationLease) {return result.terminationLease;}
         if (options.signal?.aborted) {return undefined;}
@@ -336,6 +338,7 @@ export class TestExecutor {
       }
 
       const debugCommand = this.commandResolver(playwrightCommand, workingDir);
+      reportRunProgress(options.progress, { phase: "running" });
       const started = await this.debug.startDebugging(folder, {
         type: "node",
         request: "launch",
@@ -415,6 +418,7 @@ export class TestExecutor {
     const { bddgenCommand } = this.commandBuilder().buildScenarioCommandParts(options);
     if (bddgenCommand !== undefined) {
       try {
+        reportRunProgress(options.progress, { phase: "generating" });
         const gen = this.withBinaryHint(
           await this.shellRunner(
             bddgenCommand,
@@ -425,6 +429,7 @@ export class TestExecutor {
           ),
           bddgenCommand
         );
+        reportRunProgress(options.progress, { phase: "preparing" });
         if (signal?.aborted) {
           return this.cancelledResult(
             start,
@@ -560,6 +565,7 @@ export class TestExecutor {
           "regenerating and re-resolving the same source row."
       );
       const refreshCommand = bddgenCommand;
+      reportRunProgress(options.progress, { phase: "generating" });
       const refreshed = this.withBinaryHint(
         await this.shellRunner(
           refreshCommand,
@@ -570,6 +576,7 @@ export class TestExecutor {
         ),
         refreshCommand
       );
+      reportRunProgress(options.progress, { phase: "preparing" });
       if (signal?.aborted) {
         return this.cancelledResult(
           start,
@@ -664,6 +671,7 @@ export class TestExecutor {
 
     try {
       report = this.createTemporaryReport();
+      reportRunProgress(progress, { phase: "running" });
       live = this.openLiveRun(report.livePath, progress, signal);
       let commandResult: CommandResult;
       try {
@@ -1010,6 +1018,7 @@ export class TestExecutor {
 
     const commands = buildCommand();
     if (commands.bddgenCommand !== undefined) {
+      reportRunProgress(progress, { phase: "generating" });
       const generation = this.withBinaryHint(
         await this.shellRunner(
           commands.bddgenCommand,
@@ -1020,6 +1029,7 @@ export class TestExecutor {
         ),
         commands.bddgenCommand
       );
+      reportRunProgress(progress, { phase: "preparing" });
       this.publishBddgenDiagnostics(generation, workingDir);
       if (!generation.success) {
         if (signal?.aborted) {
@@ -1056,6 +1066,7 @@ export class TestExecutor {
 
     try {
       report = this.createTemporaryReport();
+      reportRunProgress(progress, { phase: "running" });
       live = this.openLiveRun(report.livePath, progress, signal);
       let commandResult: CommandResult;
       try {
@@ -1449,6 +1460,7 @@ export class TestExecutor {
     terminationLease?: TerminationLease | undefined;
   } | undefined> {
     const command = this.config.preRunCommand.trim();
+    reportRunProgress(progress, { phase: "preparing" });
     if (command === "") { return undefined; }
 
     this.logger.info(`Running preRunCommand: ${command}`);

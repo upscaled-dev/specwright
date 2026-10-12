@@ -928,13 +928,20 @@ describe("LegacyDirectExecutionGateway", () => {
       outlineName: "Divide",
       examplesBlockLineNumber: 7,
     }));
-    const { gateway, executor, parser } = rig(vi.fn(() => Promise.resolve(output([]))));
+    const events: ExecutionEvent[] = [];
+    const run = vi.fn(async (options: { lineNumber: number; progress: RunProgressObserver }) => {
+      options.progress.onProgress?.({ phase: "finishing" });
+      expect(events.some((event) => event.kind === "progress" && event.progress.phase === "finishing"))
+        .toBe(options.lineNumber === 10);
+      return output([]);
+    });
+    const { gateway, executor, parser } = rig(run);
     vi.mocked(parser.parseFeatureFile).mockReturnValue({ scenarios: rows } as never);
 
     await gateway.execute(selectedIntent(
       [{ kind: "scenario", scenario: block }],
       { kind: "scenario", scenario: block }
-    ));
+    ), { onEvent: (event) => events.push(event) });
 
     expect(vi.mocked(executor.runScenarioWithOutput).mock.calls.map(([options, target]) => ({
       line: (options as { lineNumber?: number }).lineNumber,
@@ -1016,6 +1023,66 @@ describe("LegacyDirectExecutionGateway", () => {
     );
 
     expect(events).toContainEqual({ kind: "begin", total: 7 });
+  });
+
+  it.each([
+    [{ kind: "scenarios" as const, scenarios: [A, B] }],
+    [{ kind: "scenario" as const, scenario: A }, { kind: "scenario" as const, scenario: B }],
+  ])("forwards finishing only from the final invocation while it remains active (%j)", async (...targets) => {
+    let release!: () => void;
+    let ready!: () => void;
+    const hold = new Promise<void>((resolve) => {release = resolve;});
+    const started = new Promise<void>((resolve) => {ready = resolve;});
+    const events: ExecutionEvent[] = [];
+    const run = vi.fn(async (options: { filePath: string; progress: RunProgressObserver }) => {
+      options.progress.onProgress?.({ phase: "running", completed: 0, total: 1 });
+      options.progress.onTestEnd?.(detail(options.filePath === A.filePath ? "A" : "B"), 1, 1);
+      options.progress.onProgress?.({ phase: "finishing" });
+      expect(events.some((event) => event.kind === "progress" && event.progress.phase === "finishing"))
+        .toBe(options.filePath === B.filePath);
+      if (options.filePath === B.filePath) {ready(); await hold;}
+      return output([detail(options.filePath === A.filePath ? "A" : "B")]);
+    });
+    const { gateway } = rig(run);
+    const execution = gateway.execute(intent({ targets }),
+      { onEvent: (event) => events.push(event) });
+    await started;
+    expect(gateway.running).toBe(true);
+    expect(events.filter((event) => event.kind === "progress" && event.progress.phase === "finishing"))
+      .toHaveLength(1);
+    release();
+    await execution;
+    expect(events.filter((event) => event.kind === "progress" && event.progress.phase === "finishing"))
+      .toHaveLength(1);
+  });
+
+  it("does not inherit an earlier target's producer end when final progress is unavailable", async () => {
+    const run = vi.fn(async (options: { filePath: string; progress: RunProgressObserver }) => {
+      if (options.filePath === A.filePath) {options.progress.onProgress?.({ phase: "finishing" });}
+      return output([detail(options.filePath === A.filePath ? "A" : "B")]);
+    });
+    const { gateway } = rig(run);
+    const events: ExecutionEvent[] = [];
+    await gateway.execute(intent(), { onEvent: (event) => events.push(event) });
+    expect(events.some((event) => event.kind === "progress" && event.progress.phase === "finishing")).toBe(false);
+  });
+
+  it.each([
+    [1, 2], [2, 3],
+  ])("preserves multi-project retry uncertainty for attempts %i and %i", async (first, second) => {
+    const run = vi.fn(async () => output([
+      { ...detail("A"), projectName: "chromium", attempts: first, flaky: first > 1 },
+      { ...detail("A"), projectName: "firefox", attempts: second, flaky: second > 1 },
+    ]));
+    const { gateway } = rig(run);
+    const events: ExecutionEvent[] = [];
+    const completion = await gateway.execute(intent({ targets: [{ kind: "scenario", scenario: A }] }),
+      { onEvent: (event) => events.push(event) });
+    expect(completion.results).toHaveLength(1);
+    expect(completion.results[0]).toMatchObject({ outcome: "passed", attempts: second, flaky: true, multipleProjects: true });
+    for (const event of events) {
+      if (event.kind === "case-finished") {expect([event.completed, event.total]).toEqual([1, 1]);}
+    }
   });
 
   it("aggregates a few hundred cases with work linear in the case count", async () => {

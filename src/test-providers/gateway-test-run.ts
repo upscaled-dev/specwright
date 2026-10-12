@@ -89,10 +89,14 @@ export async function runGatewayTestRequest(options: {
     completion = await startExecution(options.gateway, options.intent, {
       signal: abort.signal,
       onEvent: (event) => {
-        if (event.kind === "case-finished") {
+        if (event.kind === "started") {
+          live.reportProgress({ phase: "running" });
+        } else if (event.kind === "case-finished") {
           live.apply(scenarioResultFromExecution(event.result), event.completed, event.total);
         } else if (event.kind === "output") {
           live.appendOutput(event.stream, event.text);
+        } else if (event.kind === "progress") {
+          live.reportProgress(event.progress);
         }
       },
     });

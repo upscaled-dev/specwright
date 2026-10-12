@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import type { ExecutionEvent } from "../core/run-contracts";
+import { formatRunProgress, type RunProgress } from "../core/run-progress";
 
 interface GatewayEventSource {
   onEvent(listener: (event: ExecutionEvent) => void): vscode.Disposable;
@@ -20,6 +21,7 @@ export class StatusBar implements vscode.Disposable {
   private item: vscode.StatusBarItem | undefined;
   private readonly subscription: vscode.Disposable;
   private lastRunAt: Date | undefined;
+  private progress: RunProgress = { phase: "running" };
 
   public static create(source: GatewayEventSource, window: typeof vscode.window = vscode.window): StatusBar {
     return new StatusBar(source, window);
@@ -39,12 +41,25 @@ export class StatusBar implements vscode.Disposable {
     const item = this.item;
     if (!item) {return;}
     if (event.kind === "started") {
-      item.text = "$(loading~spin) Specwright: running…";
+      this.progress = { phase: "running" };
+      item.text = `$(loading~spin) Specwright: ${formatRunProgress(this.progress)}`;
       item.tooltip = formatTooltip(this.lastRunAt);
       return;
     }
     if (event.kind === "case-finished") {
-      item.text = `$(loading~spin) Specwright: ${event.completed}/${event.total}`;
+      if (this.progress.phase === "finishing") {return;}
+      this.progress = { ...this.progress, phase: "running", completed: event.completed, total: event.total };
+      item.text = `$(loading~spin) Specwright: ${formatRunProgress(this.progress)}`;
+      return;
+    }
+    if (event.kind === "begin") {
+      this.progress = { phase: "running", completed: 0, total: event.total };
+      item.text = `$(loading~spin) Specwright: ${formatRunProgress(this.progress)}`;
+      return;
+    }
+    if (event.kind === "progress") {
+      this.progress = event.progress;
+      item.text = `$(loading~spin) Specwright: ${formatRunProgress(this.progress)}`;
       return;
     }
     if (event.kind !== "finished") {return;}

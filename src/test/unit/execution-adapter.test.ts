@@ -65,6 +65,11 @@ function gatewayEmitting(events: readonly ExecutionEvent[], result: RunCompletio
 }
 
 describe("runOutputFromCompletion", () => {
+  it("preserves multi-project uncertainty in scenario summaries", () => {
+    const source = completion().results[0]!;
+    const result = scenarioResultFromExecution({ ...source, flaky: true, attempts: 3, multipleProjects: true });
+    expect(result).toMatchObject({ status: "passed", flaky: true, attempts: 3, multipleProjects: true });
+  });
   // Whether a surface streamed the run is that surface's business; the completion only carries what
   // the run retained, so this result leaves the flag to the executor results that own it.
   it("leaves the streamed flag to the executor's own results", () => {
@@ -73,6 +78,15 @@ describe("runOutputFromCompletion", () => {
 });
 
 describe("runIntentWithObserver", () => {
+  it("keeps old-event-only engines generic and ignores failing optional stage consumers", async () => {
+    const onProgress = vi.fn(() => {throw new Error("closed");});
+    const result = await runIntentWithObserver(
+      gatewayEmitting([{ kind: "started", targetCount: 1 }, { kind: "progress", progress: { phase: "generating" } }], completion()),
+      intent(), new AbortController().signal, { onProgress }, parser, "/ws"
+    );
+    expect(onProgress.mock.calls).toEqual([[{ phase: "running" }], [{ phase: "generating" }]]);
+    expect(result.success).toBe(true);
+  });
   it("hands every output chunk to an observer that takes them, and retains it either way", async () => {
     const onOutput = vi.fn();
     const events: ExecutionEvent[] = [

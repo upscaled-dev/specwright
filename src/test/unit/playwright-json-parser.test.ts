@@ -463,6 +463,80 @@ describe("PlaywrightJsonParser", () => {
       expect(parser.formatResults([])).toBe("No scenarios were executed.");
     });
 
+    it("annotates only the outline row that passed after a failing attempt", () => {
+      const results = parser.parse(JSON.stringify({
+        suites: [{
+          title: "Checkout <row>",
+          specs: [
+            { title: "Checkout clean", tests: [{ results: [{ status: "passed" }] }] },
+            { title: "Checkout retry", tests: [{ results: [{ status: "failed" }, { status: "passed" }] }] },
+          ],
+        }],
+      }));
+      const lines = plain(parser.formatResults(results)).split("\n");
+      expect(lines[0]).toBe("✔ Scenario Outline: Checkout <row> (Checkout clean)");
+      expect(lines[1]).toBe("✔ Scenario Outline: Checkout <row> (Checkout retry)  Passed on attempt 2");
+    });
+
+    it("preserves project identity and each project's successful attempt", () => {
+      const results = parser.parse(JSON.stringify({
+        suites: [{ specs: [{
+          title: "Checkout",
+          tests: [
+            { projectName: "chromium", results: [{ status: "passed" }] },
+            { projectName: "firefox", results: [{ status: "failed" }, { status: "passed" }] },
+            { projectName: "webkit", results: [{ status: "failed" }, { status: "failed" }, { status: "passed" }] },
+          ],
+        }] }],
+      }));
+      const lines = plain(parser.formatResults(results)).split("\n");
+      expect(lines[0]).toBe("✔ Scenario: Checkout [chromium]");
+      expect(lines[1]).toBe("✔ Scenario: Checkout [firefox]  Passed on attempt 2");
+      expect(lines[2]).toBe("✔ Scenario: Checkout [webkit]  Passed on attempt 3");
+      expect(lines.join("\n")).not.toContain("attempt 6");
+    });
+
+    it("uses a conservative retry label for combined projects or an unknown attempt count", () => {
+      const out = plain(parser.formatResults([
+        { scenarioName: "Combined", featurePath: "", status: "passed", flaky: true, attempts: 3, multipleProjects: true },
+        { scenarioName: "Unknown", featurePath: "", status: "passed", flaky: true },
+      ]));
+      expect(out).toContain("✔ Scenario: Combined  Passed after retries");
+      expect(out).toContain("✔ Scenario: Unknown  Passed after retries");
+      expect(out).not.toContain("Passed on attempt");
+    });
+
+    it("keeps a single project's ordinary pass uncluttered", () => {
+      const out = plain(parser.formatResults([{
+        scenarioName: "Checkout", featurePath: "", status: "passed", projectName: "chromium",
+      }]));
+      expect(out.split("\n")[0]).toBe("✔ Scenario: Checkout");
+    });
+
+    it("does not annotate expected failures, serial reruns, or exhausted and interrupted retries", () => {
+      const results = parser.parse(JSON.stringify({
+        suites: [{ specs: [
+          { title: "Expected failure", tests: [{ expectedStatus: "failed", results: [{ status: "failed" }] }] },
+          { title: "Serial rerun", tests: [{ results: [{ status: "skipped" }, { status: "passed" }] }] },
+          { title: "Exhausted", tests: [{ results: [{ status: "failed" }, { status: "failed" }] }] },
+          { title: "Interrupted", tests: [{ results: [{ status: "failed" }, { status: "interrupted" }] }] },
+          { title: "Unexpected pass", tests: [{ expectedStatus: "failed", results: [{ status: "passed" }, { status: "passed" }] }] },
+        ] }],
+      }));
+      expect(results.map((result) => result.status)).toEqual(["passed", "passed", "failed", "failed", "failed"]);
+      const out = plain(parser.formatResults(results));
+      expect(out).not.toContain("Passed on attempt");
+      expect(out).not.toContain("Passed after retries");
+    });
+
+    it.each(["failed", "skipped"] as const)("ignores stale flaky metadata on a %s result", (status) => {
+      const out = plain(parser.formatResults([{
+        scenarioName: "Checkout", featurePath: "", status, flaky: true, attempts: 2,
+      }]));
+      expect(out).not.toContain("Passed on attempt");
+      expect(out).not.toContain("Passed after retries");
+    });
+
     it("renders a scenario heading, a tally, and no step lines when none are present", () => {
       const out = plain(parser.formatResults([
         { scenarioName: "Logs in", status: "passed", featurePath: "", durationMs: 1200 },

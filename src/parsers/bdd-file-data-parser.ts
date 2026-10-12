@@ -41,6 +41,17 @@ export interface BddSourceData {
   lineNumbers: Map<number, number>;
 }
 
+/** Non-placeholder outline rows have generic titles whose identity comes from their suite. */
+export function bddExampleOutlineName(title: string, enclosing: string | undefined): string | undefined {
+  return enclosing && /^Example #\d+/.test(title) ? enclosing : undefined;
+}
+
+/** Resolve both generic example titles and rows whose outline placeholders were substituted. */
+export function bddOutlineName(title: string, enclosing: string | undefined): string | undefined {
+  return bddExampleOutlineName(title, enclosing) ??
+    (enclosing && /<[^>]+>/.test(enclosing) ? enclosing : undefined);
+}
+
 /**
  * Extracts the `bddFileData` array playwright-bdd embeds in each generated spec between
  * `// bdd-data-start` and `// bdd-data-end` markers. Returns undefined (never throws) when

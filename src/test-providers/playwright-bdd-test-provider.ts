@@ -1096,6 +1096,7 @@ export class PlaywrightBddTestProvider {
     target?: { lineNumber?: number },
     live?: LiveTestRunProgress
   ): void {
+    this.appendRunOutput(run, result, undefined, filePath);
     const results = result.scenarioResults ?? {};
     if (Object.keys(results).length === 0) {
       // The report had no parseable scenarios (e.g. bddgen/compile failure before any test

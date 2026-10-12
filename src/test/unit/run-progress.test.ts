@@ -24,4 +24,13 @@ describe("combineRunProgressObservers", () => {
 
     expect(second).toHaveBeenCalledWith("stderr", "failure\n");
   });
+
+  it("fans lifecycle progress out when one optional consumer fails", () => {
+    const second = vi.fn();
+    const combined = combineRunProgressObservers(
+      { onProgress: () => {throw new Error("closed");} }, { onProgress: second }
+    );
+    combined?.onProgress?.({ phase: "finishing" });
+    expect(second).toHaveBeenCalledWith({ phase: "finishing" });
+  });
 });

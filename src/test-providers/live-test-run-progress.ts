@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import type { RunOutputResult } from "../core/test-executor";
-import type { RunProgressSession } from "../core/run-progress";
+import { formatRunProgress, type RunProgress, type RunProgressSession } from "../core/run-progress";
 import {
   normalizePathKey,
   type ScenarioResult,
@@ -67,6 +67,7 @@ export class LiveTestRunProgress {
   private readonly publishedByItem = new Map<vscode.TestItem, ScenarioStatus>();
   private readonly startedItems = new Set<vscode.TestItem>();
   private readonly pendingCarriageReturn = { stdout: false, stderr: false };
+  private lastProgress: string | undefined;
 
   public static create(options: LiveTestRunProgressOptions): LiveTestRunProgress {
     return new LiveTestRunProgress(options);
@@ -180,6 +181,16 @@ export class LiveTestRunProgress {
     this.pendingCarriageReturn[stream] = joined.endsWith("\r");
     const complete = this.pendingCarriageReturn[stream] ? joined.slice(0, -1) : joined;
     if (complete !== "") {this.run.appendOutput(complete.replace(/\r\n|\n/g, "\r\n"));}
+  }
+
+  public reportProgress(progress: RunProgress): void {
+    const text = formatRunProgress(progress);
+    if (text !== this.lastProgress) {this.run.appendOutput(`${text}\r\n`);}
+    this.lastProgress = text;
+    if (progress.phase === "running" && progress.retry) {
+      const { title, attempt, projectName } = progress.retry;
+      this.run.appendOutput(`Retrying ${title}${projectName ? ` [${projectName}]` : ""}, attempt ${attempt}\r\n`);
+    }
   }
 
   public finishOutput(): void {
@@ -335,6 +346,7 @@ export function beginExternalTestRun(options: ExternalTestRunOptions): RunProgre
 
   return {
     progress: {
+      onProgress: (progress) => live.reportProgress(progress),
       onTestEnd: (result, completed, total) => {
         live.apply(result, completed, total);
       },

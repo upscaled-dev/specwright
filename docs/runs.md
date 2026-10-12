@@ -27,7 +27,9 @@ If the Testing view is empty, start with [Troubleshooting: features do not appea
 2. Expand a feature until you reach the scope you want to run.
 3. Select the **Run** icon, or use the action in the feature editor.
 
-Specwright creates the required specs, starts Playwright, and maps each scenario result to the item you selected as soon as it finishes. During a long run, the Test Results output and status bar show the live completed count. Editor-triggered feature and scenario runs show the same count in a progress notification. Finishing the steps does not finish the run: After hooks, browser context and video cleanup, and worker shutdown may remain. The live count can also reach its total before configured retries finish. The Testing run closes only after Playwright exits and the final JSON report is reconciled. Select the status bar item to open the Specwright output channel.
+Specwright creates the required specs, starts Playwright, and maps each scenario result to the item you selected as soon as it finishes. The status bar and Test Results output show the observed stage: **Preparing run**, **Generating tests**, **Running**, or **Finishing run**. Editor-triggered feature and scenario runs show the same progress in a notification. During execution, the running label includes the logical scenario count when available and says **retrying tests** while a retry is active. Test Results output identifies the scenario and attempt. When detailed progress is unavailable, Specwright keeps a generic running label.
+
+Finishing the steps does not finish the run: After hooks, browser context and video cleanup, and worker shutdown may remain. The live count can also reach its total before configured retries finish. **Finishing run** follows an observed runner completion boundary; reaching the total does not trigger it. The Testing run closes only after Playwright exits and the final JSON report is reconciled. Select the status bar item to open the Specwright output channel.
 
 ![Run a scenario directly from its editor action](../images/running_scenario_side.gif)
 
@@ -88,7 +90,8 @@ While a run is active, the **Test Results** panel streams Playwright and `bddgen
 
 Specwright keeps only the newest 256 KiB from stdout and stderr as diagnostic tails. The full process output still streams to Test Results. If a tail is truncated, a notice reports its retained and discarded byte counts. A Playwright JSON report larger than 16 MiB stops result ingestion for that run with a specific size-limit message; a workspace report over the limit is skipped for board badges instead of blocking them. File-based reports are parsed in an isolated worker with a 128 MiB old-generation heap limit. Inline attachment bodies are ignored, but their encoded bytes still count toward the whole-report limit; file-based evidence paths are unaffected.
 
-- A retry that eventually passes is reported as passed.
+- A retry that eventually passes stays green. Its final scenario summary says **Passed on attempt 2**, or the corresponding attempt number. A first-attempt pass has no retry annotation.
+- A passing result combined from multiple Playwright projects says **Passed after retries** when any project required a retry. Attempt counts are not added across projects.
 - If the same scenario runs in multiple Playwright projects, the least successful result is shown.
 - Missing step-definition suggestions are surfaced when `bddgen` skips scenarios for missing steps.
 - If a feature is outside your `playwright-bdd` `features` glob, Specwright explains why the targeted run produced no result.

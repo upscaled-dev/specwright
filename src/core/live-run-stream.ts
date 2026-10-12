@@ -1,12 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { parseBddSourceData, type BddSourceData } from "../parsers/bdd-file-data-parser";
+import { bddOutlineName, parseBddSourceData, type BddSourceData } from "../parsers/bdd-file-data-parser";
 import type {
   LiveReporterRecord,
   LiveRunBeginRecord,
   LiveTestEndRecord,
   LiveTestStatus,
+  LiveRunProgressRecord,
 } from "./live-reporter-protocol";
 import type { ScenarioResult, ScenarioStatus } from "../utils/playwright-json-parser";
 import { resolveTestStatus } from "./test-result-status";
@@ -17,6 +18,8 @@ const POLL_INTERVAL_MS = 25;
 export interface LiveRunStreamHandlers {
   onBegin(record: LiveRunBeginRecord): void;
   onTestEnd(result: ScenarioResult, record: LiveTestEndRecord): void;
+  onProgress?(record: LiveRunProgressRecord): void;
+  onEnd?(): void;
   /** Malformed or unknown records are isolated to their own line and never stop the stream. */
   onMalformedLine?(line: string): void;
   /** File-system and consumer callback failures are reported without escaping the watcher. */
@@ -157,6 +160,14 @@ export class LiveRunStream {
       return;
     }
 
+    if (candidate.kind === "run-progress") {
+      this.callHandler(() => this.handlers.onProgress?.(candidate));
+      return;
+    }
+    if (candidate.kind === "run-end") {
+      this.callHandler(() => this.handlers.onEnd?.());
+      return;
+    }
     const result = this.toScenarioResult(candidate);
     this.callHandler(() => this.handlers.onTestEnd(result, candidate));
   }
@@ -164,7 +175,7 @@ export class LiveRunStream {
   private toScenarioResult(record: LiveTestEndRecord): ScenarioResult {
     const specPath = this.resolveSpecPath(record.file);
     const source = this.resolveSource(specPath, record.line);
-    const outlineName = enclosingOutlineName(record);
+    const outlineName = bddOutlineName(record.title, record.titlePath.at(-2));
     const attempts = record.retry + 1;
     return {
       featurePath: source?.featurePath ?? specPath,
@@ -225,17 +236,17 @@ function toScenarioStatus(record: LiveTestEndRecord): ScenarioStatus {
   return resolveTestStatus(record.status, record.expectedStatus);
 }
 
-function enclosingOutlineName(record: LiveTestEndRecord): string | undefined {
-  const enclosing = record.titlePath.at(-2);
-  return enclosing && (/^Example #\d+/.test(record.title) || /<[^>]+>/.test(enclosing))
-    ? enclosing
-    : undefined;
-}
-
 function isLiveReporterRecord(value: unknown): value is LiveReporterRecord {
-  if (!isObject(value) || (value["kind"] !== "run-begin" && value["kind"] !== "test-end")) {
-    return false;
+  if (!isObject(value)) {return false;}
+  if (value["kind"] === "run-end") {return true;}
+  if (value["kind"] === "run-progress") {
+    const retry = value["retry"];
+    return Number.isSafeInteger(value["retrying"]) && isNonNegativeNumber(value["retrying"]) &&
+      (retry === undefined || (isObject(retry) && typeof retry["title"] === "string" &&
+        typeof retry["projectName"] === "string" && Number.isSafeInteger(retry["attempt"]) &&
+        isPositiveNumber(retry["attempt"])));
   }
+  if (value["kind"] !== "run-begin" && value["kind"] !== "test-end") {return false;}
   if (value["kind"] === "run-begin") {
     return (
       typeof value["rootDir"] === "string" &&

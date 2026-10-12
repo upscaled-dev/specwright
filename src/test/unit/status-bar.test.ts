@@ -91,7 +91,7 @@ describe("StatusBar", () => {
     gateway.fire({ kind: "started", targetCount: 1 });
     expect(captured).toHaveLength(1);
     const item = captured[0]!;
-    expect(item.text).toBe("$(loading~spin) Specwright: running…");
+    expect(item.text).toBe("$(loading~spin) Specwright: Running");
     expect(item.tooltip).toBe("No runs this session");
     expect(item.command).toBe("playwrightBddRunner.showOutput");
     expect(item.alignment).toBe(vscode.StatusBarAlignment.Left);
@@ -113,7 +113,19 @@ describe("StatusBar", () => {
       completed: 10,
       total: 25,
     });
-    expect(captured[0]!.text).toBe("$(loading~spin) Specwright: 10/25");
+    expect(captured[0]!.text).toBe("$(loading~spin) Specwright: Running 10/25");
+  });
+
+  it("keeps retries visible at the total and only finishes at an explicit boundary", () => {
+    gateway.fire({ kind: "started", targetCount: 1 });
+    gateway.fire({ kind: "progress", progress: { phase: "preparing" } });
+    expect(captured[0]!.text).toContain("Preparing run");
+    gateway.fire({ kind: "progress", progress: { phase: "generating" } });
+    expect(captured[0]!.text).toContain("Generating tests");
+    gateway.fire({ kind: "progress", progress: { phase: "running", completed: 2, total: 2, retrying: 1 } });
+    expect(captured[0]!.text).toContain("Running 2/2, retrying tests");
+    gateway.fire({ kind: "progress", progress: { phase: "finishing" } });
+    expect(captured[0]!.text).toContain("Finishing run");
   });
 
   it("updates to success state with passed count and updates tooltip with last run time", () => {

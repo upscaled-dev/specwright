@@ -7,6 +7,9 @@ import { LIVE_REPORT_FILE_ENV } from "../../core/live-reporter-protocol";
 import { DetailBudget } from "../../core/execution-limits";
 import { openLiveRunSession, type LiveRunHandle, type LiveRunStatus } from "../../core/live-run-session";
 import type { ScenarioResult } from "../../utils/playwright-json-parser";
+import type { RunProgress } from "../../core/run-progress";
+import type { FullConfig, Suite, TestCase, TestResult } from "@playwright/test/reporter";
+import SpecwrightLiveReporter from "../../test-providers/specwright-live-reporter";
 
 describe("openLiveRunSession", () => {
   let root: string;
@@ -26,6 +29,71 @@ describe("openLiveRunSession", () => {
 
   afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("carries real reporter retry and end boundaries while optional stage consumers throw", async () => {
+    const stages: RunProgress[] = [];
+    const results: ScenarioResult[] = [];
+    const errors: Error[] = [];
+    const handle = openLiveRunSession({
+      liveReportPath: path.join(root, "live.jsonl"), reporterPath: "/extension/reporter.js",
+      progress: {
+        onProgress: (progress) => {stages.push(progress); throw new Error("closed progress UI");},
+        onTestEnd: (result) => results.push(result),
+      },
+      onError: (error) => errors.push(error),
+    });
+    expect(handle).toBeDefined();
+    const previous = process.env[LIVE_REPORT_FILE_ENV];
+    process.env[LIVE_REPORT_FILE_ENV] = handle!.env[LIVE_REPORT_FILE_ENV];
+    try {
+      const reporter = new SpecwrightLiveReporter();
+      const test = {
+        id: "row", title: "First title", titlePath: () => ["Sample", "First title"],
+        location: { file: specPath, line: 7, column: 1 }, retries: 1, expectedStatus: "passed",
+        parent: { project: () => ({ name: "chromium" }) },
+      } as unknown as TestCase;
+      reporter.onBegin({ rootDir: root, configFile: path.join(root, "playwright.config.ts") } as FullConfig,
+        { allTests: () => [test] } as Suite);
+      reporter.onTestEnd(test, { status: "failed", retry: 0, duration: 1 } as TestResult);
+      reporter.onTestBegin(test, { status: "passed", retry: 1, duration: 0 } as TestResult);
+      await vi.waitFor(() => expect(stages.at(-1)).toMatchObject({ phase: "running", completed: 1, total: 1, retrying: 1 }));
+      reporter.onTestEnd(test, { status: "passed", retry: 1, duration: 2 } as TestResult);
+      await vi.waitFor(() => expect(results.at(-1)?.status).toBe("passed"));
+      expect(stages.some((stage) => stage.phase === "finishing")).toBe(false);
+      reporter.onEnd();
+      await vi.waitFor(() => expect(stages.at(-1)).toEqual({ phase: "finishing" }));
+      expect(handle!.recoverResults([])).toMatchObject([{ status: "passed", attempts: 2 }]);
+      expect(errors).toEqual([]);
+    } finally {
+      if (previous === undefined) {delete process.env[LIVE_REPORT_FILE_ENV];}
+      else {process.env[LIVE_REPORT_FILE_ENV] = previous;}
+      handle!.stream.finish();
+    }
+  });
+
+  it("keeps a zero-case invocation running so exact-target regeneration cannot falsely finish", async () => {
+    const stages: RunProgress[] = [];
+    const handle = openLiveRunSession({
+      liveReportPath: path.join(root, "live.jsonl"), reporterPath: "/extension/reporter.js",
+      progress: { onProgress: (stage) => stages.push(stage) }, onError: () => undefined,
+    });
+    expect(handle).toBeDefined();
+    try {
+      const file = handle!.env[LIVE_REPORT_FILE_ENV]!;
+      fs.appendFileSync(file, [
+        JSON.stringify({ kind: "run-begin", rootDir: root, total: 0 }),
+        JSON.stringify({ kind: "run-end" }),
+      ].join("\n") + "\n");
+      await vi.waitFor(() => expect(stages).toHaveLength(1));
+      expect(stages).toEqual([{ phase: "running", completed: 0, total: 0, retrying: 0 }]);
+      fs.appendFileSync(file, [
+        JSON.stringify({ kind: "run-begin", rootDir: root, total: 1 }),
+        JSON.stringify({ kind: "run-end" }),
+      ].join("\n") + "\n");
+      await vi.waitFor(() => expect(stages.at(-1)).toEqual({ phase: "finishing" }));
+      expect(stages.filter((stage) => stage.phase === "finishing")).toHaveLength(1);
+    } finally {handle!.stream.finish();}
   });
 
   it("replaces failed counters when the same logical scenario retry passes", () => {

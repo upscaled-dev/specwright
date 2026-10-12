@@ -52,8 +52,9 @@ describe("runCapturedWithProgress", () => {
 
     expect(result.error).toBe("Cancelled");
     expect(reports).toEqual([
-      { message: "0 / 500 completed" },
-      { message: "127 / 500 completed" },
+      { message: "Running" },
+      { message: "Running 0/500" },
+      { message: "Running 127/500" },
     ]);
     expect(onTestEnd).toHaveBeenCalledOnce();
     expect(complete).toHaveBeenCalledWith(result);
@@ -96,6 +97,21 @@ describe("runCapturedWithProgress", () => {
       window
     );
 
-    expect(reports).toEqual([{ message: "0 / 2 completed" }]);
+    expect(reports).toEqual([{ message: "Running" }, { message: "Running 0/2" }]);
+  });
+
+  it("does not fail execution when optional notification reporting throws", async () => {
+    const window = {
+      ...vscode.window,
+      withProgress: async (_options: unknown, task: Function) => task(
+        { report: () => {throw new Error("notification closed");} },
+        { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) }
+      ),
+    } as unknown as typeof vscode.window;
+    const result = await runCapturedWithProgress("Run", undefined, async (_signal, progress) => {
+      progress.onProgress?.({ phase: "generating" });
+      return { success: true, output: "", duration: 1 };
+    }, window);
+    expect(result.success).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { LIVE_REPORT_FILE_ENV } from "./live-reporter-protocol";
 import { LiveRunStream } from "./live-run-stream";
-import type { RunProgressObserver } from "./run-progress";
+import { reportRunProgress, type RunProgressObserver } from "./run-progress";
 import { DetailBudget } from "./execution-limits";
 import { refIdentity, scenarioRefFromResult } from "../traceability/scenario-ref";
 import { truncate } from "../utils/text";
@@ -77,6 +77,10 @@ export function openLiveRunSession(options: LiveRunSessionOptions): LiveRunHandl
     fs.writeFileSync(options.liveReportPath, "", "utf8");
     let passed = 0;
     let failed = 0;
+    let completed = 0;
+    let total = 0;
+    let retrying = 0;
+    const running = (): void => reportRunProgress(options.progress, { phase: "running", completed, total, retrying });
     const budget = options.detailBudget ?? new DetailBudget();
     const resultByExecution = new Map<string, RetainedResult>();
     const statusByScenario = new Map<string, ScenarioStatusState>();
@@ -132,6 +136,10 @@ export function openLiveRunSession(options: LiveRunSessionOptions): LiveRunHandl
     const stream = LiveRunStream.watch(options.liveReportPath, {
       onBegin: (record) => {
         if (options.signal?.aborted) {return;}
+        total = record.total;
+        completed = 0;
+        retrying = 0;
+        running();
         options.onStatus?.({ passed, failed, completed: 0, total: record.total });
         options.progress.onBegin?.(record.total);
       },
@@ -139,8 +147,19 @@ export function openLiveRunSession(options: LiveRunSessionOptions): LiveRunHandl
         const observed = { ...result, projectName: record.projectName };
         retain(observed);
         if (options.signal?.aborted) {return;}
+        completed = record.completed;
+        total = record.total;
+        running();
         options.onStatus?.({ passed, failed, completed: record.completed, total: record.total });
         options.progress.onTestEnd?.(observed, record.completed, record.total);
+      },
+      onProgress: (record) => {
+        if (options.signal?.aborted) {return;}
+        retrying = record.retrying;
+        reportRunProgress(options.progress, { phase: "running", completed, total, retrying, ...(record.retry ? { retry: record.retry } : {}) });
+      },
+      onEnd: () => {
+        if (total > 0 && !options.signal?.aborted) {reportRunProgress(options.progress, { phase: "finishing" });}
       },
       onError: options.onError,
     });

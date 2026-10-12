@@ -1,3 +1,5 @@
+import type { RunProgress } from "./run-progress";
+
 export type ExecutionEngine = "legacy-direct" | "core-client";
 
 export interface ExecutionCaseRef {
@@ -122,6 +124,7 @@ export interface ExecutionCaseResult {
   readonly durationMs: number;
   readonly attempts: number;
   readonly flaky: boolean;
+  readonly multipleProjects?: boolean | undefined;
   readonly errorMessage?: string | undefined;
   readonly errorStack?: string | undefined;
   // Bulky, so it rides the live session's per-run detail budget; the Test Explorer summary renders
@@ -143,6 +146,7 @@ export interface RunCompletion {
 
 export type ExecutionEvent =
   | { readonly kind: "started"; readonly targetCount: number }
+  | { readonly kind: "progress"; readonly progress: RunProgress }
   // The engine's own case count for one dispatched target, emitted when that target starts.
   | { readonly kind: "begin"; readonly total: number }
   | {

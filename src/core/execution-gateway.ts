@@ -101,6 +101,7 @@ function retainCase(
       durationMs: detail.durationMs ?? 0,
       attempts: detail.attempts ?? 1,
       flaky: detail.flaky ?? false,
+      ...(detail.multipleProjects ? { multipleProjects: true } : {}),
       ...(detail.errorMessage ? { errorMessage: detail.errorMessage } : {}),
       ...(errorStack ? { errorStack } : {}),
       ...(steps ? { steps } : {}),
@@ -110,6 +111,17 @@ function retainCase(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Only the final child of every dispatch scope can finish the enclosing run. */
+function progressForChild(progress: RunProgressObserver, isLast: boolean): RunProgressObserver {
+  if (isLast) {return progress;}
+  return {
+    ...progress,
+    onProgress: (stage) => {
+      if (stage.phase !== "finishing") {progress.onProgress?.(stage);}
+    },
+  };
 }
 
 function resultKey(result: ExecutionCaseResult): string {
@@ -143,6 +155,7 @@ function resolveAggregate(results: Iterable<ExecutionCaseResult>): ExecutionCase
       durationMs: Math.max(aggregate.durationMs, result.durationMs),
       attempts: Math.max(aggregate.attempts, result.attempts),
       flaky: aggregate.flaky || result.flaky,
+      multipleProjects: true,
     });
   }
   if (aggregate === undefined) {throw new Error("Cannot aggregate an empty result set.");}
@@ -156,7 +169,6 @@ interface ScenarioResultState {
 
 class RunResultAccumulator {
   private readonly byScenario = new Map<string, ScenarioResultState>();
-  private executionTotal = 0;
 
   constructor(private readonly budget: DetailBudget) {}
 
@@ -176,10 +188,8 @@ class RunResultAccumulator {
         byProject: new Map([[project, retained]]),
         aggregate: retained.result,
       });
-      this.executionTotal += 1;
       return retained.result;
     }
-    if (!state.byProject.has(project)) {this.executionTotal += 1;}
     state.byProject.set(project, retained);
     state.aggregate = resolveAggregate(
       [...state.byProject.values()].map(({ result }) => result)
@@ -187,8 +197,8 @@ class RunResultAccumulator {
     return state.aggregate;
   }
 
-  public get executionCount(): number {
-    return this.executionTotal;
+  public get scenarioCount(): number {
+    return this.byScenario.size;
   }
 
   public results(): ExecutionCaseResult[] {
@@ -385,6 +395,7 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
     const emitOutput = outputCapture.onOutput;
     const progress: RunProgressObserver = {
       detailBudget,
+      onProgress: (progress) => emit({ kind: "progress", progress }),
       onBegin: (total) => emit({ kind: "begin", total }),
       // An abort stops the process and the remaining targets, never the bookkeeping: a case that
       // lands while the runner tears down still belongs to this run.
@@ -411,8 +422,8 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
           emit({
             kind: "case-finished",
             result: aggregate,
-            completed: runResults.executionCount,
-            total: runResults.executionCount,
+            completed: runResults.scenarioCount,
+            total: runResults.scenarioCount,
           });
         }
       }
@@ -444,6 +455,7 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
     };
 
     emit({ kind: "started", targetCount: intent.targets.length });
+    emit({ kind: "progress", progress: { phase: "preparing" } });
     const scenarioScopes = artifactOwnership ?? intent.targets.flatMap((target): readonly ScenarioRef[] => {
       if (target.kind === "scenario") {return [target.scenario];}
       if (target.kind === "scenarios") {return target.scenarios;}
@@ -453,7 +465,7 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
       if (intent.maxWorkers !== undefined) {
         this.executor.setForceParallel(true, intent.maxWorkers);
       }
-      for (const target of intent.targets) {
+      for (const [index, target] of intent.targets.entries()) {
         if (signal?.aborted) {
           state = "cancelled";
           break;
@@ -463,7 +475,7 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
           target,
           signal,
           artifactBatch,
-          progress,
+          progressForChild(progress, index === intent.targets.length - 1),
           scenarioScopes,
           consumeOutput
         );
@@ -548,14 +560,14 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
       return;
     }
     if (target.kind === "scenarios") {
-      for (const scenario of target.scenarios) {
+      for (const [index, scenario] of target.scenarios.entries()) {
         if (signal?.aborted) {break;}
         const shouldContinue = await this.runScenarioTarget(
           mode,
           scenario,
           signal,
           artifactBatch,
-          progress,
+          progressForChild(progress, index === target.scenarios.length - 1),
           undefined,
           scenarioScopes,
           consume
@@ -623,7 +635,7 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
         ? await this.executor.debugScenarioWithOutput(options, capture)
         : await this.executor.runScenarioWithOutput(options, capture));
     }
-    for (const line of exactLines) {
+    for (const [index, line] of exactLines.entries()) {
       if (signal?.aborted) {return false;}
       const row = rows.find((candidate) => candidate.lineNumber === line);
       if (!row) {
@@ -644,7 +656,7 @@ export class LegacyDirectExecutionGateway implements ExecutionServiceGateway {
         rows,
         signal,
         artifactBatch,
-        progress,
+        progressForChild(progress, index === exactLines.length - 1),
         tagExpression
       );
       const target = { scenario, resultLines: [line] };

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Run progress shows observed preparation, generation, execution, retry activity, and finishing stages in the status bar, Test Results output, and editor-run notifications.
+- Passing retries keep their green result and show the successful attempt number in the scenario summary. Combined multi-project results use a general retry annotation.
+
 
 ## [0.7.8] - 2026-10-11
 ### Changed

@@ -6,7 +6,7 @@ import {
   type RunCompletion,
   type RunIntent,
 } from "../core/run-contracts";
-import type { RunProgressObserver } from "../core/run-progress";
+import { reportRunProgress, type RunProgressObserver } from "../core/run-progress";
 import type { RunOutputResult } from "../core/test-executor";
 import type { PlaywrightJsonParser, ScenarioResult } from "../utils/playwright-json-parser";
 import { ExecutionFailure } from "../core/execution-gateway";
@@ -30,6 +30,7 @@ export function scenarioResultFromExecution(result: ExecutionCaseResult): Scenar
     ...(result.outcome !== status ? { outcome: result.outcome } : {}),
     ...(result.attempts > 1 ? { attempts: result.attempts } : {}),
     ...(result.flaky ? { flaky: true } : {}),
+    ...(result.multipleProjects ? { multipleProjects: true } : {}),
     ...(result.steps ? { steps: [...result.steps] } : {}),
   };
 }
@@ -69,7 +70,9 @@ export async function runIntentWithObserver(
     completion = await startExecution(gateway, intent, {
       signal,
       onEvent: (event: ExecutionEvent) => {
-        if (event.kind === "case-finished") {
+        if (event.kind === "started") {
+          reportRunProgress(progress, { phase: "running" });
+        } else if (event.kind === "case-finished") {
           progress.onTestEnd?.(
             scenarioResultFromExecution(event.result),
             event.completed,
@@ -79,6 +82,8 @@ export async function runIntentWithObserver(
           progress.onOutput?.(event.stream, event.text);
         } else if (event.kind === "begin") {
           progress.onBegin?.(event.total);
+        } else if (event.kind === "progress") {
+          reportRunProgress(progress, event.progress);
         }
       },
     });

@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 import {
   combineRunProgressObservers,
+  formatRunProgress,
+  type RunProgress,
   type RunProgressObserver,
   type RunProgressSession,
 } from "../core/run-progress";
@@ -11,9 +13,7 @@ import type { Logger } from "../utils/logger";
 import { runIntentWithObserver } from "../ui/execution-adapter";
 
 /**
- * Send captured runner output from every non-Test Explorer entry point to Specwright's output log.
- * These commands run the tests once through the captured executor path (no live terminal, no Test
- * Results stream), so without this echo the user would see no output at all.
+ * Keep captured command output available in Specwright's log after the run completes.
  */
 export function logCapturedRunOutput(
   logger: Logger,
@@ -42,10 +42,19 @@ export async function runCapturedWithProgress(
       async (notification, token) => {
         const cancelSub = token.onCancellationRequested(() => abort.abort());
         if (token.isCancellationRequested) {abort.abort();}
+        let state: RunProgress = { phase: "running" };
+        const report = (): void => {
+          try {notification.report({ message: formatRunProgress(state) });} catch { /* progress is optional */ }
+        };
+        report();
         const notificationProgress: RunProgressObserver = {
-          onBegin: (total) => notification.report({ message: `0 / ${total} completed` }),
-          onTestEnd: (_result, completed, total) =>
-            notification.report({ message: `${completed} / ${total} completed` }),
+          onProgress: (progress) => {state = progress; report();},
+          onBegin: (total) => {state = { phase: "running", completed: 0, total }; report();},
+          onTestEnd: (_result, completed, total) => {
+            if (state.phase === "finishing") {return;}
+            state = { ...state, phase: "running", completed, total };
+            report();
+          },
         };
         const progress = combineRunProgressObservers(session?.progress, notificationProgress)
           ?? notificationProgress;

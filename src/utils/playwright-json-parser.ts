@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Logger } from "./logger";
-import { parseBddSourceData } from "../parsers/bdd-file-data-parser";
+import { bddOutlineName, parseBddSourceData } from "../parsers/bdd-file-data-parser";
 import { resolveTestStatus } from "../core/test-result-status";
 import {
   collectPlaywrightAttachmentPaths,
@@ -88,6 +88,8 @@ export interface ScenarioResult {
   attachmentPaths?: string[] | undefined;
   /** Playwright project that produced this entry, when the reporter identifies it. */
   projectName?: string | undefined;
+  /** This entry combines outcomes from multiple Playwright projects. */
+  multipleProjects?: boolean | undefined;
 }
 
 /** A single Gherkin step within a scenario run. */
@@ -370,11 +372,7 @@ export class PlaywrightJsonParser {
     // When the outline TITLE itself carries `<placeholders>`, playwright-bdd substitutes the row
     // values into each test title instead; the raw placeholders then only survive on the
     // enclosing describe, so recognize that shape too (feature titles virtually never have `<...>`).
-    const outlineName =
-      enclosingSuiteTitle &&
-      (/^Example #\d+/.test(scenarioName) || /<[^>]+>/.test(enclosingSuiteTitle))
-        ? enclosingSuiteTitle
-        : undefined;
+    const outlineName = bddOutlineName(scenarioName, enclosingSuiteTitle);
 
     for (const test of spec.tests ?? []) {
       acc.push(this.buildResult(spec, test, scenarioName, resolved, outlineName));
@@ -516,11 +514,12 @@ export class PlaywrightJsonParser {
     const counts: Record<ScenarioStatus, number> = { passed: 0, failed: 0, skipped: 0 };
     let totalMs = 0;
     const lines: string[] = [];
+    const showProjects = new Set(results.map((result) => result.projectName).filter(Boolean)).size > 1;
 
     for (const r of results) {
       counts[r.status] += 1;
       if (typeof r.durationMs === "number") {totalMs += r.durationMs;}
-      lines.push(...this.formatScenario(r, workspaceRoot));
+      lines.push(...this.formatScenario(r, workspaceRoot, showProjects));
     }
 
     const tally = [
@@ -546,11 +545,18 @@ export class PlaywrightJsonParser {
     return `  ${paint(label, ANSI.dim)}`;
   }
 
-  private formatScenario(r: ScenarioResult, workspaceRoot?: string): string[] {
+  private formatScenario(r: ScenarioResult, workspaceRoot?: string, showProject = false): string[] {
     const heading = r.outlineName
       ? `Scenario Outline: ${r.outlineName} (${r.scenarioName})`
       : `Scenario: ${r.scenarioName}`;
-    const out = [`${STATUS_ICON[r.status]} ${paint(heading, ANSI.bold)}${this.dimDuration(r.durationMs)}`];
+    const project = showProject && r.projectName ? ` [${r.projectName}]` : "";
+    const retry = r.status === "passed" && r.flaky
+      ? r.multipleProjects || !r.attempts || r.attempts <= 1
+        ? "Passed after retries"
+        : `Passed on attempt ${r.attempts}`
+      : "";
+    const annotation = retry ? `  ${paint(retry, ANSI.green)}` : "";
+    const out = [`${STATUS_ICON[r.status]} ${paint(heading + project, ANSI.bold)}${this.dimDuration(r.durationMs)}${annotation}`];
 
     for (const step of r.steps ?? []) {
       out.push(this.formatStep(step));

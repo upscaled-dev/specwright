@@ -37,4 +37,12 @@ export interface LiveTestEndRecord {
   total: number;
 }
 
-export type LiveReporterRecord = LiveRunBeginRecord | LiveTestEndRecord;
+/** Retry activity belongs to the invocation, including parallel project workers. */
+export interface LiveRunProgressRecord {
+  kind: "run-progress";
+  retrying: number;
+  retry?: { title: string; attempt: number; projectName: string } | undefined;
+}
+
+export type LiveReporterRecord = LiveRunBeginRecord | LiveTestEndRecord | LiveRunProgressRecord
+  | { kind: "run-end" };
