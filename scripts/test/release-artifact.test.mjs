@@ -665,8 +665,8 @@ test("CI builds the candidate after its gates and promotes it without rebuilding
   assertWorkflowSupplyPolicy(workflows);
   assertDependencyAutomation(dependabot);
   assert.equal(packageJson.devDependencies["js-yaml"], "4.1.1");
-  assert.equal(readFileSync(resolve(REPO_ROOT, ".node-version"), "utf8").trim(), "24.18.1");
-  assert.match(readFileSync(resolve(REPO_ROOT, ".devcontainer", "Dockerfile"), "utf8"), /^FROM node:24\.18\.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7$/mu);
+  assert.equal(readFileSync(resolve(REPO_ROOT, ".node-version"), "utf8").trim(), "24.21.0");
+  assert.match(readFileSync(resolve(REPO_ROOT, ".devcontainer", "Dockerfile"), "utf8"), /^FROM node:24\.21\.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20$/mu);
   assert.throws(
     () => assertDependencyAutomation(dependabot.replace("package-ecosystem: github-actions", "package-ecosystem: pip")),
     /github-actions updates must run weekly/u

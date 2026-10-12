@@ -3,6 +3,7 @@ import { LegacyDirectExecutionGateway } from "../../core/execution-gateway";
 import type { FeatureParser } from "../../parsers/feature-parser";
 import type { TestExecutor } from "../../core/test-executor";
 import type { RunIntent } from "../../core/run-contracts";
+import type { LegacyDiscoveryPort } from "../../core/legacy-discovery";
 import { trustedWorkspace } from "./helpers/test-workspace-trust";
 
 const intent: RunIntent = {
@@ -12,7 +13,7 @@ const intent: RunIntent = {
 
 function createGateway(
   executor: Partial<TestExecutor>,
-  discovery = vi.fn(() => Promise.resolve({ cases: [], diagnostics: [] }))
+  discovery: LegacyDiscoveryPort["discover"] = vi.fn(() => Promise.resolve({ cases: [], diagnostics: [] }))
 ): LegacyDirectExecutionGateway {
   return new LegacyDirectExecutionGateway(
     executor as TestExecutor,

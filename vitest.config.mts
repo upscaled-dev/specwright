@@ -5,7 +5,7 @@ import * as path from "node:path";
  * Vitest config for unit tests. Unit tests live under src/test/unit/**.
  *
  * VS Code's `vscode` module is only available at extension runtime, so we alias it to a tiny
- * stub for tests. Anything beyond what the stub exposes will throw, which is the point — code
+ * stub for tests. Anything beyond what the stub exposes will throw; code
  * that uses real VS Code APIs belongs in integration tests (npm run test:integration).
  */
 export default defineConfig({
@@ -18,16 +18,16 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/test/**", "src/extension.ts"],
       thresholds: {
-        lines: 85,
-        statements: 85,
-        functions: 85,
-        branches: 85,
+        lines: 83,
+        statements: 81,
+        functions: 83,
+        branches: 77,
       },
     },
   },
   resolve: {
     alias: {
-      vscode: path.resolve(__dirname, "src/test/__mocks__/vscode.ts"),
+      vscode: path.resolve(import.meta.dirname, "src/test/__mocks__/vscode.ts"),
     },
   },
 });

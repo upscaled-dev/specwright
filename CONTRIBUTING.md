@@ -23,7 +23,7 @@ npm run test:watch # vitest in watch mode
 npm run test:coverage
 ```
 
-Unit tests live under [src/test/unit/](src/test/unit/). They use Vitest and the stub `vscode` module at [src/test/__mocks__/vscode.ts](src/test/__mocks__/vscode.ts), aliased via [vitest.config.ts](vitest.config.ts).
+Unit tests live under [src/test/unit/](src/test/unit/). They use Vitest and the stub `vscode` module at [src/test/__mocks__/vscode.ts](src/test/__mocks__/vscode.ts), aliased via [vitest.config.mts](vitest.config.mts).
 
 When adding a new module, prefer extracting pure-function logic into something a Vitest test can call directly without touching VS Code APIs. Examples in this repo:
 

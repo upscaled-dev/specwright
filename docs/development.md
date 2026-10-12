@@ -17,7 +17,11 @@ The `tsc` commands use the native TypeScript 7 compiler through the `@typescript
 
 When changing the compiler, check all four TypeScript projects and compile the integration runner before native tests. Exercise both `watch:tsc` and `watch:webview`: observe a clean compilation, introduce a deliberate type error, and observe recovery after correcting it. Use compiler output to detect completion. Verify the emitted integration tests on both pinned VS Code hosts, along with lint, coverage, production bundling, and installed VSIX behavior.
 
-Unit tests use [Vitest](https://vitest.dev/) with a minimal stub of the `vscode` module under [src/test/__mocks__/vscode.ts](../src/test/__mocks__/vscode.ts). Tests that need real VS Code APIs (`TestController`, `TestItem` trees, run-profile registration) run via `npm run test:integration`, which launches a real VS Code instance against a fixture workspace under [src/test/integration/fixtures/workspace/](../src/test/integration/fixtures/workspace/). See [CONTRIBUTING.md](../CONTRIBUTING.md#integration-tests) for details.
+Unit tests use [Vitest](https://vitest.dev/) 5 with the matching V8 coverage provider and the ESM configuration [vitest.config.mts](../vitest.config.mts). A minimal stub of the `vscode` module lives under [src/test/__mocks__/vscode.ts](../src/test/__mocks__/vscode.ts). Tests that need real VS Code APIs (`TestController`, `TestItem` trees, run-profile registration) run via `npm run test:integration`, which launches a real VS Code instance against a fixture workspace under [src/test/integration/fixtures/workspace/](../src/test/integration/fixtures/workspace/). See [CONTRIBUTING.md](../CONTRIBUTING.md#integration-tests) for details.
+
+When changing the unit-test runner, first run the installed BDD outline targeting and retry/Debug cases in `test-provider-outline-targeting.test.ts`. In watch mode, observe a passing test, a deliberate failure, and recovery after correcting it. Compare the reported coverage file inventory, including unexecuted runtime files, and prove that a run below the configured floors exits with failure. Coverage policy changes require an explicit compatibility decision.
+
+The temporary Vitest 5 AST mapper baseline uses floors of 81% statements, 77% branches, and 83% functions and lines, with the existing source scope intact. The follow-up target of 95% for all four metrics is deferred to separate coverage work. Keep source-level coverage tests distinct from the bundled producer-to-consumer acceptance tests.
 
 Changes to executable resolution need a real Extension Host test on Windows, macOS, and Linux. Put a temporary fixture beneath the checkout when it needs the checkout's installed dependency, so normal package resolution can find the parent `node_modules` without a temp-to-checkout junction. Run the configured command through the production command runner and assert its generated output.
 
@@ -45,7 +49,7 @@ For Debug retry policy, pass the executor's structured `startDebugging` argument
 
 Release only from protected `main` and protect tags matching `v*` in the repository settings. The workflow cannot administer or prove those rules with its token, so verify both rules before the first release and after repository-policy changes. The workflow uses read-only repository permissions; only the tag-only promotion job receives `actions: read`, `id-token: write`, and `attestations: write`.
 
-CI and the devcontainer use the exact Node toolchain in [.node-version](../.node-version): Node `24.18.1`. Dependabot checks npm and GitHub Actions dependencies weekly. Repository maintainers own dependency alerts, Dependabot update pull requests, and quarterly review of the Node pin. GitHub's Security and Dependabot surfaces are the routing points for those alerts and updates; Dependabot does not update `.node-version`, and this repository does not name an individual or team owner in source control.
+CI and the devcontainer use the exact Node toolchain in [.node-version](../.node-version): Node `24.21.0`. Dependabot checks npm and GitHub Actions dependencies weekly. Repository maintainers own dependency alerts, Dependabot update pull requests, and quarterly review of the Node pin. GitHub's Security and Dependabot surfaces are the routing points for those alerts and updates; Dependabot does not update `.node-version`, and this repository does not name an individual or team owner in source control.
 
 Release preparation is supported on macOS and Linux hosts with a POSIX-compatible shell. `release.mjs` invokes `/bin/bash` and shell command strings, so it is not a supported Windows release host. Windows and macOS remain native CI quality lanes; containers do not replace native test coverage or any native signing verification.
 
@@ -132,9 +136,9 @@ Use a disposable workspace. Captures must contain no personal paths, accounts, c
 
 ## DevContainer
 
-The DevContainer gives you a consistent Node 24.18.1 environment. To use it: install VS Code's "Dev Containers" extension, then run **Dev Containers: Reopen in Container** from the command palette. The container runs `npm ci` automatically on first start.
+The DevContainer gives you a consistent Node 24.21.0 environment. To use it: install VS Code's "Dev Containers" extension, then run **Dev Containers: Reopen in Container** from the command palette. The container runs `npm ci` automatically on first start.
 
-The base image is pinned as `node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7`, the verified multi-architecture OCI index for that tag. Re-verify the tag and index digest with the official Node image registry before updating either value, then update the Dockerfile and release contract test together.
+The base image is pinned as `node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20`, the verified multi-architecture OCI index for that tag. Re-verify the tag and index digest with the official Node image registry before updating either value, then update the Dockerfile and release contract test together.
 
 Useful when:
 - Your host node version diverges from the project's target.
@@ -232,7 +236,7 @@ snippets/gherkin.code-snippets            # contributed Gherkin snippets
 scripts/
   build/esbuild.cjs                       # bundler config
   release.mjs                             # release / version-bump script
-.devcontainer/                            # consistent Node 24.18.1 container
+.devcontainer/                            # consistent Node 24.21.0 container
 ```
 
 ## Architectural notes

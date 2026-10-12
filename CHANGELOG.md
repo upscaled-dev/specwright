@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update development Node to 24.21.0, Node typings to the 24 line, and Vitest with matching V8 coverage to 5.0.3.
+- Set temporary coverage floors for Vitest 5's AST mapper at 81% statements, 77% branches, and 83% functions and lines. Keep the source scope intact and defer the 95% target to separate coverage work.
 - Use native TypeScript 7 for type checking, watch mode, and integration compilation while retaining the TypeScript 6 API for ESLint.
 - Update compatible development dependencies and migrate the repository's tested pair to playwright-bdd 9.2.1 and Playwright 1.64.0, with Playwright bounded to its tested minor line.
 - Run progress shows observed preparation, generation, execution, retry activity, and finishing stages in the status bar, Test Results output, and editor-run notifications.

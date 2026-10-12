@@ -1,4 +1,4 @@
-FROM node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7
+FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
 # git + certs for npm/husky; sudo so postCreateCommand can chown the
 # node_modules volume; the rest are the shared libraries + xvfb that

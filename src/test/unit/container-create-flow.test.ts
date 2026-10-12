@@ -1,17 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { runContainerCreate } from "../../traceability/container-create-flow";
-import type { AuthoredTest, NewContainerSpec } from "../../traceability/contracts";
+import { runContainerCreate, type ContainerCreateDeps } from "../../traceability/container-create-flow";
+import type { AuthoredTest } from "../../traceability/contracts";
 
 const IDS: Record<string, string> = { "CALC-1": "1001", "CALC-2": "1002", "CALC-3": "1003" };
 
-interface Rig {
-  create: ReturnType<typeof vi.fn>;
-  issueIdFor: (key: string) => string | undefined;
-}
-
-function rig(created: AuthoredTest = { key: "CALC-90", issueId: "9000", warnings: [] }, ids = IDS): Rig {
+function rig(created: AuthoredTest = { key: "CALC-90", issueId: "9000", warnings: [] }, ids = IDS) {
   return {
-    create: vi.fn((_spec: NewContainerSpec) => Promise.resolve(created)),
+    create: vi.fn<ContainerCreateDeps["create"]>(() => Promise.resolve(created)),
     issueIdFor: (key: string) => ids[key],
   };
 }

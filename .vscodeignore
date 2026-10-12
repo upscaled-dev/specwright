@@ -9,7 +9,7 @@ tsconfig.json
 tsconfig.integration.json
 tsconfig.webview.json
 tsconfig.webview-test.json
-vitest.config.ts
+vitest.config.mts
 eslint.config.mjs
 commitlint.config.mjs
 .node-version
