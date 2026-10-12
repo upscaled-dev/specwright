@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
 import { ExtensionConfig } from "../../core/extension-config";
-import { XrayFetchOutcome, XrayPageProgress, XrayTestRecord, XrayClient } from "../../xray/xray-client";
+import { XrayFetchOutcome, XrayPageProgress, XrayTestRecord, XrayClient, XrayAbortError } from "../../xray/xray-client";
 import { CachedMetadata, CACHE_SCHEMA_VERSION, XrayMetadataCache } from "../../xray/xray-metadata-cache";
 import { XrayMetadataCapability } from "../../xray/xray-metadata";
 import { validatedAdapter } from "../../traceability/validated-adapter";
@@ -104,6 +104,45 @@ function makeCapability(options: CapabilityOptions): XrayMetadataCapability {
 }
 
 describe("XrayMetadataCapability sync", () => {
+  it("does not fetch empty merge keys and batches duplicate canonical identities once", async () => {
+    const fetchTestsByKeys = vi.fn(async () => outcome([{ key: "CALC-1", summary: "Checkout" }]));
+    const capability = makeCapability({ client: fakeClient({ fetchTestsByKeys }) });
+    await capability.mergeKeys(["", ""]);
+    expect(fetchTestsByKeys).not.toHaveBeenCalled();
+    await capability.mergeKeys(["calc-1", "CALC-1"]);
+    expect(fetchTestsByKeys).toHaveBeenCalledWith(["CALC-1"], expect.any(AbortSignal));
+    expect(capability.snapshot().tests.get("CALC-1")?.summary).toBe("Checkout");
+    await capability.dispose();
+  });
+
+  it.each(["sync", "merge"])("leaves cached metadata unchanged after an aborted %s", async (operation) => {
+    const fetchTestsByKeys = vi.fn(async () => outcome([{ key: "CALC-1", summary: "Known checkout" }]));
+    const capability = makeCapability({ client: fakeClient({ fetchTestsByKeys }) });
+    await capability.sync({ testKeys: ["CALC-1"] });
+    const before = capability.snapshot();
+    const changed = vi.fn(); capability.onDidChange(changed);
+    fetchTestsByKeys.mockRejectedValue(new XrayAbortError());
+    if (operation === "sync") { await capability.sync({ testKeys: ["CALC-2"] }); }
+    else { await capability.mergeKeys(["CALC-2"]); }
+    expect(capability.snapshot()).toEqual(before);
+    expect(changed).not.toHaveBeenCalled();
+    await capability.dispose();
+  });
+
+  it.each(["sync", "merge"])("does not commit or retry a %s whose caller aborts during transport failure", async (operation) => {
+    const controller = new AbortController();
+    const fetchTestsByKeys = vi.fn(async () => { controller.abort(); throw new Error("transport aborted"); });
+    const cache = cacheFor(fakeMemento());
+    const save = vi.spyOn(cache, "saveForAccount");
+    const capability = makeCapability({ cache, client: fakeClient({ fetchTestsByKeys }) });
+    if (operation === "sync") { await capability.sync({ testKeys: ["CALC-1"] }, controller.signal); }
+    else { await capability.mergeKeys(["CALC-1"], controller.signal); }
+    expect(capability.snapshot().tests.size).toBe(0);
+    expect(fetchTestsByKeys).toHaveBeenCalledOnce();
+    expect(save).not.toHaveBeenCalled();
+    await capability.dispose();
+  });
+
   it("retains all complete catalogues beyond the organization display limit", async () => {
     const testsFor = (project: string, count: number): XrayTestRecord[] =>
       Array.from({ length: count }, (_, index) => ({ key: `${project}-${index + 1}` }));
@@ -1223,4 +1262,141 @@ describe("XrayMetadataCapability.mergeKeys", () => {
     expect(capability.snapshot().tests.size).toBe(0);
     expect(fired).toBe(0);
   });
+});
+
+describe("metadata lifecycle boundaries", () => {
+  it("ignores credential notifications after disposal and reuses the disposal promise", async () => {
+    const invalidateAuth = vi.fn();
+    const capability = makeCapability({ client: fakeClient({ invalidateAuth }) });
+    const disposal = capability.dispose();
+    expect(capability.dispose()).toBe(disposal);
+    await disposal;
+    capability.onCredentialsChanged();
+    expect(invalidateAuth).not.toHaveBeenCalled();
+  });
+
+  it("clears cached tests when stored credentials are removed", async () => {
+    let account: string | undefined = "account-a";
+    const capability = makeCapability({ account: () => Promise.resolve(account),
+      client: fakeClient({ fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "CALC-1" }])) }) });
+    await capability.mergeKeys(["CALC-1"]);
+    expect(capability.snapshot().tests.has("CALC-1")).toBe(true);
+    account = undefined;
+    capability.onCredentialsChanged();
+    await vi.waitFor(() => expect(capability.snapshot().tests.size).toBe(0));
+    await capability.dispose();
+  });
+
+  it("does not commit an account lookup superseded by a second credential change", async () => {
+    const account = vi.fn<() => Promise<string | undefined>>().mockResolvedValue("account-a");
+    const capability = makeCapability({ account, client: fakeClient({ fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "CALC-1" }])) }) });
+    await capability.mergeKeys(["CALC-1"]);
+    let release!: (value: string) => void;
+    account.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    capability.onCredentialsChanged();
+    account.mockResolvedValue(undefined);
+    capability.onCredentialsChanged();
+    await vi.waitFor(() => expect(capability.snapshot().tests.size).toBe(0));
+    release("account-a");
+    await capability.dispose();
+    expect(capability.snapshot().tests.size).toBe(0);
+  });
+
+  it("retains the directory when its cancelled request rejects", async () => {
+    const controller = new AbortController();
+    const capability = makeCapability({ client: fakeClient({}), listProjects: () => {
+      controller.abort(); return Promise.reject(new Error("cancelled"));
+    } });
+    await expect(capability.list(controller.signal)).resolves.toMatchObject({ projects: [] });
+    await capability.dispose();
+  });
+
+  it("keeps a remote test with blank Gherkin and logs only its shape", async () => {
+    const logger = silentLogger();
+    const info = vi.spyOn(logger, "info");
+    const capability = makeCapability({ logger, client: fakeClient({ fetchTestsByKeys: () => Promise.resolve(outcome([{ key: "CALC-1", gherkin: " \n\t" }])) }) });
+    await capability.sync({ testKeys: ["CALC-1"] });
+    expect(capability.snapshot().tests.get("CALC-1")?.gherkin).toBe(" \n\t");
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("startsWithKeyword=false"));
+    await capability.dispose();
+  });
+});
+
+
+describe("metadata account and request cancellation boundaries", () => {
+  it("discards cached metadata when disposal wins the credential reload", async () => {
+    const cache = cacheFor(fakeMemento());
+    const cached: CachedMetadata = { schemaVersion: CACHE_SCHEMA_VERSION, syncedAt: 10_000,
+      fetchedScopes: [], catalogueProjects: [], completeProjects: [], verifiedAbsentKeys: [],
+      errors: [], pages: [], tests: [{ key: "CALC-1", summary: "cached result" }] };
+    await cache.saveForAccount("account-a", cached);
+    let accountName = "account-a";
+    const capability = makeCapability({ client: fakeClient({}), cache, account: () => Promise.resolve(accountName) });
+    await new Promise<void>((resolve) => { const sub = capability.onDidChange(() => { sub.dispose(); resolve(); }); });
+    expect(capability.snapshot().tests.has("CALC-1")).toBe(true);
+    let started!: () => void;
+    const loading = new Promise<void>((resolve) => { started = resolve; });
+    let release!: (value: CachedMetadata) => void;
+    vi.spyOn(cache, "load").mockImplementation(() => {
+      started();
+      return new Promise((resolve) => { release = resolve; });
+    });
+    accountName = "account-b";
+    capability.onCredentialsChanged();
+    await loading;
+    const disposal = capability.dispose();
+    release(cached);
+    await disposal;
+    expect(capability.snapshot().tests.size).toBe(0);
+  });
+
+
+  it("does not warn about an account lookup rejected during shutdown", async () => {
+    let reject!: (error: Error) => void;
+    const account = () => new Promise<string>((_resolve, rejectPromise) => { reject = rejectPromise; });
+    const logger = silentLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const capability = makeCapability({ client: fakeClient({}), account, logger });
+    const disposal = capability.dispose();
+    reject(new Error("credentials store closed"));
+    await disposal;
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+
+it.each([
+  [200, "null"],
+  [200, JSON.stringify({ data: { getTests: { total: 0 } } })],
+  [403, "Forbidden"],
+  [200, JSON.stringify({ data: { getTests: { total: 1, results: [null] } } })],
+] as const)("preserves known metadata and never verifies absence after an invalid remote response %s %s", async (status, body) => {
+  let failed = false;
+  const client = new XrayClient({
+    region: "global", logger: silentLogger(),
+    credentials: async () => ({ clientId: "id", clientSecret: "secret" }),
+    fetchImpl: async (url) => {
+      const auth = url.endsWith("/authenticate");
+      const code = auth || !failed ? 200 : status;
+      const text = auth ? JSON.stringify("test-jwt") : failed ? body : JSON.stringify({ data: { getTests: {
+        total: 1, results: [{ issueId: "1", jira: { key: "CALC-1", summary: "Known checkout" } }],
+      } } });
+      return new Response(text, { status: code });
+    },
+  });
+  const capability = makeCapability({ client });
+  try {
+    await capability.sync({ testKeys: ["CALC-1"] });
+    expect(capability.snapshot().tests.get("CALC-1")?.summary).toBe("Known checkout");
+    failed = true;
+    await capability.mergeKeys(["CALC-1", "CALC-2"]);
+    const snapshot = capability.snapshot();
+    expect(snapshot.tests.get("CALC-1")?.summary).toBe("Known checkout");
+    expect(snapshot.verifiedAbsentKeys).toEqual([]);
+    await capability.sync({ testKeys: ["CALC-1", "CALC-2"] });
+    expect(capability.snapshot().verifiedAbsentKeys).toEqual([]);
+    expect(capability.snapshot().errors).not.toEqual([]);
+  } finally {
+    await capability.dispose();
+  }
 });

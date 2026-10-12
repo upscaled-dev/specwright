@@ -298,14 +298,16 @@ interface TestPage {
   results: (RawTest | null)[];
 }
 
-function parseTestPage(body: unknown): TestPage {
+function parseTestPage(body: unknown): TestPage | { errors: string[] } {
   const getTests =
     body !== null && typeof body === "object"
       ? (body as { data?: { getTests?: { total?: unknown; results?: unknown } } }).data?.getTests
       : undefined;
   const total = typeof getTests?.total === "number" ? getTests.total : undefined;
-  const results = Array.isArray(getTests?.results) ? (getTests.results as (RawTest | null)[]) : [];
-  return { total, results };
+  if (!Array.isArray(getTests?.results)) {
+    return { errors: ["Xray returned a malformed test lookup response."] };
+  }
+  return { total, results: getTests.results as (RawTest | null)[] };
 }
 
 type PageTermination =
@@ -483,7 +485,7 @@ export class XrayClient {
   // Focused provider extensions can share the authenticated, retried, timeout-bounded read path
   // without growing this transport with their query and parser details.
   public readGraphql(query: string, signal?: AbortSignal): Promise<unknown> {
-    return this.graphql(query, operationIdentity("xray.graphql.read"), signal, true);
+    return this.graphql(query, operationIdentity("xray.graphql.read"), signal);
   }
 
   public fetchProjectCatalogue(
@@ -519,11 +521,11 @@ export class XrayClient {
         outcome.complete = false;
         return outcome;
       }
-      for (const raw of page.results) {
-        const record = toTestRecord(raw);
-        if (record) {
-          outcome.tests.push(record);
-        }
+      const records = page.results.map(toTestRecord).filter((record) => record !== undefined);
+      outcome.tests.push(...records);
+      if (records.length !== page.results.length) {
+        outcome.complete = false;
+        outcome.errors.push("Xray returned unreadable test records.");
       }
       outcome.pages.push({ fetchedAt: this.now(), query: jql, start, total: page.total });
       // Progress is best effort, so a sink that throws costs its own report, never the fetch.
@@ -553,11 +555,7 @@ export class XrayClient {
   ): Promise<TestPage | { errors: string[] }> {
     let body: unknown;
     try {
-      body = await this.graphql(
-        testsQuery(jql, start),
-        operationIdentity("xray.graphql.read"),
-        signal
-      );
+      body = await this.readGraphql(testsQuery(jql, start), signal);
     } catch (error) {
       if (isTrustRevocation(signal)) {
         throw signal?.reason ?? error;
@@ -643,12 +641,7 @@ export class XrayClient {
     signal?: AbortSignal
   ): Promise<TestContainerTarget | undefined> {
     const canonicalKey = key.toUpperCase();
-    const body = await this.graphql(
-      resolveTestContainerQuery(kind, canonicalKey),
-      operationIdentity("xray.graphql.read"),
-      signal,
-      true
-    );
+    const body = await this.readGraphql(resolveTestContainerQuery(kind, canonicalKey), signal);
     const summaries = graphqlErrorSummaries(body);
     if (summaries.length > 0) {
       for (const summary of summaries) {
@@ -735,8 +728,7 @@ export class XrayClient {
   private async graphql(
     query: string,
     identity: OperationIdentity,
-    signal?: AbortSignal,
-    strictRead = false
+    signal?: AbortSignal
   ): Promise<unknown> {
     const response = await this.sendAuthorized(
       `${this.base}/graphql`,
@@ -752,10 +744,8 @@ export class XrayClient {
       if (REMOTE_OPERATION_POLICY[identity.name].class !== "read") {
         throw new XrayMutationError(`Mutation failed (HTTP ${response.status}).`);
       }
-      if (strictRead) {
-        this.deps.logger.error(`GraphQL read failed (HTTP ${response.status})`);
-        throw new XrayQueryError(`Query failed (HTTP ${response.status}).`);
-      }
+      this.deps.logger.error(`GraphQL read failed (HTTP ${response.status})`);
+      throw new XrayQueryError(`Query failed (HTTP ${response.status}).`);
     }
     return parseBody(response.bodyText);
   }

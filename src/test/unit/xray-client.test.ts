@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
-import { FetchLike, XrayAbortError, XrayAuthError, XrayClient, XrayMutationError } from "../../xray/xray-client";
+import { abortableSleep, FetchLike, XrayAbortError, XrayAuthError, XrayClient, XrayMutationError } from "../../xray/xray-client";
 import { XrayCredentials } from "../../xray/xray-credential-store";
 import {
   RemoteOutcomeUnknownError,
@@ -1180,4 +1180,158 @@ describe("XrayClient mutation replay safety", () => {
     await expect(mutate(makeClient({ fetchImpl: remote.fetchImpl }))).rejects.toBeInstanceOf(RemoteOutcomeUnknownError);
     expect(remote.writes()).toBe(1);
   });
+});
+
+describe("XrayClient response normalization", () => {
+  it.each([
+    ["failed", "failed"], ["ABORTED", "failed"], ["ERROR", "failed"],
+    ["TODO", "pending"], ["TO DO", "pending"], ["EXECUTING", "pending"],
+    ["CUSTOM", "unknown"],
+  ])("preserves provider status %s while mapping its category", async (name, category) => {
+    const client = makeClient({ fetchImpl: jwtThenGraphql(() => ({
+      data: { getTests: { total: 1, results: [{ jira: { key: "CALC-1" }, status: { name } }] } },
+    })) });
+    const result = await client.fetchTestsByKeys(["CALC-1"]);
+    expect(result.tests).toEqual([{ key: "CALC-1", status: { category, providerValue: name } }]);
+  });
+
+  it("omits unreadable rows and optional metadata, and deduplicates coverage keys", async () => {
+    const client = makeClient({ fetchImpl: jwtThenGraphql(() => ({
+      data: { getTests: { total: 5, results: [null, {}, { jira: { key: 1 } },
+        { jira: { key: "calc-1", summary: "" }, issueId: null, gherkin: 7,
+          testType: { kind: "Gherkin" }, folder: { path: "/Smoke" },
+          coverableIssues: { results: [null, {}, { jira: { key: "req-1" } }, { jira: { key: "REQ-1" } }] } },
+        { jira: { key: "CALC-2" }, testType: { name: "No kind" }, folder: { name: "No path" } },
+      ] } },
+    })) });
+    const result = await client.searchTests("project = CALC");
+    expect(result.complete).toBe(false);
+    expect(result.errors).toEqual(["Xray returned unreadable test records."]);
+    expect(result.tests).toEqual([
+      { key: "CALC-1", testType: { name: "Gherkin", kind: "Gherkin" },
+        repositoryFolder: { name: "/Smoke", path: "/Smoke" }, coverageKeys: ["REQ-1"] },
+      { key: "CALC-2" },
+    ]);
+  });
+
+  it("deduplicates normalized requested keys before issuing the query", async () => {
+    const queries: string[] = [];
+    const client = makeClient({ fetchImpl: jwtThenGraphql(query => {
+      queries.push(query);
+      return testsPage(["CALC-1"]);
+    }) });
+    const result = await client.fetchTestsByKeys(["calc-1", "CALC-1", "calc-1"]);
+    expect(result.tests.map(test => test.key)).toEqual(["CALC-1"]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]!.match(/CALC-1/g)).toHaveLength(1);
+  });
+
+  it("rejects missing credentials before making a request", async () => {
+    const fetchImpl = vi.fn<FetchLike>();
+    const client = makeClient({ fetchImpl, credentials: () => Promise.resolve(undefined) });
+    await expect(client.readGraphql("query { getTests { total } }"))
+      .rejects.toThrow("No stored Xray credentials");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([null, {}, { data: { createTest: null } }, { data: { createTest: { warnings: "invalid" } } }])(
+    "does not invent a created issue from an incomplete response %j", async body => {
+      const client = makeClient({ fetchImpl: jwtThenGraphql(() => body) });
+      await expect(client.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" }))
+        .resolves.toEqual({ warnings: [] });
+    }
+  );
+
+  it("returns no updated definition when the mutation response is null", async () => {
+    const client = makeClient({ fetchImpl: jwtThenGraphql(() => null) });
+    await expect(client.updateGherkinTestDefinition("123", "Scenario: S")).resolves.toBeUndefined();
+  });
+
+  it("reports a rejected mutation without retrying it", async () => {
+    const fetchImpl = vi.fn<FetchLike>(url => Promise.resolve(
+      url.endsWith("/authenticate") ? response(200, JSON.stringify(JWT)) : response(400, "bad request")
+    ));
+    const client = makeClient({ fetchImpl });
+    await expect(client.createTest({ project: "CALC", summary: "S", gherkin: "Scenario: S" }))
+      .rejects.toThrow("Mutation failed (HTTP 400)");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+describe("Xray read cancellation and throttling", () => {
+  it("rejects an already cancelled backoff without scheduling a timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      await expect(abortableSleep(5_000, controller.signal)).rejects.toBeInstanceOf(XrayAbortError);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry a read cancelled while the response body is arriving", async () => {
+    const controller = new AbortController();
+    let reads = 0;
+    const client = makeClient({ fetchImpl: (url) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(response(200, JSON.stringify(JWT)));
+      }
+      reads += 1;
+      return Promise.resolve({
+        ...response(200, ""),
+        text: () => {
+          controller.abort();
+          return Promise.reject(new Error("body stream cancelled"));
+        },
+      } as Response);
+    } });
+    await expect(client.fetchTestsByKeys(["CALC-1"], controller.signal)).rejects.toBeInstanceOf(XrayAbortError);
+    expect(reads).toBe(1);
+  });
+
+  it("honours the server retry delay before returning a populated read", async () => {
+    const sleep = vi.fn(() => Promise.resolve());
+    let reads = 0;
+    const client = new XrayClient({
+      region: "global",
+      logger: Logger.create(undefined, LogLevel.ERROR),
+      credentials: () => Promise.resolve({ clientId: "id", clientSecret: SECRET }),
+      sleep,
+      random: () => 0,
+      now: () => 1_000,
+      fetchImpl: (url) => {
+        if (url.endsWith("/authenticate")) {
+          return Promise.resolve(response(200, JSON.stringify(JWT)));
+        }
+        reads += 1;
+        return Promise.resolve(reads === 1
+          ? { ...response(429, "rate limited"), headers: new Headers({ "retry-after": "2" }) } as Response
+          : response(200, JSON.stringify(testsPage(["CALC-1"]))));
+      },
+    });
+    const result = await client.fetchTestsByKeys(["CALC-1"]);
+    expect(result.complete).toBe(true);
+    expect(result.tests.map((test) => test.key)).toEqual(["CALC-1"]);
+    expect(reads).toBe(2);
+    expect(sleep).toHaveBeenCalledWith(2_000, undefined);
+  });
+});
+
+
+it.each([null, { data: { getTests: { total: 0 } } }])("keeps malformed test lookup responses incomplete: %j", async (body) => {
+  const client = makeClient({ fetchImpl: jwtThenGraphql(() => body) });
+  const result = await client.fetchTestsByKeys(["CALC-1"]);
+  expect(result.tests).toEqual([]);
+  expect(result.complete).toBe(false);
+});
+
+it("keeps a refused metadata read incomplete when Jira returns plain text", async () => {
+  const client = makeClient({ fetchImpl: (url) => Promise.resolve(url.endsWith("/authenticate")
+    ? response(200, JSON.stringify(JWT)) : response(403, "Forbidden")) });
+  const result = await client.fetchTestsByKeys(["CALC-1"]);
+  expect(result.tests).toEqual([]);
+  expect(result.complete).toBe(false);
 });
