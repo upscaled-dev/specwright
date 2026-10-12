@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { hasReindexDiagnostic, providerWarnings } from "../../traceability/provider-warnings";
 
 describe("providerWarnings", () => {
+  it("counts empty provider warnings without displaying a blank diagnostic", () => {
+    expect(providerWarnings(["", " "])).toMatchObject({ count: 2, detail: "(empty warning); (empty warning)", omitted: 0 });
+  });
   it("keeps ordinary warnings readable", () => {
     expect(providerWarnings(["first", "second"])).toEqual({
       count: 2,

@@ -182,3 +182,22 @@ describe("ProjectSyncScheduler", () => {
     }
   );
 });
+
+
+it.each([false, true])("coalesces forced refreshes while an active request has force=%s", async (initialForce) => {
+  const activity = new vscode.EventEmitter<void>();
+  const current = deferred();
+  const run = vi.fn().mockImplementationOnce(() => current.promise).mockResolvedValue(undefined);
+  const scheduler = new ProjectSyncScheduler({ onDidChangeActivity: activity.event, canStart: () => true, run, onError: vi.fn() });
+  scheduler.enqueue("CALC", initialForce);
+  scheduler.enqueue("CALC", true);
+  scheduler.enqueue("CALC", true);
+  expect(run).toHaveBeenCalledTimes(1);
+  current.resolve();
+  if (!initialForce) {await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));}
+  scheduler.dispose();
+  scheduler.enqueue("CALC", true);
+  scheduler.defer("PAY", true);
+  expect(run.mock.calls).toEqual(initialForce ? [["CALC", true]] : [["CALC", false], ["CALC", true]]);
+  activity.dispose();
+});

@@ -682,6 +682,22 @@ describe("runPublishFlow: publish", () => {
 });
 
 describe("runPublishFlow: attachments", () => {
+  it("reports a local sealing failure before remote publication without discarding an unsealed file", async () => {
+    const publishing = spyPublishing();
+    const discardAttachments = vi.fn();
+    const fault = new Error("report file no longer exists");
+    const d = deps([artifact()], {
+      publishing: publishing.capability,
+      presentDialog: () => Promise.resolve(dialogResult(CREATE_REQUEST, ["/ws/report.zip"])),
+      sealAttachments: () => {throw fault;},
+      discardAttachments,
+    });
+    await runPublishFlow(d);
+    expect(publishing.publish).not.toHaveBeenCalled();
+    expect(discardAttachments).not.toHaveBeenCalled();
+    expect(d.recordPublish).not.toHaveBeenCalled();
+    expect(d.reportFailure).toHaveBeenCalledWith(fault);
+  });
   it("seals confirmed files before import and carries the operation id through upload and ledger", async () => {
     const events: string[] = [];
     const sealed = {
@@ -708,7 +724,7 @@ describe("runPublishFlow: attachments", () => {
     expect(d.recordPublish).toHaveBeenCalledWith(expect.objectContaining({ operationId: "publish-1" }));
   });
 
-  it("preserves landed import proof and confirmed snapshots when post-import evidence sealing fails", async () => {
+  it.each([new Error("evidence changed"), "evidence changed"])("preserves landed import proof when evidence sealing throws %s", async (fault) => {
     const confirmed = {
       ref: "00000001-0000-4000-8000-000000000000",
       name: "report.zip",
@@ -723,7 +739,7 @@ describe("runPublishFlow: attachments", () => {
     };
     const sealAttachments = vi.fn()
       .mockReturnValueOnce([confirmed])
-      .mockImplementationOnce(() => {throw new Error("evidence changed");});
+      .mockImplementationOnce(() => {throw fault;});
     const discardAttachments = vi.fn();
     const d = deps([artifact()], {
       publishing: spyPublishing(outcome).capability,
@@ -742,6 +758,9 @@ describe("runPublishFlow: attachments", () => {
     }));
     expect(discardAttachments).not.toHaveBeenCalled();
     expect(d.reportFailure).toHaveBeenCalledWith(expect.any(LandedAttachmentPreparationError));
+    expect(d.reportFailure).toHaveBeenCalledWith(expect.objectContaining({
+      message: "Results were published to XNP-100, but local attachment sealing failed: evidence changed",
+    }));
     expect(d.presentRetry).not.toHaveBeenCalled();
   });
 

@@ -233,4 +233,57 @@ describe("ensureWorkerCount", () => {
       vscode.ConfigurationTarget.Global
     );
   });
+
+  it.each(["globalValue", "workspaceFolderValue"])("respects an explicit %s without replacing it", async (scope) => {
+    const memento = makeMemento();
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick");
+    const update = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(vscode.workspace, "getConfiguration").mockReturnValue({
+      get: <T>(_key: string, def?: T): T | undefined => def,
+      update,
+      inspect: () => ({ [scope]: 8 }),
+    } as never);
+
+    expect(await ensureWorkerCount(memento, configWith(8) as never, loggerStub()))
+      .toEqual({ workers: 8, autoAdjusted: false });
+    expect(quickPick).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("leaves settings untouched when the custom entry is dismissed", async () => {
+    const memento = makeMemento();
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValueOnce({ label: "Custom…" });
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValueOnce(undefined);
+    const update = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(vscode.workspace, "getConfiguration").mockReturnValue({
+      update,
+      inspect: () => undefined,
+    } as never);
+
+    expect(await ensureWorkerCount(memento, configWith(4) as never, loggerStub())).toBeUndefined();
+    expect(update).not.toHaveBeenCalled();
+    expect(memento.get<boolean>(PROMPTED_KEY)).toBeUndefined();
+  });
+
+  it("validates custom worker counts before saving a chosen count", async () => {
+    const memento = makeMemento();
+    vi.spyOn(vscode.window, "showQuickPick").mockResolvedValueOnce({ label: "Custom…" });
+    const input = vi.spyOn(vscode.window, "showInputBox").mockResolvedValueOnce(" 12 ");
+    const update = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(vscode.workspace, "getConfiguration").mockReturnValue({
+      update,
+      inspect: () => undefined,
+    } as never);
+
+    expect(await ensureWorkerCount(memento, configWith(4) as never, loggerStub()))
+      .toEqual({ workers: 12, autoAdjusted: false });
+    const validate = input.mock.calls[0]?.[0]?.validateInput;
+    expect(validate).toBeTypeOf("function");
+    expect(validate?.("  ")).toBe("Value is required");
+    expect(validate?.("2.5")).toContain("Enter an integer");
+    expect(validate?.("0")).toContain("Must be between");
+    expect(validate?.("17")).toContain("Must be between");
+    expect(validate?.("12")).toBeUndefined();
+    expect(update).toHaveBeenCalledWith("maxParallelProcesses", 12, vscode.ConfigurationTarget.Workspace);
+  });
 });

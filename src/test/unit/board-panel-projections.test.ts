@@ -45,6 +45,8 @@ describe("BoardPanel", () => {
 
     expect(lastRender(panel)!.matrix.map((group) => [group.file, group.count])).toEqual([["features/zeta.feature", 3]]);
     expect(matrixTests(lastRender(panel)!)).toEqual(zetaRows.slice(49).map((row) => row.test));
+    await receive(panel, { surface: "board", type: "page", section: "matrix", step: "prev" });
+    expect(matrixTests(lastRender(panel)!)).toEqual(["ALPHA-1", ...zetaRows.slice(0, 49).map((row) => row.test)]);
   });
 
   it("posts the executions rows from the ledger on render", async () => {

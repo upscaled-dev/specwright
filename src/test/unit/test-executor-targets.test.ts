@@ -86,6 +86,16 @@ describe("TestExecutor working-directory inference (monorepo)", () => {
     expect(calls[0]!.workingDir).toBe(nodePath.join(tmpDir, "packages", "other"));
   });
 
+  it("resolves a relative working directory from the process when no folder is open", () => {
+    const workspace = { ...vscode.workspace, workspaceFolders: undefined } as unknown as typeof vscode.workspace;
+    const { executor } = makeExecutor(
+      makeConfig({ workingDirectory: "packages/e2e" }), recordingShell, { workspace }
+    );
+
+    expect(executor.workingDirectoryFor("/repo/features/login.feature"))
+      .toBe(nodePath.resolve(process.cwd(), "packages/e2e"));
+  });
+
   it("stops the config walk at the workspace folder boundary", async () => {
     // A config placed in os.tmpdir() (above the workspace root) must not be picked up;
     // the walk stops at the workspace folder.
@@ -336,6 +346,66 @@ const bddFileData = [ // bdd-data-start
     expect(calls[3]).toContain(`${spec}:11`);
     expect(calls[3]).toContain(`${spec}:15`);
     expect(calls.filter((command) => command.includes("--grep"))).toEqual([]);
+  });
+
+  it.each(["", "generator diagnostic"])("stops an exact run when regeneration fails with stderr %j after Playwright finds no tests", async (stderr) => {
+    writeSpec();
+    const feature = write("features/a.feature", "Feature: F");
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      if (calls.length === 3) {
+        return { success: false, output: "generator diagnostic", error: stderr, returnCode: 2 };
+      }
+      return command === "npx bddgen"
+        ? { success: true, output: "", error: "", returnCode: 0 }
+        : { success: false, output: "Error: no tests found", error: "", returnCode: 1 };
+    };
+    const { executor } = makeExecutor(makeConfig(), shell, { workspace: makeWorkspace() });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+    });
+
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toBe("npx bddgen");
+    expect(calls[1]).toContain("a.feature.spec.js:7");
+    expect(calls[2]).toBe("npx bddgen");
+    expect(result.infrastructureFailure).toContain("bddgen failed while refreshing the exact target");
+    expect(result.infrastructureFailure).toContain("generator diagnostic");
+    expect(calls.filter((command) => command.includes("--grep"))).toEqual([]);
+  });
+
+  it("returns cancellation when an exact-target refresh is stopped", async () => {
+    writeSpec();
+    const feature = write("features/a.feature", "Feature: F");
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      if (calls.length === 3) {
+        controller.abort();
+        return { success: false, output: "refresh interrupted", error: "", returnCode: 1 };
+      }
+      return command === "npx bddgen"
+        ? { success: true, output: "", error: "", returnCode: 0 }
+        : { success: false, output: "Error: no tests found", error: "", returnCode: 1 };
+    };
+    const { executor } = makeExecutor(makeConfig(), shell, { workspace: makeWorkspace() });
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: feature,
+      lineNumber: 3,
+      scenarioName: "S",
+      signal: controller.signal,
+    });
+
+    expect(calls).toHaveLength(3);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("Cancelled");
+    expect(result.infrastructureFailure).toBeUndefined();
   });
 
   it("fails closed if refresh loses one row from an outline batch", async () => {

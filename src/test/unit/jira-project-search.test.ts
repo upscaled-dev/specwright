@@ -58,6 +58,37 @@ function run(
 }
 
 describe("searchJiraProjects", () => {
+  it.each([null, { values: null }, { values: [null, {}, { key: "", name: "invalid" }] }])(
+    "ignores malformed project rows without inventing selectable keys: %j", async (body) => {
+      expect((await run(async () => response(200, body), capturingLogger().logger)).projects).toEqual([]);
+    },
+  );
+
+  it("caps an oversized server page at 200 selectable projects", async () => {
+    const fetchImpl = vi.fn(async () => response(200, page(Array.from({ length: 205 }, (_, index) => ({ key: `P${index}`, name: `Project ${index}` })))));
+    const result = await run(fetchImpl, capturingLogger().logger);
+    expect(result.projects).toHaveLength(200);
+    expect(result.projects.at(-1)?.key).toBe("P199");
+    expect(result.truncated).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("does not send an already cancelled search", async () => {
+    const controller = new AbortController();
+    const reason = new Error("search superseded");
+    controller.abort(reason);
+    const fetchImpl = vi.fn();
+    await expect(run(fetchImpl, capturingLogger().logger, { signal: controller.signal })).rejects.toBe(reason);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("preserves a caller cancellation rather than retrying a fetch error", async () => {
+    const controller = new AbortController();
+    const reason = new Error("search superseded");
+    const fetchImpl = vi.fn(async () => { controller.abort(reason); throw new Error("fetch aborted"); });
+    await expect(run(fetchImpl, capturingLogger().logger, { signal: controller.signal })).rejects.toBe(reason);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
   it("returns key/name pairs from a single final page and sends basic auth", async () => {
     const { logger } = capturingLogger();
     let authHeader: string | undefined;
@@ -253,6 +284,50 @@ describe("searchJiraProjects", () => {
 });
 
 describe("fetchJiraIdentity", () => {
+  it("reports a refused identity response without inventing a server message", async () => {
+    await expect(fetchJiraIdentity({ site: SITE, credentials: { email: EMAIL, token: TOKEN },
+      logger: capturingLogger().logger, fetchImpl: async () => response(403, {}),
+    })).rejects.toThrow("Jira identity check failed (HTTP 403).");
+  });
+
+  it.each(["caller", "deadline"] as const)("ends identity lookup on its %s cancellation", async (cancellation) => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const reason = new Error("caller cancelled lookup");
+      const fetchImpl = vi.fn<FetchLike>((_url, init) => new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      }));
+      const pending = fetchJiraIdentity({ site: SITE, credentials: { email: EMAIL, token: TOKEN },
+        logger: capturingLogger().logger, fetchImpl, signal: controller.signal,
+      });
+      const rejected = cancellation === "caller"
+        ? expect(pending).rejects.toBe(reason)
+        : expect(pending).rejects.toThrow("Could not reach Jira");
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      if (cancellation === "caller") { controller.abort(reason); }
+      else { await vi.runAllTimersAsync(); }
+      await rejected;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([null, {}])("labels a valid response with missing identity fields safely: %j", async (body) => {
+    await expect(fetchJiraIdentity({ site: SITE, credentials: { email: EMAIL, token: TOKEN },
+      logger: capturingLogger().logger, fetchImpl: async () => response(200, body),
+    })).resolves.toBe("an unnamed account");
+  });
+
+  it("cancels identity lookup before any request is sent", async () => {
+    const controller = new AbortController();
+    const reason = new Error("dialog closed"); controller.abort(reason);
+    const fetchImpl = vi.fn();
+    await expect(fetchJiraIdentity({ site: SITE, credentials: { email: EMAIL, token: TOKEN },
+      logger: capturingLogger().logger, fetchImpl, signal: controller.signal,
+    })).rejects.toBe(reason);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   function identity(fetchImpl: FetchLike, logger: Logger): Promise<string> {
     return fetchJiraIdentity({ site: SITE, credentials: { email: EMAIL, token: TOKEN }, logger, fetchImpl });
   }
@@ -363,4 +438,15 @@ describe("fetchJiraIdentity", () => {
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
+});
+
+it("does not retry the identity read after cancellation during backoff", async () => {
+  const controller = new AbortController();
+  const reason = new Error("dialog closed during backoff");
+  const fetchImpl = vi.fn().mockResolvedValue(response(503, "unavailable"));
+  await expect(fetchJiraIdentity({ site: SITE, credentials: { email: EMAIL, token: TOKEN },
+    logger: capturingLogger().logger, fetchImpl, signal: controller.signal, random: () => 0,
+    sleep: async () => { controller.abort(reason); },
+  })).rejects.toBe(reason);
+  expect(fetchImpl).toHaveBeenCalledOnce();
 });

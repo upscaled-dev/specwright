@@ -3,6 +3,8 @@ import {
   XrayConnectionOutcome,
 } from "../../xray/xray-connection-test";
 import { XraySetupPanel } from "../../xray/xray-setup-panel";
+import { WorkspaceTrust } from "../../core/workspace-trust";
+import type { XrayCredentials } from "../../xray/xray-credential-store";
 import {
   WEBVIEW_PROTOCOL_VERSION,
 } from "../../webview/setup-protocol";
@@ -22,6 +24,201 @@ afterEach(() => {
 });
 
 describe("Xray setup panel connection verification", () => {
+  it("settles opening verification when the delegate throws before returning a promise", async () => {
+    stubWorkspaceConfig();
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    await store.setCredentials("acme.atlassian.net", "stored-id", "stored-secret");
+    const show = XraySetupPanel.show.bind(XraySetupPanel);
+    vi.spyOn(XraySetupPanel, "show").mockImplementation((delegate, root) => show({
+      ...delegate,
+      verifyConnection: () => {throw new Error("verification unavailable");},
+    }, root));
+    const panel = await openPanel(commands);
+    await vi.waitFor(() => expect(lastNonBusy(panel)).toEqual({
+      type: "error", message: "Could not verify connection: verification unavailable",
+    }));
+    expect(connStates(panel).at(-1)).toEqual({ type: "conn-state", state: "disconnected", label: "Not connected" });
+    await XraySetupPanel.close();
+    expect(panel.__disposed).toBe(true);
+  });
+
+  it("drains a committed save after the user closes the panel without starting a replacement probe", async () => {
+    stubWorkspaceConfig();
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    const panel = await openPanel(commands);
+    let finishSave!: () => void;
+    const admittedSave = new Promise<void>(resolve => {finishSave = resolve;});
+    const saveSetup = commands.saveSetup.bind(commands);
+    const save = vi.spyOn(commands, "saveSetup").mockImplementation(async input => {
+      await admittedSave;
+      return saveSetup(input);
+    });
+    const probe = vi.spyOn(commands, "probeConnection");
+    const saving = panel.__receive(saveMessage({ clientId: "new-id", clientSecret: "new-secret" }));
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    let closed = false;
+    const closing = XraySetupPanel.close().then(() => {closed = true;});
+    expect(panel.__disposed).toBe(true);
+    expect(closed).toBe(false);
+    const count = panel.webview.__posted.length;
+    finishSave();
+    await Promise.all([saving, closing]);
+    expect(closed).toBe(true);
+    expect(probe).not.toHaveBeenCalled();
+    expect(panel.webview.__posted).toHaveLength(count);
+    expect(await store.getCredentials("acme.atlassian.net")).toEqual({ clientId: "new-id", clientSecret: "new-secret" });
+  });
+
+  it("ignores a ready replay carrying a host revision and keeps the hydrated form usable", async () => {
+    stubWorkspaceConfig();
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    const panel = await openPanel(commands);
+    const count = panel.webview.__posted.length;
+    const revision = (panel.webview.__posted.at(-1) as PostedSetup).revision;
+    await panel.__receive({
+      version: WEBVIEW_PROTOCOL_VERSION, session: sessionOf(panel), document: FIRST_DOCUMENT,
+      revision, surface: "setup", body: { type: "ready" },
+    });
+    expect(panel.webview.__posted).toHaveLength(count);
+    await panel.__receive(saveMessage({ clientId: "new-id", clientSecret: "new-secret", test: false }));
+    expect(await store.getCredentials("acme.atlassian.net")).toEqual({ clientId: "new-id", clientSecret: "new-secret" });
+    expect(connStates(panel).at(-1)?.state).toBe("connected");
+  });
+
+  it("asks for a new secret when the issued same-site mask no longer has stored credentials", async () => {
+    stubWorkspaceConfig();
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    await store.setCredentials("acme.atlassian.net", "old-id", "old-secret");
+    const panel = await openPanel(commands);
+    await vi.waitFor(() => expect(connStates(panel).at(-1)?.state).toBe("connected"));
+    vi.spyOn(store, "getCredentials").mockResolvedValue(undefined);
+    const save = vi.spyOn(commands, "saveSetup");
+    await panel.__receive(saveMessage({ clientId: "new-id", clientSecret: MASK }));
+    expect(lastNonBusy(panel)).toEqual({ type: "validation", errors: { clientSecret: "Enter your Xray client secret" } });
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("reveals a panel still detecting credentials and discards that detection after the user closes it", async () => {
+    stubWorkspaceConfig();
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    let finishPresence!: (present: boolean) => void;
+    const presence = vi.spyOn(store, "hasCredentials").mockReturnValue(new Promise(resolve => {finishPresence = resolve;}));
+    const probe = vi.spyOn(commands, "probeConnection");
+    const opening = commands.connect();
+    await vi.waitFor(() => expect(presence).toHaveBeenCalled());
+    const panel = win.__webviewPanels[0]!;
+    await commands.connect();
+    expect(panel.__revealCount).toBe(1);
+    (panel as unknown as { dispose(): void }).dispose();
+    finishPresence(true);
+    await opening;
+    await XraySetupPanel.close();
+    expect(panel.__disposed).toBe(true);
+    expect(panel.webview.html).toBe("");
+    expect(panel.webview.__posted).toEqual([]);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("requires a new secret when a masked secret is submitted for a different host", async () => {
+    stubWorkspaceConfig();
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    await store.setCredentials("acme.atlassian.net", "old-id", "old-secret");
+    const panel = await openPanel(commands);
+    await vi.waitFor(() => expect(connStates(panel).at(-1)?.state).toBe("connected"));
+    const save = vi.spyOn(commands, "saveSetup");
+    await panel.__receive(saveMessage({ site: "new.atlassian.net", clientId: "new-id", clientSecret: MASK }));
+    expect(lastNonBusy(panel)).toEqual({ type: "validation", errors: { clientSecret: "Enter the credentials for the new site" } });
+    expect(save).not.toHaveBeenCalled();
+    expect(await store.getCredentials("acme.atlassian.net")).toEqual({ clientId: "old-id", clientSecret: "old-secret" });
+    expect(await store.getCredentials("new.atlassian.net")).toBeUndefined();
+  });
+
+  it("preserves a committed save and skips its replacement probe when trust is lost at checking", async () => {
+    stubWorkspaceConfig();
+    let available = true;
+    const { commands, store } = makeCommands("acme.atlassian.net", "global", new WorkspaceTrust(() => available));
+    const panel = await openPanel(commands);
+    const probe = vi.spyOn(commands, "probeConnection");
+    const post = panel.webview.postMessage.bind(panel.webview);
+    vi.spyOn(panel.webview, "postMessage").mockImplementation(message => {
+      const body = (message as PostedSetup).body;
+      if (body.type === "conn-state" && body.state === "checking") {available = false;}
+      return post(message);
+    });
+    await panel.__receive(saveMessage({ clientId: "new-id", clientSecret: "new-secret" }));
+    expect(probe).not.toHaveBeenCalled();
+    expect(await store.getCredentials("acme.atlassian.net")).toEqual({ clientId: "new-id", clientSecret: "new-secret" });
+    expect(postedBodies(panel)).toContainEqual({ type: "saved", site: "acme.atlassian.net", region: "global", jira: false });
+  });
+  it("reports credentials removed between presence detection and verification", async () => {
+    stubWorkspaceConfig();
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    vi.spyOn(store, "hasCredentials").mockResolvedValue(true);
+    vi.spyOn(store, "getCredentials").mockResolvedValue(undefined);
+    const probe = vi.spyOn(commands, "probeConnection");
+    const panel = await openPanel(commands);
+    await vi.waitFor(() => expect(lastNonBusy(panel)).toEqual({
+      type: "error", message: "Could not verify connection: stored credentials could not be read.",
+    }));
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores a stored credential %s after the panel closes", async (outcome) => {
+    stubWorkspaceConfig();
+    const { commands, store } = makeCommands("acme.atlassian.net");
+    vi.spyOn(store, "hasCredentials").mockResolvedValue(true);
+    let resolve!: (value: XrayCredentials) => void;
+    let reject!: (error: Error) => void;
+    const read = vi.spyOn(store, "getCredentials").mockReturnValue(new Promise((done, fail) => {
+      resolve = done;
+      reject = fail;
+    }));
+    const probe = vi.spyOn(commands, "probeConnection");
+    const panel = await openPanel(commands);
+    await vi.waitFor(() => expect(read).toHaveBeenCalled());
+    const closing = XraySetupPanel.close();
+    const count = panel.webview.__posted.length;
+    if (outcome === "resolve") {resolve({ clientId: "id", clientSecret: "secret" });}
+    else {reject(new Error("retired credential read"));}
+    await closing;
+    expect(panel.__disposed).toBe(true);
+    expect(probe).not.toHaveBeenCalled();
+    expect(panel.webview.__posted).toHaveLength(count);
+  });
+
+  it("does not commit a masked credential save when trust is lost during its read", async () => {
+    stubWorkspaceConfig();
+    let available = true;
+    const { commands, store } = makeCommands("acme.atlassian.net", "global", new WorkspaceTrust(() => available));
+    await store.setCredentials("acme.atlassian.net", "stored-id", "stored-secret");
+    vi.spyOn(commands, "probeConnection").mockResolvedValue(connected("acme.atlassian.net"));
+    const panel = await openPanel(commands);
+    await vi.waitFor(() => expect(connStates(panel).at(-1)?.state).toBe("connected"));
+    let resolve!: (value: XrayCredentials) => void;
+    const read = vi.spyOn(store, "getCredentials").mockReturnValueOnce(new Promise((done) => {resolve = done;}));
+    const save = vi.spyOn(commands, "saveSetup");
+    const saving = panel.__receive(saveMessage({ clientId: MASK, clientSecret: MASK }));
+    await vi.waitFor(() => expect(read).toHaveBeenCalled());
+    available = false;
+    resolve({ clientId: "stored-id", clientSecret: "stored-secret" });
+    await saving;
+    expect(save).not.toHaveBeenCalled();
+    expect(await store.getCredentials("acme.atlassian.net")).toEqual({ clientId: "stored-id", clientSecret: "stored-secret" });
+  });
+
+  it("rejects a Jira token without an email before saving or probing", async () => {
+    stubWorkspaceConfig();
+    const { commands } = makeCommands("acme.atlassian.net");
+    const panel = await openPanel(commands);
+    const save = vi.spyOn(commands, "saveSetup");
+    const probe = vi.spyOn(commands, "probeConnection");
+    await panel.__receive(saveMessage({ jiraToken: "token", jiraEmail: " " }));
+    expect(lastNonBusy(panel)).toEqual({ type: "validation", errors: {
+      jiraEmail: "Enter both a Jira email and API token, or leave both blank",
+    } });
+    expect(save).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
+  });
   function connStates(panel: StubPanel): Array<{ type: string; state: string; label: string }> {
     return (postedBodies(panel) as Array<{ type: string; state?: string; label?: string }>)
       .filter((m): m is { type: string; state: string; label: string } => m.type === "conn-state");

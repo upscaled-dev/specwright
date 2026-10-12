@@ -3,6 +3,9 @@ import * as vscode from "vscode";
 import { ProviderRegistry, shouldRegisterCompletion } from "../../core/provider-registry";
 import type { ExtensionConfig } from "../../core/extension-config";
 import type { FeatureParser } from "../../parsers/feature-parser";
+import { StepResolver } from "../../providers/step-resolver";
+import { StepDiagnosticsProvider } from "../../providers/step-diagnostics-provider";
+import { UnusedStepDiagnosticsProvider } from "../../providers/unused-step-diagnostics-provider";
 import type { Logger } from "../../utils/logger";
 
 interface MockableLanguages {
@@ -17,6 +20,14 @@ interface MockableLanguages {
     diagnosticCollectionDisposeCount: number;
     completionRegisterCount: number;
     completionDisposeCount: number;
+    hoverRegisterCount: number;
+    hoverDisposeCount: number;
+    referenceRegisterCount: number;
+    referenceDisposeCount: number;
+    usageCodeLensRegisterCount: number;
+    usageCodeLensDisposeCount: number;
+    documentFormattingRegisterCount: number;
+    documentFormattingDisposeCount: number;
   };
   __resetCounters: () => void;
 }
@@ -118,6 +129,146 @@ describe("ProviderRegistry", () => {
   });
 
   afterEach(() => vi.restoreAllMocks());
+
+  it.each([undefined, [], [{ uri: vscode.Uri.file("/ws"), name: "shop", index: 0 }]])(
+    "reports project capabilities from discovered features and step definitions for %j", async (folders) => {
+      const previous = vscode.workspace.workspaceFolders;
+      Object.defineProperty(vscode.workspace, "workspaceFolders", { configurable: true, value: folders });
+      const { config } = makeFakeConfig({ enableCodeLens: false, enableStepDefinitionNavigation: false, stepDefinitionPaths: ["steps/*.ts"] });
+      vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([vscode.Uri.file("/ws/checkout.feature")]);
+      vi.spyOn(StepResolver.prototype, "loadAllStepDefs").mockResolvedValue([
+        { pattern: "a basket", filePath: "/ws/steps/cart.ts", line: 2, regex: /^a basket$/, isRegex: false },
+      ]);
+      const registry = new ProviderRegistry(config, stubFeatureParser, stubLogger);
+      try {
+        expect(await registry.projectCapabilities()).toEqual({
+          workspace: (folders?.length ?? 0) > 0, featureFiles: 1, stepDefinitions: 1, stepDefinitionPaths: ["steps/*.ts"],
+        });
+      } finally {
+        registry.dispose();
+        Object.defineProperty(vscode.workspace, "workspaceFolders", { configurable: true, value: previous });
+      }
+    },
+  );
+
+  it("refreshes enabled providers with changed step paths while reusing unchanged registrations", () => {
+    vi.spyOn(StepResolver.prototype, "loadAllStepDefs").mockResolvedValue([]);
+    const diagnosticsPaths = vi.spyOn(StepDiagnosticsProvider.prototype, "setStepGlobs");
+    const unusedPaths = vi.spyOn(UnusedStepDiagnosticsProvider.prototype, "setStepGlobs");
+    const ctx = makeFakeConfig({
+      enableCodeLens: false, enableStepDefinitionNavigation: true, enableStepDiagnostics: true,
+      stepDefinitionPaths: ["steps/*.ts"], stepAutocompleteMode: "on", tagAutocompleteMode: "on",
+      stepLiteralPromotionMode: "on", stepReferencesMode: "on", stepHoverMode: "on",
+      unusedStepDiagnosticsMode: "on", enableStepsPanel: true,
+    });
+    const registry = new ProviderRegistry(ctx.config, stubFeatureParser, stubLogger);
+    try {
+      registry.applyCurrent();
+      const initial = { ...lang.__counters };
+      registry.applyCurrent();
+      expect(lang.__counters).toEqual(initial);
+      expect(diagnosticsPaths).not.toHaveBeenCalled();
+      expect(unusedPaths).not.toHaveBeenCalled();
+
+      ctx.set({ stepDefinitionPaths: ["steps/*.ts", "support/*.ts"] });
+      ctx.fireChange();
+      expect(diagnosticsPaths).toHaveBeenCalledWith(["steps/*.ts", "support/*.ts"]);
+      expect(unusedPaths).toHaveBeenCalledWith(["steps/*.ts", "support/*.ts"]);
+      expect(lang.__counters.completionRegisterCount).toBe(initial.completionRegisterCount + 1);
+      expect(lang.__counters.codeActionRegisterCount).toBe(initial.codeActionRegisterCount + 1);
+      expect(registry.stepPaths).toEqual(["steps/*.ts", "support/*.ts"]);
+      const updated = { ...lang.__counters };
+      ctx.fireChange();
+      expect(lang.__counters).toEqual(updated);
+
+      ctx.set({ stepLiteralPromotionMode: "off", enableStepDefinitionNavigation: false });
+      ctx.fireChange();
+      expect(lang.__counters.codeActionDisposeCount).toBe(updated.codeActionDisposeCount + 1);
+      expect(registry.stepPaths).toEqual([]);
+    } finally { registry.dispose(); }
+  });
+
+  it("updates navigation providers when step paths change and removes them when disabled", () => {
+    const ctx = makeFakeConfig({
+      enableCodeLens: false, enableStepDefinitionNavigation: false,
+      stepDefinitionPaths: ["features/steps/**/*.ts"], stepReferencesMode: "on", stepHoverMode: "on",
+    });
+    const registry = new ProviderRegistry(ctx.config, stubFeatureParser, stubLogger);
+    registry.applyCurrent();
+    expect(registry.stepReferencesActive).toBe(true);
+    expect(registry.hoverActive).toBe(true);
+    expect(lang.__counters.referenceRegisterCount).toBe(1);
+    expect(lang.__counters.hoverRegisterCount).toBe(1);
+
+    ctx.set({ stepDefinitionPaths: ["tests/steps/**/*.ts"] });
+    ctx.fireChange();
+    expect(lang.__counters.referenceRegisterCount).toBe(2);
+    expect(lang.__counters.referenceDisposeCount).toBe(1);
+    expect(lang.__counters.hoverRegisterCount).toBe(2);
+    expect(lang.__counters.hoverDisposeCount).toBe(1);
+
+    ctx.set({ stepReferencesMode: "off", stepHoverMode: "off" });
+    ctx.fireChange();
+    expect(registry.stepReferencesActive).toBe(false);
+    expect(registry.hoverActive).toBe(false);
+    expect(lang.__counters.referenceDisposeCount).toBe(2);
+    expect(lang.__counters.hoverDisposeCount).toBe(2);
+    registry.dispose();
+  });
+
+  it("keeps formatting and usage CodeLens registered only while enabled", () => {
+    const ctx = makeFakeConfig({
+      enableCodeLens: false, enableStepDefinitionNavigation: false,
+      stepDefinitionPaths: ["features/steps/**/*.ts"], tableFormattingMode: "on", stepUsageCodeLensMode: "on",
+    });
+    const registry = new ProviderRegistry(ctx.config, stubFeatureParser, stubLogger);
+    registry.applyCurrent();
+    registry.applyCurrent();
+    expect(registry.tableFormattingActive).toBe(true);
+    expect(registry.usageCodeLensActive).toBe(true);
+    expect(registry.stepUsageIndexActive).toBe(true);
+    expect(lang.__counters.documentFormattingRegisterCount).toBe(1);
+    expect(lang.__counters.usageCodeLensRegisterCount).toBe(1);
+
+    ctx.set({ stepDefinitionPaths: ["tests/steps/**/*.ts"] });
+    ctx.fireChange();
+    expect(lang.__counters.usageCodeLensRegisterCount).toBe(2);
+    expect(lang.__counters.usageCodeLensDisposeCount).toBe(1);
+
+    ctx.set({ tableFormattingMode: "off", stepUsageCodeLensMode: "off" });
+    ctx.fireChange();
+    expect(registry.tableFormattingActive).toBe(false);
+    expect(registry.usageCodeLensActive).toBe(false);
+    expect(registry.stepUsageIndexActive).toBe(false);
+    expect(lang.__counters.documentFormattingDisposeCount).toBe(1);
+    expect(lang.__counters.usageCodeLensDisposeCount).toBe(2);
+    registry.dispose();
+  });
+
+  it("reuses the shared usage index while unused-step diagnostics changes paths", () => {
+    const ctx = makeFakeConfig({
+      enableCodeLens: false, enableStepDefinitionNavigation: false,
+      stepDefinitionPaths: ["features/steps/**/*.ts"], unusedStepDiagnosticsMode: "on",
+    });
+    const registry = new ProviderRegistry(ctx.config, stubFeatureParser, stubLogger);
+    registry.applyCurrent();
+    const index = registry.getUsageIndex();
+    const rescan = vi.spyOn(index, "rescan");
+    expect(registry.unusedStepDiagnosticsActive).toBe(true);
+    expect(registry.stepUsageIndexActive).toBe(true);
+
+    ctx.set({ stepDefinitionPaths: ["tests/steps/**/*.ts"] });
+    ctx.fireChange();
+    expect(registry.getUsageIndex()).toBe(index);
+    expect(rescan).toHaveBeenCalledTimes(1);
+    expect(registry.unusedStepDiagnosticsActive).toBe(true);
+
+    ctx.set({ unusedStepDiagnosticsMode: "off" });
+    ctx.fireChange();
+    expect(registry.unusedStepDiagnosticsActive).toBe(false);
+    expect(registry.stepUsageIndexActive).toBe(false);
+    registry.dispose();
+  });
 
   it("short-circuits traceability evidence with sequential, case-insensitive reads", async () => {
     const { config } = makeFakeConfig({

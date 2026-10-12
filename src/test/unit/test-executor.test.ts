@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { makeConfig, makeExecutor } from "./helpers/test-executor-driver";
+import { makeFixture, reportJson, type Fixture } from "./helpers/test-provider-fixture";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -14,6 +15,170 @@ interface ShellCall {
   workingDir: string;
   extraEnv?: NodeJS.ProcessEnv | undefined;
 }
+
+describe("TestExecutor tagged batch execution", () => {
+  let fixture: Fixture;
+
+  beforeEach(() => { fixture = makeFixture(); });
+  afterEach(() => { fs.rmSync(fixture.root, { recursive: true, force: true }); });
+
+  it("generates for the exact tag expression and returns the matching report result", async () => {
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command, _workingDir, env) => {
+      calls.push(command);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+        fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], reportJson(fixture, [
+          { title: "Passing scenario", line: 6, status: "passed" },
+        ]));
+      }
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "npx bddgen", workingDirectory: fixture.root }),
+      shell
+    );
+
+    const result = await executor.runAllTestsWithTagsOutput("@smoke and not @wip");
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toContain("--tags");
+    expect(calls[0]).toContain("@smoke and not @wip");
+    expect(calls[1]).toContain("playwright test");
+    expect(result.success).toBe(true);
+    expect(result.scenarioResults).toMatchObject({ [`${fixture.featurePath}:4`]: "passed" });
+  });
+
+  it.each(["", "SyntaxError in checkout.steps.ts"])("surfaces a generator failure with stderr %j and runs no tests", async (stderr) => {
+    const calls: string[] = [];
+    const streamed: string[] = [];
+    const shell: ShellRunner = async (command, _workingDir, _env, _signal, onOutput) => {
+      calls.push(command);
+      onOutput?.("stderr", "SyntaxError in checkout.steps.ts");
+      return {
+        success: false, output: "SyntaxError in checkout.steps.ts", error: stderr, returnCode: 1,
+        outputStreamed: true,
+      };
+    };
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "npx bddgen", workingDirectory: fixture.root }),
+      shell
+    );
+
+    const result = await executor.runAllTestsWithTagsOutput("@smoke", undefined, undefined, {
+      onOutput: (_stream, chunk) => streamed.push(chunk),
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("--tags");
+    expect(result.infrastructureFailure).toContain("SyntaxError in checkout.steps.ts");
+    expect(result.outputStreamed).toBe(true);
+    expect(streamed).toEqual(["SyntaxError in checkout.steps.ts"]);
+  });
+
+  it("returns cancellation while generation is stopping and never starts Playwright", async () => {
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      calls.push(command);
+      controller.abort(new Error("Stop tagged run"));
+      return { success: false, output: "Generating steps", error: "terminated", returnCode: 1 };
+    };
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "npx bddgen", workingDirectory: fixture.root }),
+      shell
+    );
+
+    const result = await executor.runAllTestsWithTagsOutput("@smoke", controller.signal);
+
+    expect(calls).toHaveLength(1);
+    expect(result).toMatchObject({ success: false, error: "Cancelled" });
+  });
+
+  it("preserves configured reporters while still parsing the JSON report they write", async () => {
+    const config = makeConfig({ bddgenCommand: "", workingDirectory: fixture.root });
+    vi.spyOn(config, "useConfigReporters", "get").mockReturnValue(true);
+    const commands: string[] = [];
+    const shell: ShellRunner = async (command, _workingDir, env) => {
+      commands.push(command);
+      fs.writeFileSync(env!["PLAYWRIGHT_JSON_OUTPUT_NAME"]!, reportJson(fixture, [
+        { title: "Passing scenario", line: 6, status: "passed" },
+      ]));
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(config, shell);
+
+    const result = await executor.runSuiteWithOutput();
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).not.toContain("--reporter");
+    expect(result.scenarioResults).toMatchObject({ [`${fixture.featurePath}:4`]: "passed" });
+  });
+
+  it("explains a missing JSON report when the project owns its reporter configuration", async () => {
+    const config = makeConfig({ bddgenCommand: "", workingDirectory: fixture.root });
+    vi.spyOn(config, "useConfigReporters", "get").mockReturnValue(true);
+    const warning = vi.spyOn(Logger.prototype, "warn");
+    const { executor } = makeExecutor(config, async () => ({
+      success: true, output: "Playwright finished", error: "", returnCode: 0,
+    }));
+
+    try {
+      const result = await executor.runSuiteWithOutput();
+      expect(result.scenarioDetails).toEqual([]);
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining(
+        "useConfigReporters is on but no JSON report was produced"
+      ));
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("keeps configured reporters for an exact scenario run as well", async () => {
+    const config = makeConfig({ bddgenCommand: "", workingDirectory: fixture.root });
+    vi.spyOn(config, "useConfigReporters", "get").mockReturnValue(true);
+    const commands: string[] = [];
+    const shell: ShellRunner = async (command, _workingDir, env) => {
+      commands.push(command);
+      fs.writeFileSync(env!["PLAYWRIGHT_JSON_OUTPUT_NAME"]!, reportJson(fixture, [
+        { title: "Passing scenario", line: 6, status: "passed" },
+      ]));
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(config, shell);
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: fixture.featurePath,
+      lineNumber: 4,
+      scenarioName: "Passing scenario",
+    });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).not.toContain("--reporter");
+    expect(commands[0]).toContain(":6");
+    expect(result.scenarioResults).toMatchObject({ [`${fixture.featurePath}:4`]: "passed" });
+  });
+
+  it("applies and releases the requested worker count across suite runs", async () => {
+    const commands: string[] = [];
+    const shell: ShellRunner = async (command, _workingDir, env) => {
+      commands.push(command);
+      fs.writeFileSync(env!["PLAYWRIGHT_JSON_OUTPUT_NAME"]!, JSON.stringify({ suites: [] }));
+      return { success: true, output: "", error: "", returnCode: 0 };
+    };
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "", workingDirectory: fixture.root }),
+      shell
+    );
+
+    executor.setForceParallel(true, 3);
+    await executor.runSuiteWithOutput();
+    executor.setForceParallel(false);
+    await executor.runSuiteWithOutput();
+
+    expect(commands[0]).toContain("--workers=3");
+    expect(commands[1]).not.toContain("--workers=");
+  });
+});
 
 
 describe("TestExecutor temporary report lifetime", () => {
@@ -181,6 +346,25 @@ describe("TestExecutor preRunCommand", () => {
     };
   });
 
+  it("cancels during a failed pre-run command before launching generation or Playwright", async () => {
+    const controller = new AbortController();
+    const invoked: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      invoked.push(command);
+      controller.abort(new Error("Stop preparation"));
+      return { success: false, output: "Preparing fixtures", error: "terminated", returnCode: 1 };
+    };
+    const { executor } = makeExecutor(
+      makeConfig({ preRunCommand: "prepare fixtures", bddgenCommand: "npx bddgen" }),
+      shell
+    );
+
+    const result = await executor.runSuiteWithOutput(controller.signal);
+
+    expect(invoked).toEqual(["prepare fixtures"]);
+    expect(result).toMatchObject({ success: false, error: "Cancelled" });
+  });
+
   it("does not exec a pre-run command when the setting is empty", async () => {
     // bddgen disabled so this stays focused on pre-run sequencing (bddgen-first is covered separately).
     const config = makeConfig({ preRunCommand: "", bddgenCommand: "" });
@@ -235,6 +419,23 @@ describe("TestExecutor preRunCommand", () => {
       details: [],
       invocation: scenario,
     }));
+  });
+
+  it("names a missing pre-run binary in the failure shown to the runner", async () => {
+    const shell: ShellRunner = async (command, workingDir) => {
+      calls.push({ command, workingDir });
+      return { success: false, output: "fixturegen: command not found", error: "", returnCode: 127 };
+    };
+    const { executor } = makeExecutor(
+      makeConfig({ preRunCommand: "fixturegen prepare", bddgenCommand: "" }),
+      shell
+    );
+
+    const result = await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 1 });
+
+    expect(calls.map((call) => call.command)).toEqual(["fixturegen prepare"]);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('The command "fixturegen" was not found.');
   });
 
   it("continues to playwright when the pre-run command exits zero", async () => {
@@ -306,6 +507,38 @@ describe("TestExecutor runScenarioWithOutput bddgen-first", () => {
       details: [],
       invocation: target.scenario,
     }));
+  });
+
+  it("returns a generation infrastructure failure when bddgen cannot start", async () => {
+    const shell: ShellRunner = async (command) => {
+      calls.push({ command });
+      throw new Error("spawn denied");
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), shell);
+
+    const result = await executor.runScenarioWithOutput({ filePath: "/tmp/x.feature", lineNumber: 5 });
+
+    expect(calls.map(({ command }) => command)).toEqual(["npx bddgen"]);
+    expect(result.success).toBe(false);
+    expect(result.infrastructureFailure).toContain("spawn denied");
+  });
+
+  it("returns cancellation when bddgen throws after the run was stopped", async () => {
+    const controller = new AbortController();
+    const shell: ShellRunner = async (command) => {
+      calls.push({ command });
+      controller.abort();
+      throw new Error("process closed during cancellation");
+    };
+    const { executor } = makeExecutor(makeConfig({ bddgenCommand: "npx bddgen" }), shell);
+
+    const result = await executor.runScenarioWithOutput({
+      filePath: "/tmp/x.feature", lineNumber: 5, signal: controller.signal,
+    });
+
+    expect(calls.map(({ command }) => command)).toEqual(["npx bddgen"]);
+    expect(result.error).toBe("Cancelled");
+    expect(result.infrastructureFailure).toBeUndefined();
   });
 
   it("skips code generation when the run does not need an exact generated target", async () => {

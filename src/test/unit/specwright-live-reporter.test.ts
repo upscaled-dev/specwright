@@ -111,6 +111,25 @@ describe("SpecwrightLiveReporter", () => {
     ]);
   });
 
+  it("reports a configless run and emits retry progress only after the initial attempt", () => {
+    const test = testCase({ retries: 1 });
+    const reporter = new SpecwrightLiveReporter();
+    const withoutConfigFile = config();
+    delete withoutConfigFile.configFile;
+    reporter.onBegin(withoutConfigFile, suite([test]));
+    reporter.onTestBegin(test, testResult());
+    expect(records()).toEqual([{ kind: "run-begin", rootDir: "/repo/.features-gen", total: 1 }]);
+    reporter.onTestEnd(test, testResult({ status: "failed", error: { message: "assertion failed" } }));
+    reporter.onTestBegin(test, testResult({ retry: 1 }));
+    reporter.onTestEnd(test, testResult({ status: "timedOut", retry: 1, error: { message: "timeout" } }));
+    expect(records().filter((record) => record.kind === "test-end").map((record) => [record.status, record.retry]))
+      .toEqual([["failed", 0], ["timedOut", 1]]);
+    expect(records().filter((record) => record.kind === "run-progress")).toEqual([
+      { kind: "run-progress", retrying: 1, retry: { title: "logs in", attempt: 2, projectName: "chromium" } },
+      { kind: "run-progress", retrying: 0 },
+    ]);
+  });
+
   it("revises a failed attempt when its retry passes", () => {
     const test = testCase({ retries: 1 });
     const reporter = new SpecwrightLiveReporter();

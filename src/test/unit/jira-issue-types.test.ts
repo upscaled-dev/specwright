@@ -414,3 +414,32 @@ describe("resolveExecutionIssueType", () => {
     }
   });
 });
+
+describe("issue type resolution response boundaries", () => {
+  it.each([null, {}, { issueTypes: "invalid" }])("does not invent a match from malformed metadata %j", async body => {
+    const { logger } = capturingLogger();
+    const result = await resolve(() => Promise.resolve(response(200, body)), logger);
+    expect(result).toMatchObject({ kind: "unavailable", availableNames: [], subtaskNames: [] });
+  });
+
+  it("uses the configured global transport when no test transport is supplied", async () => {
+    const { logger } = capturingLogger();
+    const fetchMock = vi.fn().mockResolvedValue(response(200, meta([{ id: "1", name: "Test Execution" }])));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(resolveExecutionIssueType({ site: SITE, credentials: { email: EMAIL, token: TOKEN },
+        projectKey: "CALC", executionIssueType: "Test Execution", logger })).resolves.toEqual({ kind: "resolved", name: "Test Execution" });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("starts no request when issue type resolution is already cancelled", async () => {
+    const { logger } = capturingLogger();
+    const fetchImpl = vi.fn<FetchLike>();
+    const controller = new AbortController(); controller.abort(new Error("cancelled"));
+    await expect(resolveExecutionIssueType({ site: SITE, credentials: { email: EMAIL, token: TOKEN },
+      projectKey: "CALC", executionIssueType: "Test Execution", logger, fetchImpl, signal: controller.signal }))
+      .resolves.toEqual({ kind: "unknown" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});

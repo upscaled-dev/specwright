@@ -216,3 +216,41 @@ describe("traceability organization projection bounds", () => {
     expect(result.rows.find((row) => row.view === "repository" && row.label.includes("Repository display reached"))).toBeDefined();
   });
 });
+
+describe("organization preview availability", () => {
+  it.each([false, true])("describes an incomplete repository (truncated %s) without offering a run", truncated => {
+    const value = organization({ repositories: [{ projectKey: "SHOP", tests: [{ key: "SHOP-1" }], complete: false, truncated, errors: [] }] });
+    const rows = projectTraceabilityOrganization(value, mapped).rows;
+    expect(rows.find(row => row.label === "SHOP")?.description).toContain(truncated ? "truncated" : "partial");
+    expect(rows.flatMap(row => row.actions).some(action => action.id === "preview-run")).toBe(false);
+    expect(resolveRepositoryFolderPreview(value, mapped, "SHOP", "/")).toBeUndefined();
+  });
+
+  it("refuses a folder preview with no local mappings or no matching remote tests", () => {
+    const value = repository([{ key: "SHOP-2", repositoryFolder: { path: "/Other", name: "Other" } }]);
+    expect(resolveRepositoryFolderPreview(value, mapped, "SHOP", "/Other")).toBeUndefined();
+    expect(resolveRepositoryFolderPreview(value, mapped, "SHOP", "/Missing")).toBeUndefined();
+    expect(resolveRepositoryFolderPreview(value, mapped, "UNKNOWN", "/Other")).toBeUndefined();
+  });
+
+  it("deduplicates a scenario linked to more than one remote test in a folder preview", () => {
+    const value = repository([
+      { key: "SHOP-1", repositoryFolder: { path: "/A", name: "A" } },
+      { key: "SHOP-2", repositoryFolder: { path: "/A", name: "A" } },
+    ]);
+    const local = { ...mapped, links: [mapped.links[0]!, mapped.links[0]!, { ...mapped.links[0]!, testKey: "SHOP-2" }] };
+    const preview = resolveRepositoryFolderPreview(value, local, "SHOP", "/A");
+    expect(preview?.selection.scenarios).toEqual([scenario]);
+    expect(preview?.remoteTests).toBe(2);
+  });
+
+  it("shows omitted Test Set projects and leaves an empty set without a run action", () => {
+    const value = organization({ omittedTestSetProjectCount: 2, testSetProjects: [{
+      projectKey: "SHOP", complete: true, truncated: false, errors: [],
+      testSets: [{ key: "SHOP-10", issueId: "10", members: [], remoteMemberCount: 0, membershipComplete: true, truncated: false, errors: [] }],
+    }] });
+    const rows = projectTraceabilityOrganization(value, mapped).rows;
+    expect(rows.find(row => row.label === "SHOP-10")?.actions.map(action => action.id)).toEqual(["open", "copy"]);
+    expect(rows.some(row => row.label.includes("2") && row.label.includes("project"))).toBe(true);
+  });
+});

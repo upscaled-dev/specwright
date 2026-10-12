@@ -73,6 +73,42 @@ describe("associations after test creation", () => {
     expect(add).toHaveBeenCalledWith("test-set", "set-111", ["returned-9"], expect.any(AbortSignal));
   });
 
+  it("deduplicates returned ids and keeps provider warnings visible without duplicating membership", async () => {
+    const add = vi.fn().mockResolvedValue({ addedTests: ["returned-9"], warning: "membership is indexing" });
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const logger = Logger.create();
+    const logged = vi.spyOn(logger, "warn");
+
+    await associateCreatedTests(adapter(add), TARGETS.slice(0, 1), [
+      { key: "CALC-9", issueId: "returned-9", warnings: [] },
+      { key: "CALC-10", issueId: "returned-9", warnings: [] },
+    ], "CALC", logger, trustedWorkspace());
+
+    expect(add).toHaveBeenCalledWith("test-set", "set-111", ["returned-9"], expect.any(AbortSignal));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("1 provider warning logged"));
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining("warning associating created tests"), expect.objectContaining({
+      key: "CALC-111", warnings: "membership is indexing",
+    }));
+  });
+
+  it("names created tests when association support disappears after the target was chosen", async () => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+
+    await associateCreatedTests({ testAuthoring: {} } as TraceabilityAdapter, TARGETS, CREATED, "CALC", Logger.create(), trustedWorkspace());
+
+    expect(warning).toHaveBeenCalledWith("Created tests remain: CALC-9. The tracker no longer supports association. Association not attempted for Test Set CALC-111 and Test Plan CALC-222.");
+  });
+
+  it("does not claim created tests when the create response was empty", async () => {
+    const add = vi.fn();
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+
+    await associateCreatedTests(adapter(add), TARGETS, [], "CALC", Logger.create(), trustedWorkspace());
+
+    expect(add).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith("No tests were created. No returned test issue IDs are available. Association not attempted for Test Set CALC-111 and Test Plan CALC-222.");
+  });
+
   it("sends no membership request when created tests have no returned ids", async () => {
     const add = vi.fn();
     const warning = vi.spyOn(vscode.window, "showWarningMessage");

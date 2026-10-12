@@ -1,14 +1,13 @@
 /// <reference path="../../webview/client/globals.d.ts" />
 
-import { build } from "esbuild";
 import axe from "axe-core";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
 import * as vscode from "vscode";
 import { describe, expect, it, vi } from "vitest";
+import { browserClientCode } from "./helpers/browser-client-bundle.mjs";
 import { TestDiscoveryManager } from "../../core/test-discovery-manager";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { buildBoardViewModel } from "../../traceability/board-data";
@@ -21,7 +20,7 @@ import { TraceabilityViewProvider } from "../../traceability/traceability-view-p
 import { validatedAdapter } from "../../traceability/validated-adapter";
 import { Logger } from "../../utils/logger";
 import { PlaywrightJsonParser } from "../../utils/playwright-json-parser";
-import { TRACEABILITY_VIEW_PROTOCOL_VERSION, type TraceabilityHostBody, type TraceabilityWireRow } from "../../webview/traceability-view-protocol";
+import { TRACEABILITY_PREVIEW_MEMBER_LIMIT, TRACEABILITY_VIEW_PROTOCOL_VERSION, type TraceabilityHostBody, type TraceabilityWireRow } from "../../webview/traceability-view-protocol";
 import { XrayClient, type FetchLike } from "../../xray/xray-client";
 import { XrayMetadataCapability } from "../../xray/xray-metadata";
 import { XrayMetadataCache } from "../../xray/xray-metadata-cache";
@@ -41,13 +40,6 @@ const OPEN = { id: "open", label: "Open", icon: "go-to-file" } as const;
 const OPEN_REMOTE = { id: "open", label: "Open in tracker", icon: "link-external" } as const;
 const COPY = { id: "copy", label: "Copy", icon: "copy" } as const;
 
-let bundle: Promise<string> | undefined;
-function clientCode(): Promise<string> {
-  bundle ??= build({ entryPoints: ["src/webview/traceability-view.ts"], bundle: true, platform: "browser", format: "iife", outfile: "dist/traceability-view.js" })
-    .then(() => readFile("dist/traceability-view.js", "utf8"));
-  return bundle;
-}
-
 async function rig(restored?: unknown): Promise<{ dom: JSDOM; messages: unknown[]; states: unknown[]; send(body: TraceabilityHostBody, revision?: number): void }> {
   const webview = { cspSource: "https://traceability.test", asWebviewUri: (uri: vscode.Uri) => uri } as vscode.Webview;
   const html = renderTraceabilityViewDocument(webview, vscode.Uri.file("/dist"), "local").replace(/<script[^>]*src="[^"]*"><\/script>/, "");
@@ -56,7 +48,7 @@ async function rig(restored?: unknown): Promise<{ dom: JSDOM; messages: unknown[
   const messages: unknown[] = [];
   const states: unknown[] = [];
   Object.defineProperty(dom.window, "acquireVsCodeApi", { value: () => ({ postMessage: (message: unknown) => messages.push(message), getState: () => restored, setState: (state: unknown) => states.push(state) }) });
-  dom.window.eval(await clientCode());
+  dom.window.eval(await browserClientCode("traceability-view"));
   if (messages.length !== 1) {
     throw new Error(`Traceability client did not initialize: ${html}`);
   }
@@ -110,7 +102,7 @@ async function mountProviderClient(
   Object.defineProperty(dom.window, "TextEncoder", { value: TextEncoder });
   Object.defineProperty(dom.window, "acquireVsCodeApi", { value: () => ({ postMessage: receive, getState: () => undefined, setState: () => undefined }) });
   post = (message) => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message }));
-  dom.window.eval(await clientCode());
+  dom.window.eval(await browserClientCode("traceability-view"));
   return {
     dom,
     setVisible: (next) => {
@@ -157,6 +149,71 @@ function mutation(dom: JSDOM, ready: () => boolean): Promise<void> {
 }
 
 describe("traceability view client", () => {
+  it.each([
+    ["empty", "Add @TEST_KEY tags to scenarios. Local mappings update automatically."],
+    ["disconnected", "Set up Xray integration to map scenarios and publish results."],
+    ["untrusted", "Traceability stays offline while this workspace is untrusted."],
+  ] as const)("renders a readable %s status before any row detail is available", async (state, text) => {
+    const view = await rig();
+    view.send({ type: "begin", generation: 1, state, total: 0 });
+    view.send({ type: "end", generation: 1 });
+    expect(view.dom.window.document.getElementById("tree")?.textContent).toBe(`Traceability${text}`);
+    expect(view.dom.window.document.getElementById("tree")?.getAttribute("role")).toBe("region");
+    view.dom.window.close();
+  });
+
+  it("keeps a filtered parent focused when its children are hidden and a leaf has no default action", async () => {
+    const view = await rig();
+    const rows = [
+      { id: "checkout", label: "Checkout", icon: "folder", expandable: true, actions: [] },
+      { id: "guest", parentId: "checkout", label: "Guest payment", icon: "circle", expandable: false, actions: [] },
+    ];
+    view.send({ type: "begin", generation: 1, state: "ready", total: 2 });
+    view.send({ type: "chunk", generation: 1, offset: 0, rows });
+    view.send({ type: "end", generation: 1 });
+    const document = view.dom.window.document;
+    const before = view.messages.length;
+    document.querySelector<HTMLElement>('[data-id="guest"]')!.click();
+    document.querySelector<HTMLElement>('[data-id="guest"]')!.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(view.messages).toHaveLength(before);
+    const filter = document.getElementById("filter") as HTMLInputElement;
+    filter.value = "Checkout";
+    filter.dispatchEvent(new view.dom.window.Event("input"));
+    const parent = document.querySelector<HTMLElement>('[data-id="checkout"]')!;
+    parent.focus();
+    parent.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(document.activeElement).toBe(parent);
+    expect(document.querySelector('[data-id="guest"]')).toBeNull();
+    view.dom.window.close();
+  });
+
+  it("retires saved selection and expansion ids that disappeared from a refreshed tree", async () => {
+    const view = await rig({ expanded: ["removed-folder"], selected: ["removed-test"] });
+    const rows = [{ id: "checkout", label: "Checkout", icon: "circle", expandable: false, actions: [OPEN], defaultAction: "open" }];
+    view.send({ type: "begin", generation: 1, state: "ready", total: 1 });
+    view.send({ type: "chunk", generation: 1, offset: 0, rows });
+    view.send({ type: "end", generation: 1 });
+    expect(view.states.at(-1)).toMatchObject({ expanded: [], selected: [] });
+    expect(view.dom.window.document.querySelector('[data-id="checkout"]')?.getAttribute("tabindex")).toBe("0");
+    view.dom.window.close();
+  });
+
+  it("suppresses a retained state action while its replacement generation is incomplete", async () => {
+    const view = await rig();
+    const rows = [{ id: "connection", label: "Connect Xray", icon: "plug", expandable: false, actions: [{ id: "connect", label: "Set up connection", icon: "plug" }] }];
+    view.send({ type: "begin", generation: 1, state: "disconnected", total: 1 });
+    view.send({ type: "chunk", generation: 1, offset: 0, rows });
+    view.send({ type: "end", generation: 1 });
+    const button = view.dom.window.document.querySelector<HTMLButtonElement>(".state-actions button")!;
+    const count = view.messages.length;
+    view.send({ type: "begin", generation: 2, state: "ready", total: 0 });
+    button.click();
+    expect(view.messages).toHaveLength(count);
+    expect(view.dom.window.document.getElementById("tree")?.getAttribute("aria-busy")).toBe("true");
+    view.send({ type: "end", generation: 2 });
+    expect(view.dom.window.document.querySelector(".state-actions")).toBeNull();
+    view.dom.window.close();
+  });
   it("restores the active tab, supports roving keyboard navigation, and closes stale previews on a new generation", async () => {
     const view = await rig({ view: "test-sets" });
     const tabs = [...view.dom.window.document.querySelectorAll<HTMLButtonElement>("[role=tab]")];
@@ -170,6 +227,12 @@ describe("traceability view client", () => {
     expect(view.dom.window.document.activeElement?.textContent).toBe("Repository");
     selected()?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
     expect(selected()?.textContent).toBe("Workspace");
+    selected()?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(selected()?.textContent).toBe("Repository");
+    const tab = new view.dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    selected()?.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(false);
+    expect(selected()?.textContent).toBe("Repository");
     selected()?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
     expect(selected()?.textContent).toBe("Test Sets");
 
@@ -194,6 +257,31 @@ describe("traceability view client", () => {
     });
     view.send({ type: "begin", generation: 1, state: "ready", total: 0 });
     expect(view.dom.window.document.getElementById("preview")?.hasAttribute("open")).toBe(false);
+    view.send({
+      type: "preview", generation: 0,
+      preview: { previewId: "late", title: "Late preview", remoteMembers: 1, runnable: 1, remoteOnly: 0, members: [{ label: "SHOP-1", mapped: true }], displayTruncated: false },
+    });
+    expect(view.dom.window.document.getElementById("preview")?.hasAttribute("open")).toBe(false);
+    view.dom.window.close();
+  });
+
+  it("names the bounded remote member list and warns when additional members are omitted", async () => {
+    const view = await rig();
+    const members = Array.from({ length: TRACEABILITY_PREVIEW_MEMBER_LIMIT }, (_, index) => ({ label: `SHOP-${index + 1}`, mapped: index === 0 }));
+    view.send({
+      type: "preview", generation: 0,
+      preview: { previewId: "bounded", title: "Run SHOP-301", remoteMembers: members.length + 1, runnable: 1, remoteOnly: members.length, members, displayTruncated: true },
+    });
+    const doc = view.dom.window.document;
+    expect(doc.getElementById("preview")?.hasAttribute("open")).toBe(true);
+    expect(doc.getElementById("preview-title")?.textContent).toBe("Run SHOP-301");
+    const list = doc.getElementById("preview-members")!;
+    expect(list.children).toHaveLength(members.length + 1);
+    expect(list.children[0]?.textContent).toBe("✓SHOP-1");
+    expect(list.children[members.length - 1]?.textContent).toBe(`−SHOP-${members.length}`);
+    expect(list.lastElementChild?.textContent).toBe("Additional remote members are omitted from this display.");
+    expect(doc.getElementById("confirm-preview")?.textContent).toBe("Run 1 scenarios");
+    view.dom.window.close();
   });
 
   it("renders and confirms exact SHOP-301 and nested repository runs through the production Xray and bundled-client path", async () => {
@@ -735,8 +823,13 @@ describe("traceability view client", () => {
     const readyMessages = view.messages.length;
     view.send({ type: "begin", generation: 2, state: "ready", total: 1 });
     const item = view.dom.window.document.querySelector<HTMLElement>("[role=treeitem]")!;
+    item.dispatchEvent(new view.dom.window.MouseEvent("click", { bubbles: true }));
+    item.querySelector<HTMLButtonElement>(".actions button")!.click();
     item.dispatchEvent(new view.dom.window.MouseEvent("dblclick", { bubbles: true }));
     item.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(view.messages).toHaveLength(readyMessages);
+    view.send({ type: "focus-filter", generation: 1 });
+    view.send({ type: "begin", generation: 1, state: "ready", total: 0 });
     expect(view.messages).toHaveLength(readyMessages);
     expect(view.dom.window.document.getElementById("tree")?.getAttribute("aria-disabled")).toBe("true");
     view.send({ type: "chunk", generation: 3, offset: 0, rows: [row] });
@@ -744,7 +837,7 @@ describe("traceability view client", () => {
     expect(view.dom.window.document.getElementById("tree")?.getAttribute("aria-busy")).toBe("true");
     view.send({ type: "chunk", generation: 2, offset: 0, rows: [row] }, 99);
     expect(view.dom.window.document.getElementById("tree")?.getAttribute("aria-busy")).toBe("true");
-    view.send({ type: "begin", generation: 3, state: "ready", total: 1 }, 7);
+    view.send({ type: "begin", generation: 3, state: "ready", total: 1 }, 9);
     view.send({ type: "chunk", generation: 3, offset: 0, rows: [row] });
     view.send({ type: "end", generation: 3 });
     expect(view.dom.window.document.getElementById("tree")?.hasAttribute("aria-busy")).toBe(false);
@@ -802,6 +895,76 @@ describe("traceability view client", () => {
     view.dom.window.document.querySelector<HTMLElement>("[data-id=row-2]")?.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "ArrowDown", ctrlKey: true, bubbles: true }));
     expect(view.dom.window.document.activeElement?.getAttribute("data-id")).toBe("row-3");
     expect([...view.dom.window.document.querySelectorAll("[role=treeitem][aria-selected=true]")].map((item) => item.getAttribute("data-id"))).toEqual(["row-0", "row-1", "row-2"]);
+  });
+
+  it("navigates named parent and child rows, collapses groups, and toggles keyboard selection", async () => {
+    const view = await rig();
+    const document = view.dom.window.document;
+    Object.defineProperty(document.getElementById("tree"), "clientHeight", { configurable: true, value: 84 });
+    const rows: readonly TraceabilityWireRow[] = [
+      { id: "checkout", label: "Checkout feature", icon: "folder", expandable: true, actions: [] },
+      { id: "guest", parentId: "checkout", label: "Checkout as guest", icon: "beaker", expandable: false, actions: [OPEN], defaultAction: "open" },
+      { id: "payments", parentId: "checkout", label: "Payments", icon: "folder", expandable: true, actions: [] },
+      { id: "card", parentId: "payments", label: "Pay by card", icon: "loading", expandable: false, actions: [OPEN], defaultAction: "open" },
+      { id: "other", label: "Other feature", icon: "file", expandable: false, actions: [] },
+    ];
+    view.send({ type: "begin", generation: 1, state: "ready", total: rows.length });
+    view.send({ type: "chunk", generation: 1, offset: 0, rows });
+    view.send({ type: "end", generation: 1 });
+    const node = (id: string): HTMLElement => document.querySelector<HTMLElement>(`[data-id="${id}"]`)!;
+    const press = (id: string, key: string, ctrlKey = false): void => {
+      node(id).dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key, ctrlKey, bubbles: true, cancelable: true }));
+    };
+    const focused = (): string | null | undefined => document.activeElement?.getAttribute("data-id");
+
+    press("checkout", "ArrowRight");
+    expect(focused()).toBe("guest");
+    press("guest", "ArrowLeft");
+    expect(focused()).toBe("checkout");
+    press("checkout", "ArrowLeft");
+    expect(document.querySelector('[data-id="guest"]')).toBeNull();
+    press("checkout", "ArrowLeft");
+    expect(document.querySelector('[data-id="guest"]')).toBeNull();
+    expect(focused()).toBe("checkout");
+    const postedBeforeTab = view.messages.length;
+    const tab = new view.dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    node("checkout").dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(false);
+    expect(view.messages).toHaveLength(postedBeforeTab);
+    press("checkout", "ArrowRight");
+    expect(node("guest").textContent).toContain("Checkout as guest");
+    press("payments", "ArrowRight");
+    expect(node("card").querySelector(".codicon-modifier-spin")).not.toBeNull();
+    view.send({ type: "begin", generation: 2, state: "ready", total: rows.length });
+    view.send({ type: "chunk", generation: 2, offset: 0, rows });
+    view.send({ type: "end", generation: 2 });
+    expect(node("payments").getAttribute("aria-expanded")).toBe("true");
+    expect(node("card").textContent).toContain("Pay by card");
+    expect(view.states.at(-1)).toMatchObject({ expanded: ["payments"] });
+    press("payments", "ArrowRight");
+    expect(focused()).toBe("card");
+    press("card", "Enter");
+    expect(view.messages.at(-1)).toMatchObject({ body: { type: "action", id: "card", action: "open" } });
+    press("card", "ArrowLeft");
+    expect(focused()).toBe("payments");
+    press("payments", "Enter");
+    expect(document.querySelector('[data-id="card"]')).toBeNull();
+
+    press("guest", "ArrowUp");
+    expect(focused()).toBe("checkout");
+    press("checkout", "End");
+    expect(focused()).toBe("other");
+    press("other", "PageUp");
+    expect(focused()).toBe("checkout");
+    press("payments", "Home");
+    expect(focused()).toBe("checkout");
+    press("checkout", " ", true);
+    expect(node("checkout").getAttribute("aria-selected")).toBe("false");
+    press("checkout", " ", true);
+    expect(node("checkout").getAttribute("aria-selected")).toBe("true");
+    press("guest", " ", true);
+    expect(node("guest").getAttribute("aria-selected")).toBe("true");
+    view.dom.window.close();
   });
 
   it("keeps a workspace selection, focus, and anchor across a tab round trip", async () => {
@@ -864,6 +1027,28 @@ describe("traceability view client", () => {
       item.dispatchEvent(new view.dom.window.MouseEvent("click", { bubbles: true, ctrlKey: true }));
     }
     expect(view.dom.window.document.getElementById("status")?.textContent).toBe("Selection is limited to 128 rows.");
+    const last = view.dom.window.document.querySelector<HTMLElement>('[data-id="row-256"]')!;
+    last.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: " ", bubbles: true, metaKey: true }));
+    expect(view.dom.window.document.getElementById("status")?.textContent).toBe("Selection is limited to 128 rows.");
+    expect((view.states.at(-1) as { selected: string[] }).selected).toHaveLength(128);
+  });
+
+  it("keeps the newest collapsed root when the saved collapse history reaches its bound", async () => {
+    const collapsedRoots = Array.from({ length: 512 }, (_, index) => `previous-root-${index}`);
+    const view = await rig({ collapsedRoots });
+    const rows = [
+      { id: "checkout-root", label: "Checkout", icon: "folder", expandable: true, actions: [] },
+      { id: "checkout-card", parentId: "checkout-root", label: "Pay by card", icon: "circle", expandable: false, actions: [OPEN] },
+    ];
+    view.send({ type: "begin", generation: 1, state: "ready", total: rows.length });
+    view.send({ type: "chunk", generation: 1, offset: 0, rows });
+    view.send({ type: "end", generation: 1 });
+    expect(view.dom.window.document.querySelector('[data-id="checkout-card"]')?.textContent).toContain("Pay by card");
+    view.dom.window.document.querySelector<HTMLButtonElement>('[data-id="checkout-root"] .twisty')!.click();
+    expect(view.dom.window.document.querySelector('[data-id="checkout-card"]')).toBeNull();
+    expect((view.states.at(-1) as { collapsedRoots: string[] }).collapsedRoots).toEqual([
+      ...collapsedRoots.slice(1), "checkout-root",
+    ]);
   });
 
   it("has no serious or critical accessibility violations after a bundled render", async () => {

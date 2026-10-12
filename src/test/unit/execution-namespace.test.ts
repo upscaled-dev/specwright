@@ -45,6 +45,43 @@ class MemoryAdmission implements AdmissionStore {
 }
 
 describe("execution namespaces", () => {
+  it("rejects path traversal in an execution identity before creating a storage root", () => {
+    const malformed = { ...legacy, schemaProfile: "../other-engine" };
+    expect(() => executionStorageRoot("/storage", malformed)).toThrow("Invalid execution namespace segment");
+    expect(() => executionStateKey(malformed, "artifacts")).toThrow("Invalid execution namespace segment");
+  });
+
+  it("lists only its own keys and supplies an explicit missing-state default", async () => {
+    const state = new MemoryState();
+    const view = new NamespacedStateStore(state, legacy);
+    await view.update("runs", ["checkout"]);
+    await new NamespacedStateStore(state, core).update("runs", ["card"]);
+    state.values.set("unrelated", true);
+    expect(view.keys()).toEqual(["runs"]);
+    expect(view.get("absent", ["fallback"])).toEqual(["fallback"]);
+    expect(view.get("runs", [])).toEqual(["checkout"]);
+  });
+
+  it("preserves a namespaced value instead of overwriting it with rollback state", async () => {
+    const state = new MemoryState();
+    state.values.set("runs", ["old"]);
+    state.values.set(executionStateKey(legacy, "runs"), ["new"]);
+    await new ExecutionNamespaceMigration(state, legacy).stateKeys(["runs", "missing"]);
+    expect(new NamespacedStateStore(state, legacy).get("runs")).toEqual(["new"]);
+    expect(state.values.has(executionStateKey(legacy, "missing"))).toBe(false);
+    expect(state.get("runs")).toEqual(["old"]);
+  });
+
+  it("deduplicates agreeing leases and fails closed on conflicting compatibility records", async () => {
+    const primary = new MemoryAdmission();
+    const old = new MemoryAdmission();
+    primary.records.set("lease", { kind: "debug-session", failure: "unknown" });
+    old.records.set("lease", { kind: "debug-session", failure: "unknown" });
+    const store = new CompatibleAdmissionStore(primary, old);
+    await expect(store.readAll()).resolves.toEqual([{ id: "lease", value: { kind: "debug-session", failure: "unknown" } }]);
+    old.records.set("lease", { kind: "debug-session", failure: "different" });
+    await expect(store.readAll()).rejects.toThrow("Execution admission record lease disagrees across compatibility stores.");
+  });
   it("isolates state keys and filesystem roots by engine and schema profile", async () => {
     const state = new MemoryState();
     const legacyState = new NamespacedStateStore(state, legacy);

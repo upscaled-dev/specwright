@@ -1,10 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as vscode from "vscode";
 import {
+  StepDefinitionProvider,
   extractStepDefsFromSource,
   extractStepText,
   patternToRegexSource,
 } from "../../providers/step-definition-provider";
 import { STEP_KEYWORDS } from "../../providers/step-keywords";
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("STEP_KEYWORDS contract", () => {
   it("is the bare alternation without trailing whitespace or grouping", () => {
@@ -42,6 +49,11 @@ describe("StepDefinitionProvider helpers", () => {
 
   describe("patternToRegexSource", () => {
     const compile = (pattern: string): RegExp => new RegExp(`^${patternToRegexSource(pattern)}$`);
+
+    it.each(["unfinished {parameter", "unfinished (optional"])("keeps unfinished expression syntax literal: %s", (pattern) => {
+      expect(compile(pattern).test(pattern)).toBe(true);
+      expect(compile(pattern).test("unfinished any text")).toBe(false);
+    });
 
     it("expands {int} to a signed integer matcher", () => {
       const re = compile("I have {int} users");
@@ -104,6 +116,19 @@ describe("StepDefinitionProvider helpers", () => {
   });
 
   describe("extractStepDefsFromSource", () => {
+    it.each([
+      "Given('unfinished", "Given(/unfinished", "Given(variable, async () => {});",
+      "Given(/[invalid/, async () => {});", "Given(/(oops/, async () => {});",
+    ])("ignores an incomplete or invalid step argument: %s", (source) => {
+      expect(extractStepDefsFromSource(source)).toEqual([]);
+    });
+
+    it("keeps a completed pattern available while its handler is being typed", () => {
+      const defs = extractStepDefsFromSource("Given('a basket'\n");
+      expect(defs).toHaveLength(1);
+      expect(defs[0]?.regex.test("a basket")).toBe(true);
+    });
+
     it("finds Given/When/Then with string and template-literal patterns", () => {
       const src = [
         "import { createBdd } from 'playwright-bdd';",
@@ -147,6 +172,12 @@ describe("StepDefinitionProvider helpers", () => {
       expect(defs[0]!.regex.test("I am on the home page")).toBe(true);
       expect(defs[1]!.line).toBe(5);
       expect(defs[1]!.regex.test("I press enter")).toBe(true);
+    });
+
+    it("adds an end anchor to a start-only pattern", () => {
+      const [definition] = extractStepDefsFromSource("Given(/^a basket/, async () => {});");
+      expect(definition?.regex.test("a basket")).toBe(true);
+      expect(definition?.regex.test("a basket and more")).toBe(false);
     });
 
     it("anchors a regex literal with top-level alternation as a whole", () => {
@@ -311,5 +342,44 @@ describe("StepDefinitionProvider helpers", () => {
       const defs = extractStepDefsFromSource(src);
       expect(defs[0]!.keyword).toBe("Then");
     });
+  });
+});
+
+describe("StepDefinitionProvider navigation", () => {
+  it("opens the matching source location across keyword forms and leaves unmatched steps without a link", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "step-definition-navigation-"));
+    const stepFile = path.join(root, "checkout.steps.ts");
+    fs.writeFileSync(stepFile, [
+      "Given('I press {string}', async () => {});",
+      "Then(/^the order is paid$/, async () => {});",
+    ].join("\n"));
+    const findFiles = vi.spyOn(vscode.workspace, "findFiles")
+      .mockResolvedValue([vscode.Uri.file(stepFile)]);
+    const document = {
+      lineAt: (line: number) => ({ text: [
+        "Feature: Checkout",
+        '  When I press "Checkout"',
+        "  Then the order is paid",
+        "  Given I open an unrelated page",
+      ][line] ?? "" }),
+    } as unknown as vscode.TextDocument;
+    const provider = new StepDefinitionProvider(["**/*.steps.ts"]);
+
+    try {
+      const press = await provider.provideDefinition(document, new vscode.Position(1, 8));
+      const paid = await provider.provideDefinition(document, new vscode.Position(2, 8));
+      const unmatched = await provider.provideDefinition(document, new vscode.Position(3, 8));
+      const heading = await provider.provideDefinition(document, new vscode.Position(0, 0));
+
+      expect(press?.map((location) => [location.uri.fsPath, location.range.start.line]))
+        .toEqual([[stepFile, 0]]);
+      expect(paid?.map((location) => [location.uri.fsPath, location.range.start.line]))
+        .toEqual([[stepFile, 1]]);
+      expect(unmatched).toBeUndefined();
+      expect(heading).toBeUndefined();
+      expect(findFiles).toHaveBeenCalled();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

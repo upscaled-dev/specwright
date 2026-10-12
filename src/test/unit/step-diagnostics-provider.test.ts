@@ -11,6 +11,18 @@ function defsFromSource(source: string, filePath = "/ws/steps/a.ts"): ParsedStep
 }
 
 describe("computeDiagnostics (pure helper)", () => {
+  it("keeps incomplete Examples rows and blank headers from leaking into the next scenario", () => {
+    const feature = [
+      "Feature: Checkout", "Scenario Outline: Pay", "  Given <method>", "  A description",
+      "  Examples:", "    | method |   |", "    | cash |", "    | unfinished",
+      "Scenario: Plain", "  Given <unrelated>",
+    ].join("\n");
+    const { diagnostics } = computeDiagnosticsWithInfo(feature, defsFromSource("Given('cash', async () => {});"));
+    expect(diagnostics.filter((d) => d.code === StepDiagnosticsProvider.UNUSED_COLUMN_CODE)).toEqual([]);
+    expect(diagnostics.filter((d) => d.code === StepDiagnosticsProvider.UNDECLARED_PLACEHOLDER_CODE)).toEqual([]);
+    expect(diagnostics.some((d) => d.range.start.line === 9 && d.code === StepDiagnosticsProvider.DIAGNOSTIC_CODE)).toBe(true);
+  });
+
   it("returns zero diagnostics when every step matches a definition", () => {
     const feature = [
       "Feature: A",
@@ -525,4 +537,13 @@ describe("computeDiagnostics scenario outline placeholder validation", () => {
     );
     expect(undeclared).toHaveLength(0);
   });
+});
+
+
+it.each(["|", "| value"])("keeps outline diagnostics usable while an Examples header is unfinished: %s", (header) => {
+  const feature = `Feature: Checkout\nScenario Outline: Cart\n  Given I have <count> items\nExamples:\n  ${header}`;
+  const defs = defsFromSource("Given('I have {int} items', async () => {});");
+  const { diagnostics } = computeDiagnosticsWithInfo(feature, defs);
+  expect(diagnostics.filter((diagnostic) => diagnostic.code === StepDiagnosticsProvider.UNUSED_COLUMN_CODE)).toEqual([]);
+  expect(diagnostics.some((diagnostic) => diagnostic.message.includes("count"))).toBe(true);
 });

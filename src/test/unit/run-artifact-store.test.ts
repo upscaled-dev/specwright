@@ -565,3 +565,29 @@ describe("testKey threading and preflight decisions", () => {
     expect(sealed?.preflight).toEqual(decisions);
   });
 });
+
+describe("artifact identity fallbacks", () => {
+  it("scopes relative targets against a working directory and leaves them relative without one", () => {
+    const details = [scenario({ featurePath: "a.feature" }), scenario({ featurePath: "b.feature" })];
+    const target = { scenario: { filePath: "a.feature", line: 3, name: "S", kind: "scenario" as const }, resultLines: [3] };
+    expect(scopeArtifactDetails(details, target, "/ws").map(detail => detail.featurePath)).toEqual(["/ws/a.feature"]);
+    expect(scopeArtifactDetails(details, target).map(detail => detail.featurePath)).toEqual(["a.feature"]);
+  });
+
+  it("keeps a named scenario without source coordinates and merges repeated outline rows across projects", () => {
+    const [plain] = buildArtifactResults([scenario({ lineNumber: undefined })], "/ws");
+    expect(plain?.scenario).toMatchObject({ name: "S", line: 0 });
+    const results = buildArtifactResults([
+      scenario({ scenarioName: "Example #1", outlineName: "Outline", lineNumber: undefined, status: "passed", durationMs: 3 }),
+      scenario({ scenarioName: "Example #1", outlineName: "Outline", lineNumber: undefined, status: "failed", durationMs: 5 }),
+    ], "/ws");
+    expect(results).toHaveLength(1);
+    expect(results[0]?.scenario.line).toBe(0);
+    expect(results[0]?.iterations).toEqual([{ name: "Example #1", outcome: "failed", durationMs: 5, attempts: 1 }]);
+  });
+
+  it("ignores primitive entries in a persisted artifact list", () => {
+    const store = new RunArtifactStore(fakeMemento({ "specwright.runArtifacts": [null, "stale", 7, artifact({ id: "valid" })] }), logger);
+    expect(store.list().map(value => value.id)).toEqual(["valid"]);
+  });
+});

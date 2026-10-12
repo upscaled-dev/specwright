@@ -19,6 +19,27 @@ interface FakeTerminal {
   dispose(): void;
 }
 
+describe("TestExecutor debug teardown", () => {
+  it("reports an unconfirmed debug process while releasing confirmed sessions", async () => {
+    const logger = Logger.create();
+    const error = vi.spyOn(logger, "error").mockImplementation(() => {});
+    const shutdown = vi.fn().mockResolvedValue([
+      { confirmed: true },
+      { confirmed: false, failure: "debug child could not be confirmed stopped" },
+    ]);
+    const mirror = { shutdown } as unknown as BreakpointMirror;
+    const executor = TestExecutor.create(
+      vscode.workspace, vscode.window, vscode.debug, makeConfig(), logger,
+      undefined, undefined, mirror
+    );
+
+    await executor.dispose();
+
+    expect(shutdown).toHaveBeenCalledOnce();
+    expect(error).toHaveBeenCalledExactlyOnceWith("debug child could not be confirmed stopped");
+  });
+});
+
 interface FakeWindow {
   terminals: FakeTerminal[];
   closeListeners: Array<(t: unknown) => void>;
@@ -709,7 +730,7 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
     warn.mockRestore();
   });
 
-  it("preserves an unsafe bddgen termination as debug infrastructure failure", async () => {
+  it("preserves an unsafe bddgen termination and explains it to a Debug command user", async () => {
     const failure = "bddgen process group remained alive";
     const shell: ShellRunner = async () => ({
       success: false,
@@ -739,6 +760,38 @@ describe("TestExecutor debugScenarioWithOutput cancellation", () => {
       admissionUnsafe: true,
       terminationLease: { kind: "posix-group", pgid: 42 },
     });
+
+    const shown = vi.spyOn(vscode.window, "showErrorMessage");
+    await executor.debugScenario({ filePath: "/abs/features/a.feature", outlineName: "A" });
+    expect(shown).toHaveBeenCalledWith(expect.stringContaining(failure));
+  });
+
+  it("stops Debug before generation when the pre-run command cannot be terminated safely", async () => {
+    const failure = "fixture generator process group remained alive";
+    const commands: string[] = [];
+    const shell: ShellRunner = async (command) => {
+      commands.push(command);
+      return {
+        success: false,
+        output: "",
+        error: failure,
+        returnCode: 1,
+        terminationFailure: failure,
+        terminationLease: { kind: "posix-group", pgid: 43, failure },
+      };
+    };
+    const shown = vi.spyOn(vscode.window, "showErrorMessage");
+    const launch = vi.spyOn(vscode.debug, "startDebugging");
+    const { executor } = makeExecutor(
+      makeConfig({ preRunCommand: "prepare fixtures", bddgenCommand: "npx bddgen", workingDirectory: "/abs" }),
+      shell
+    );
+
+    await executor.debugScenario({ filePath: "/abs/features/a.feature", outlineName: "A" });
+
+    expect(commands).toEqual(["prepare fixtures"]);
+    expect(launch).not.toHaveBeenCalled();
+    expect(shown).toHaveBeenCalledWith(expect.stringContaining(failure));
   });
 
   it("releases debug admission with a warning when no tracked root can be stopped", async () => {

@@ -56,6 +56,44 @@ function saveEnvelope(document: string, revision: number): SetupEnvelope<SetupCl
 }
 
 describe("XraySetupChannel", () => {
+  it("keeps the first predecessor of a pending reload when a conflicting ready repeats it", async () => {
+    const { channel, posted } = channelWith();
+    const [root, successor, foreign] = [documentId(1), documentId(2), documentId(3)] as const;
+    await channel.hydrate(successor, root);
+    await channel.hydrate(successor, foreign);
+    await channel.hydrate(root, undefined);
+    expect(posted).toHaveLength(3);
+    expect(posted.every(message => message.document === successor)).toBe(true);
+    expect(channel.accepts(saveEnvelope(successor, posted.at(-1)!.revision))).toBe(true);
+    await channel.dispose();
+  });
+  it("chooses a newer sibling over an older deep descendant", async () => {
+    const { channel, posted } = channelWith();
+    const [a, b, c, d] = [documentId(1), documentId(2), documentId(3), documentId(4)] as const;
+    await channel.hydrate(b, a);
+    await channel.hydrate(c, b);
+    await channel.hydrate(d, a);
+    await channel.hydrate(a, undefined);
+    expect(posted).toHaveLength(3);
+    expect(posted.every((message) => message.document === d)).toBe(true);
+    await channel.dispose();
+  });
+
+  it("evicts the oldest orphan reload link without activating its successor", async () => {
+    const { channel, posted } = channelWith();
+    const oldest = documentId(100);
+    await channel.hydrate(documentId(101), oldest);
+    for (let index = 1; index <= 32; index += 1) {
+      await channel.hydrate(documentId(index), documentId(1000 + index));
+    }
+    await channel.hydrate(oldest, undefined);
+    expect(posted).toHaveLength(3);
+    expect(posted.every((message) => message.document === oldest)).toBe(true);
+    expect(channel.accepts(saveEnvelope(oldest, posted.at(-1)!.revision))).toBe(true);
+    await channel.dispose();
+    await expect(channel.post({ type: "error", message: "retired" })).resolves.toBe(false);
+    expect(posted).toHaveLength(3);
+  });
   it("resolves C-before-B and hydrates only the newest reachable document", async () => {
     const { channel, posted } = channelWith();
     const [a, b, c] = [documentId(1), documentId(2), documentId(3)] as const;

@@ -79,6 +79,71 @@ function link(links: TraceLink[], testKey: string): TraceLink {
 }
 
 describe("buildTraceabilitySnapshot", () => {
+  it.each([false, true])("keeps tagless parser records visible with multiple Examples blocks: %s", (multipleBlocks) => {
+    const input = parse([
+      "Feature: Checkout", "Scenario: Plain", "  Given a basket", "Scenario Outline: Pay",
+      "  Given <method>", "Examples: cash", "  | method |", "  | coins |",
+      ...(multipleBlocks ? ["Examples: cards", "  | method |", "  | debit |"] : []),
+    ].join("\n"));
+    const records = input.scenarios.map((scenario) => ({
+      ...scenario, tags: undefined, ...(scenario.isScenarioOutline ? { examplesBlockTags: undefined } : {}),
+    }));
+    const snapshot = buildTraceabilitySnapshot([{ ...input, scenarios: records }], {}, GRAMMAR);
+    expect(snapshot.links).toEqual([]);
+    expect(snapshot.untraced.map((item) => ({ name: item.scenario.name, requirements: item.reqKeys, malformed: item.malformedTags })))
+      .toEqual([{ name: "Plain", requirements: [], malformed: [] }, { name: "Pay", requirements: [], malformed: [] }]);
+  });
+
+  it("keeps malformed outline tags visible beside valid mappings and collects per-block requirements", () => {
+    const input = parse(`Feature: Checkout
+@TEST_CALC-1 @TEST_broken
+Scenario Outline: Pay
+  Given <method>
+  @REQ_CALC-9
+  Examples: cash
+    | method |
+    | cash   |
+  @REQ_CALC-10
+  Examples: card
+    | method |
+    | card   |
+`);
+    const snap = buildTraceabilitySnapshot([input], {}, GRAMMAR);
+    expect(snap.links).toHaveLength(1);
+    expect(snap.links[0]).toMatchObject({ testKey: "CALC-1", reqKeys: ["CALC-9", "CALC-10"], malformedTags: ["@TEST_broken"] });
+  });
+
+  it("keeps untagged and malformed examples separate from an independently tagged block", () => {
+    const input = parse(`Feature: Checkout
+Scenario Outline: Pay
+  Given <method>
+  @TEST_CALC-1
+  Examples:
+    | method |
+    | cash   |
+  @TEST_broken @REQ_CALC-9
+  Examples: unfinished
+    | method |
+    | card   |
+    | cheque |
+`);
+    const snap = buildTraceabilitySnapshot([input], {}, GRAMMAR);
+    expect(snap.links).toHaveLength(1);
+    expect(snap.links[0]).toMatchObject({ testKey: "CALC-1", scenario: { kind: "examplesBlock", name: "Pay" } });
+    expect(snap.links[0]!.scenario).not.toHaveProperty("examplesBlockName");
+    expect(snap.untraced).toEqual([expect.objectContaining({
+      scenario: expect.objectContaining({ kind: "outline", name: "Pay" }),
+      reqKeys: ["CALC-9"], malformedTags: ["@TEST_broken"],
+    })]);
+  });
+
+  it("retains a mapped outline while its Examples table is still being written", () => {
+    const snap = buildTraceabilitySnapshot([parse("Feature: Checkout\n@TEST_CALC-1\nScenario Outline: Pay\n  Given <method>\n")], {}, GRAMMAR);
+    expect(snap.links).toEqual([expect.objectContaining({
+      testKey: "CALC-1", scenario: expect.objectContaining({ kind: "outline", name: "Pay", line: 3 }),
+    })]);
+  });
+
   it("maps scenarios to test keys, derives projects, and carries requirement keys", () => {
     const snap = buildTraceabilitySnapshot([parse(FEATURE)], {}, GRAMMAR);
 
@@ -597,6 +662,12 @@ describe("TraceabilityModel.rebuild badge precedence (readStatusMap)", () => {
     expect(await rebuiltResult(featurePath, store)).toBe("passed");
   });
 
+  it("removes a deleted feature from the rebuilt model", async () => {
+    const { featurePath } = makeWorkspace();
+    fs.unlinkSync(featurePath);
+    expect(await rebuiltResult(featurePath, new RunResultStore())).toBeUndefined();
+  });
+
   it("badges from the store with no report on disk (the P1 exit criterion)", async () => {
     const { featurePath, key } = makeWorkspace();
     const store = new RunResultStore();
@@ -645,6 +716,13 @@ describe("findPlaywrightReport", () => {
     const found = await findPlaywrightReport([root]);
     expect(found?.path).toBe(path.join(root, "test-results/results.json"));
     expect(found?.root).toBe(root);
+  });
+
+  it("keeps the newest report when an older candidate is visited later", async () => {
+    const root = makeRoot();
+    writeReport(root, "results.json", "{}", Date.now());
+    writeReport(root, "test-results/results.json", "{}", Date.now() - 10_000);
+    expect((await findPlaywrightReport([root]))?.path).toBe(path.join(root, "results.json"));
   });
 
   it("propagates the winning root across multiple roots", async () => {
@@ -733,6 +811,14 @@ describe("findLinkForScenario", () => {
     ];
 
     expect(findLinkForScenario(links, ref(25, "outline"))?.testKey).toBe("CALC-2");
+  });
+
+  it("selects the nearest preceding Examples block regardless of mapping order", () => {
+    const links: TraceLink[] = [20, 8, 30].map((line) => ({
+      testKey: `CALC-${line}`, reqKeys: [], scenario: { ...ref(line, "examplesBlock"), outlineName: "Repeated title" },
+    }));
+    expect(findLinkForScenario(links, ref(25, "outline"))?.testKey).toBe("CALC-20");
+    expect(findLinkForScenario([...links].reverse(), ref(25, "outline"))?.testKey).toBe("CALC-20");
   });
 
   it("resolves a named Examples block when the batch scoped out its enclosing outline", () => {

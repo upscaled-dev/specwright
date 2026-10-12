@@ -53,6 +53,14 @@ function makeContext(diagnostics: vscode.Diagnostic[]): vscode.CodeActionContext
 }
 
 describe("StepCodeActionProvider", () => {
+  it("ignores stale diagnostics whose step metadata has already been cleared", () => {
+    const provider = new StepCodeActionProvider(new StubDiagnosticsProvider() as unknown as StepDiagnosticsProvider);
+    const doc = { uri: vscode.Uri.file("/tmp/closed.feature") } as vscode.TextDocument;
+    expect(provider.provideCodeActions(doc, new vscode.Range(2, 0, 2, 0), makeContext([
+      makeDiagnostic(2, "a basket"), makeAmbiguousDiagnostic(3, "payment"),
+    ]))).toEqual([]);
+  });
+
   it("returns no actions when no diagnostics match our source/code", () => {
     const stub = new StubDiagnosticsProvider();
     const provider = new StepCodeActionProvider(stub as unknown as StepDiagnosticsProvider);

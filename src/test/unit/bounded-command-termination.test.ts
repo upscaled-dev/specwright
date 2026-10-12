@@ -158,6 +158,96 @@ describe("runBoundedCommand cancellation", () => {
     };
   }
 
+  it.each(["ESRCH", "EPERM"])("keeps POSIX cancellation bounded when signaling returns %s", async (code) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    vi.mocked(process.kill).mockImplementation((_pid, signal) => {
+      if (signal !== 0 || !groupAlive) {
+        const error = new Error(code) as NodeJS.ErrnoException;
+        error.code = signal === 0 ? "ESRCH" : code;
+        throw error;
+      }
+      return true;
+    });
+    const run = cancelledRun();
+    groupAlive = false;
+    await settleTermination();
+    await expect(run.result).resolves.toMatchObject({ error: "Cancelled", returnCode: 130 });
+    if (code === "EPERM") {expect(warnings()).toContain("Failed to signal process group with SIGTERM: EPERM");}
+    else {expect(warnings()).not.toContain("Failed to signal process group");}
+  });
+
+  it("releases immediately when the POSIX process group is already gone", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    groupAlive = false;
+    const run = cancelledRun();
+    await expect(run.result).resolves.toMatchObject({ error: "Cancelled", returnCode: 130 });
+    expect(signals()).toEqual([]);
+  });
+
+  it("reports a taskkill spawn failure without stranding cancellation", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE);
+    const run = cancelledRun();
+    vi.mocked(spawn).mockImplementation(() => {throw new Error("taskkill unavailable");});
+    await settleTermination();
+    await expectReleased(run.result, "Process-tree termination failed to start: taskkill unavailable.");
+  });
+
+  it("keeps a taskkill error authoritative when a later close also fires", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE);
+    const killer = new FakeChild();
+    const run = cancelledRun({ killer });
+    await awaitKiller(run);
+    killer.stderr.write("access denied");
+    killer.emit("error", new Error("permission denied"));
+    killer.emit("close", 0);
+    await settleTermination();
+    await expectReleased(run.result, "Process-tree termination failed: permission denied. access denied");
+  });
+
+  it("reports a signal-terminated taskkill without inventing an exit code", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE);
+    const killer = new FakeChild();
+    const run = cancelledRun({ killer });
+    await awaitKiller(run);
+    killer.emit("close", null);
+    await settleTermination();
+    await expectReleased(run.result, "taskkill exit code unknown");
+  });
+
+  it("starts no further inventory when a delayed identity and taskkill consume the confirmation budget", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockImplementation(() => new Promise(resolve => {
+      setTimeout(() => resolve(ROOT), WINDOWS_TERMINATION_BUDGET_MS - 1_000);
+    }));
+    vi.mocked(readProcessTable).mockResolvedValue(RUNNING_TREE);
+    const run = cancelledRun();
+    const released = expectReleased(run.result, "confirmation window elapsed");
+    await vi.advanceTimersByTimeAsync(WINDOWS_TERMINATION_WORST_CASE_MS);
+    await released;
+    expect(run.killers).toHaveLength(1);
+    expect(readProcessTable).toHaveBeenCalledOnce();
+  });
+
+  it.each(["retry inventory", "second confirmation"] as const)("releases Windows cancellation when survivors vanish at the %s", async (boundary) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(readProcessIdentity).mockResolvedValue(ROOT);
+    const gone = [{ pid: 900, parentPid: 1, creationDate: 1 }];
+    vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE).mockResolvedValueOnce(RUNNING_TREE);
+    if (boundary === "second confirmation") {vi.mocked(readProcessTable).mockResolvedValueOnce(RUNNING_TREE);}
+    vi.mocked(readProcessTable).mockResolvedValue(gone);
+    const run = cancelledRun({ taskkillExit: 0 });
+    await settleTermination(2);
+    await expect(run.result).resolves.toMatchObject({ error: "Cancelled", returnCode: 130 });
+    expect(run.killers).toHaveLength(boundary === "retry inventory" ? 1 : 2);
+    expect(warnings()).not.toContain("released without that proof");
+  });
+
   it.runIf(process.platform !== "win32")(
     "waits through SIGKILL and a gone-group probe after the direct child exits",
     async () => {

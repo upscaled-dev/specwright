@@ -127,6 +127,16 @@ describe("invocationsAfterExclusions", () => {
 });
 
 describe("runPreflightFlow", () => {
+  it("enforces target-plan membership before allowing the user to exclude a mapped scenario", async () => {
+    const harness: FlowHarness = { runs: [], repairs: [] };
+    const d = deps([{ kind: "run", outcome: "exclude" }], harness);
+    await runPreflightFlow(SELECTION, { ...d, targetPlanKeys: new Set(["OTHER-1"]) });
+    expect(harness.runs[0]?.invocations).toEqual([]);
+    expect(harness.runs[0]?.decisions).toEqual([
+      { scenario: UNMAPPED, state: "unmapped", outcome: "exclude" },
+      { scenario: MAPPED, testKey: "CALC-1", state: "not-in-target-plan", outcome: "exclude" },
+    ]);
+  });
   it("runs nothing when the user cancels the preflight", async () => {
     const harness: FlowHarness = { runs: [], repairs: [] };
     const ran = await runPreflightFlow(SELECTION, deps([{ kind: "cancel" }], harness));

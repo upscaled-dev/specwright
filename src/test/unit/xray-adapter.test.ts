@@ -361,6 +361,14 @@ describe("createXrayAdapterFactory organization sync", () => {
     await adapter.metadata?.sync({ testKeys: ["SHOP-1"] });
 
     expect(queries.some((query) => query.includes("getTestSets") && query.includes("SHOP"))).toBe(true);
+    queries.length = 0;
+    const prior = adapter.metadata!.snapshot();
+    const controller = new AbortController();
+    const progress = vi.fn(() => controller.abort());
+    await adapter.metadata!.sync({ projectKeys: ["SHOP"] }, controller.signal, progress);
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({ projectKey: "SHOP" }));
+    expect(queries.some(query => query.includes("getTestSets"))).toBe(false);
+    expect(adapter.metadata!.snapshot()).toEqual(prior);
     await adapter.dispose?.();
   });
 
@@ -476,5 +484,46 @@ describe("XrayAdapter disposal", () => {
     finish();
     await disposal;
     expect(settled).toBe(true);
+  });
+});
+
+describe("live Xray adapter capability wiring", () => {
+  it("discovers Jira projects and routes container writes through the live Xray transport", async () => {
+    const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
+    await store.setCredentials("acme.atlassian.net", "account-a", "secret-a");
+    await store.setJiraCredentials("acme.atlassian.net", "me@example.com", "jira-token");
+    const queries: string[] = [];
+    vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+      let body: unknown;
+      if (url.endsWith("/authenticate")) { body = "token"; }
+      else if (url.includes("/project/search")) { body = { isLast: true, values: [{ key: "SHOP", name: "Shop" }] }; }
+      else {
+        const query = (JSON.parse(String(init.body)) as { query: string }).query;
+        queries.push(query);
+        if (query.includes("createTestSet")) { body = { data: { createTestSet: { testSet: { issueId: "10", jira: { key: "SHOP-10" } } } } }; }
+        else if (query.includes("createTestPlan")) { body = { data: { createTestPlan: { testPlan: { issueId: "20", jira: { key: "SHOP-20" } } } } }; }
+        else if (query.includes("createTestExecution")) { body = { data: { createTestExecution: { testExecution: { issueId: "30", jira: { key: "SHOP-30" } } } } }; }
+        else if (query.includes("updateGherkinTestDefinition")) { body = { data: { updateGherkinTestDefinition: { gherkin: "Scenario: Updated" } } }; }
+        else { body = { data: { getTests: { total: 0, results: [] } } }; }
+      }
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    });
+    const trust = trustedWorkspace();
+    const adapter = createXrayAdapterFactory(store,
+      recordingProbe({ ok: true, stage: "ok", site: "acme.atlassian.net", message: "Connected" }).probe,
+      fakeMemento(), NOOP_PUBLISH_SUPPORT, trust).create({
+      config: configWith({ "xray.siteUrl": "acme.atlassian.net" }), logger: Logger.create(),
+    });
+    try {
+      await expect(adapter.projectDirectory!.list()).resolves.toMatchObject({ projects: [{ key: "SHOP", name: "Shop" }] });
+      const spec = { project: "SHOP", summary: "Smoke", testIssueIds: ["1"] };
+      await expect(adapter.testAuthoring!.createTestSet!(spec)).resolves.toMatchObject({ key: "SHOP-10" });
+      await expect(adapter.testAuthoring!.createTestPlan!(spec)).resolves.toMatchObject({ key: "SHOP-20" });
+      await expect(adapter.testAuthoring!.createTestExecution!({ project: "SHOP", summary: "Nightly" }))
+        .resolves.toMatchObject({ key: "SHOP-30" });
+      await expect(adapter.testAuthoring!.pushGherkin!("1", "Scenario: Updated")).resolves.toBe("Scenario: Updated");
+      expect(queries.filter(query => query.startsWith("mutation"))).toHaveLength(4);
+      expect(queries[0]).toContain('testIssueIds: ["1"]');
+    } finally { await adapter.dispose?.(); await trust.dispose(); }
   });
 });

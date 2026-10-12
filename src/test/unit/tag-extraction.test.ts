@@ -11,6 +11,10 @@ const DEFAULTS: KeyExtractionGrammar = {
 };
 
 describe("extractKeys", () => {
+  it("accepts tags without an at-sign at the parser-neutral boundary", () => {
+    expect(extractKeys(["TEST_CALC-1", "REQ_CALC-2"], DEFAULTS)).toMatchObject({ testKeys: ["CALC-1"], reqKeys: ["CALC-2"] });
+    expect(malformedTestTags(["TEST_broken"], DEFAULTS)).toEqual(["TEST_broken"]);
+  });
   it("extracts test and requirement keys from a scenario's tags", () => {
     const keys = extractKeys(["@TEST_CALC-1043", "@REQ_CALC-900", "@smoke"], DEFAULTS);
     expect(keys.testKeys).toEqual(["CALC-1043"]);

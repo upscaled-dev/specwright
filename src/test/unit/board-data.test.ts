@@ -1126,6 +1126,8 @@ describe("buildExecutionRows", () => {
     expect(rows.map((r) => r.keyLabel)).toEqual([UNKNOWN_EXECUTION, UNKNOWN_EXECUTION]);
     expect(rows.map((r) => r.key)).toEqual(["", ""]);
     expect(rows.map((r) => r.summary)).toEqual(["First unknown", "Second unknown"]);
+    expect(filterExecutionRows(rows, "1970")).toEqual(rows);
+    expect(filterExecutionRows(rows, "does-not-match")).toEqual([]);
   });
 
   it("preserves input order when activities have equal timestamps", () => {

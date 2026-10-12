@@ -13,7 +13,7 @@ import {
   TraceabilityAdapterFactory,
   TraceabilityAdapterRegistry,
 } from "../../traceability/adapter-registry";
-import { currentAdapterVersions } from "../../traceability/adapter-contract";
+import { currentAdapterVersions, IntegrationAdapterError } from "../../traceability/adapter-contract";
 import { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { RunResultStore } from "../../traceability/run-result-store";
 import { ConnectionCapability, RunArtifact, TraceabilityAdapter } from "../../traceability/contracts";
@@ -75,6 +75,32 @@ function inMemoryHarness(): AdapterContractHarness {
 runAdapterContractTests(inMemoryHarness);
 
 describe("InMemoryTraceabilityAdapter specifics", () => {
+  it("emits only actual connection changes and preserves its catalogue when sync is cancelled", async () => {
+    const adapter = new InMemoryTraceabilityAdapter();
+    const changed = vi.fn();
+    adapter.connection.onDidChange(changed);
+    adapter.setConnected(false);
+    adapter.setConnected(true);
+    adapter.setConnected(true);
+    expect(changed).toHaveBeenCalledOnce();
+    adapter.seedCatalogue([{ key: "1", summary: "Checkout" }], []);
+    const controller = new AbortController();
+    controller.abort();
+    await adapter.metadata.sync({}, controller.signal);
+    expect(adapter.metadata.snapshot().tests.size).toBe(0);
+    await adapter.metadata.sync({});
+    expect([...adapter.metadata.snapshot().tests.keys()]).toEqual(["1"]);
+  });
+
+  it("searches seeded executions by key or label while project search stays empty", async () => {
+    const adapter = new InMemoryTraceabilityAdapter({ targets: [
+      { id: "EXEC-9", label: "Nightly checkout", ref: { key: "EXEC-9" } },
+    ] });
+    await expect(adapter.resultPublishing.searchTargets("project", "nightly")).resolves.toEqual([]);
+    await expect(adapter.resultPublishing.searchTargets("execution", "exec-9")).resolves.toMatchObject([{ id: "EXEC-9" }]);
+    await expect(adapter.resultPublishing.searchTargets("execution", "checkout")).resolves.toMatchObject([{ id: "EXEC-9" }]);
+    await expect(adapter.resultPublishing.searchTargets("execution", "missing")).resolves.toEqual([]);
+  });
   it("uses a non-Jira grammar: numeric keys, no project derivation, leading-zero canonicalization", async () => {
     const adapter = new InMemoryTraceabilityAdapter();
     expect(adapter.keyGrammar.projectOf).toBeUndefined();
@@ -108,6 +134,11 @@ describe("InMemoryTraceabilityAdapter specifics", () => {
     expect(adapter.publications).toEqual([{ artifact, executionKey: "EXEC-9" }]);
     const targets = await adapter.resultPublishing.searchTargets("execution", "");
     expect(targets.map((t) => t.ref.key)).toContain("EXEC-9");
+    const created = await adapter.resultPublishing.publish(artifact, { mode: "create-new", project: "CALC", summary: "Checkout" });
+    expect(created.ref.key).toBe("CALC-1");
+    await adapter.resultPublishing.publish(artifact, { mode: "append", executionKey: "CALC-1" });
+    expect((await adapter.resultPublishing.searchTargets("execution", "")).filter((target) => target.ref.key === "CALC-1")).toHaveLength(1);
+    expect(adapter.publications.slice(1)).toEqual([{ artifact, executionKey: "CALC-1" }, { artifact, executionKey: "CALC-1" }]);
   });
 
   it("keeps the last-known snapshot whole on a sync error, down to its catalogue scope", async () => {
@@ -204,7 +235,208 @@ describe("metadata snapshot boundary", () => {
   });
 });
 
+function optionalCapabilities(overrides: Partial<TraceabilityAdapter> = {}): TraceabilityAdapter {
+  return {
+    id: "optional", label: "Optional capabilities",
+    keyGrammar: { testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: /^T-\d+$/u, canonicalizeKey: (key) => key },
+    browseUrl: () => undefined,
+    coverage: { coverageFor: () => Promise.resolve([{ kind: "requirement", key: "R-1" }]) },
+    automationBinding: { classify: () => "compatible", bind: () => Promise.resolve() },
+    remoteSearch: {
+      search: () => Promise.resolve({ tests: [{ key: "T-1", summary: "Checkout", status: { category: "passed", providerValue: "Done" } }], complete: true }),
+      mergeKeys: () => Promise.resolve(),
+    },
+    projectDirectory: {
+      cached: () => ({ projects: [{ key: "T", name: "Tests" }], truncated: false }),
+      list: () => Promise.resolve({ projects: [{ key: "T", name: "Tests" }], truncated: false }),
+    },
+    attachments: { attach: () => Promise.resolve() },
+    ...overrides,
+  };
+}
+
+describe("optional capability response boundary", () => {
+  it("keeps last-known Test Set members readable after an incomplete refresh", async () => {
+    const set = {
+      key: "T-9", issueId: "99", members: [{ key: "T-1", summary: "Checkout" }],
+      remoteMemberCount: 1, membershipComplete: false, truncated: true, membersLastKnown: true,
+      errors: ["Membership refresh failed"],
+    };
+    const adapter = validatedAdapter(optionalCapabilities({ organization: {
+      onDidChange: new vscode.EventEmitter<void>().event,
+      snapshot: () => ({
+        repositories: [], testSetProjects: [{ projectKey: "T", testSets: [set], complete: false, truncated: true, errors: set.errors }],
+        stale: true, omittedRepositoryProjectCount: 0, omittedTestSetProjectCount: 0,
+      }),
+      sync: () => Promise.resolve(),
+      refreshTestSet: () => Promise.resolve({ status: "incomplete", testSet: set }),
+    } }), () => Promise.resolve(), () => undefined);
+    expect(adapter.organization!.snapshot().testSetProjects[0]!.testSets[0]).toEqual(set);
+    await expect(adapter.organization!.refreshTestSet("T-9")).resolves.toEqual({ status: "incomplete", testSet: set });
+  });
+
+  it("preserves a typed attachment denial through the write boundary", async () => {
+    const denied = new IntegrationAdapterError("provider-failed", "Attachment access denied");
+    const adapter = validatedAdapter(optionalCapabilities({ attachments: { attach: () => Promise.reject(denied) } }),
+      () => Promise.resolve(), () => undefined);
+    await expect(adapter.attachments!.attach({ kind: "execution", key: "T-9" }, ["/ws/checkout.zip"])).rejects.toBe(denied);
+  });
+  it.each([
+    ["non-map catalogue", { tests: {} }],
+    ["non-array scope list", { fetchedScopes: "CALC" }],
+    ["non-text provider status", { tests: new Map([["T-1", { key: "T-1", status: { category: "passed", providerValue: 42 } }]]) }],
+    ["non-object test type", { tests: new Map([["T-1", { key: "T-1", testType: "Cucumber" }]]) }],
+  ])("rejects a %s metadata response before exposing a snapshot", (_case, override) => {
+    const adapter = validatedAdapter(optionalCapabilities({ metadata: {
+      onDidChange: new vscode.EventEmitter<void>().event,
+      snapshot: () => (Object.assign({
+        tests: new Map(), fetchedScopes: [], catalogueProjects: [], completeProjects: [],
+        verifiedAbsentKeys: [], stale: false, errors: [],
+      }, override) as never),
+      sync: () => Promise.resolve(),
+    } }), () => Promise.resolve(), () => undefined);
+    expect(() => adapter.metadata!.snapshot()).toThrow(expect.objectContaining({ code: "malformed-response" }));
+  });
+
+  it("rejects a null metadata snapshot at the adapter boundary", () => {
+    const adapter = validatedAdapter(optionalCapabilities({ metadata: {
+      onDidChange: new vscode.EventEmitter<void>().event, snapshot: () => null as never, sync: async () => {},
+    } }), async () => {}, () => {});
+    expect(() => adapter.metadata!.snapshot()).toThrow(expect.objectContaining({ code: "malformed-response" }));
+  });
+
+  it.each(["grow", "shrink"] as const)("rejects a catalogue that can %s while its values are validated", (change) => {
+    const tests = new Map<string, { key: string; readonly summary?: string }>();
+    tests.set("T-1", { key: "T-1", get summary() {
+      if (change === "grow") {tests.set("T-2", { key: "T-2" });}
+      else {tests.delete("T-1");}
+      return "Checkout";
+    } });
+    const adapter = validatedAdapter(optionalCapabilities({ metadata: {
+      onDidChange: new vscode.EventEmitter<void>().event,
+      snapshot: () => ({ tests, fetchedScopes: [], catalogueProjects: [], completeProjects: [], verifiedAbsentKeys: [], stale: false, errors: [] }),
+      sync: () => Promise.resolve(),
+    } }), () => Promise.resolve(), () => undefined);
+    expect(() => adapter.metadata!.snapshot()).toThrow(expect.objectContaining({ code: "malformed-response" }));
+  });
+
+  it("rejects malformed publication outcomes instead of confirming a remote import", async () => {
+    const artifact: RunArtifact = {
+      id: "run-9", createdAt: 5, results: [], shards: [], selection: { kind: "all-mapped" }, preflight: [], state: "complete",
+    };
+    const adapter = validatedAdapter(optionalCapabilities({ resultPublishing: {
+      searchTargets: () => Promise.resolve([]),
+      publish: () => Promise.resolve({ ref: { kind: "testCase", key: "T-1" }, imported: 1, warnings: [] } as never),
+    } }), () => Promise.resolve(), () => undefined);
+    await expect(adapter.resultPublishing!.publish(artifact, { mode: "append", executionKey: "T-9" }))
+      .rejects.toMatchObject({ code: "malformed-response" });
+  });
+  it("delivers populated coverage, search, and project results to consumers", async () => {
+    const attach = vi.fn().mockResolvedValue(undefined);
+    const adapter = validatedAdapter(optionalCapabilities({ attachments: { attach } }), () => Promise.resolve(), () => undefined);
+
+    await expect(adapter.coverage!.coverageFor({ kind: "testCase", key: "T-1" })).resolves.toEqual([{ kind: "requirement", key: "R-1" }]);
+    expect(adapter.automationBinding!.classify({ key: "T-1" })).toBe("compatible");
+    await expect(adapter.automationBinding!.bind({ kind: "testCase", key: "T-1" })).resolves.toBeUndefined();
+    await expect(adapter.remoteSearch!.search("checkout")).resolves.toMatchObject({ tests: [{ key: "T-1", summary: "Checkout" }], complete: true });
+    await expect(adapter.remoteSearch!.mergeKeys(["T-1"])).resolves.toBeUndefined();
+    expect(adapter.projectDirectory!.cached().projects).toEqual([{ key: "T", name: "Tests" }]);
+    await expect(adapter.projectDirectory!.list()).resolves.toMatchObject({ truncated: false });
+    await adapter.attachments!.attach({ kind: "execution", key: "T-9" }, ["/tmp/trace.zip"]);
+    expect(attach).toHaveBeenCalledWith({ kind: "execution", key: "T-9" }, ["/tmp/trace.zip"], expect.any(AbortSignal));
+  });
+
+  it("rejects malformed optional results before domain state consumes them", async () => {
+    const adapter = validatedAdapter(optionalCapabilities({
+      coverage: { coverageFor: () => Promise.resolve([{ kind: "testCase", key: "T-1" }] as never) },
+      automationBinding: { classify: () => "complete" as never, bind: () => Promise.resolve() },
+      remoteSearch: { search: () => Promise.resolve({ tests: [{ summary: "Missing key" }], complete: true } as never), mergeKeys: () => Promise.resolve() },
+      projectDirectory: { cached: () => ({ projects: [{ key: "T", name: 42 }], truncated: false } as never), list: () => Promise.resolve({ projects: [], truncated: "no" } as never) },
+      attachments: { attach: () => Promise.reject(new Error("network unavailable")) },
+    }), () => Promise.resolve(), () => undefined);
+
+    await expect(adapter.coverage!.coverageFor({ kind: "testCase", key: "T-1" })).rejects.toMatchObject({ code: "malformed-response" });
+    expect(() => adapter.automationBinding!.classify({ key: "T-1" })).toThrow(expect.objectContaining({ code: "malformed-response" }));
+    await expect(adapter.remoteSearch!.search("checkout")).rejects.toMatchObject({ code: "malformed-response" });
+    expect(() => adapter.projectDirectory!.cached()).toThrow(expect.objectContaining({ code: "malformed-response" }));
+    await expect(adapter.projectDirectory!.list()).rejects.toMatchObject({ code: "malformed-response" });
+    await expect(adapter.attachments!.attach({ kind: "execution", key: "T-9" }, ["/tmp/trace.zip"])).rejects.toMatchObject({ code: "provider-failed" });
+  });
+
+  it("preserves a typed provider error and disposes its boundary once", async () => {
+    const denied = new IntegrationAdapterError("provider-failed", "Project access denied");
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    const adapter = validatedAdapter(optionalCapabilities({
+      projectDirectory: { cached: () => {throw denied;}, list: () => Promise.reject(denied) },
+    }), dispose, () => undefined);
+
+    expect(() => adapter.projectDirectory!.cached()).toThrow(denied);
+    await expect(adapter.projectDirectory!.list()).rejects.toBe(denied);
+    await adapter.dispose?.();
+    await adapter.dispose?.();
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(() => adapter.projectDirectory!.cached()).toThrow(expect.objectContaining({ code: "adapter-disposed" }));
+  });
+});
+
+describe("optional activation capability shape", () => {
+  it.each([
+    ["missing required method", "coverage", { coverage: {} }],
+    ["non-callable optional method", "testAuthoring", { testAuthoring: { createTest: () => Promise.resolve({ warnings: [] }), createTestSet: true } }],
+    ["non-text connection label", "connection", { connection: { onDidChange: new vscode.EventEmitter<void>().event, isConnected: () => Promise.resolve(true), label: 7 } }],
+  ] as const)("rejects a %s", async (_case, capability, override) => {
+    const registry = new TraceabilityAdapterRegistry();
+    registry.register({
+      id: "optional", ...currentAdapterVersions(capability),
+      create: () => {
+        const { id, label, keyGrammar, browseUrl } = optionalCapabilities();
+        return { id, label, keyGrammar, browseUrl, ...override } as TraceabilityAdapter;
+      },
+    });
+
+    await expect(registry.activate("optional", ctx)).rejects.toMatchObject({
+      code: "malformed-adapter", message: expect.stringContaining(`capability "${capability}"`),
+    });
+  });
+});
+
 describe("TraceabilityAdapterRegistry", () => {
+  it.each([
+    ["blank id", { id: " " }],
+    ["null versions", { capabilityVersions: null }],
+    ["array versions", { capabilityVersions: [] }],
+    ["excess versions", { capabilityVersions: Object.fromEntries(Array.from({ length: 11 }, (_, index) => [`unsupported-${index}`, 1])) }],
+  ])("rejects a factory with %s without registering it", (_case, override) => {
+    const registry = new TraceabilityAdapterRegistry();
+    const factory = Object.assign(createInMemoryAdapterFactory(), override);
+    expect(() => registry.register(factory as TraceabilityAdapterFactory)).toThrow(expect.objectContaining({ code: "malformed-factory" }));
+    expect(registry.ids()).toEqual([]);
+  });
+
+  it("rejects an adapter factory that returns null before exposing it", async () => {
+    const registry = new TraceabilityAdapterRegistry();
+    registry.register({ ...createInMemoryAdapterFactory(), create: () => null as never });
+    await expect(registry.activate("in-memory", ctx)).rejects.toMatchObject({ code: "malformed-adapter" });
+  });
+
+  it("contains factory property and construction faults with stable lifecycle codes", async () => {
+    const registry = new TraceabilityAdapterRegistry();
+    const factory = createInMemoryAdapterFactory();
+    Object.defineProperty(factory, "id", { get: () => {throw new Error("factory read fault");} });
+    expect(() => registry.register(factory)).toThrow(expect.objectContaining({ code: "malformed-factory" }));
+    registry.register({ ...createInMemoryAdapterFactory(), create: () => {throw new Error("construction fault");} });
+    await expect(registry.activate("in-memory", ctx)).rejects.toMatchObject({ code: "activation-failed", cause: expect.any(Error) });
+  });
+
+  it("preserves an adapter's typed disposal failure", async () => {
+    const denied = new IntegrationAdapterError("provider-failed", "Cleanup denied");
+    const registry = new TraceabilityAdapterRegistry();
+    registry.register({ ...createInMemoryAdapterFactory(), create: () => Object.assign(new InMemoryTraceabilityAdapter(), {
+      dispose: () => Promise.reject(denied),
+    }) });
+    const adapter = await registry.activate("in-memory", ctx);
+    await expect(adapter!.dispose!()).rejects.toBe(denied);
+  });
   it("registers a factory and activates its adapter by id", async () => {
     const registry = new TraceabilityAdapterRegistry();
     registry.register(createInMemoryAdapterFactory());

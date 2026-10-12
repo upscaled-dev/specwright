@@ -108,7 +108,7 @@ describe("LiveRunStream", () => {
     const record = JSON.stringify(testEndRecord());
     fs.appendFileSync(reportPath, record.slice(0, 30));
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(began).toHaveLength(1));
     expect(ended).toEqual([]);
 
     fs.appendFileSync(reportPath, `${record.slice(30)}\n`);
@@ -220,5 +220,52 @@ describe("LiveRunStream", () => {
 
     expect(calls).toBe(1);
     expect(errors.map((error) => error.message)).toEqual(["consumer failed"]);
+  });
+
+  it("restarts cleanly when an external writer truncates the report", () => {
+    fs.writeFileSync(reportPath, `${JSON.stringify(beginRecord())}\n${JSON.stringify(testEndRecord({ title: "A long initial title" }))}\n`);
+    watch();
+    expect(ended).toHaveLength(1);
+    fs.writeFileSync(reportPath, JSON.stringify(testEndRecord({ title: "New" })));
+    stream!.finish();
+    expect(ended.map(item => item.result.scenarioName)).toEqual(["A long initial title", "New"]);
+  });
+
+  it("ignores blank lines and malformed values while preserving interruption and skip outcomes", () => {
+    fs.writeFileSync(reportPath, ["", "   ", "null", "3", JSON.stringify({ kind: "unknown" }),
+      JSON.stringify(testEndRecord({ status: "interrupted" })),
+      JSON.stringify(testEndRecord({ status: "skipped" })),
+      JSON.stringify({ ...testEndRecord(), status: "invalid" }),
+    ].join("\n"));
+    watch();
+    stream!.finish();
+    expect(malformed).toHaveLength(4);
+    expect(ended.map(item => item.result.status)).toEqual(["failed", "skipped"]);
+    expect(ended[0]!.result.outcome).toBe("interrupted");
+  });
+
+  it.each([true, false])("resolves relative generated paths with a begin record: %s", includeBegin => {
+    const file = includeBegin ? path.basename(specPath) : path.relative(process.cwd(), specPath);
+    fs.writeFileSync(reportPath, [
+      ...(includeBegin ? [JSON.stringify(beginRecord())] : []),
+      JSON.stringify(testEndRecord({ file, line: 999 })),
+    ].join("\n"));
+    watch();
+    stream!.finish();
+    expect(ended[0]!.result.featurePath).toBe(includeBegin ? path.join(root, "features", "math.feature") : path.resolve("features/math.feature"));
+    expect(ended[0]!.result.lineNumber).toBeUndefined();
+  });
+
+  it("normalizes a non-Error consumer failure without losing the next result", () => {
+    const errors: Error[] = [];
+    stream = LiveRunStream.watch(reportPath, {
+      onBegin: () => { throw "closed consumer"; },
+      onTestEnd: (result, record) => ended.push({ result, record }),
+      onError: error => errors.push(error),
+    });
+    fs.appendFileSync(reportPath, `${JSON.stringify(beginRecord())}\n${JSON.stringify(testEndRecord())}`);
+    stream.finish();
+    expect(errors.map(error => error.message)).toEqual(["closed consumer"]);
+    expect(ended).toHaveLength(1);
   });
 });

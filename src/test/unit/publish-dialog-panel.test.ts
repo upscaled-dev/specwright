@@ -154,6 +154,62 @@ function surface(delegate: PublishDialogDelegate, startPublish: () => void = () 
 }
 
 describe("PublishSurface: lifecycle", () => {
+  it("retains a replacement flow when an older preparation finishes late", async () => {
+    const { delegate } = deferredDelegate();
+    const start = vi.fn();
+    const { rig, publish } = surface(delegate, start);
+    const retired = publish.beginFlow();
+    const replacement = publish.beginFlow();
+    publish.onManualActivate();
+    expect(start).not.toHaveBeenCalled();
+    await expect(retired.present(makeModel())).resolves.toBeUndefined();
+    expect(rig.posted).toEqual([]);
+    expect(retired.markSettled()).toBe(false);
+    const pending = replacement.present(makeModel());
+    expect(replacement.markSettled()).toBe(false);
+    rig.receive({ type: "cancel" });
+    await pending;
+    expect(replacement.markSettled()).toBe(true);
+    expect(rig.posted.at(-1)).toEqual({ type: "settled" });
+  });
+
+  it("keeps publishing busy on a second cancel and reports settled after completion", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const flow = publish.beginFlow();
+    const pending = flow.present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "CALC-42" }, attachments: [] });
+    await pending;
+    rig.receive({ type: "cancel" });
+    expect(rig.posted.at(-1)).toEqual({ type: "publish-busy", busy: true });
+    expect(flow.markSettled()).toBe(true);
+    rig.receive({ type: "cancel" });
+    expect(rig.posted.at(-1)).toEqual({ type: "settled" });
+  });
+  it.each([
+    { mode: "append", executionKey: " " },
+    { mode: "create-new", project: " ", summary: "Nightly" },
+    { mode: "create-new", project: "CALC", summary: " " },
+  ] satisfies PublishRequest[])("keeps the form open for an incomplete request %j", async (request) => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const pending = publish.beginFlow().present(makeModel());
+    rig.receive({ type: "confirm", runId: "run-1", request, attachments: [] });
+    expect(rig.posted.some((message) => message.type === "publish-busy" && message["busy"] === true)).toBe(false);
+    const valid: PublishRequest = { mode: "append", executionKey: "CALC-42" };
+    rig.receive({ type: "confirm", runId: "run-1", request: valid, attachments: [] });
+    await expect(pending).resolves.toEqual({ runId: "run-1", request: valid, attachments: [] });
+  });
+
+  it("ignores an evicted selection while preserving the offered run for confirmation", async () => {
+    const { delegate } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const pending = publish.beginFlow().present(makeModel());
+    rig.receive({ type: "selectRun", runId: "evicted-run" });
+    const request: PublishRequest = { mode: "append", executionKey: "CALC-42" };
+    rig.receive({ type: "confirm", runId: "run-1", request, attachments: [] });
+    await expect(pending).resolves.toEqual({ runId: "run-1", request, attachments: [] });
+  });
   it("resolves undefined when the panel is disposed without confirming (the flow's zero-transport signal)", async () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
@@ -644,6 +700,31 @@ describe("PublishSurface: manual activation", () => {
 });
 
 describe("PublishSurface: search", () => {
+  it("does not search when Jira is unavailable", async () => {
+    const { delegate, calls } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const pending = publish.beginFlow().present(makeModel({ jiraSearchAvailable: false }));
+    rig.receive({ type: "search", token: 1, kind: "execution", query: "CALC" });
+    rig.receive({ type: "cancel" });
+    await expect(pending).resolves.toBeUndefined();
+    expect(calls).toEqual([]);
+    expect(rig.posted.some((message) => message.type === "search-result")).toBe(false);
+  });
+
+  it("drops a rejected superseded search and displays the replacement result", async () => {
+    const { delegate, calls } = deferredDelegate();
+    const { rig, publish } = surface(delegate);
+    const pending = publish.beginFlow().present(makeModel());
+    rig.receive({ type: "search", token: 1, kind: "execution", query: "old" });
+    rig.receive({ type: "search", token: 2, kind: "execution", query: "CALC" });
+    calls[0]!.reject(new Error("retired search failure"));
+    calls[1]!.resolve([target("CALC-42", "Nightly checkout")]);
+    await vi.waitFor(() => expect(rig.posted.filter((message) => message.type === "search-result")).toEqual([
+      { type: "search-result", token: 2, kind: "execution", items: [{ key: "CALC-42", label: "Nightly checkout" }] },
+    ]));
+    rig.receive({ type: "cancel" });
+    await pending;
+  });
   it("does not call the search delegate until the webview asks for a search", () => {
     const { delegate, calls } = deferredDelegate();
     const { rig, publish } = surface(delegate);
@@ -745,6 +826,37 @@ describe("PublishSurface: search", () => {
 });
 
 describe("PublishSurface: attachments", () => {
+  it("does not open the file chooser when attachments are unavailable", async () => {
+    const { delegate } = deferredDelegate();
+    const browse = vi.spyOn(delegate, "browseFiles");
+    const { rig, publish } = surface(delegate);
+    const pending = publish.beginFlow().present(makeModel({ attachments: attachmentsModel({ available: false }) }));
+    rig.receive({ type: "browse" });
+    rig.receive({ type: "cancel" });
+    await pending;
+    expect(browse).not.toHaveBeenCalled();
+  });
+
+  it("does not carry a cancelled chooser result into a replacement form", async () => {
+    const { delegate } = deferredDelegate();
+    let resolve!: (files: AttachmentSuggestion[]) => void;
+    vi.spyOn(delegate, "browseFiles").mockReturnValue(new Promise((done) => {resolve = done;}));
+    const { rig, publish } = surface(delegate);
+    const old = publish.beginFlow().present(makeModel());
+    rig.receive({ type: "browse" });
+    rig.receive({ type: "cancel" });
+    await old;
+    const next = publish.beginFlow().present(makeModel({ runs: [runOption({ id: "run-2" })], selectedRunId: "run-2" }));
+    const files = [{ path: "/ws/old.zip", name: "old.zip", size: 10 }];
+    resolve(files);
+    // The delegate promise settles before this continuation; its queued result must be retired.
+    await Promise.resolve();
+    expect(rig.posted.some((message) => message.type === "browse-result")).toBe(false);
+    rig.receive({ type: "confirm", runId: "run-2", request: { mode: "append", executionKey: "CALC-42" }, attachments: ["/ws/old.zip"] });
+    expect(rig.posted.at(-1)).toEqual({ type: "attachment-error", text: "Choose attachments from the files currently offered." });
+    rig.receive({ type: "cancel" });
+    await expect(next).resolves.toBeUndefined();
+  });
   const files = (count: number): AttachmentSuggestion[] => Array.from({ length: count }, (_, index) => ({
     path: `/ws/file-${index}.zip`, name: `file-${index}.zip`, size: 100,
   }));

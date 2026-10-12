@@ -493,6 +493,23 @@ describe("TraceabilityAuthoringCommands container creates", () => {
 describe("TraceabilityAuthoringCommands existing containers", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it.each([
+    { name: "the adapter lacks membership support", options: { seams: false }, message: "Connect to your test tracker before adding tests to a Test Set." },
+    { name: "credentials are missing", options: { credentials: false }, message: "Connect to your test tracker before adding tests to a Test Set." },
+    { name: "the board has no working project", options: { project: undefined }, message: "Pick a project on the Coverage Board before choosing a Test Set." },
+  ])("stops before choosing a target when $name", async ({ options, message }) => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const input = vi.spyOn(vscode.window, "showInputBox");
+    const { commands, resolved, additions } = containerRig(options);
+
+    await commands.addToTestSet();
+
+    expect(info).toHaveBeenCalledWith(message);
+    expect(input).not.toHaveBeenCalled();
+    expect(resolved).toEqual([]);
+    expect(additions).toEqual([]);
+  });
+
   it("fails the whole append before any read or mutation and names every test without an issue id", async () => {
     const warn = vi.spyOn(vscode.window, "showWarningMessage");
     const input = vi.spyOn(vscode.window, "showInputBox");

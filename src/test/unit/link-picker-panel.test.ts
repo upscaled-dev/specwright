@@ -59,6 +59,32 @@ function begin(rig: FakeHost): { surface: LinkSurface; ui: LinkPickerUi } {
 }
 
 describe("LinkSurface", () => {
+  it("keeps a newer session active when an older cancelled session closes late", () => {
+    const rig = fakeHost();
+    const surface = new LinkSurface(rig.host);
+    const old = surface.begin(OPTS);
+    old.onCancel(() => undefined);
+    const current = surface.begin({ ...OPTS, title: "Link Checkout" });
+    old.close();
+    current.setRows([ROW, { id: "hint", key: "No matches", kind: "hint" }]);
+    const confirmed: string[] = [];
+    current.onConfirm(id => confirmed.push(id));
+    rig.receive({ type: "confirm", id: "hint" });
+    expect(confirmed).toEqual([]);
+    rig.receive({ type: "confirm", id: ROW.id });
+    expect(confirmed).toEqual([ROW.id]);
+  });
+
+  it("posts no session state into a disposed host", () => {
+    const rig = fakeHost();
+    rig.dispose();
+    const { surface, ui } = begin(rig);
+    ui.setRows([ROW]);
+    ui.setLinked(LINKED);
+    surface.rehydrate();
+    expect(rig.posted).toEqual([]);
+    expect(rig.tabVisible).toEqual([]);
+  });
   it("reveals the Link tab, resets the pane, and activates the Link tab on begin", () => {
     const rig = fakeHost();
     begin(rig);
@@ -171,6 +197,20 @@ describe("LinkSurface", () => {
     rig.dispose();
 
     expect(cancels).toBe(1);
+  });
+
+  it("disposes a live flow once and leaves a subsequent rehydration idle", () => {
+    const rig = fakeHost();
+    const { surface, ui } = begin(rig);
+    let cancels = 0;
+    ui.onCancel(() => {cancels += 1; ui.close();});
+    surface.dispose();
+    surface.dispose();
+    const count = rig.posted.length;
+    surface.rehydrate();
+    expect(cancels).toBe(1);
+    expect(rig.tabVisible.at(-1)).toEqual({ visible: false, title: undefined });
+    expect(rig.posted).toHaveLength(count);
   });
 
   it("drops webview messages after a terminal confirm (settle-safety)", () => {

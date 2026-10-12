@@ -158,6 +158,43 @@ describe("runLinkPickerFlow", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it.each(["current", "superseded", "cancelled"] as const)("handles a %s search rejection without repainting rows", async (state) => {
+    const { remoteSearch, calls } = deferredSearch();
+    const h = harness({ remoteSearch, localCandidates: [{ key: "CALC-1" }] });
+    const flow = runLinkPickerFlow(h.deps);
+    h.ui.type("checkout");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(calls).toHaveLength(1);
+    if (state === "superseded") {h.ui.type("ca");}
+    if (state === "cancelled") {h.ui.clickCancel();}
+    const count = h.ui.setRowsCalls;
+    const fault = new Error("remote search unavailable");
+    calls[0]!.reject(fault);
+    await flush();
+    expect(h.searchErrors).toEqual(state === "current" ? [fault] : []);
+    expect(h.ui.setRowsCalls).toBe(count);
+    expect(h.ui.busy).toBe(false);
+    h.ui.clickCancel();
+    await flow;
+  });
+
+  it("keeps a closed picker unchanged when an already admitted unlink finishes", async () => {
+    let complete!: () => void;
+    const h = harness({ linkedTests: [{ key: "CALC-1", summary: "Checkout" }], unlink: () => new Promise<void>((resolve) => {complete = resolve;}) });
+    const flow = runLinkPickerFlow(h.deps);
+    h.ui.clickUnlink("CALC-1");
+    h.ui.clickCancel();
+    await flow;
+    const count = h.ui.setLinkedCalls;
+    complete();
+    await flush();
+    h.ui.clickOpenLinked("CALC-1");
+    h.ui.clickUnlink("CALC-1");
+    expect(h.ui.setLinkedCalls).toBe(count);
+    expect(h.ui.linkedKeys()).toEqual(["CALC-1"]);
+    expect(h.opened).toEqual([]);
+  });
+
   it("shows the snapshot's orphan tests on open, before any typing", async () => {
     const h = harness({ orphanSuggestions: ORPHANS });
     const flow = runLinkPickerFlow(h.deps);
@@ -254,9 +291,10 @@ describe("runLinkPickerFlow", () => {
     await flush();
     expect(h.ui.keys()).not.toContain("STALE-1");
 
-    calls[1]!.resolve({ tests: [{ key: "FRESH-1", summary: "fresh" }], complete: true });
+    calls[1]!.resolve({ tests: [{ key: "FRESH-1" }], complete: true });
     await flush();
     expect(h.ui.keys()).toContain("FRESH-1");
+    expect(h.ui.rows.find((row) => row.key === "FRESH-1")).not.toHaveProperty("summary");
 
     h.ui.clickCancel();
     await flow;

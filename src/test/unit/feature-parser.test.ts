@@ -35,6 +35,50 @@ const NL = "\n";
 const lines = (...rows: string[]): string => rows.join(NL);
 
 describe("FeatureParser.parseFeatureContent: invalid input", () => {
+  it("ignores orphan steps and stops collecting Background steps at narrative text", () => {
+    const parsed = FeatureParser.create().parseFeatureContent(lines(
+      "Feature: Checkout", "Given an orphan step", "Some feature description", "Background:",
+      "  Given a basket", "    | item |", "    | apple |", "End of background description",
+      "  Given another orphan step", "Scenario: Pay", "  When I pay", "Some scenario description",
+    ));
+    expect(parsed?.scenarios).toHaveLength(1);
+    expect(parsed?.scenarios[0]).toMatchObject({
+      name: "Pay", steps: ["When I pay"], backgroundSteps: ["Given a basket"],
+    });
+  });
+
+  it.each(["", "# drafting a feature"])("offers no CodeLens before a Feature or Scenario is written: %s", (text) => {
+    expect(FeatureParser.create().provideScenarioCodeLenses(text, "/ws/draft.feature")).toEqual([]);
+  });
+
+  it("keeps unnamed scenarios and outlines discoverable while the user types", () => {
+    const logger = makeLoggerMock();
+    const parsed = FeatureParser.create(logger).parseFeatureContent(lines(
+      "Feature: Checkout", "Scenario:", "  Given a basket", "Scenario Outline:", "  Given a <method> payment",
+    ));
+    expect(parsed?.scenarios.map((scenario) => scenario.name)).toEqual(["Unnamed Scenario", "Unnamed Scenario Outline"]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Empty scenario name"));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Empty scenario outline name"));
+  });
+
+  it("retains rule and background context on an outline before examples exist", () => {
+    const parsed = FeatureParser.create().parseFeatureContent(lines(
+      "Feature: Checkout", "Background:", "  Given a basket", "Rule: Payments", "Background:",
+      "  Given a payment provider", "Scenario Outline: Pay with <method>", "  When I pay with <method>",
+    ));
+    expect(parsed?.scenarios[0]).toMatchObject({ name: "Pay with <method>", ruleName: "Payments",
+      backgroundSteps: ["Given a basket", "Given a payment provider"], isScenarioOutline: true });
+  });
+
+  it("uses a readable positional name for an unfinished example header", () => {
+    const parsed = FeatureParser.create().parseFeatureContent(lines(
+      "Feature: Checkout", "Rule:", "Scenario Outline: Pay", "  Given <method>",
+      "Examples:", "  | method |        |", "  | cash   | receipt |",
+    ));
+    expect(parsed?.scenarios[0]?.name).toContain("param1: receipt");
+    expect(parsed?.scenarios[0]?.ruleName).toBeUndefined();
+  });
+
   it("returns null for an empty string", () => {
     const parser = FeatureParser.create();
     expect(parser.parseFeatureContent("")).toBeNull();

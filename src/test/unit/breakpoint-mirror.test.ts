@@ -570,6 +570,91 @@ describe("BreakpointMirror", () => {
     });
   });
 
+  it("matches Windows feature paths regardless of casing", () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    debugApi.breakpoints.push(featureBreakpoint(9));
+    const mirror = makeMirror();
+    mirror.mirrorBreakpoints(FEATURE.toUpperCase(), SPEC);
+    expect(mirroredLines()).toEqual([11]);
+    mirror.dispose();
+  });
+
+  it("tracks a debug launch before a generated spec is available", async () => {
+    const read = vi.fn(() => specText);
+    const mirror = makeMirror(read);
+    const id = mirror.mirrorBreakpoints(FEATURE, undefined);
+    expect(read).not.toHaveBeenCalled();
+    const completed = mirror.waitForRelease(id);
+    mirror.release(id);
+    await expect(completed).resolves.toEqual({ confirmed: true });
+    mirror.dispose();
+  });
+
+  it.each([
+    { label: "synchronous error", reject: () => { throw new Error("adapter offline"); } },
+    { label: "synchronous value", reject: () => { throw "adapter offline"; } },
+    { label: "rejected value", reject: () => Promise.reject("adapter offline") },
+  ])("reports a $label from the stop request without removing breakpoints", async ({ reject }) => {
+    vi.spyOn(vscode.debug, "stopDebugging").mockImplementation(reject);
+    debugApi.breakpoints.push(featureBreakpoint(9));
+    const mirror = makeMirror();
+    const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+    const root = { id: "root", configuration: { [BreakpointMirror.SESSION_KEY]: id } };
+    debugApi.__fireStart(root);
+
+    await expect(mirror.forceStop(id)).resolves.toEqual({
+      confirmed: false,
+      failure: "Debug-session termination failed: adapter offline",
+    });
+    expect(mirroredLines()).toEqual([11]);
+    debugApi.__fireTerminate(root);
+    expect(mirroredLines()).toEqual([]);
+    mirror.dispose();
+  });
+
+  it("ignores unrelated starts and a competing root after a child identifies its parent", async () => {
+    const mirror = makeMirror();
+    const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+    const root = { id: "owner", configuration: { [BreakpointMirror.SESSION_KEY]: id } };
+    const child = { id: "child", configuration: {}, parentSession: root };
+    debugApi.__fireStart({ id: "unrelated", configuration: {} });
+    debugApi.__fireStart(child);
+    debugApi.__fireStart({ id: "imposter", configuration: root.configuration });
+    debugApi.__fireTerminate({ id: "never-started", configuration: {}, parentSession: root });
+    expect(debugApi.__stopDebuggingCalls).toEqual([]);
+    debugApi.__fireStart(root);
+    const completed = mirror.waitForRelease(id);
+    debugApi.__fireTerminate(root);
+    await expect(completed).resolves.toEqual({ confirmed: true });
+    mirror.dispose();
+  });
+
+  it("coalesces repeated child termination events while the root is stopping", async () => {
+    const mirror = makeMirror();
+    const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+    const root = { id: "owner", configuration: { [BreakpointMirror.SESSION_KEY]: id } };
+    const child = { id: "child", configuration: {}, parentSession: root };
+    debugApi.__fireStart(root);
+    debugApi.__fireStart(child);
+    const completed = mirror.waitForRelease(id);
+    debugApi.__fireTerminate(child);
+    debugApi.__fireTerminate(child);
+    expect(debugApi.__stopDebuggingCalls).toEqual([root]);
+    debugApi.__fireTerminate(root);
+    await expect(completed).resolves.toEqual({ confirmed: true });
+    mirror.dispose();
+  });
+
+  it("delivers a stored unsuccessful release to a later waiter once", async () => {
+    const mirror = makeMirror();
+    const id = mirror.mirrorBreakpoints(FEATURE, SPEC);
+    const failure = { confirmed: false, failure: "adapter disconnected without confirmation" } as const;
+    mirror.release(id, failure);
+    await expect(mirror.waitForRelease(id)).resolves.toEqual(failure);
+    await expect(mirror.waitForRelease(id)).resolves.toEqual({ confirmed: true });
+    mirror.dispose();
+  });
+
   describe("waitForRelease", () => {
     it("resolves when the mirror is released", async () => {
       const mirror = makeMirror();

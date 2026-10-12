@@ -174,6 +174,39 @@ describe("XrayConnectionCommands.saveConnection", () => {
 });
 
 describe("XrayConnectionCommands.connect", () => {
+  it.each([
+    ["connect", "playwrightBddRunner.traceability.connect"],
+    ["update", "playwrightBddRunner.traceability.connect"],
+    ["test", "playwrightBddRunner.traceability.testConnection"],
+    ["disconnect", "playwrightBddRunner.traceability.disconnect"],
+    ["settings", "workbench.action.openSettings"],
+    [undefined, undefined],
+  ] as const)("routes the offered manage-connection choice %s and honors dismissal", async (choice, command) => {
+    const site = "acme.atlassian.net";
+    stubWorkspaceConfig({}, { "xray.siteUrl": site });
+    const { commands, store } = makeCommands(site);
+    if (choice !== "connect" && choice !== undefined) {await store.setCredentials(site, "id", "secret");}
+    const execute = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    const picker = vi.spyOn(vscode.window, "showQuickPick").mockImplementation(async items => {
+      const offered = await items as readonly { label: string; action: string }[];
+      const selected = offered.find(item => item.action === choice);
+      if (choice !== undefined) {expect(selected?.label).toBeTruthy();}
+      return selected as never;
+    });
+    await commands.manageConnection();
+    expect(picker).toHaveBeenCalledOnce();
+    if (command === undefined) {expect(execute).not.toHaveBeenCalled();}
+    else {expect(execute.mock.calls.map(call => call[0])).toEqual([command]);}
+  });
+  it("closes a panel requested before its asynchronous opening completes", async () => {
+    stubWorkspaceConfig();
+    const { commands } = makeCommands("acme.atlassian.net");
+    const opening = commands.connect();
+    const closing = XraySetupPanel.close();
+    await Promise.all([opening, closing]);
+    expect(win.__webviewPanels).toHaveLength(1);
+    expect(win.__webviewPanels[0]!.__disposed).toBe(true);
+  });
   it("aborts and drains the initial auth probe without posting after trust disposal", async () => {
     const trust = new WorkspaceTrust(() => true);
     const map = new Map<string, string>();

@@ -107,6 +107,7 @@ describe("publishableResults", () => {
   it("does not exclude a same-titled plain scenario for an outline decision", () => {
     const outline = ref("features/calc.feature", 12, "Repeated title", "outline");
     const plain = ref("features/calc.feature", 20, "Repeated title", "scenario");
+    expect(sameScenario(outline, plain)).toBe(false);
     const result = publishableResults(
       artifact(
         [makeResult(outline, { testKey: "CALC-1" }), makeResult(plain, { testKey: "CALC-2" })],
@@ -231,6 +232,7 @@ describe("summarizePublishable", () => {
         [{ scenario: ref("f", 8, "i"), testKey: "C-8", state: "duplicate-mapping", outcome: "exclude" }]
       )
     );
+    expect(publishDialogSubtitle(summarizePublishable(reconciled), 0)).toContain("1 flaky");
     expect(summarizePublishable(reconciled)).toEqual({
       total: 6,
       passed: 2,
@@ -265,6 +267,11 @@ describe("publishDialogSubtitle", () => {
     excludedCount: 0,
     unmappedCount: 0,
   };
+
+  it("names timed-out and interrupted results in the publishable summary", () => {
+    expect(publishDialogSubtitle({ ...base, total: 3, passed: 1, failed: 2, timedOut: 1, interrupted: 1 }, 0))
+      .toBe("3 scenarios · 1 passed · 2 failed · 1 timed out · 1 interrupted");
+  });
 
   it("shows the publishable headline and omits zero-count notes", () => {
     expect(publishDialogSubtitle(base, 0)).toBe("3 scenarios · 3 passed · 0 failed");

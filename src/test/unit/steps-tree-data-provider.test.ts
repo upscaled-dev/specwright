@@ -252,3 +252,30 @@ describe("StepsTreeDataProvider", () => {
     expect(refreshes).toBe(1);
   });
 });
+
+describe("steps panel node presentation", () => {
+  it("renders section and keyword nodes and expands unmatched files into navigable steps", async () => {
+    const provider = new StepsTreeDataProvider(makeIndex({
+      usages: [[def("ready", { keyword: "Given" }), []]],
+      unmatched: [["/ws/a.feature", [unmatched("missing action", 4)]]],
+    }).index, makeConfig().config);
+    const roots = await provider.getChildren();
+    expect(roots.map(node => provider.getTreeItem(node).label)).toEqual(["Step definitions", "Unmatched steps"]);
+    const groups = await provider.getChildren(roots[0]);
+    expect(groups.map(node => provider.getTreeItem(node).label)).toEqual(["Given"]);
+    const files = await provider.getChildren(roots[1]);
+    const steps = await provider.getChildren(files[0]);
+    expect(steps.map(node => provider.getTreeItem(node).label)).toEqual(["missing action"]);
+    expect(await provider.getChildren(steps[0])).toEqual([]);
+    provider.dispose();
+  });
+
+  it("does not expand stale nodes when the panel becomes disabled", async () => {
+    const config = makeConfig();
+    const provider = new StepsTreeDataProvider(makeIndex({ usages: [[def("ready"), []]] }).index, config.config);
+    const roots = await provider.getChildren();
+    config.set(false);
+    expect(await provider.getChildren(roots[0])).toEqual([]);
+    provider.dispose();
+  });
+});

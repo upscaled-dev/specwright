@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type * as vscode from "vscode";
+import * as vscode from "vscode";
 import { ExtensionConfig } from "../../core/extension-config";
 
 // A config stub that answers every get() with the getter's own fallback default, so each
@@ -151,6 +151,37 @@ describe("ExtensionConfig.validate", () => {
       inspect: (key: string): { key: string } => ({ key }),
     } as unknown as vscode.WorkspaceConfiguration;
   }
+
+  it.each(["on", "off", "invalid"])("honors explicit authoring modes and safely defaults unknown values: %s", (mode) => {
+    const settings = ["enableStepAutocomplete", "enableTagAutocomplete", "enableStepHover", "enableStepReferences",
+      "enableStepUsageCodeLens", "enableUnusedStepDiagnostics", "enableStepLiteralPromotion", "enableTableFormatting"];
+    const config = ExtensionConfig.create(configReturning(Object.fromEntries(settings.map((key) => [key, mode]))), false);
+    for (const setting of settings) { expect(GETTER_FOR_SETTING[setting]!(config)).toBe(mode === "invalid" ? "auto" : mode); }
+  });
+
+  it("reports every empty required command or traceability prefix and keeps a usable generation directory", () => {
+    const config = ExtensionConfig.create(configReturning({ playwrightCommand: " ", "traceability.testTagPrefix": " ",
+      "traceability.reqTagPrefix": "", featuresGenDir: "   " }), false);
+    expect(config.featuresGenDir).toBe(".features-gen");
+    expect(config.isValid()).toBe(false);
+    const errors = config.getValidationErrors().join("\n");
+    expect(errors).toContain("playwrightCommand");
+    expect(errors).toContain("traceability.testTagPrefix cannot be empty");
+    expect(errors).toContain("traceability.reqTagPrefix cannot be empty");
+  });
+
+  it("refreshes cached values before notifying listeners for relevant workspace changes", () => {
+    const changed = new vscode.EventEmitter<vscode.ConfigurationChangeEvent>();
+    const subscription = vi.spyOn(vscode.workspace, "onDidChangeConfiguration").mockImplementation(changed.event);
+    const read = vi.spyOn(vscode.workspace, "getConfiguration").mockReturnValue(configReturning({ featuresGenDir: "generated-new" }));
+    const config = ExtensionConfig.create(configReturning({ featuresGenDir: "generated-old" }));
+    const seen: string[] = []; config.addChangeListener(() => seen.push(config.featuresGenDir));
+    changed.fire({ affectsConfiguration: () => false } as unknown as vscode.ConfigurationChangeEvent);
+    expect(seen).toEqual([]);
+    changed.fire({ affectsConfiguration: (name: string) => name === "playwrightBddRunner" } as vscode.ConfigurationChangeEvent);
+    expect(seen).toEqual(["generated-new"]);
+    config.dispose(); changed.dispose(); read.mockRestore(); subscription.mockRestore();
+  });
 
   it("accepts the declared defaults", () => {
     expect(() => ExtensionConfig.create(defaultsOnlyConfig(), false).validate()).not.toThrow();

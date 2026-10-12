@@ -42,6 +42,16 @@ describe("BddgenDiagnosticsProvider", () => {
     lang.__resetCounters();
   });
 
+  it("resolves relative compiler errors and uses the first column when none is supplied", () => {
+    const provider = new BddgenDiagnosticsProvider();
+    const probe = probeCollection(provider);
+    provider.publish("features/draft.feature:3: missing Scenario", "/repo");
+    expect(probe.setCalls).toEqual([{ fsPath: "/repo/features/draft.feature", diags: [expect.objectContaining({
+      message: "missing Scenario", range: expect.objectContaining({ start: expect.objectContaining({ line: 2, character: 0 }) }),
+    })] }]);
+    provider.dispose();
+  });
+
   it("publishes diagnostics grouped by file when parseable errors are present", () => {
     const provider = new BddgenDiagnosticsProvider();
     const probe = probeCollection(provider);

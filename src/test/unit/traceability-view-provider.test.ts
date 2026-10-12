@@ -260,7 +260,8 @@ describe("TraceabilityViewProvider", () => {
   it.each([
     ["false", () => Promise.resolve(false)],
     ["rejection", () => Promise.reject(new Error("hidden post failed"))],
-  ])("replays the latest generation when hiding causes a chunk %s", async (_kind, failed) => {
+    ["acknowledged", () => Promise.resolve(true)],
+  ])("replays the latest generation after a %s chunk delivery during visibility loss", async (_kind, failed) => {
     const large: TraceabilitySnapshot = { ...snapshot, links: Array.from({ length: 300 }, (_, index) => ({
       ...snapshot.links[0]!, testKey: `CALC-${index}`, scenario: { ...snapshot.links[0]!.scenario, line: index + 1, name: `Scenario ${index}` },
     })) };
@@ -290,6 +291,33 @@ describe("TraceabilityViewProvider", () => {
     const bodies = posts.map((message) => (message as { body: { generation: number; type: string } }).body);
     const latest = Math.max(...bodies.map((body) => body.generation));
     expect(bodies.filter((body) => body.generation === latest).slice(-5).map((body) => body.type)).toEqual(["begin", "chunk", "chunk", "chunk", "end"]);
+  });
+
+  it("finishes the queued generation when visibility returns before an interrupted chunk acknowledges", async () => {
+    const posts: unknown[] = [];
+    const receive = { current: (_message: unknown) => undefined };
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.attach({ get snapshot(): TraceabilitySnapshot { return snapshot; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel, "Xray", "test");
+    provider.setConnected(true);
+    let interrupt = true;
+    const controlled = visibilityView(posts, receive, message => {
+      if (interrupt && (message as { body: { type: string } }).body.type === "chunk") {
+        interrupt = false;
+        controlled.setVisible(false);
+        controlled.setVisible(true);
+        return Promise.resolve(false);
+      }
+      return Promise.resolve(true);
+    });
+    provider.resolveWebviewView(controlled.view);
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: controlled.view.webview.html.match(/data-session="([^"]+)"/)![1],
+      revision: 0, surface: "traceability", body: { type: "ready" } });
+    await settleTransfer(provider);
+    const bodies = posts.map(message => (message as { body: { type: string } }).body.type);
+    expect(bodies).toEqual(["begin", "chunk", "begin", "chunk", "end"]);
+    expect(chunkRows(posts).map(row => row.label)).toContain("😀 scenario");
+    expect(provider.clientReady).toBe(true);
+    provider.dispose();
   });
 
   it("ignores stale visibility and disposal events", async () => {
@@ -584,9 +612,9 @@ describe("TraceabilityViewProvider", () => {
     expect((provider as unknown as { generation: number }).generation).toBe(detached);
   });
 
-  it("supersedes an in-flight multi-chunk generation without ending or admitting it", async () => {
+  it.each([300, 1])("supersedes an in-flight %i-scenario generation without ending or admitting it", async count => {
     const changes = new vscode.EventEmitter<void>();
-    const large: TraceabilitySnapshot = { ...snapshot, links: Array.from({ length: 300 }, (_, index) => ({
+    const large: TraceabilitySnapshot = { ...snapshot, links: Array.from({ length: count }, (_, index) => ({
       ...snapshot.links[0]!, testKey: `CALC-${index}`, scenario: { ...snapshot.links[0]!.scenario, line: index + 1, name: `Scenario ${index}` },
     })) };
     let release: (() => void) | undefined;
@@ -683,7 +711,11 @@ describe("TraceabilityViewProvider", () => {
   });
 
   it("dispatches every advertised projection action through registered command seams", async () => {
-    const value: TraceabilitySnapshot = { ...snapshot, orphans: [{ testKey: "CALC-9", meta: { key: "CALC-9", summary: "Unused" } }], completeProjects: ["CALC"] };
+    const value: TraceabilitySnapshot = {
+      ...snapshot,
+      untraced: [{ scenario: { filePath: "/workspace/new.feature", line: 8, name: "Unlinked checkout", kind: "scenario" }, reqKeys: [] }],
+      orphans: [{ testKey: "CALC-9", meta: { key: "CALC-9", summary: "Unused" } }], completeProjects: ["CALC"],
+    };
     const posts: unknown[] = [];
     const receive = { current: (_message: unknown) => undefined };
     const execute = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
@@ -716,9 +748,13 @@ describe("TraceabilityViewProvider", () => {
     expect(commands).toContain("playwrightBddRunner.traceability.connect");
     expect(commands).toContain("playwrightBddRunner.traceability.switchDefaultProject");
     expect(commands).toContain("playwrightBddRunner.traceability.selectSyncProjects");
-    const open = execute.mock.calls.find(([command]) => command === "vscode.open")!;
+    const open = execute.mock.calls.find(([command, target]) => command === "vscode.open"
+      && (target as vscode.Uri).fsPath === "/workspace/a.feature")!;
     expect(open[1]).toMatchObject({ fsPath: "/workspace/a.feature" });
     expect(open[2]).toMatchObject({ selection: new vscode.Range(0, 0, 0, 0) });
+    const untracedOpen = execute.mock.calls.find(([command, target]) => command === "vscode.open"
+      && (target as vscode.Uri).fsPath === "/workspace/new.feature")!;
+    expect(untracedOpen[2]).toMatchObject({ selection: new vscode.Range(7, 0, 7, 0) });
     execute.mockRestore();
   });
 
@@ -850,5 +886,208 @@ describe("TraceabilityViewProvider", () => {
     expect(execute).toHaveBeenCalledTimes(2);
     execute.mockRestore();
     warning.mockRestore();
+  });
+});
+
+describe("TraceabilityViewProvider preview delivery", () => {
+  async function ready(
+    refresh: OrganizationCapability["refreshTestSet"] = key => Promise.resolve({ status: "complete", testSet: completeSet(key) }),
+    post: (message: unknown) => Promise<boolean> = () => Promise.resolve(true),
+    value = snapshot,
+    changed: OrganizationCapability["onDidChange"] = () => ({ dispose: () => undefined })
+  ) {
+    const posts: import("../../webview/traceability-view-protocol").TraceabilityEnvelope<import("../../webview/traceability-view-protocol").TraceabilityHostBody>[] = [];
+    const receive = { current: (_message: unknown) => undefined };
+    const provider = new TraceabilityViewProvider(vscode.Uri.file("/dist"), Logger.create());
+    provider.attach({ get snapshot() { return value; }, onDidChange: () => ({ dispose: () => undefined }) } as unknown as TraceabilityModel,
+      "Xray", "test", organization(refresh, undefined, changed));
+    provider.setConnected(true);
+    const controlled = visibilityView(posts, receive, post);
+    provider.resolveWebviewView(controlled.view);
+    const session = controlled.view.webview.html.match(/data-session="([^"]+)"/)![1]!;
+    const send = (body: import("../../webview/traceability-view-protocol").TraceabilityClientBody, revision = posts.at(-1)?.revision ?? 0) => {
+      receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session, revision, surface: "traceability", body });
+    };
+    send({ type: "ready" });
+    await settleTransfer(provider);
+    const requestPreview = () => {
+      const chunk = posts.find(message => message.body.type === "chunk")!;
+      if (chunk.body.type !== "chunk") { throw new Error("missing rows"); }
+      const row = chunk.body.rows.find(item => item.label.startsWith("CALC-10") && item.actions.some(action => action.id === "preview-run"))!;
+      send({ type: "action", generation: chunk.body.generation, id: row.id, action: "preview-run", selection: [] });
+    };
+    const preview = async () => {
+      requestPreview();
+      await vi.waitFor(() => expect(posts.some(message => message.body.type === "preview")).toBe(true));
+      await settleTransfer(provider);
+      return posts.find(message => message.body.type === "preview")!;
+    };
+    return { provider, posts, send, preview, requestPreview, controlled };
+  }
+
+  it.each(["focus-filter", "preview"] as const)("retries an interrupted %s when the retained view becomes visible", async type => {
+    let interrupt = true;
+    const changed = new vscode.EventEmitter<void>();
+    const h = await ready(undefined, message => {
+      if (interrupt && (message as { body: { type: string } }).body.type === type) {
+        interrupt = false;
+        controlled.setVisible(false);
+        return Promise.resolve(false);
+      }
+      return Promise.resolve(true);
+    }, snapshot, changed.event);
+    const controlled: ReturnType<typeof visibilityView> = h.controlled;
+    try {
+      if (type === "preview") {await h.preview();}
+      else {h.provider.focusFilter(); await settleTransfer(h.provider);}
+      const attempts = () => h.posts.filter(message => message.body.type === type);
+      expect(attempts()).toHaveLength(1);
+      expect(controlled.view.visible).toBe(false);
+      controlled.setVisible(true);
+      await settleTransfer(h.provider);
+      expect(attempts()).toHaveLength(2);
+      expect(h.provider.currentProjection.labels).toContain("😀 scenario");
+      const last = attempts().at(-1)!.body;
+      if (last.type === "preview") {
+        expect(last.preview.title).toContain("CALC-10");
+        expect(last.preview.runnable).toBe(1);
+      }
+      changed.fire();
+      await settleTransfer(h.provider);
+    } finally {h.provider.dispose(); changed.dispose();}
+  });
+
+  it.each(["incomplete", "failed"] as const)("does not offer an organization run after a %s exact refresh", async status => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const execute = vi.spyOn(vscode.commands, "executeCommand");
+    const h = await ready(() => Promise.resolve({ status }));
+    try {
+      h.requestPreview();
+      await vi.waitFor(() => expect(warning).toHaveBeenCalledWith("Test Set membership could not be refreshed completely. Nothing was run."));
+      expect(h.posts.some(message => message.body.type === "preview")).toBe(false);
+      expect(execute).not.toHaveBeenCalled();
+    } finally {h.provider.dispose(); warning.mockRestore(); execute.mockRestore();}
+  });
+
+  it("keeps the current tree usable when the exact Test Set request rejects without cancellation", async () => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const execute = vi.spyOn(vscode.commands, "executeCommand");
+    const h = await ready(() => Promise.reject(new Error("Test Set service unavailable")));
+    try {
+      h.requestPreview();
+      await vi.waitFor(() => expect(warning).toHaveBeenCalledWith(
+        "Test Set membership could not be refreshed completely. Nothing was run."
+      ));
+      await settleTransfer(h.provider);
+      expect(h.posts.some(message => message.body.type === "preview")).toBe(false);
+      expect(h.provider.currentProjection.labels).toContain("😀 scenario");
+      expect(h.provider.currentProjection.labels).toContain("CALC-10");
+      expect(execute).not.toHaveBeenCalled();
+      h.provider.focusFilter();
+      await settleTransfer(h.provider);
+      expect(h.posts.at(-1)?.body.type).toBe("focus-filter");
+    } finally {h.provider.dispose(); warning.mockRestore(); execute.mockRestore();}
+  });
+
+  it("reports an exact Test Set with no local scenarios instead of offering an empty run", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const h = await ready(key => Promise.resolve({ status: "complete", testSet: {
+      ...completeSet(key), members: [{ key: "CALC-99", summary: "Remote checkout" }],
+    } }));
+    try {
+      h.requestPreview();
+      await vi.waitFor(() => expect(info).toHaveBeenCalledWith("This Test Set has no scenarios mapped in this workspace. Nothing was run."));
+      expect(h.posts.some(message => message.body.type === "preview")).toBe(false);
+    } finally {h.provider.dispose(); info.mockRestore();}
+  });
+
+  it("deduplicates locally mapped scenarios and omits tests outside the refreshed membership", async () => {
+    const execute = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    const value = { ...snapshot, links: [snapshot.links[0]!, snapshot.links[0]!, {
+      ...snapshot.links[0]!, testKey: "CALC-99", scenario: { ...snapshot.links[0]!.scenario, line: 9, name: "Unrelated checkout" },
+    }] };
+    const h = await ready(undefined, undefined, value);
+    try {
+      const message = await h.preview();
+      if (message.body.type !== "preview") {throw new Error("missing preview");}
+      h.send({ type: "confirm-preview", generation: message.body.generation, previewId: message.body.preview.previewId });
+      expect(execute).toHaveBeenCalledExactlyOnceWith("playwrightBddRunner.traceability.runAndPublish", {
+        kind: "organizationRun", selection: { kind: "test-set", testSetKey: "CALC-10", scenarios: [snapshot.links[0]!.scenario] },
+      });
+    } finally {h.provider.dispose(); execute.mockRestore();}
+  });
+
+  it("passes an already cancelled progress token to the exact refresh and offers no preview", async () => {
+    const progress = vi.spyOn(vscode.window, "withProgress").mockImplementation((_options, task) => Promise.resolve(task(
+      { report: () => undefined },
+      { isCancellationRequested: true, onCancellationRequested: () => ({ dispose: () => undefined }) } as vscode.CancellationToken
+    )));
+    const refresh = vi.fn((key: string, signal?: AbortSignal) => {
+      expect(signal?.aborted).toBe(true);
+      return Promise.resolve({ status: "complete" as const, testSet: completeSet(key) });
+    });
+    const h = await ready(refresh);
+    try {
+      h.requestPreview();
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalled());
+      await progress.mock.results[0]!.value;
+      await settleTransfer(h.provider);
+      expect(h.posts.some(message => message.body.type === "preview")).toBe(false);
+    } finally {h.provider.dispose(); progress.mockRestore();}
+  });
+
+  it.each(["confirm", "cancel"])("accepts only the current preview when users %s", async action => {
+    const execute = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    const h = await ready();
+    try {
+      const message = await h.preview();
+      if (message.body.type !== "preview") { throw new Error("missing preview"); }
+      const { generation, preview: { previewId } } = message.body;
+      h.send({ type: "confirm-preview", generation, previewId: "outdated" });
+      h.send({ type: "confirm-preview", generation, previewId }, message.revision - 1);
+      expect(execute).not.toHaveBeenCalled();
+      h.send({ type: "cancel-preview", generation, previewId: "outdated" });
+      h.send({ type: action === "confirm" ? "confirm-preview" : "cancel-preview", generation, previewId });
+      h.send({ type: "confirm-preview", generation, previewId });
+      if (action === "confirm") {
+        expect(execute).toHaveBeenCalledExactlyOnceWith("playwrightBddRunner.traceability.runAndPublish", {
+          kind: "organizationRun", selection: { kind: "test-set", testSetKey: "CALC-10", scenarios: [snapshot.links[0]!.scenario] },
+        });
+      } else { expect(execute).not.toHaveBeenCalled(); }
+    } finally { h.provider.dispose(); execute.mockRestore(); }
+  });
+
+  it.each(["focus-filter", "preview"])("retries a failed %s only after client readiness", async type => {
+    let fail = true;
+    const h = await ready(undefined, message => Promise.resolve(!(fail && (message as { body: { type: string } }).body.type === type)));
+    try {
+      if (type === "preview") { await h.preview(); } else { h.provider.focusFilter(); await settleTransfer(h.provider); }
+      const attempts = () => h.posts.filter(message => message.body.type === type).length;
+      expect(attempts()).toBe(1);
+      await settleTransfer(h.provider);
+      expect(attempts()).toBe(1);
+      fail = false;
+      h.send({ type: "ready" });
+      await settleTransfer(h.provider);
+      expect(attempts()).toBe(2);
+    } finally { h.provider.dispose(); }
+  });
+
+  it("stops updates after the current view is disposed and replays into its replacement", async () => {
+    const h = await ready();
+    h.controlled.dispose();
+    const before = h.posts.length;
+    h.provider.focusFilter();
+    await settleTransfer(h.provider);
+    expect(h.posts).toHaveLength(before);
+    expect(h.provider.clientReady).toBe(false);
+    const receive = { current: (_message: unknown) => undefined };
+    const next = view(h.posts, receive);
+    h.provider.resolveWebviewView(next);
+    receive.current({ version: TRACEABILITY_VIEW_PROTOCOL_VERSION, session: next.webview.html.match(/data-session="([^"]+)"/)![1],
+      revision: 0, surface: "traceability", body: { type: "ready" } });
+    await settleTransfer(h.provider);
+    expect(h.posts.slice(before).map(message => message.body.type)).toEqual(["begin", "chunk", "end", "focus-filter"]);
+    h.provider.dispose();
   });
 });

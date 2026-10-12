@@ -241,6 +241,8 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const { provider, controller } = buildProvider(shell);
     await provider.discoverTests();
     await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+    await runItem(controller, controller.find(fixture.featurePath)!);
+    expect(controller.runs.at(-1)!.outcome.passed).toContain(fixture.featurePath);
     const beforeEdit = controller.runs.length;
 
     await vscode.__fireFileWatcher("change", vscode.Uri.file(fixture.featurePath));

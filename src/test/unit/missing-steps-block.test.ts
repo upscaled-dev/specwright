@@ -62,4 +62,9 @@ describe("suggestedFeatureGlob", () => {
   it("handles a feature at the workspace root", () => {
     expect(suggestedFeatureGlob("/repo/login.feature", "/repo")).toBe("**/*.feature");
   });
+
+  it("suggests the feature directory when the file is open without a workspace", () => {
+    expect(suggestedFeatureGlob("/repo/features/login.feature"))
+      .toBe("/repo/features/**/*.feature");
+  });
 });

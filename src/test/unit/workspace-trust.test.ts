@@ -6,6 +6,29 @@ import {
 } from "../../core/workspace-trust";
 
 describe("WorkspaceTrust", () => {
+  it("bounds disposal while preserving cancellation until the operation finishes cleanup", async () => {
+    vi.useFakeTimers();
+    try {
+      const trust = new WorkspaceTrust(() => true);
+      let finish!: () => void;
+      let operationSignal: AbortSignal | undefined;
+      const running = trust.run(signal => {
+        operationSignal = signal;
+        return new Promise<void>(resolve => {finish = resolve;});
+      });
+      const draining = trust.dispose();
+      expect(trust.dispose()).toBe(draining);
+      expect(operationSignal?.aborted).toBe(true);
+      await vi.advanceTimersByTimeAsync(6_000);
+      await draining;
+      expect(trust.available).toBe(false);
+      finish();
+      await running;
+      const other = new WorkspaceTrust(() => true).begin();
+      other.dispose();
+      expect(() => other.dispose()).not.toThrow();
+    } finally {vi.useRealTimers();}
+  });
   it("fails closed with one stable typed error", () => {
     const trust = new WorkspaceTrust(() => false);
     expect(() => trust.require()).toThrow(WorkspaceTrustRequiredError);

@@ -13,6 +13,7 @@ import type {
 import type { ClientRunIntent } from "../../ui/execution-client-context";
 import { Logger } from "../../utils/logger";
 import { TestExecutor } from "../../core/test-executor";
+import { ExtensionConfig } from "../../core/extension-config";
 import {
   ArtifactCaptureTarget,
   RunArtifactStore,
@@ -567,6 +568,37 @@ describe("CommandManager palette run commands", () => {
     fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
   });
 
+  it.each([
+    ["debugScenario", "debug", undefined, "Payment"],
+    ["runScenarioWithTags", "run", "@smoke", "Payment"],
+    ["debugScenarioWithContext", "debug", undefined, "Payment"],
+    ["debugScenario", "debug", undefined, undefined],
+  ] as const)("runs explicit scenario arguments through %s in %s mode", async (command, mode, tags, name) => {
+    const filePath = writeTempFeature("Feature: Checkout\nScenario: Payment\n  Given a basket\n");
+    const exec = {
+      runScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
+      debugScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
+    };
+    const prompt = vi.spyOn(vscode.window, "showInputBox");
+    const handlers = captureHandlers(makeContext({ testExecutor: exec as unknown as TestExecutor }));
+    try {
+      await handlers.get(`playwrightBddRunner.${command}`)!(filePath, 2, name, tags);
+      const run = mode === "debug" ? exec.debugScenarioWithOutput : exec.runScenarioWithOutput;
+      expect(run).toHaveBeenCalledOnce();
+      expect(run).toHaveBeenCalledWith(expect.objectContaining({ filePath, lineNumber: 2, scenarioName: "Payment", ...(tags ? { tags } : {}) }), expect.anything());
+      expect(prompt).not.toHaveBeenCalled();
+    } finally {fs.rmSync(path.dirname(filePath), { recursive: true, force: true });}
+  });
+
+  it("rejects an explicitly tagged scenario command whose tag expression is missing", async () => {
+    const execute = vi.fn();
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const handlers = captureHandlers(makeContext({ executionGateway: testGateway(execute) }));
+    await handlers.get("playwrightBddRunner.runScenarioWithTags")!("/ws/checkout.feature", 2, "Payment", "");
+    expect(execute).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Tags are required"));
+  });
+
   it("keeps tagged scenario and feature runs intersected when routing through the gateway", async () => {
     const execute = vi.fn().mockResolvedValue({
       identity: EXECUTION_IDENTITY,
@@ -743,6 +775,51 @@ describe("CommandManager palette run commands", () => {
     expect(errors).not.toHaveBeenCalled();
   });
 
+  it("does not run when palette feature or scenario selection is dismissed", async () => {
+    const filePath = writeTempFeature("Feature: Login\nScenario: accepted\n  Given credentials\n");
+    const execute = vi.fn();
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const errors = vi.spyOn(vscode.window, "showErrorMessage");
+    const gateway = testGateway(execute);
+    gateway.discover = vi.fn().mockResolvedValue({
+      cases: [{ id: `${filePath}:2`, name: "accepted", source: { path: filePath, line: 2 }, suites: [], tags: [] }],
+      diagnostics: [],
+    });
+    const handlers = captureHandlers(makeContext({
+      executionGateway: gateway,
+    }));
+
+    try {
+      await handlers.get("playwrightBddRunner.runFeatureFile")!();
+      await handlers.get("playwrightBddRunner.debugScenario")!();
+      await handlers.get("playwrightBddRunner.runFeatureFileWithTags")!();
+      await handlers.get("playwrightBddRunner.runScenarioWithTags")!();
+    } finally {
+      fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+    }
+
+    expect(quickPick).toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it("does not run a tagged scenario when its tag prompt is dismissed", async () => {
+    const execute = vi.fn();
+    const errors = vi.spyOn(vscode.window, "showErrorMessage");
+    const input = vi.spyOn(vscode.window, "showInputBox").mockResolvedValue(undefined);
+    window.activeTextEditor = {
+      document: fakeDoc("Feature: Login\nScenario: accepted\n  Given credentials\n"),
+      selection: { active: { line: 1 } },
+    };
+    const handlers = captureHandlers(makeContext({ executionGateway: testGateway(execute) }));
+
+    await handlers.get("playwrightBddRunner.runScenarioWithTags")!();
+
+    expect(input).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+  });
+
   it("passes a palette outline target through to execution", async () => {
     const exec = {
       runScenarioWithOutput: vi.fn().mockResolvedValue({ success: true, output: "ok", duration: 1 }),
@@ -807,6 +884,175 @@ describe("CommandManager palette run commands", () => {
       expect.stringContaining("Could not parse /ws/missing.feature"),
       expect.stringContaining("Tags are required"),
     ]);
+  });
+});
+
+describe("Run All in Parallel command", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("warns without launching a process when discovery has no cases", async () => {
+    const execute = vi.fn();
+    const gateway = testGateway(execute);
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const handlers = captureHandlers(makeContext({ executionGateway: gateway }));
+
+    await handlers.get("playwrightBddRunner.runAllTestsParallel")!();
+
+    expect(gateway.discover).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith("No feature files found to run");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("runs the discovered suite with the configured worker count", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      identity: EXECUTION_IDENTITY,
+      state: "complete",
+      results: [],
+      passed: 0,
+      failed: 0,
+      durationMs: 1,
+    });
+    const gateway = testGateway(execute);
+    gateway.discover = vi.fn().mockResolvedValue({
+      cases: [{
+        id: "/ws/a.feature:3",
+        name: "Scenario A",
+        source: { path: "/ws/a.feature", line: 3 },
+        suites: [],
+        tags: [],
+      }],
+      diagnostics: [],
+    });
+    const config = ExtensionConfig.create({
+      get: (key: string, fallback: unknown) => key === "maxParallelProcesses" ? 3 : fallback,
+    } as vscode.WorkspaceConfiguration, false);
+    const handlers = captureHandlers(makeContext({ executionGateway: gateway, config }));
+
+    await handlers.get("playwrightBddRunner.runAllTestsParallel")!();
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0]![0]).toMatchObject({
+      mode: "run",
+      targets: [{ kind: "suite" }],
+      maxWorkers: 3,
+    });
+  });
+});
+
+describe("context-menu run boundaries", () => {
+  afterEach(() => {
+    (vscode.window as unknown as { activeTextEditor: unknown }).activeTextEditor = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    "playwrightBddRunner.runScenarioWithContext",
+    "playwrightBddRunner.debugScenarioWithContext",
+    "playwrightBddRunner.runFeatureFileWithContext",
+  ])("explains a missing feature path for %s without running tests", async (command) => {
+    const execute = vi.fn();
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const handlers = captureHandlers(makeContext({ executionGateway: testGateway(execute) }));
+
+    await handlers.get(command)!();
+
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("File path is required"));
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("marks an editor context run as editor-initiated and preserves a selected scenario", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      identity: EXECUTION_IDENTITY,
+      state: "complete",
+      results: [],
+      passed: 0,
+      failed: 0,
+      durationMs: 1,
+    });
+    (vscode.window as unknown as { activeTextEditor: unknown }).activeTextEditor = {
+      document: { uri: vscode.Uri.file("/ws/a.feature") },
+    };
+    const handlers = captureHandlers(makeContext({ executionGateway: testGateway(execute) }));
+
+    await handlers.get("playwrightBddRunner.runScenarioWithContext")!(
+      vscode.Uri.file("/ws/a.feature"), 3, "Scenario A"
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0]![0]).toMatchObject({
+      targets: [{ kind: "scenario", scenario: { filePath: "/ws/a.feature", name: "Scenario A" } }],
+      metadata: { initiatedBy: "editor" },
+    });
+  });
+
+  it("treats non-scenario context arguments as a feature run from the explorer", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      identity: EXECUTION_IDENTITY,
+      state: "complete",
+      results: [],
+      passed: 0,
+      failed: 0,
+      durationMs: 1,
+    });
+    const handlers = captureHandlers(makeContext({ executionGateway: testGateway(execute) }));
+
+    await handlers.get("playwrightBddRunner.runScenarioWithContext")!(
+      vscode.Uri.file("/ws/login.feature"), "not-a-line", 42
+    );
+    await handlers.get("playwrightBddRunner.debugScenarioWithContext")!(
+      vscode.Uri.file("/ws/login.feature"), "not-a-line", 42
+    );
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    for (const [intent] of execute.mock.calls) {
+      expect(intent).toMatchObject({
+        targets: [{ kind: "path", path: "/ws/login.feature" }],
+        metadata: { initiatedBy: "explorer" },
+      });
+    }
+  });
+
+  it("does not open a Test Results session while another execution owns the gateway", async () => {
+    const execute = vi.fn();
+    const gateway = testGateway(execute);
+    Object.defineProperty(gateway, "running", { value: true });
+    const beginExternalRun = vi.fn();
+    const warning = vi.spyOn(vscode.window, "showWarningMessage");
+    const handlers = captureHandlers(
+      makeContext({ executionGateway: gateway }),
+      (manager) => manager.setTestProvider({ beginExternalRun })
+    );
+
+    await handlers.get("playwrightBddRunner.runFeatureFileWithContext")!(vscode.Uri.file("/ws/a.feature"));
+
+    expect(warning).toHaveBeenCalledWith("A test run is already in progress.");
+    expect(beginExternalRun).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("reports an external command result to a provider without a live-session hook", async () => {
+    const completed = {
+      identity: EXECUTION_IDENTITY,
+      state: "complete" as const,
+      results: [],
+      passed: 1,
+      failed: 0,
+      durationMs: 3,
+      output: "",
+    };
+    const applyExternalRunResult = vi.fn();
+    const handlers = captureHandlers(
+      makeContext({ executionGateway: testGateway(async () => completed) }),
+      (manager) => manager.setTestProvider({ applyExternalRunResult })
+    );
+
+    await handlers.get("playwrightBddRunner.runFeatureFileWithContext")!(vscode.Uri.file("/ws/a.feature"));
+
+    expect(applyExternalRunResult).toHaveBeenCalledWith(
+      "/ws/a.feature",
+      expect.objectContaining({ success: true }),
+      undefined
+    );
   });
 });
 

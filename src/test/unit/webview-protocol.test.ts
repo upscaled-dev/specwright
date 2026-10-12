@@ -11,6 +11,14 @@ function client(surface: SurfaceName | "shell", body: object, overrides: Record<
   return { version: WEBVIEW_PROTOCOL_VERSION, session: "session", revision: surface === "shell" ? 0 : 4, surface, body, ...overrides };
 }
 
+function host(surface: SurfaceName | "shell", body: object): object {
+  return { version: WEBVIEW_PROTOCOL_VERSION, session: "session", revision: 2, surface, body };
+}
+
+function acceptedHost(surface: SurfaceName | "shell", body: object): boolean {
+  return isHostEnvelope(host(surface, body), "session", 1);
+}
+
 function boardRender(matrixRows = 1): Extract<BoardHostMessage, { type: "render" }> {
   const section = { total: 0, filtered: 0, page: 0, pageSize: 25, pageCount: 0, query: "", filtering: false, selection: "none" } as const;
   const verb = { label: "Action", enabled: false, hint: "Pick an item" };
@@ -27,6 +35,85 @@ function boardRender(matrixRows = 1): Extract<BoardHostMessage, { type: "render"
 }
 
 describe("webview protocol", () => {
+  it("routes shell navigation and link selection through their own message contracts", () => {
+    expect(parseClientEnvelope(client("shell", { type: "ready" }))).toBeDefined();
+    expect(parseClientEnvelope(client("shell", { type: "tab", tab: "publish" }))).toBeDefined();
+    expect(parseClientEnvelope(client("shell", { type: "tab", tab: "settings" }))).toBeUndefined();
+    expect(parseClientEnvelope(client("link", { type: "cancel" }))).toBeDefined();
+    expect(parseClientEnvelope(client("link", { type: "search", value: "CALC" }))).toBeDefined();
+    expect(parseClientEnvelope(client("link", { type: "openLinked", key: "CALC-7" }))).toBeDefined();
+    expect(parseClientEnvelope(client("link", { type: "unlink", key: "CALC-7" }))).toBeDefined();
+    expect(parseClientEnvelope(client("link", { type: "unlink", key: 7 }))).toBeUndefined();
+
+    expect(acceptedHost("shell", { type: "activate", tab: "mapping" })).toBe(true);
+    expect(acceptedHost("shell", { type: "linkTab", visible: true, title: "Link CALC-7" })).toBe(true);
+    expect(acceptedHost("shell", { type: "linkTab", visible: "yes" })).toBe(false);
+    expect(acceptedHost("shell", { type: "activate", tab: "settings" })).toBe(false);
+  });
+
+  it("accepts populated link picker results and rejects malformed remote rows", () => {
+    expect(acceptedHost("link", { type: "reset", title: "Link test", searchPlaceholder: "Search tests" })).toBe(true);
+    expect(acceptedHost("link", { type: "busy", busy: false })).toBe(true);
+    expect(acceptedHost("link", { type: "rows", rows: [
+      { id: "CALC-7", key: "CALC-7", kind: "test", summary: "Adds tax" },
+      { id: "create", key: "", kind: "create", summary: "Create new test" },
+    ] })).toBe(true);
+    expect(acceptedHost("link", { type: "linked", rows: [
+      { key: "CALC-7", summary: "Adds tax", remoteMissing: false },
+      { key: "CALC-8", remoteMissing: true },
+    ] })).toBe(true);
+    expect(acceptedHost("link", { type: "rows", rows: [{ id: "CALC-7", key: "CALC-7", kind: "issue" }] })).toBe(false);
+    expect(acceptedHost("link", { type: "linked", rows: [{ key: "CALC-8", remoteMissing: "yes" }] })).toBe(false);
+    expect(acceptedHost("link", { type: "rows", rows: [{ id: "CALC-7", key: "CALC-7", kind: "test", token: "secret" }] })).toBe(false);
+  });
+
+  it("accepts publish creation and search requests with bounded user input", () => {
+    const create = { mode: "create-new", project: "CALC", summary: "Nightly run", testPlanKey: "CALC-2", environments: ["chrome", "firefox"] };
+    expect(parseClientEnvelope(client("publish", { type: "confirm", runId: "run-1", request: create, attachments: ["/tmp/trace.zip"] }))).toBeDefined();
+    expect(parseClientEnvelope(client("publish", { type: "confirm", runId: "run-1", request: { ...create, environments: [4] }, attachments: [] }))).toBeUndefined();
+    expect(parseClientEnvelope(client("publish", { type: "confirm", runId: "run-1", request: { ...create, project: "x".repeat(513) }, attachments: [] }))).toBeUndefined();
+    expect(parseClientEnvelope(client("publish", { type: "confirm", runId: "run-1", request: { ...create, unknown: true }, attachments: [] }))).toBeUndefined();
+    expect(parseClientEnvelope(client("publish", { type: "confirm", runId: "run-1", request: null, attachments: [] }))).toBeUndefined();
+    expect(parseClientEnvelope(client("publish", { type: "search", token: 8, kind: "test-plan", query: "CALC" }))).toBeDefined();
+    expect(parseClientEnvelope(client("publish", { type: "search", token: -1, kind: "test-plan", query: "CALC" }))).toBeUndefined();
+    expect(parseClientEnvelope(client("publish", { type: "attachPending", runId: "run-1" }))).toBeDefined();
+    expect(parseClientEnvelope(client("publish", { type: "browse" }))).toBeDefined();
+  });
+
+  it("admits the populated publish model and validates search and attachment results", () => {
+    const run = {
+      id: "run-1", label: "Checkout", subtitle: "4 scenarios", defaultSummary: "Checkout nightly run",
+      project: { value: "CALC", fromDerivation: true, fromScope: false }, prefillPlanKey: "CALC-2",
+      republish: { target: "CALC-9", publishedAt: 1_700_000_000, mode: "append", outcomeUnknown: false, operationId: "op-1" },
+      pendingAttachments: { target: "CALC-9", count: 2 },
+    };
+    const attachment = { path: "/tmp/trace.zip", name: "trace.zip", size: 42 };
+    const model = {
+      title: "Publish run", runs: [run], selectedRunId: "run-1", jiraSearchAvailable: true,
+      knownProjectKeys: ["CALC"], attachments: { available: true, suggestions: [attachment], uploadLimitBytes: 1024, evidenceStream: "both" },
+    };
+    expect(acceptedHost("publish", { type: "model", model })).toBe(true);
+    expect(acceptedHost("publish", { type: "runs", runs: [run], selectedRunId: "run-1" })).toBe(true);
+    expect(acceptedHost("publish", { type: "retry", runs: [run], selectedRunId: "run-1" })).toBe(true);
+    for (const override of [{ project: "CALC" }, { republish: { target: "CALC-9", publishedAt: "yesterday" } }, { pendingAttachments: 2 }]) {
+      expect(acceptedHost("publish", { type: "model", model: { ...model, runs: [{ ...run, ...override }] } })).toBe(false);
+    }
+    expect(acceptedHost("publish", { type: "search-result", token: 8, kind: "execution", items: [{ key: "CALC-9", label: "Nightly run" }] })).toBe(true);
+    expect(acceptedHost("publish", { type: "browse-result", items: [attachment] })).toBe(true);
+    expect(acceptedHost("publish", { type: "attachment-error", text: "File unavailable" })).toBe(true);
+    expect(acceptedHost("publish", { type: "pending-busy", runId: "run-1", busy: true })).toBe(true);
+    expect(acceptedHost("publish", { type: "pending-result", runId: "run-1", remaining: 1 })).toBe(true);
+    expect(acceptedHost("publish", { type: "settled" })).toBe(true);
+
+    expect(acceptedHost("publish", { type: "model", model: { ...model, runs: [{ ...run, republish: "CALC-9" }] } })).toBe(false);
+    expect(acceptedHost("publish", { type: "model", model: { ...model, runs: [{ ...run, project: { value: "CALC", fromDerivation: "yes" } }] } })).toBe(false);
+    expect(acceptedHost("publish", { type: "model", model: { ...model, runs: [{ ...run, pendingAttachments: { target: "CALC-9", count: -1 } }] } })).toBe(false);
+    expect(acceptedHost("publish", { type: "model", model: { ...model, attachments: { ...model.attachments, evidenceStream: "unfiltered" } } })).toBe(false);
+    expect(acceptedHost("publish", { type: "search-result", token: 8, kind: "execution", items: [{ key: "CALC-9", label: 4 }] })).toBe(false);
+    expect(acceptedHost("publish", { type: "browse-result", items: [{ ...attachment, size: -1 }] })).toBe(false);
+    expect(acceptedHost("publish", { type: "pending-result", runId: "run-1", remaining: -1 })).toBe(false);
+    expect(acceptedHost("publish", { type: "search-result", token: 8, kind: "execution", items: [], secret: "echo" })).toBe(false);
+  });
   it("accepts only exact, bounded privileged client messages", () => {
     expect(parseClientEnvelope(client("board", { type: "addToTestPlan" }))).toBeDefined();
     expect(parseClientEnvelope(client("board", { type: "runSelected" }))).toBeUndefined();
@@ -85,6 +172,8 @@ describe("webview protocol", () => {
     expect(isHostEnvelope({ ...valid, revision: 3, body: { type: "render" } }, "session", 2)).toBe(false);
     expect(isHostEnvelope({ ...valid, surface: "publish", body: { type: "publish-busy", busy: true } }, "session", 1)).toBe(true);
     expect(isHostEnvelope({ ...valid, surface: "publish", body: { type: "publish-busy", busy: true, extra: true } }, "session", 1)).toBe(false);
+    expect(acceptedHost("board", { type: "syncProgress", text: "Refreshing CALC" })).toBe(true);
+    expect(acceptedHost("board", { type: "syncProgress", text: 5 })).toBe(false);
   });
 
   it("preserves unpaginated large-board projections", () => {
@@ -109,6 +198,13 @@ describe("webview protocol", () => {
       body: { ...base, executions: [{ kind: "group", key: "CALC-1", keyLabel: "CALC-1", summary: "Run", latestPublishedAt: "now", activityCount: 300, activities }] },
     };
     expect(isHostEnvelope(executions, "session", 1)).toBe(true);
+
+    const unknown = {
+      kind: "unknown", key: "", keyLabel: "Unknown execution", summary: "Unmatched run",
+      activityCount: 1, action: "Publish", resultsImported: "1", passRate: "100%", publishedAt: "now",
+    };
+    expect(acceptedHost("board", { ...base, executions: [unknown] })).toBe(true);
+    expect(acceptedHost("board", { ...base, executions: [{ ...unknown, key: "CALC-9" }] })).toBe(false);
   });
 
   it("rejects a projection whose card-level string arrays and links exceed the aggregate budget", () => {

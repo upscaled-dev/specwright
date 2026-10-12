@@ -773,3 +773,22 @@ describe("buildCucumberMultipartPayload uri", () => {
     expect(payload.results[0]!.uri).toBe("C:/repo/features/calc.feature");
   });
 });
+
+
+it("preserves an unrecognized successful import response without inventing an execution reference", async () => {
+  const rec = recordingTransport({ status: 200, ok: true, body: null });
+  const payload = buildXrayJsonPayload({ results: [pub(ref("f", 1, "a"), "C-1")], request: { mode: "append", executionKey: "X-1" } });
+  expect(await new XrayJsonImporter().import(rec.transport, payload)).toEqual({});
+});
+
+it("uses a later resolved feature name for earlier unnamed scenarios in the same multipart feature", () => {
+  const payload = buildCucumberMultipartPayload({
+    artifact: refArtifact(),
+    results: [pub(ref("features/shop.feature", 2, "Basket"), "SHOP-1"), pub(ref("features/shop.feature", 5, "Payment"), "SHOP-2")],
+    request: CREATE_REQUEST,
+    resolveSteps: (scenario) => ({ ...(scenario.name === "Payment" ? { featureName: "Checkout" } : {}), steps: ["Given a basket"] }),
+    issueTypeName: "Test Execution",
+  });
+  expect(payload.results).toHaveLength(1);
+  expect(payload.results[0]).toMatchObject({ name: "Checkout", elements: [{ name: "Basket" }, { name: "Payment" }] });
+});

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { tagKeyLines, TagDecorationProvider, TAG_DECORATION_COLOR } from "../../traceability/tag-decoration";
 import { KeyGrammar } from "../../traceability/contracts";
@@ -81,5 +81,49 @@ describe("TagDecorationProvider", () => {
 
   it("uses the contributed theme color so the wash adapts to the active theme", () => {
     expect(TAG_DECORATION_COLOR).toBe("specwright.traceabilityTagBackground");
+  });
+});
+
+
+describe("tag decoration document events", () => {
+  it("debounces feature edits, ignores unrelated documents, and cancels work on disposal", () => {
+    vi.useFakeTimers();
+    let changed!: (event: vscode.TextDocumentChangeEvent) => void;
+    let visible!: (editors: readonly vscode.TextEditor[]) => void;
+    vi.spyOn(vscode.workspace, "onDidChangeTextDocument").mockImplementation(listener => {
+      changed = listener;
+      return { dispose: vi.fn() };
+    });
+    vi.spyOn(vscode.window, "onDidChangeVisibleTextEditors").mockImplementation(listener => {
+      visible = listener;
+      return { dispose: vi.fn() };
+    });
+    const editor = fakeEditor("gherkin", "/ws/a.feature");
+    vi.spyOn(vscode.window, "visibleTextEditors", "get").mockReturnValue([editor as unknown as vscode.TextEditor]);
+    const provider = new TagDecorationProvider(XRAY_GRAMMAR);
+    try {
+      provider.start();
+      expect(editor.decorations).toHaveLength(1);
+      const event = (document: FakeEditor["document"]) => ({ document } as unknown as vscode.TextDocumentChangeEvent);
+      changed(event(fakeEditor("typescript", "/ws/a.ts").document));
+      vi.advanceTimersByTime(300);
+      expect(editor.decorations).toHaveLength(1);
+      changed(event(editor.document));
+      vi.advanceTimersByTime(200);
+      changed(event(editor.document));
+      vi.advanceTimersByTime(299);
+      expect(editor.decorations).toHaveLength(1);
+      vi.advanceTimersByTime(1);
+      expect(editor.decorations).toHaveLength(2);
+      visible([]);
+      expect(editor.decorations).toHaveLength(3);
+      changed(event(editor.document));
+      provider.dispose();
+      provider.start();
+      changed(event(editor.document));
+      visible([]);
+      vi.runAllTimers();
+      expect(editor.decorations).toHaveLength(3);
+    } finally { provider.dispose(); vi.restoreAllMocks(); vi.useRealTimers(); }
   });
 });

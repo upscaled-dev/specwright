@@ -24,6 +24,35 @@ function rawAdapter(over: Partial<NonNullable<TraceabilityAdapter["testAuthoring
 }
 
 describe("existing-container adapter boundaries", () => {
+  it("validates authored containers, executions, and pushed Gherkin before callers use them", async () => {
+    const adapter = validatedAdapter(rawAdapter({
+      createTestSet: () => Promise.resolve({ key: "T-4", issueId: "4004", warnings: [] }),
+      createTestPlan: () => Promise.resolve({ key: "T-5", issueId: "4005", warnings: ["One remote warning"] }),
+      createTestExecution: () => Promise.resolve({ key: "T-6", issueId: "4006", warnings: [] }),
+      pushGherkin: () => Promise.resolve("Feature: Checkout\nScenario: pay\n  Given a cart\n"),
+    }), () => Promise.resolve(), () => undefined);
+    const container = { project: "T", summary: "Checkout", testIssueIds: ["4001", "4002"] };
+
+    await expect(adapter.testAuthoring!.createTestSet!(container)).resolves.toMatchObject({ key: "T-4", issueId: "4004" });
+    await expect(adapter.testAuthoring!.createTestPlan!(container)).resolves.toMatchObject({ key: "T-5", warnings: ["One remote warning"] });
+    await expect(adapter.testAuthoring!.createTestExecution!({ project: "T", summary: "Nightly" })).resolves.toMatchObject({ key: "T-6" });
+    await expect(adapter.testAuthoring!.pushGherkin!("4001", "Feature: Checkout")).resolves.toContain("Scenario: pay");
+  });
+
+  it("rejects malformed optional authoring results before treating the write as confirmed", async () => {
+    const adapter = validatedAdapter(rawAdapter({
+      createTestSet: () => Promise.resolve({ key: "T-4", warnings: [1] } as never),
+      createTestPlan: () => Promise.resolve({ key: "T-5" } as never),
+      createTestExecution: () => Promise.resolve({ warnings: ["ok"], issueId: 4006 } as never),
+      pushGherkin: () => Promise.resolve(42 as never),
+    }), () => Promise.resolve(), () => undefined);
+    const container = { project: "T", summary: "Checkout", testIssueIds: ["4001"] };
+
+    await expect(adapter.testAuthoring!.createTestSet!(container)).rejects.toMatchObject({ code: "malformed-response" });
+    await expect(adapter.testAuthoring!.createTestPlan!(container)).rejects.toMatchObject({ code: "malformed-response" });
+    await expect(adapter.testAuthoring!.createTestExecution!({ project: "T", summary: "Nightly" })).rejects.toMatchObject({ code: "malformed-response" });
+    await expect(adapter.testAuthoring!.pushGherkin!("4001", "Feature: Checkout")).rejects.toMatchObject({ code: "malformed-response" });
+  });
   it("threads trust-owned signals through both resolve and add seams", async () => {
     const resolve = vi.fn((_kind, key, signal?: AbortSignal) =>
       Promise.resolve({ kind: "test-set" as const, key, issueId: "5000", aborted: signal?.aborted })

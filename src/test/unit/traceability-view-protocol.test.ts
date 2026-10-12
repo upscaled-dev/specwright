@@ -22,6 +22,34 @@ function message(body: object, overrides: Record<string, unknown> = {}): object 
 }
 
 describe("traceability view protocol", () => {
+  it("accepts preview cancellation and rejects stale or ambiguous actions", () => {
+    expect(parseTraceabilityClientEnvelope(message({ type: "cancel-preview", generation: 4, previewId: "preview-1" }))).toBeDefined();
+    expect(parseTraceabilityClientEnvelope(message({ type: "cancel-preview", generation: 4, previewId: "" }))).toBeUndefined();
+    expect(parseTraceabilityClientEnvelope(message({ type: "action", generation: 4, id: "CALC-1", action: "run", selection: ["CALC-1", "CALC-2"] }))).toBeDefined();
+    expect(parseTraceabilityClientEnvelope(message({ type: "action", generation: 4, id: "CALC-1", action: "run", selection: ["CALC-1", 2] }))).toBeUndefined();
+    expect(parseTraceabilityClientEnvelope(message({ type: "action", generation: 4, id: "CALC-1", action: "run", selection: [], extra: true }))).toBeUndefined();
+  });
+
+  it("validates populated rows and completion messages before rendering", () => {
+    const accepts = (body: object): boolean => parseTraceabilityHostEnvelope(message(body, { revision: 4 }), "trace-session", 3) !== undefined;
+    const row = {
+      id: "CALC-1", parentId: "suite-1", label: "Checkout completes", description: "Chrome run",
+      tooltip: "Passed on the latest run", icon: "check", tone: "success", expandable: false,
+      actions: [{ id: "open", label: "Open CALC-1", icon: "link-external" }],
+      defaultAction: "open", view: "repository",
+    };
+    expect(accepts({ type: "chunk", generation: 2, offset: 0, rows: [row] })).toBe(true);
+    expect(accepts({ type: "end", generation: 2 })).toBe(true);
+    expect(accepts({ type: "focus-filter", generation: 2 })).toBe(true);
+    expect(accepts({ type: "chunk", generation: 2, offset: 0, rows: [{ ...row, defaultAction: "delete" }] })).toBe(false);
+    expect(accepts({ type: "chunk", generation: 2, offset: 0, rows: [{ ...row, actions: [{ ...row.actions[0], icon: "bad icon" }] }] })).toBe(false);
+    expect(accepts({ type: "chunk", generation: 2, offset: 0, rows: [{ ...row, tone: "critical" }] })).toBe(false);
+    expect(accepts({ type: "chunk", generation: 2, offset: 0, rows: [null] })).toBe(false);
+    expect(accepts({ type: "chunk", generation: 2, offset: 0, rows: [{ id: "CALC-1", label: "Checkout completes", icon: "check", actions: [] }] })).toBe(false);
+    expect(accepts({ type: "preview", generation: 2, preview: null })).toBe(false);
+    expect(accepts({ type: "end", generation: -1 })).toBe(false);
+    expect(parseTraceabilityHostEnvelope(message({ type: "end", generation: 2 }, { revision: 4, session: "other" }), "trace-session", 3)).toBeUndefined();
+  });
   it("admits only exact bounded ready, focus, and action envelopes", () => {
     expect(parseTraceabilityClientEnvelope(message({ type: "ready" }))).toBeDefined();
     expect(parseTraceabilityClientEnvelope(message({ type: "focused", generation: 2 }))).toBeDefined();

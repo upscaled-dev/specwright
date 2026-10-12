@@ -87,6 +87,37 @@ describe("treeBatchSelection", () => {
       selection: { kind: "multi-select", scenarios: [] }, skipped: 0,
     });
   });
+
+  it("runs a single mapped row exactly and ignores malformed tree nodes", () => {
+    expect(treeBatchSelection([{ kind: "link", link: snapshot.links[0] }], snapshot))
+      .toEqual({ selection: { kind: "scenario", scenario: A }, skipped: 0 });
+    expect(treeBatchSelection([
+      { kind: "link", link: { testKey: "CALC-4" } },
+      { kind: "file", filePath: 42 },
+      { kind: "untraced", item: {} },
+    ], snapshot)).toEqual({ selection: { kind: "multi-select", scenarios: [] }, skipped: 0 });
+  });
+
+  it("accepts a populated repository scope and rejects an invalid organization request", () => {
+    const selection = {
+      kind: "repository-folder" as const,
+      projectKey: "CALC",
+      folderPath: "/checkout",
+      scenarios: [A, B],
+    };
+    expect(treeBatchSelection([{ kind: "organizationRun", selection }], snapshot))
+      .toEqual({ selection, skipped: 0 });
+    expect(treeBatchSelection([{ kind: "organizationRun", selection: {
+      ...selection, scenarios: [{ ...A, line: 3.5 }],
+    } }], snapshot)).toEqual({ selection: { kind: "multi-select", scenarios: [] }, skipped: 0 });
+  });
+
+  it("counts untraced scenarios selected from a file without running them", () => {
+    expect(treeBatchSelection([
+      { kind: "file", filePath: A.filePath },
+      [{ kind: "untraced", item: snapshot.untraced[0] }],
+    ], snapshot)).toEqual({ selection: { kind: "multi-select", scenarios: [A, B] }, skipped: 1 });
+  });
 });
 
 describe("executionTargets", () => {
@@ -97,6 +128,18 @@ describe("executionTargets", () => {
     ])).toEqual([
       { kind: "scenario", scenario: A, tagExpression: "@smoke" },
       { kind: "path", path: A.filePath, tagExpression: "@smoke" },
+    ]);
+  });
+
+  it("routes a tag scope and leaves untagged exact targets unfiltered", () => {
+    expect(executionTargets([
+      { kind: "scenario", ref: C },
+      { kind: "path-filter", target: "/ws/features" },
+      { kind: "tags", expression: "@regression and not @wip" },
+    ])).toEqual([
+      { kind: "scenario", scenario: C },
+      { kind: "path", path: "/ws/features" },
+      { kind: "tag-expression", expression: "@regression and not @wip" },
     ]);
   });
 });

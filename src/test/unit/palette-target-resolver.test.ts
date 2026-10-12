@@ -32,6 +32,22 @@ describe("palette target resolver", () => {
     "    | 2 |",
   ].join("\n");
 
+  it("picks an exact outline example when the cursor is outside any scenario", async () => {
+    activeFeature(outline, 0);
+    vi.spyOn(vscode.window, "showQuickPick").mockImplementation((items) =>
+      Promise.resolve((items as Array<unknown>)[1] as never));
+    await expect(resolvePaletteScenario(makeContext())).resolves.toEqual({
+      filePath: "/ws/a.feature", lineNumber: 9, scenarioName: "2: Divide - n: 2", outlineName: "Divide",
+    });
+  });
+
+  it("refuses a feature buffer the parser cannot read", async () => {
+    activeFeature("unfinished document", 0);
+    const context = makeContext();
+    vi.spyOn(context.featureParser, "parseFeatureContent").mockReturnValue(null);
+    await expect(resolvePaletteScenario(context)).rejects.toThrow("Unable to parse feature file: /ws/a.feature");
+  });
+
   // An outline header carries no line: the declaration line has no generated spec line, so the runner
   // greps the outline title and runs every row.
   it("returns a line-less outline target for its header and body", async () => {

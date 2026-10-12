@@ -1,11 +1,14 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { build } from "esbuild";
-import { stopPlaywrightCli, PLAYWRIGHT_STOP_ACCEPTED, PLAYWRIGHT_STOP_REQUEST,
+import { playwrightCliInvocation, stopPlaywrightCli, PLAYWRIGHT_STOP_ACCEPTED, PLAYWRIGHT_STOP_REQUEST,
   PLAYWRIGHT_STOP_GRACE_MS } from "../../core/playwright-cli-cancellation";
 import { provePlaywrightCancellation } from "../helpers/playwright-cancellation";
+
+vi.mock("node:fs", async (importOriginal) => ({ ...await importOriginal<typeof import("node:fs")>() }));
 
 describe("Playwright cooperative CLI cancellation", () => {
   beforeAll(async () => {
@@ -27,7 +30,7 @@ class FakeCli extends EventEmitter {
 }
 
 describe("cooperative stop evidence", () => {
-  afterEach(() => {vi.useRealTimers();});
+  afterEach(() => {vi.useRealTimers(); vi.restoreAllMocks();});
 
   it.each([0, 130])("requires a requested acknowledgement and complete CLI close with code %i", async (code) => {
     const cli = new FakeCli();
@@ -68,5 +71,47 @@ describe("cooperative stop evidence", () => {
     const stopped = stopPlaywrightCli(cli as unknown as ChildProcess);
     cli.emit(event, new Error("channel failed"));
     await expect(stopped).resolves.toBe(false);
+  });
+});
+
+
+describe("CLI bridge availability", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+  it("declines an invocation when the workspace has no Playwright CLI", () => {
+    expect(playwrightCliInvocation(undefined, ["test"])).toBeUndefined();
+  });
+  it("declines an invocation when neither packaged nor development bridge exists", () => {
+    vi.spyOn(fs, "existsSync").mockReturnValue(false);
+    expect(playwrightCliInvocation("/workspace/node_modules/playwright/cli.js", ["test"])).toBeUndefined();
+  });
+});
+
+describe("CLI control channel races", () => {
+  it("does not send to a disconnected child", async () => {
+    const cli = new FakeCli();
+    cli.connected = false;
+    await expect(stopPlaywrightCli(cli as unknown as ChildProcess)).resolves.toBe(false);
+    expect(cli.send).not.toHaveBeenCalled();
+    expect(cli.eventNames()).toEqual([]);
+  });
+  it("ignores unrelated messages and falls back when sending fails", async () => {
+    const cli = new FakeCli();
+    cli.send.mockImplementation((_message, callback) => {
+      cli.emit("message", { kind: "worker-ready" });
+      callback(new Error("channel closed"));
+    });
+    await expect(stopPlaywrightCli(cli as unknown as ChildProcess)).resolves.toBe(false);
+    expect(cli.eventNames()).toEqual([]);
+  });
+  it("keeps a completed clean stop when a delayed send callback reports failure", async () => {
+    const cli = new FakeCli();
+    let completeSend!: (error: Error | null) => void;
+    cli.send.mockImplementation((_message, callback) => { completeSend = callback; });
+    const stopped = stopPlaywrightCli(cli as unknown as ChildProcess);
+    cli.emit("message", PLAYWRIGHT_STOP_ACCEPTED);
+    cli.emit("close", 0, null);
+    completeSend(new Error("late channel failure"));
+    await expect(stopped).resolves.toBe(true);
+    expect(cli.eventNames()).toEqual([]);
   });
 });

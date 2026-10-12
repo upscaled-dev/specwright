@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
-import { LiveTestRunProgress } from "../../test-providers/live-test-run-progress";
+import { beginExternalTestRun, LiveTestRunProgress } from "../../test-providers/live-test-run-progress";
 import type { ScenarioResult, ScenarioStatus } from "../../utils/playwright-json-parser";
-import { FakeTestItem } from "./helpers/fake-test-controller";
+import { FakeTestController, FakeTestItem } from "./helpers/fake-test-controller";
 
 interface StatusCall {
   readonly item: vscode.TestItem;
@@ -127,6 +127,34 @@ describe("LiveTestRunProgress", () => {
       { text: "\r\nthird", item: undefined },
       { text: "\r", item: undefined },
     ]);
+  });
+
+  it("keeps blank output chunks out of the transcript and names an unassigned-project retry", () => {
+    const run = new RecordingRun();
+    const progress = progressFor(run, [], {});
+
+    progress.appendOutput("stdout", "");
+    progress.reportProgress({ phase: "running", completed: 1, total: 2 });
+    progress.reportProgress({ phase: "running", completed: 1, total: 2 });
+    progress.reportProgress({
+      phase: "running", completed: 1, total: 2,
+      retry: { title: "Pay by card", attempt: 2, projectName: "" },
+    });
+
+    expect(run.output.map(({ text }) => text)).toEqual([
+      "Running 1/2\r\n",
+      "Retrying Pay by card, attempt 2\r\n",
+    ]);
+  });
+
+  it("names the project when a parallel run retries a scenario", () => {
+    const run = new RecordingRun();
+    progressFor(run, [], {}).reportProgress({
+      phase: "running", completed: 1, total: 2,
+      retry: { title: "Pay by card", attempt: 2, projectName: "firefox" },
+    });
+
+    expect(run.output.at(-1)?.text).toBe("Retrying Pay by card [firefox], attempt 2\r\n");
   });
 
   it("starts the supplied scope once and marks matching leaves as each result arrives", () => {
@@ -266,6 +294,43 @@ describe("LiveTestRunProgress", () => {
     expect(withFallback.apply(unmatched)).toBe(true);
     expect(runWithFallback.passed[0]?.item.id).toBe("target");
     expect(runWithFallback.output[0]?.text).toBe("[1 / 1] Target scenario: passed\r\n");
+  });
+
+  it("starts and updates a selected leaf outside the discovered roots from its source metadata", () => {
+    const fallback = item("selected", "Displayed title", "/repo/features/target.feature", 3);
+    const run = new RecordingRun();
+    const progress = progressFor(run, [], {
+      selected: {
+        source: { filePath: "/repo/features/target.feature", lineNumber: 3 },
+        name: "Generated title",
+      },
+    }, { fallbackTarget: fallback });
+
+    progress.start();
+    const changed = progress.apply(result({
+      featurePath: "/repo/.features-gen/target.feature.spec.js",
+      lineNumber: 20,
+      scenarioName: "Generated title",
+    }), 1, 1);
+
+    expect(run.started.map((test) => test.id)).toEqual(["selected"]);
+    expect(changed).toBe(true);
+    expect(run.passed.map(({ item: test }) => test.id)).toEqual(["selected"]);
+  });
+
+  it("reports an unsourced selected leaf without inventing a failure location", () => {
+    const selected = item("selected", "Selected scenario");
+    const run = new RecordingRun();
+    const progress = progressFor(run, [], {}, { fallbackTarget: selected });
+
+    progress.start();
+    expect(progress.apply(result({ status: "failed", errorMessage: "" }))).toBe(true);
+    progress.publishPendingFailures();
+
+    expect(run.started).toEqual([asTestItem(selected)]);
+    expect(run.failed[0]?.item).toBe(asTestItem(selected));
+    expect(run.failed[0]?.message.message).toBe("Test failed");
+    expect(run.failed[0]?.message.location).toBeUndefined();
   });
 
   it("uses reporter counts and skips only unfinished leaves when cancelled", () => {
@@ -411,5 +476,121 @@ describe("LiveTestRunProgress", () => {
       asTestItem(firstCopy),
       asTestItem(secondCopy),
     ]);
+  });
+});
+
+describe("editor-triggered Test Results run", () => {
+  function runFor(
+    controller: FakeTestController,
+    lineNumber?: number,
+    applyFinal: Parameters<typeof beginExternalTestRun>[0]["applyFinal"] = vi.fn()
+  ) {
+    return beginExternalTestRun({
+      controller: controller as unknown as vscode.TestController,
+      filePath: "/repo/features/sample.feature",
+      ...(lineNumber === undefined ? {} : { lineNumber }),
+      lineFor: (test) => test.range?.start.line === undefined ? undefined : test.range.start.line + 1,
+      createProgress: (run, roots, fallbackTarget) => LiveTestRunProgress.create({
+        run,
+        roots,
+        fallbackTarget,
+        scenarioFor: () => undefined,
+      }),
+      applyFinal,
+    });
+  }
+
+  it("streams only the selected scenario into the open run and closes after final reconciliation", () => {
+    const controller = new FakeTestController();
+    const feature = item("feature", "Sample feature", "/repo/features/sample.feature", 1);
+    const first = item("first", "First scenario", "/repo/features/sample.feature", 4);
+    const second = item("second", "Second scenario", "/repo/features/sample.feature", 8);
+    feature.children.add(first);
+    feature.children.add(second);
+    controller.items.add(feature);
+    const applyFinal = vi.fn();
+
+    const session = runFor(controller, 8, applyFinal);
+    session.progress.onOutput?.("stdout", "running\n");
+    session.progress.onTestEnd?.(result({ lineNumber: 4 }), 1, 2);
+    session.progress.onTestEnd?.(result({ lineNumber: 8, scenarioName: "Second scenario" }), 2, 2);
+    const final = { success: true, output: "", duration: 12 };
+    session.complete(final);
+
+    const run = controller.runs[0]!;
+    expect((run.request as vscode.TestRunRequest).include?.map((test) => test.id)).toEqual(["second"]);
+    expect(run.outcome.started).toEqual(["second"]);
+    expect(run.outcome.passed).toEqual(["second"]);
+    expect(run.outcome.output).toContain("running\r\n");
+    expect(run.outcome.ended).toBe(true);
+    expect(applyFinal).toHaveBeenCalledWith(run, final, expect.any(LiveTestRunProgress));
+  });
+
+  it("preserves a completed scenario and skips only unfinished siblings when the file run is cancelled", () => {
+    const controller = new FakeTestController();
+    const feature = item("feature", "Sample feature", "/repo/features/sample.feature", 1);
+    feature.children.add(item("first", "First scenario", "/repo/features/sample.feature", 4));
+    feature.children.add(item("second", "Second scenario", "/repo/features/sample.feature", 8));
+    controller.items.add(feature);
+    const applyFinal = vi.fn();
+
+    const session = runFor(controller, undefined, applyFinal);
+    session.progress.onTestEnd?.(result(), 1, 2);
+    session.complete({ success: false, output: "", error: "Cancelled", duration: 12 });
+
+    const run = controller.runs[0]!;
+    expect((run.request as vscode.TestRunRequest).include?.map((test) => test.id)).toEqual(["feature"]);
+    expect(run.outcome.passed).toEqual(["first"]);
+    expect(run.outcome.skipped).toEqual(["second", "feature"]);
+    expect(run.outcome.ended).toBe(true);
+    expect(applyFinal).not.toHaveBeenCalled();
+  });
+
+  it("ends an editor run as skipped when execution stops before a result arrives", () => {
+    const controller = new FakeTestController();
+    controller.items.add(item("scenario", "First scenario", "/repo/features/sample.feature", 4));
+    const applyFinal = vi.fn();
+
+    const session = runFor(controller, 4, applyFinal);
+    session.end();
+    session.complete({ success: true, output: "", duration: 1 });
+
+    expect(controller.runs[0]!.outcome.skipped).toEqual(["scenario"]);
+    expect(controller.runs[0]!.outcome.ended).toBe(true);
+    expect(applyFinal).not.toHaveBeenCalled();
+  });
+
+  it("selects the item range when a caller has no indexed line and ends once", () => {
+    const controller = new FakeTestController();
+    controller.items.add(item("scenario", "Selected scenario", "/repo/features/sample.feature", 4));
+    const session = beginExternalTestRun({
+      controller: controller as unknown as vscode.TestController,
+      filePath: "/repo/features/sample.feature",
+      lineNumber: 4,
+      lineFor: () => undefined,
+      createProgress: (run, roots, fallbackTarget) => LiveTestRunProgress.create({
+        run, roots, fallbackTarget, scenarioFor: () => undefined,
+      }),
+      applyFinal: vi.fn(),
+    });
+    const run = controller.runs[0]!;
+    const end = vi.spyOn(run, "end");
+
+    expect((run.request as vscode.TestRunRequest).include?.map((test) => test.id))
+      .toEqual(["scenario"]);
+    session.end();
+    session.end();
+    session.complete({ success: true, output: "", duration: 1 });
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the Test Results run even when final reconciliation fails", () => {
+    const controller = new FakeTestController();
+    controller.items.add(item("scenario", "First scenario", "/repo/features/sample.feature", 4));
+    const session = runFor(controller, 4, () => { throw new Error("reconcile failed"); });
+
+    expect(() => session.complete({ success: true, output: "", duration: 1 }))
+      .toThrow("reconcile failed");
+    expect(controller.runs[0]!.outcome.ended).toBe(true);
   });
 });

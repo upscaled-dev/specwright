@@ -56,6 +56,19 @@ describe("DetailBudget", () => {
 });
 
 describe("BoundedOutputTail", () => {
+  it("preserves a long stream of tiny chunks through compaction and later trimming", () => {
+    const tail = new BoundedOutputTail(100);
+    tail.append("");
+    tail.append(Buffer.alloc(0));
+    for (let index = 0; index < 130; index += 1) {
+      tail.append(String(index % 10));
+    }
+    expect(tail.retained()).toBe("0123456789".repeat(10));
+    expect(tail.truncationNotice("stdout")).toBe(
+      "[Specwright truncated stdout: retained 100 bytes, discarded 30 bytes.]"
+    );
+  });
+
   it("returns complete output while it remains within the limit", () => {
     const tail = new BoundedOutputTail(8);
     tail.append("hello");

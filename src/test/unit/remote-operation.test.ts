@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { RemoteOutcomeUnknownError } from "../../core/workspace-trust";
 import { isRemoteOperationName, REMOTE_OPERATION_NAMES } from "../../core/remote-operation-name";
 import {
+  abortableRemoteSleep,
   operationIdentity,
   REMOTE_OPERATION_POLICY,
   RetryableRemoteError,
@@ -100,7 +101,25 @@ describe("remote operation policy", () => {
     expect(once).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects a cancelled backoff immediately and cancels an active delay", async () => {
+    vi.useFakeTimers();
+    try {
+      const before = new AbortController();
+      const reason = new Error("operation cancelled");
+      before.abort(reason);
+      await expect(abortableRemoteSleep(1_000, before.signal)).rejects.toBe(reason);
+      expect(vi.getTimerCount()).toBe(0);
+      const during = new AbortController();
+      const pending = abortableRemoteSleep(1_000, during.signal);
+      const rejected = expect(pending).rejects.toBe(reason);
+      during.abort(reason);
+      await rejected;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("parses delta seconds and HTTP dates", () => {
+    expect(retryAfterMilliseconds("invalid-date", 0)).toBeUndefined();
     expect(retryAfterMilliseconds("3", 0)).toBe(3_000);
     expect(retryAfterMilliseconds("Thu, 01 Jan 1970 00:00:05 GMT", 1_000)).toBe(4_000);
   });

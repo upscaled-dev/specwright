@@ -267,6 +267,38 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(controller.runs.at(-1)!.outcome.ended).toBe(true);
   });
 
+  it("reports one failed Test Explorer leaf after its live event and final result agree", async () => {
+    const caseResult = {
+      scenario: { filePath: fixture.featurePath, line: 4, name: "Passing scenario", kind: "scenario" as const },
+      outcome: "failed" as const,
+      durationMs: 5, attempts: 1, flaky: false,
+      errorMessage: "Expected total 12, received 10",
+    };
+    const gateway = testGateway(async (_intent, options) => {
+      options?.onEvent?.({ kind: "case-finished", result: caseResult, completed: 1, total: 1 });
+      return {
+        identity: EXECUTION_IDENTITY, state: "complete", results: [caseResult],
+        passed: 0, failed: 1, durationMs: 5, output: "1 failed",
+      };
+    }, [{
+      id: `${fixture.featurePath}:4`, name: "Passing scenario",
+      source: { path: fixture.featurePath, line: 4 },
+      suites: [{ name: "Sample feature", source: { path: fixture.featurePath, line: 2 } }], tags: [],
+    }]);
+    const { provider, controller } = buildProvider(
+      async () => ({ success: true, output: "", error: "", returnCode: 0 }), gateway
+    );
+    await provider.discoverTests();
+
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+
+    const failures = controller.runs.at(-1)!.outcome.failed
+      .filter(({ id }) => id === `${fixture.featurePath}:4`);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.message).toContain("Expected total 12, received 10");
+    expect(controller.runs.at(-1)!.outcome.ended).toBe(true);
+  });
+
   it("recovers a completed live case into one partial completion and artifact", async () => {
     const shell: ShellRunner = async (_cmd, _dir, env) => {
       const reportPath = env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"];
@@ -388,6 +420,67 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(run.outcome.passed).not.toContain(fixture.featurePath);
     expect(run.outcome.failed).toEqual([]);
     expect(provider.getItemStatus(`${fixture.featurePath}:4`)).toBeUndefined();
+  });
+
+  it("keeps a streamed pass and rolls the feature up from live results when final JSON is empty", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    const session = provider.beginExternalRun(fixture.featurePath);
+    const run = controller.runs.at(-1)!;
+
+    session.progress.onTestEnd?.({
+      featurePath: fixture.featurePath, lineNumber: 4,
+      scenarioName: "Passing scenario", status: "passed", durationMs: 4,
+    }, 1, 3);
+    session.progress.onTestEnd?.({
+      featurePath: fixture.featurePath, lineNumber: 12,
+      scenarioName: "Example #1", status: "skipped",
+    }, 2, 3);
+    session.progress.onTestEnd?.({
+      featurePath: fixture.featurePath, lineNumber: 13,
+      scenarioName: "Example #2", status: "skipped",
+    }, 3, 3);
+    session.complete({ success: true, output: "", duration: 8, scenarioResults: {} });
+
+    expect(run.outcome.passed.filter((id) => id === `${fixture.featurePath}:4`)).toHaveLength(1);
+    expect(run.outcome.passed).toContain(fixture.featurePath);
+    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:12`);
+    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:13`);
+    expect(run.outcome.failed).toEqual([]);
+  });
+
+  it("holds a streamed failure until final reconciliation and reports its assertion once", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    const session = provider.beginExternalRun(fixture.featurePath);
+    const run = controller.runs.at(-1)!;
+    const detail = {
+      featurePath: fixture.featurePath,
+      lineNumber: 4,
+      scenarioName: "Passing scenario",
+      status: "failed" as const,
+      errorMessage: "Expected basket total 12, received 10",
+      durationMs: 5,
+    };
+
+    session.progress.onTestEnd?.(detail, 1, 3);
+    expect(run.outcome.failed).toEqual([]);
+    session.complete({
+      success: false,
+      output: "1 failed",
+      error: "Playwright reported a failed test",
+      duration: 8,
+      scenarioResults: { [`${fixture.featurePath}:4`]: "failed" },
+      scenarioDetails: [detail],
+    });
+
+    const leafFailures = run.outcome.failed.filter(({ id }) => id === `${fixture.featurePath}:4`);
+    expect(leafFailures).toHaveLength(1);
+    expect(leafFailures[0]?.message).toContain("Expected basket total 12, received 10");
+    expect(run.outcome.failed.map(({ id }) => id)).toContain(fixture.featurePath);
+    expect(run.outcome.ended).toBe(true);
   });
 
   it("does not overwrite a completed live scenario when the rest of the run is cancelled", async () => {

@@ -41,6 +41,41 @@ function host(body: SetupHostMessage, revision = 1): SetupEnvelope<SetupHostMess
 }
 
 describe("Xray setup webview protocol", () => {
+  it("rejects an invalid document token before accepting setup actions", () => {
+    expect(parseSetupClientEnvelope(client({ type: "ready" }, { document: "wrong" }))).toBeUndefined();
+    expect(parseSetupClientEnvelope(client(save(), { session: "" }))).toBeUndefined();
+    expect(parseSetupClientEnvelope(client(save({ test: "yes" })))).toBeUndefined();
+    expect(parseSetupClientEnvelope(client(save({ jiraToken: "x".repeat(8_193) })))).toBeUndefined();
+  });
+
+  it("validates host feedback before showing credential and connection state", () => {
+    const accepts = (body: SetupHostMessage | object): boolean => isSetupHostEnvelope(host(body as SetupHostMessage), "session-1", DOCUMENT, 0);
+    expect(accepts({ type: "busy", busy: true, testing: false })).toBe(true);
+    expect(accepts({ type: "validation", errors: { site: "Enter an Atlassian site", clientSecret: "Enter a secret" } })).toBe(true);
+    expect(accepts({ type: "test-result", ok: false, message: "Xray rejected the credentials" })).toBe(true);
+    expect(accepts({ type: "error", message: "Connection failed" })).toBe(true);
+    expect(accepts({ type: "conn-state", state: "checking", label: "Checking connection" })).toBe(true);
+    expect(accepts({ type: "validation", errors: { password: "Unexpected field" } })).toBe(false);
+    expect(accepts({ type: "validation", errors: null })).toBe(false);
+    expect(accepts({ type: "validation", errors: { site: 12 } })).toBe(false);
+    expect(accepts({ type: "busy", busy: "yes", testing: false })).toBe(false);
+    expect(accepts({ type: "conn-state", state: "authenticated", label: "Ready" })).toBe(false);
+    expect(accepts({ type: "test-result", ok: true, message: "x".repeat(513) })).toBe(false);
+  });
+
+  it("accepts probed project summaries and rejects unreliable counts and site flags", () => {
+    const body = {
+      type: "project-view" as const, hasJira: true, jiraProjects: [{ key: "CALC", name: "Calculator" }],
+      jiraTruncated: false, probed: [{ project: "CALC", totalTests: 43, existsOnSite: true }],
+      jiraError: "A second project could not be read",
+    };
+    const accepts = (view: object): boolean => isSetupHostEnvelope(host(view as SetupHostMessage), "session-1", DOCUMENT, 0);
+    expect(accepts(body)).toBe(true);
+    expect(accepts({ ...body, probed: [{ project: "CALC", totalTests: -1, existsOnSite: true }] })).toBe(false);
+    expect(accepts({ ...body, probed: [{ project: "CALC", totalTests: 43, existsOnSite: "yes" }] })).toBe(false);
+    expect(accepts({ ...body, probed: Array(4).fill(body.probed[0]) })).toBe(false);
+    expect(accepts({ ...body, jiraError: 12 })).toBe(false);
+  });
   it("accepts only exact bounded setup save and ready envelopes", () => {
     expect(parseSetupClientEnvelope(client({ type: "ready" }))).toBeDefined();
     expect(parseSetupClientEnvelope(client({ type: "ready", previousDocument: PREVIOUS_DOCUMENT }))).toBeDefined();

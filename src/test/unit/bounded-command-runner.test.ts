@@ -364,6 +364,14 @@ describe("runBoundedCommand", () => {
     expect(result.outputStreamed).toBeUndefined();
   });
 
+  it("ignores empty output chunks without notifying consumers", () => {
+    const notify = vi.fn();
+    const capture = new BoundedCommandOutput(notify);
+    capture.onOutput("stdout", ""); capture.onOutput("stderr", "");
+    expect(notify).not.toHaveBeenCalled();
+    expect(capture.format()).toBe("");
+  });
+
   it("keeps command diagnostics local while one capture retains the whole run", async () => {
     const capture = new BoundedCommandOutput(() => undefined);
     await runBoundedCommand({
@@ -383,4 +391,55 @@ describe("runBoundedCommand", () => {
     expect(capture.format()).toBe("firstsecond");
     // Two sequential real spawns pay node's start-up twice, and on Windows the exit grace twice.
   }, 20_000);
+});
+
+describe("configured executable boundaries", () => {
+  it.each(["", "   ", "''", 'node "unfinished', "node 'unfinished"])("rejects an incomplete command %j", command => {
+    expect(() => parseExecutableCommand(command)).toThrow(/empty|unfinished/);
+  });
+
+  it("preserves empty arguments and parses escaped spaces, quotes, and trailing backslashes", () => {
+    expect(parseExecutableCommand(String.raw`node   one\ two \"three\" \'four\' "" C:\temp` + "\\")).toEqual({
+      executable: "node", args: ["one two", '"three"', "'four'", "", "C:\\temp\\"],
+    });
+  });
+
+  it.each(["npx", "npm exec", "npm exec --", "pnpm exec", "yarn --offline", "yarn run"])(
+    "does not invent a package executable for %s", command => {
+      expect(resolveExecutableCommand(command, os.tmpdir(), "linux")).toEqual(parseExecutableCommand(command));
+    }
+  );
+
+  it.each(["tool.cmd", "tool.bat"])("refuses direct Windows shell shim %s", command => {
+    expect(() => resolveExecutableCommand(command, os.tmpdir(), "win32")).toThrow("Windows command shims are not supported");
+  });
+
+  it("refuses malformed and absolute package shim targets", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-invalid-shim-"));
+    const bin = path.join(root, "node_modules", ".bin");
+    fs.mkdirSync(bin, { recursive: true });
+    try {
+      for (const body of ['echo no node target', 'node "%~dp0\\C:\\outside\\entry.js" %*', 'node "%~dp0//outside/entry.js" %*']) {
+        fs.writeFileSync(path.join(bin, "invalid.cmd"), body);
+        expect(() => resolveExecutableCommand("npx invalid", root, "win32")).toThrow("not installed");
+      }
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("resolves npm exec without a separator from the installed package", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-npm-exec-"));
+    const bin = path.join(root, "node_modules", ".bin");
+    fs.mkdirSync(bin, { recursive: true });
+    const target = path.join(bin, "tool");
+    fs.writeFileSync(target, "#!/usr/bin/env node\n");
+    try {
+      expect(resolveExecutableCommand("npm exec tool --help", root, "linux"))
+        .toEqual({ executable: fs.realpathSync(target), args: ["--help"] });
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("returns a bounded error for an empty command without starting a process", async () => {
+    await expect(runBoundedCommand({ command: "  ", workingDir: os.tmpdir(), logger }))
+      .resolves.toEqual({ success: false, output: "", error: "Command cannot be empty", returnCode: 1 });
+  });
 });

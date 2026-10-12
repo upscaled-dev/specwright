@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
@@ -58,6 +59,216 @@ describe("CommandManager: StepDefinitionProvider caching", () => {
     const first = get();
     config.reload();
     expect(get()).not.toBe(first);
+  });
+});
+
+describe("Create Step Definition For Step command arguments", () => {
+  const feature = vscode.Uri.file("/ws/checkout.feature");
+  const step = { line: 4, text: "I pay 12 dollars", keyword: "When", effectiveKeyword: "When" };
+
+  it.each(["Given", "When", "Then"])("accepts a resolved %s step and reaches the generator", async (effectiveKeyword) => {
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    const message = vi.spyOn(vscode.window, "showWarningMessage");
+    vi.spyOn(vscode.workspace, "getWorkspaceFolder").mockReturnValue(undefined);
+    const handler = captureHandlers(makeContext({ logger })).get("playwrightBddRunner.generateStepDefinitionForStep")!;
+
+    try {
+      await handler(feature, { ...step, effectiveKeyword });
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("generateStepDefinitionForStep"), expect.anything());
+      expect(message).toHaveBeenCalledWith("Generate Step Definitions requires an open workspace folder.");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each([
+    { name: "missing feature", args: [undefined, step], warning: "missing or invalid featureUri" },
+    { name: "plain path in place of a URI", args: ["/ws/checkout.feature", step], warning: "missing or invalid featureUri" },
+    { name: "missing step", args: [feature, undefined], warning: "missing or invalid step info" },
+    { name: "non-numeric source line", args: [feature, { ...step, line: "4" }], warning: "missing or invalid step info" },
+    { name: "missing step text", args: [feature, { ...step, text: undefined }], warning: "missing or invalid step info" },
+    { name: "missing source keyword", args: [feature, { ...step, keyword: undefined }], warning: "missing or invalid step info" },
+    { name: "unresolved effective keyword", args: [feature, { ...step, effectiveKeyword: "And" }], warning: "invalid effectiveKeyword" },
+  ])("ignores $name without opening or editing a step file", async ({ args, warning }) => {
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    const open = vi.spyOn(vscode.workspace, "openTextDocument");
+    const edit = vi.spyOn(vscode.workspace, "applyEdit");
+    const handler = captureHandlers(makeContext({ logger })).get("playwrightBddRunner.generateStepDefinitionForStep")!;
+
+    try {
+      await handler(...args);
+      expect(warn).toHaveBeenCalledWith(`generateStepDefinitionForStep: ${warning}`, { args });
+      expect(open).not.toHaveBeenCalled();
+      expect(edit).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe("Go to Step Definition command context", () => {
+  it("guides an editor-free invocation and rejects a non-feature editor", async () => {
+    const editorHost = vscode.window as unknown as { activeTextEditor: unknown };
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const files = vi.spyOn(vscode.workspace, "findFiles");
+    const command = captureHandlers(makeContext()).get("playwrightBddRunner.goToStepDefinition")!;
+
+    try {
+      editorHost.activeTextEditor = undefined;
+      await command();
+      expect(error).toHaveBeenCalledWith("Go to Step Definition: open a .feature file and place the cursor on a step.");
+
+      editorHost.activeTextEditor = {
+        document: Object.assign(fakeDoc("export const step = 1;", "/ws/steps.ts"), {
+          languageId: "typescript", fileName: "/ws/steps.ts",
+        }),
+        selection: { active: new vscode.Position(0, 0) },
+      };
+      await command();
+      expect(error).toHaveBeenCalledWith("Go to Step Definition only works inside .feature files.");
+      expect(files).not.toHaveBeenCalled();
+    } finally {
+      editorHost.activeTextEditor = undefined;
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe("Refresh Steps Panel command", () => {
+  it("rescans the active usage index so its change event can repaint the tree", async () => {
+    const rescan = vi.fn();
+    const handlers = captureHandlers(makeContext(), (manager) => manager.setUsageIndexHost({
+      getUsageIndex: () => ({ rescan }) as never,
+      projectCapabilities: () => Promise.resolve({
+        workspace: true,
+        featureFiles: 1,
+        stepDefinitions: 1,
+        stepDefinitionPaths: ["steps/**/*.ts"],
+      }),
+    }));
+
+    await handlers.get("playwrightBddRunner.refreshStepsPanel")!();
+
+    expect(rescan).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Insert Step command from the Steps panel", () => {
+  it.each([true, false])("inserts a matching step into the feature editor (context node: %s)", async (fromNode) => {
+    const editorHost = vscode.window as unknown as { activeTextEditor: unknown };
+    const insertSnippet = vi.fn().mockResolvedValue(true);
+    const step = { pattern: "I pay {int} dollars", isRegex: false, keyword: "When", filePath: "/ws/steps.ts" };
+    const getAllUsages = vi.fn().mockResolvedValue(new Map([[step, []]]));
+    const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockImplementation(
+      ((items: Array<{ snippet: string }>) => Promise.resolve(items[0])) as never
+    );
+    editorHost.activeTextEditor = {
+      document: Object.assign(fakeDoc("Feature: Checkout\nScenario: pay\n  When I pay", "/ws/checkout.feature"), {
+        languageId: "gherkin", fileName: "/ws/checkout.feature",
+      }),
+      insertSnippet,
+    };
+    const handlers = captureHandlers(makeContext(), (manager) => manager.setUsageIndexHost({
+      getUsageIndex: () => ({ getAllUsages }) as never,
+      projectCapabilities: () => Promise.resolve({
+        workspace: true,
+        featureFiles: 1,
+        stepDefinitions: 1,
+        stepDefinitionPaths: ["steps/**/*.ts"],
+      }),
+    }));
+    const node = {
+      kind: "stepDefinition", ...step, humanized: "I pay {int} dollars", usageCount: 0, line: 1,
+    };
+
+    try {
+      await handlers.get("playwrightBddRunner.insertStep")!(fromNode ? node : undefined);
+      expect(insertSnippet).toHaveBeenCalledOnce();
+      expect((insertSnippet.mock.calls[0]?.[0] as vscode.SnippetString).value).toContain("I pay");
+      expect(quickPick).toHaveBeenCalledTimes(fromNode ? 0 : 1);
+      expect(getAllUsages).toHaveBeenCalledTimes(fromNode ? 0 : 1);
+    } finally {
+      editorHost.activeTextEditor = undefined;
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe("Steps panel scaffold commands", () => {
+  it("uses the selected unmatched step and ignores a different tree node", async () => {
+    const message = vi.spyOn(vscode.window, "showWarningMessage");
+    vi.spyOn(vscode.workspace, "getWorkspaceFolder").mockReturnValue(undefined);
+    const handler = captureHandlers(makeContext()).get("playwrightBddRunner.scaffoldStepFromPanel")!;
+    const node = {
+      kind: "unmatchedStep", featurePath: "/ws/checkout.feature",
+      step: { line: 4, text: "I pay 12 dollars", keyword: "When", effectiveKeyword: "When" },
+    };
+
+    try {
+      await handler({ kind: "section" });
+      expect(message).not.toHaveBeenCalled();
+      await handler(node);
+      expect(message).toHaveBeenCalledWith("Generate Step Definitions requires an open workspace folder.");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("reads the selected unmatched feature and ignores a different tree node", async () => {
+    const open = vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(
+      fakeDoc("Feature: Checkout\nScenario: pay\n  Given a basket\n", "/ws/checkout.feature")
+    );
+    const message = vi.spyOn(vscode.window, "showWarningMessage");
+    vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([]);
+    vi.spyOn(vscode.workspace, "getWorkspaceFolder").mockReturnValue(undefined);
+    const handler = captureHandlers(makeContext()).get("playwrightBddRunner.scaffoldFeatureFromPanel")!;
+
+    try {
+      await handler({ kind: "section" });
+      expect(open).not.toHaveBeenCalled();
+      await handler({ kind: "unmatchedFile", featurePath: "/ws/checkout.feature", steps: [] });
+      expect(open).toHaveBeenCalledWith(expect.objectContaining({ fsPath: "/ws/checkout.feature" }));
+      expect(message).toHaveBeenCalledWith("Generate Step Definitions requires an open workspace folder.");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe("Command diagnostics", () => {
+  it("shows every configuration error from Validate Configuration", async () => {
+    const context = makeContext();
+    vi.spyOn(context.config, "getValidationErrors").mockReturnValue([
+      "stepDefinitionPaths must contain a glob",
+      "maxParallelProcesses must be positive",
+    ]);
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const handlers = captureHandlers(context);
+
+    try {
+      await handlers.get("playwrightBddRunner.validateConfiguration")!();
+      expect(error).toHaveBeenCalledWith(
+        "Configuration validation failed:\nstepDefinitionPaths must contain a glob\nmaxParallelProcesses must be positive"
+      );
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("reports a rejected Discover Tests request to the user", async () => {
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const handlers = captureHandlers(makeContext(), (manager) => manager.setTestProvider({
+      discoverTests: () => Promise.reject(new Error("the feature scanner stopped")),
+    }));
+
+    try {
+      await handlers.get("playwrightBddRunner.discoverTests")!();
+      expect(error).toHaveBeenCalledWith("Failed to discover tests: the feature scanner stopped");
+    } finally {
+      error.mockRestore();
+    }
   });
 });
 
@@ -303,7 +514,6 @@ describe("command contributions ↔ handler registrations parity", () => {
       await handlers.get("playwrightBddRunner.discoverTests")!();
       await handlers.get("playwrightBddRunner.refreshTests")!();
     } finally {
-      manager.dispose();
       registration.mockRestore();
     }
 
@@ -353,6 +563,109 @@ describe("command contributions ↔ handler registrations parity", () => {
       .toEqual(["Tags", "File", "Scenario type", "None", "Feature"]);
     expect(quickPick.mock.calls[0]?.[1]).toMatchObject({ placeHolder: "Group tests by" });
     quickPick.mockRestore();
+  });
+
+  it.each([
+    ["setTagBasedOrganization", "TagBasedOrganization", ["@smoke", "@regression", "Untagged"]],
+    ["setOrganizationStrategy", "TagBasedOrganization", ["@smoke", "@regression", "Untagged"]],
+    ["setFileBasedOrganization", "FileBasedOrganization", ["a.feature", "b.feature"]],
+    ["setScenarioTypeOrganization", "ScenarioTypeOrganization", ["Regular Scenarios", "Scenario Outlines"]],
+    ["setFlatOrganization", "FlatOrganization", ["All Scenarios"]],
+    ["setFeatureBasedOrganization", "FeatureBasedOrganization", ["a.feature", "b.feature"]],
+  ])("rebuilds populated Test Explorer groups through %s", async (name, strategyType, labels) => {
+    const context = makeContext();
+    const parse = (source: string, filePath: string) =>
+      context.featureParser.parseFeatureContent(source)!.scenarios.map((scenario) => ({ ...scenario, filePath }));
+    const scenarios = [
+      ...parse("Feature: A\n@smoke\nScenario: checkout\n  Given a cart\n@regression\nScenario Outline: totals\n  Given <count> items\nExamples:\n  | count |\n  | 2 |", "/ws/a.feature"),
+      ...parse("Feature: B\nScenario: refund\n  Given an order", "/ws/b.feature"),
+    ];
+    const clearCache = vi.fn();
+    const persist = vi.fn();
+    const groups: string[][] = [];
+    const picker = vi.spyOn(vscode.window, "showQuickPick").mockImplementation(async (choices) => (await choices)[0] as never);
+    const info = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined);
+    const handlers = captureHandlers(context, (manager) => manager.setTestProvider({
+      organizationManager: context.organizationManager,
+      discoveryManager: { clearCache },
+      persistOrganizationStrategy: persist,
+      discoverTests: () => {
+        groups.push(context.organizationManager.organizeTests(scenarios).map(({ label }) => label));
+        return Promise.resolve();
+      },
+    }));
+    try {
+      await handlers.get(`playwrightBddRunner.${name}`)!();
+      expect(context.organizationManager.getStrategy().strategyType).toBe(strategyType);
+      expect(groups).toEqual([labels]);
+      expect(clearCache).toHaveBeenCalledTimes(1);
+      expect(persist).toHaveBeenCalledWith(strategyType);
+      expect(info).toHaveBeenCalledWith(expect.stringContaining("Tests grouped by:"));
+    } finally {
+      picker.mockRestore();
+      info.mockRestore();
+    }
+  });
+
+  it("reports the current test grouping from the connected provider", async () => {
+    const context = makeContext();
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const handlers = captureHandlers(context, (manager) => manager.setTestProvider({ organizationManager: context.organizationManager }));
+    try {
+      await handlers.get("playwrightBddRunner.debugOrganization")!();
+      expect(info).toHaveBeenCalledWith(`Current test grouping: ${context.organizationManager.getStrategy().strategyType}`);
+    } finally {info.mockRestore();}
+  });
+
+  it("navigates to one step definition, offers ambiguous matches, and explains missing matches", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "specwright-command-navigation-"));
+    const first = path.join(directory, "checkout.steps.ts");
+    const second = path.join(directory, "payment.steps.ts");
+    fs.writeFileSync(first, "Given('I have a cart', async () => {});\nGiven('I pay', async () => {});\n");
+    fs.writeFileSync(second, "Given('I pay', async () => {});\n");
+    const document = Object.assign(fakeDoc("Feature: Checkout\nScenario: pay\n  Given I have a cart\n  Given I pay\n  Given unknown"), {
+      languageId: "gherkin", fileName: "/ws/checkout.feature",
+    });
+    const selection = { active: new vscode.Position(2, 8) };
+    const editorHost = vscode.window as unknown as { activeTextEditor: unknown };
+    const openedEditor = { selection: undefined as vscode.Selection | undefined, revealRange: vi.fn() };
+    const files = vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([vscode.Uri.file(first), vscode.Uri.file(second)]);
+    const open = vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(document);
+    const show = vi.spyOn(vscode.window, "showTextDocument").mockResolvedValue(openedEditor as never);
+    const execute = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    const info = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined);
+    const errors = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+    editorHost.activeTextEditor = { document, selection };
+    let manager!: CommandManager;
+    const command = captureHandlers(makeContext(), (value) => {manager = value;}).get("playwrightBddRunner.goToStepDefinition")!;
+
+    try {
+      await command();
+      expect(open).toHaveBeenCalledWith(expect.objectContaining({ fsPath: first }));
+      expect(show).toHaveBeenCalledWith(document);
+      expect(errors.mock.calls).toEqual([]);
+      expect(openedEditor.selection?.active.line).toBe(0);
+      expect(openedEditor.revealRange).toHaveBeenCalledWith(expect.objectContaining({ start: expect.objectContaining({ line: 0 }) }), vscode.TextEditorRevealType.InCenter);
+
+      selection.active = new vscode.Position(3, 8);
+      await command();
+      const picker = execute.mock.calls.find(([id]) => id === "editor.action.goToLocations");
+      expect(picker?.[1]).toBe(document.uri);
+      expect(picker?.[2]).toBe(selection.active);
+      expect((picker?.[3] as vscode.Location[]).map(({ uri }) => uri.fsPath)).toEqual([first, second]);
+      expect(picker?.slice(4)).toEqual(["goto", "No matching step definition found."]);
+
+      selection.active = new vscode.Position(4, 8);
+      await command();
+      expect(info).toHaveBeenCalledWith("No matching step definition found for the step under the cursor.");
+      expect(errors).not.toHaveBeenCalled();
+      expect(files).toHaveBeenCalled();
+    } finally {
+      manager.dispose();
+      editorHost.activeTextEditor = undefined;
+      for (const spy of [files, open, show, execute, info, errors]) {spy.mockRestore();}
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   // The palette invokes with no arguments. A command that needs one belongs in the hidden list, so

@@ -118,6 +118,12 @@ function rig(options: RigOptions = {}): Rig {
 const STORED: TestCaseMetadata = { key: "CALC-1", issueId: "45678", gherkin: A };
 
 describe("runPushGherkin", () => {
+  it("refuses a provider-incompatible target even when its type label is unavailable", async () => {
+    const h = rig({ classifyBinding: () => "incompatible-test-type" });
+    await expect(runPushGherkin(STORED, B, h.deps)).resolves.toEqual({ kind: "wrong-test-type", key: "CALC-1" });
+    expect(h.calls).toEqual(["read CALC-1"]);
+    expect(h.pushed).toEqual([]);
+  });
   it("reads the remote fresh before writing, then refreshes the one key it wrote", async () => {
     const h = rig();
 

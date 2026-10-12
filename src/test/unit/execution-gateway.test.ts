@@ -18,6 +18,7 @@ import type { FeatureParser } from "../../parsers/feature-parser";
 import type { RunArtifactStore } from "../../traceability/run-artifact-store";
 import type { ScenarioRef } from "../../traceability/scenario-ref";
 import type { ScenarioResult } from "../../utils/playwright-json-parser";
+import type { TestExecutionOptions } from "../../types";
 import { EXECUTION_LIMITS } from "../../core/execution-limits";
 import {
   runBoundedCommand,
@@ -133,6 +134,65 @@ function rig(
 }
 
 describe("LegacyDirectExecutionGateway", () => {
+  it("applies the requested worker count only for the current run", async () => {
+    const { gateway, executor } = rig();
+    const completion = await gateway.execute(intent({ maxWorkers: 3 }));
+    expect(completion.state).toBe("complete");
+    expect(executor.setForceParallel).toHaveBeenNthCalledWith(1, true, 3);
+    expect(executor.setForceParallel).toHaveBeenNthCalledWith(2, false);
+  });
+
+  it("reports a worker-override cleanup failure without losing completed results", async () => {
+    const { gateway, executor } = rig();
+    vi.mocked(executor.setForceParallel).mockImplementation((enabled) => {
+      if (!enabled) { throw new Error("could not reset workers"); }
+    });
+    await expect(gateway.execute(intent({ maxWorkers: 2 }))).rejects.toMatchObject({
+      completion: { state: "partial", failure: "could not reset workers", results: [expect.objectContaining({ outcome: "passed" })] },
+    });
+  });
+
+  it("preserves cancellation when worker cleanup also fails", async () => {
+    const controller = new AbortController();
+    const { gateway, executor } = rig(vi.fn(async () => { controller.abort(); return output([detail("A")]); }));
+    vi.mocked(executor.setForceParallel).mockImplementation((enabled) => {
+      if (!enabled) { throw new Error("cleanup failed"); }
+    });
+    await expect(gateway.execute(intent({ maxWorkers: 2 }), { signal: controller.signal })).resolves.toMatchObject({ state: "cancelled" });
+    expect(executor.runScenarioWithOutput).toHaveBeenCalledOnce();
+  });
+
+  it("reports non-Error executor failures and restores the worker override", async () => {
+    const { gateway, executor } = rig(vi.fn().mockRejectedValue("runner unavailable"));
+    await expect(gateway.execute(intent({ maxWorkers: 2 }))).rejects.toMatchObject({
+      completion: { state: "partial", failure: "runner unavailable" },
+    });
+    expect(executor.setForceParallel).toHaveBeenLastCalledWith(false);
+  });
+
+  it("gives an actionable partial result when the process fails without a report or error", async () => {
+    const { gateway } = rig(vi.fn().mockResolvedValue(output([], false)));
+    await expect(gateway.execute(intent())).rejects.toMatchObject({ completion: {
+      state: "partial", failure: "The test process failed without a complete report.", results: [],
+    } });
+  });
+
+  it("retains a final multi-project result flag through artifact recording", async () => {
+    const { gateway } = rig(vi.fn().mockResolvedValue(output([{ ...detail("A"), multipleProjects: true }])));
+    const completion = await gateway.execute(intent({ targets: [{ kind: "scenario", scenario: A }] }));
+    expect(completion.results).toEqual([expect.objectContaining({ scenario: A, outcome: "passed", multipleProjects: true })]);
+  });
+
+  it.each([{ kind: "suite" } as const, { kind: "tag-expression", expression: "@smoke" } as const])(
+    "rejects unsupported debug target %j without starting an executor", async (target) => {
+      const { gateway, executor } = rig();
+      await expect(gateway.execute(intent({ mode: "debug", targets: [target] }))).rejects.toThrow("Debug mode does not support");
+      expect(executor.debugScenarioWithOutput).not.toHaveBeenCalled();
+      expect(executor.runSuiteWithOutput).not.toHaveBeenCalled();
+      expect(executor.runAllTestsWithTagsOutput).not.toHaveBeenCalled();
+    },
+  );
+
   it("dispatches targets sequentially and emits one ordered terminal event", async () => {
     let running = false;
     const calls: string[] = [];
@@ -188,10 +248,11 @@ describe("LegacyDirectExecutionGateway", () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 
-  it("lets cancellation dominate a killed-process failure and skips later targets", async () => {
+  it.each(["result", "rejection"])("lets cancellation dominate a killed-process %s and skips later targets", async (failure) => {
     const abort = new AbortController();
     const run = vi.fn(async () => {
       abort.abort();
+      if (failure === "rejection") {throw new Error("process exited 1");}
       return output([], false, "process exited 1");
     });
     const { gateway, store } = rig(run);
@@ -403,8 +464,13 @@ describe("LegacyDirectExecutionGateway", () => {
   it("ignores late live events after finished", async () => {
     let late: (() => void) | undefined;
     const run = vi.fn(async (options: unknown) => {
-      const progress = (options as { progress: { onTestEnd?: (...args: unknown[]) => void } }).progress;
-      late = () => progress.onTestEnd?.(detail("A"), 1, 1);
+      const progress = (options as { progress: RunProgressObserver }).progress;
+      late = () => {
+        progress.onTestEnd?.(detail("A"), 1, 1);
+        progress.onBegin?.(1);
+        progress.onProgress?.({ phase: "running", completed: 1, total: 1 });
+        progress.onOutput?.("stdout", "late output");
+      };
       return output([detail("A")]);
     });
     const { gateway } = rig(run);
@@ -908,7 +974,7 @@ describe("LegacyDirectExecutionGateway", () => {
     expect(executor.runScenarioWithOutput).toHaveBeenCalledTimes(1);
   });
 
-  it("runs each Examples-block row by its exact generated-test source line", async () => {
+  it.each(["run", "debug"] as const)("%s dispatches each Examples-block row by its exact generated-test source line", async (mode) => {
     const block = {
       filePath: A.filePath,
       line: 7,
@@ -929,27 +995,67 @@ describe("LegacyDirectExecutionGateway", () => {
       examplesBlockLineNumber: 7,
     }));
     const events: ExecutionEvent[] = [];
-    const run = vi.fn(async (options: { lineNumber: number; progress: RunProgressObserver }) => {
-      options.progress.onProgress?.({ phase: "finishing" });
+    const run = vi.fn(async (options: TestExecutionOptions) => {
+      options.progress?.onProgress?.({ phase: "finishing" });
       expect(events.some((event) => event.kind === "progress" && event.progress.phase === "finishing"))
         .toBe(options.lineNumber === 10);
       return output([]);
     });
     const { gateway, executor, parser } = rig(run);
+    vi.mocked(executor.debugScenarioWithOutput).mockImplementation(run);
     vi.mocked(parser.parseFeatureFile).mockReturnValue({ scenarios: rows } as never);
 
-    await gateway.execute(selectedIntent(
+    await gateway.execute({ ...selectedIntent(
       [{ kind: "scenario", scenario: block }],
       { kind: "scenario", scenario: block }
-    ), { onEvent: (event) => events.push(event) });
+    ), mode }, { onEvent: (event) => events.push(event) });
 
-    expect(vi.mocked(executor.runScenarioWithOutput).mock.calls.map(([options, target]) => ({
+    expect(vi.mocked(mode === "run" ? executor.runScenarioWithOutput : executor.debugScenarioWithOutput).mock.calls.map(([options, target]) => ({
       line: (options as { lineNumber?: number }).lineNumber,
       target,
     }))).toEqual([
       { line: 9, target: { scenario: block, resultLines: [9] } },
       { line: 10, target: { scenario: block, resultLines: [10] } },
     ]);
+  });
+
+  it.each(["cancelled", "unsafe"] as const)("stops an Examples block after a %s first row", async (reason) => {
+    const block = { ...A, line: 7, kind: "examplesBlock" as const, outlineName: "Divide" };
+    const rows = [9, 10].map((lineNumber) => ({
+      filePath: A.filePath, name: `row ${lineNumber}`, lineNumber, steps: [],
+      isScenarioOutline: true as const, outlineLineNumber: 4, outlineName: "Divide",
+      examplesBlockLineNumber: 7,
+    }));
+    const abort = new AbortController();
+    const run = vi.fn(async () => {
+      if (reason === "cancelled") {
+        abort.abort();
+        return output([], false, "Cancelled");
+      }
+      return { ...output([], false, "debug process still alive"), admissionUnsafe: true };
+    });
+    const { gateway, parser } = rig(run);
+    vi.mocked(parser.parseFeatureFile).mockReturnValue({ scenarios: rows } as never);
+    const completion = gateway.execute(selectedIntent(
+      [{ kind: "scenario", scenario: block }], { kind: "scenario", scenario: block }
+    ), { signal: abort.signal });
+    if (reason === "cancelled") {
+      await expect(completion).resolves.toMatchObject({ state: "cancelled" });
+    } else {
+      await expect(completion).rejects.toMatchObject({ completion: { state: "partial", failure: "debug process still alive" } });
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains the failing project when a later project reports a worse outcome", async () => {
+    const { gateway } = rig(vi.fn().mockResolvedValue(output([
+      { ...detail("A"), projectName: "chromium" },
+      { ...detail("A", "failed"), projectName: "firefox", errorMessage: "firefox failed" },
+    ], false)));
+    const completion = await gateway.execute(intent({ targets: [{ kind: "scenario", scenario: A }] }));
+    expect(completion).toMatchObject({ failed: 1, passed: 0, results: [
+      { outcome: "failed", errorMessage: "firefox failed", multipleProjects: true },
+    ] });
   });
 
   it("finishes immutable and releases admission when artifact sealing fails", async () => {
@@ -1397,5 +1503,57 @@ describe("LegacyArtifactGateway lifecycle diagnostics", () => {
       captureState: "missing",
     }));
     expect((rejected.gateway as unknown as { captures: Map<string, unknown> }).captures.size).toBe(0);
+  });
+});
+
+describe("gateway cancellation between dispatches", () => {
+  it("observes cancellation from the started event before launching the first target", async () => {
+    const abort = new AbortController();
+    const { gateway, executor } = rig();
+    const completion = await gateway.execute(intent(), {
+      signal: abort.signal,
+      onEvent: (event) => { if (event.kind === "started") { abort.abort(); } },
+    });
+    expect(completion.state).toBe("cancelled");
+    expect(executor.runScenarioWithOutput).not.toHaveBeenCalled();
+  });
+
+  it.each(["scenarios", "examples"] as const)("stops %s when cancellation lands after consuming a completed case", async (kind) => {
+    const abort = new AbortController();
+    const block = { ...A, line: 7, name: "Divide", kind: "examplesBlock" as const, outlineName: "Divide" };
+    const run = vi.fn().mockResolvedValue(output([detail("A")]));
+    const { gateway, parser } = rig(run);
+    vi.mocked(parser.parseFeatureFile).mockReturnValue({ scenarios: [9, 10].map((lineNumber) => ({
+      filePath: A.filePath, name: `row ${lineNumber}`, lineNumber, steps: [],
+      isScenarioOutline: true, outlineLineNumber: 4, outlineName: "Divide", examplesBlockLineNumber: 7,
+    })) } as never);
+    const completion = await gateway.execute(intent({ targets: kind === "scenarios"
+      ? [{ kind: "scenarios", scenarios: [A, B] }]
+      : [{ kind: "scenario", scenario: block }],
+    }), { signal: abort.signal, onEvent: (event) => {
+      if (event.kind === "case-finished") { queueMicrotask(() => abort.abort()); }
+    } });
+    expect(completion.state).toBe("cancelled");
+    expect(completion.results).toHaveLength(1);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("debugs a path through the direct gateway without requiring an artifact batch", async () => {
+    const { executor, parser } = rig();
+    vi.mocked(executor.debugScenarioWithOutput).mockResolvedValue(output([detail("A")]));
+    const gateway = new LegacyDirectExecutionGateway(executor, parser, trustedWorkspace());
+    const events: ExecutionEvent[] = [];
+    const subscription = gateway.onEvent((event) => events.push(event));
+    const result = await gateway.execute({ mode: "debug", targets: [{ kind: "path", path: A.filePath }] });
+    expect(result).toMatchObject({ state: "complete", passed: 1 });
+    const options = vi.mocked(executor.debugScenarioWithOutput).mock.calls[0]?.[0];
+    expect(options).toMatchObject({ filePath: A.filePath });
+    expect(options).not.toHaveProperty("artifactBatch");
+    expect(events.filter((event) => event.kind === "finished")).toHaveLength(1);
+    subscription.dispose();
+    const count = events.length;
+    await gateway.execute({ mode: "debug", targets: [{ kind: "path", path: A.filePath }] });
+    expect(events).toHaveLength(count);
+    await gateway.dispose();
   });
 });

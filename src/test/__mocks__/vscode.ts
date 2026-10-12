@@ -33,6 +33,19 @@ class Range {
   }
 }
 
+class Selection extends Range {
+  constructor(public readonly anchor: Position, public readonly active: Position) {
+    super(anchor, active);
+  }
+}
+
+export const TextEditorRevealType = {
+  Default: 0,
+  InCenter: 1,
+  InCenterIfOutsideViewport: 2,
+  AtTop: 3,
+} as const;
+
 class Location {
   public readonly range: Range;
   constructor(public readonly uri: unknown, rangeOrPosition: Range | Position) {
@@ -281,6 +294,7 @@ export const window = {
   showErrorMessage: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showQuickPick: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showInputBox: (..._args: unknown[]): Promise<string | undefined> => Promise.resolve(undefined),
+  showOpenDialog: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showSaveDialog: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   showTextDocument: (..._args: unknown[]): Promise<unknown> => Promise.resolve(undefined),
   // Runs the task immediately with a no-op progress reporter and a never-cancelled token. Tests that
@@ -700,7 +714,7 @@ export const extensions = {
   onDidChange: () => ({ dispose: () => {} }),
 };
 
-export { Position, Range, Location, Uri };
+export { Position, Range, Selection, Location, Uri };
 
 export const ExtensionMode = { Production: 1, Development: 2, Test: 3 };
 export const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };

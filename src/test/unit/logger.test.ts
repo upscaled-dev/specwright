@@ -54,10 +54,14 @@ describe("Logger", () => {
 
     logger.debug("details", { runId: "run-1" });
     logger.warn("warning");
+    logger.info("connected");
+    logger.error("failed");
 
     expect(calls).toEqual([
       { level: "debug", message: "details\n{\n  \"runId\": \"run-1\"\n}" },
       { level: "warn", message: "warning" },
+      { level: "info", message: "connected" },
+      { level: "error", message: "failed" },
     ]);
   });
 

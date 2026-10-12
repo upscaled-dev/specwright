@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
-import type * as vscode from "vscode";
+import { describe, it, expect, vi } from "vitest";
+import * as vscode from "vscode";
 import {
   CachedMetadata,
   cacheStorageKey,
+  currentWorkspaceId,
   CACHE_SCHEMA_VERSION,
   XrayCacheIdentity,
   XrayMetadataCache,
@@ -132,4 +133,18 @@ describe("XrayMetadataCache", () => {
     expect(store.size).toBe(0);
     expect(await cache.load()).toBeUndefined();
   });
+});
+
+
+it("keeps workspace cache identities stable across folder order and separate across workspace membership", () => {
+  const folders = ["/ws/cart", "/ws/payments"].map((folder, index) => ({ uri: vscode.Uri.file(folder), name: folder, index }));
+  const workspace = vi.spyOn(vscode.workspace, "workspaceFolders", "get").mockReturnValue(folders);
+  try {
+    const first = currentWorkspaceId();
+    expect(first).toMatch(/^[0-9a-f]{16}$/u);
+    workspace.mockReturnValue([...folders].reverse());
+    expect(currentWorkspaceId()).toBe(first);
+    workspace.mockReturnValue(folders.slice(0, 1));
+    expect(currentWorkspaceId()).not.toBe(first);
+  } finally {workspace.mockRestore();}
 });

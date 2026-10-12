@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { artifactCaptureTarget, batchSelectionFromScenarios, resolveBatchSelection } from "../../traceability/batch-selection";
 import type { OutlineExampleRow } from "../../types";
+import { FeatureParser } from "../../parsers/feature-parser";
+import { scenarioRefFromScenario } from "../../traceability/scenario-ref";
 import { ScenarioRef, TraceLink, TraceabilitySnapshot } from "../../traceability/traceability-model";
 
 function ref(over: Partial<ScenarioRef> = {}): ScenarioRef {
@@ -27,6 +29,16 @@ const SNAP: TraceabilitySnapshot = {
 };
 
 describe("resolveBatchSelection", () => {
+  it("resolves a scenario tagged to two tests as one executable unit", () => {
+    const snapshot = { ...SNAP, links: [...SNAP.links, link(A1, "CALC-9")] };
+    expect(resolveBatchSelection({ kind: "all-mapped" }, snapshot).scenarios).toEqual([A1, A2, B1]);
+    expect(resolveBatchSelection({ kind: "feature", filePath: A1.filePath }, snapshot).scenarios).toEqual([A1, A2, UNTAGGED]);
+  });
+
+  it("names a drafted outline without Examples as a whole-outline target", () => {
+    const scenario = FeatureParser.create().parseFeatureContent("Feature: Payments\nScenario Outline: Checkout\n  Given a basket")!.scenarios[0]!;
+    expect(scenarioRefFromScenario(scenario)).toEqual({ filePath: "", line: 0, name: "Checkout", kind: "outline", outlineName: "Checkout" });
+  });
   it("scenario → that scenario, one grep invocation", () => {
     const resolved = resolveBatchSelection({ kind: "scenario", scenario: A1 }, SNAP);
     expect(resolved.scenarios).toEqual([A1]);
@@ -244,6 +256,11 @@ describe("artifactCaptureTarget", () => {
     examplesBlockLineNumber,
   });
   const rows = [row(8, 6), row(9, 6)];
+
+  it("refuses a removed Examples block while other outline rows remain", () => {
+    expect(() => artifactCaptureTarget({ filePath, line: 18, name: "Removed block", kind: "examplesBlock" }, rows, []))
+      .toThrow("owns no parsed rows");
+  });
   const outline = { filePath, name: "Divide", kind: "outline" as const, outlineName: "Divide" };
 
   it("captures only the row an outline ref names by its own line", () => {

@@ -22,12 +22,13 @@ describe("xray diagnostics module graph", () => {
 
 describe("describeShape", () => {
   it("emits types and lengths, never values", () => {
-    const input = { name: "secret-value", count: 3, ok: true, none: null };
+    const input = { name: "secret-value", count: 3, ok: true, none: null, missing: undefined };
     expect(describeShape(input)).toEqual({
       name: "string(12)",
       count: "number",
       ok: "boolean",
       none: "null",
+      missing: "undefined",
     });
   });
 
@@ -66,10 +67,11 @@ describe("graphqlErrorSummaries", () => {
 
   it("formats message and extensions.code, with a fallback for missing messages", () => {
     const summaries = graphqlErrorSummaries({
-      errors: [{ message: "denied", extensions: { code: "FORBIDDEN" } }, {}],
+      errors: [{ message: "denied", extensions: { code: "FORBIDDEN" } }, {}, null],
     });
     expect(summaries[0]).toBe("errors[0] [FORBIDDEN]: denied");
     expect(summaries[1]).toBe("errors[1]: (no message)");
+    expect(summaries[2]).toBe("errors[2]: (no message)");
   });
 
   it("clips long messages and scrubs jwt-like tokens inside them", () => {

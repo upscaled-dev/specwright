@@ -87,6 +87,23 @@ describe("StatusBar", () => {
     expect(captured).toHaveLength(0);
   });
 
+  it("ignores completion before startup and retains finishing across a late case event", () => {
+    gateway.fire({ kind: "finished", completion: completion() });
+    expect(captured).toHaveLength(0);
+    gateway.fire({ kind: "started", targetCount: 1 });
+    gateway.fire({ kind: "begin", total: 3 });
+    expect(captured[0]!.text).toContain("Running 0/3");
+    gateway.fire({ kind: "progress", progress: { phase: "finishing" } });
+    gateway.fire({ kind: "output", stream: "stdout", text: "Checkout completed" });
+    gateway.fire({ kind: "case-finished", result: {
+      scenario: { filePath: "/ws/a.feature", line: 3, name: "Checkout", kind: "scenario" },
+      outcome: "passed", durationMs: 1, attempts: 1, flaky: false,
+    }, completed: 3, total: 3 });
+    expect(captured[0]!.text).toContain("Finishing run");
+    gateway.fire({ kind: "finished", completion: completion({ state: "partial", passed: 2 }) });
+    expect(captured[0]!.text).toBe("$(error) Specwright: 2 passed, 0 failed");
+  });
+
   it("updates to running state when a running event fires", () => {
     gateway.fire({ kind: "started", targetCount: 1 });
     expect(captured).toHaveLength(1);

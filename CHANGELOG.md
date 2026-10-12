@@ -15,11 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update VSIX packaging to VSCE 4.0.0 on the pinned development Node runtime, retaining the existing artifact inventory and provenance checks.
 - Update the browser-test DOM to jsdom 30.1.2 with matching major-version typings, preserving the bundled webview rendering and interaction checks.
 - Update development Node to 24.21.0, Node typings to the 24 line, and Vitest with matching V8 coverage to 5.0.3.
-- Set temporary coverage floors for Vitest 5's AST mapper at 81% statements, 77% branches, and 83% functions and lines. Keep the source scope intact and defer the 95% target to separate coverage work.
+- Enforce 95% coverage floors for statements, branches, functions, and lines across the existing source inventory, with source-mapped browser coverage and behavioral regressions.
 - Use native TypeScript 7 for type checking, watch mode, and integration compilation while retaining the TypeScript 6 API for ESLint.
 - Update compatible development dependencies and migrate the repository's tested pair to playwright-bdd 9.2.1 and Playwright 1.64.0, with Playwright bounded to its tested minor line.
 - Run progress shows observed preparation, generation, execution, retry activity, and finishing stages in the status bar, Test Results output, and editor-run notifications.
 - Passing retries keep their green result and show the successful attempt number in the scenario summary. Combined multi-project results use a general retry annotation.
+
+
+### Fixed
+
+- Publish dialog Browse opens the file chooser and carries selected attachments through confirmation and Jira upload.
+- Step catalogs preserve definitions in unnamed workspace sections without displaying an undefined folder name.
+- Failed or malformed Xray test responses no longer mark missing tests as verified absent; additive sync retains known tests.
 
 
 ## [0.7.8] - 2026-10-11

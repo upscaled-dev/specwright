@@ -12,6 +12,23 @@ function command() {
 }
 
 describe("DiagnosticsCommands", () => {
+  it.each(["preview", "clipboard"] as const)("contains a non-Error %s failure and reports its cause", async stage => {
+    const warn = vi.spyOn(Logger.prototype, "warn");
+    vi.spyOn(vscode.workspace, "openTextDocument").mockImplementation(async () => {
+      if (stage === "preview") {throw "document unavailable";}
+      return {} as vscode.TextDocument;
+    });
+    vi.spyOn(vscode.window, "showTextDocument").mockResolvedValue({} as vscode.TextEditor);
+    vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue("Copy Snapshot" as never);
+    const copy = vi.spyOn(vscode.env.clipboard, "writeText").mockRejectedValue("clipboard unavailable");
+    try {
+      await expect(command().openSupportSnapshot()).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(stage === "preview" ? "Could not open support snapshot" : "Could not copy support snapshot", {
+        error: stage === "preview" ? "document unavailable" : "clipboard unavailable",
+      });
+      if (stage === "preview") {expect(copy).not.toHaveBeenCalled();}
+    } finally {vi.restoreAllMocks();}
+  });
   it("previews before an explicit copy and copies the exact preview bytes", async () => {
     const order: string[] = [];
     let content = "";

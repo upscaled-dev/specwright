@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,6 +18,7 @@ describe("generated test targets", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -31,6 +32,32 @@ describe("generated test targets", () => {
       "]; // bdd-data-end",
     ].join("\n"));
   }
+
+  it("matches a differently cased source identity on Windows", () => {
+    writeProject("browser", 17);
+    const spec = path.join(root, ".features-gen/browser/features/a.feature.spec.js");
+    fs.writeFileSync(spec, fs.readFileSync(spec, "utf8").replace("features/a.feature", "FEATURES/A.feature"));
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    expect(exactGeneratedTargets(root, ".features-gen", feature, 7)).toEqual({
+      targets: [".features-gen/browser/features/a.feature.spec.js:17"],
+    });
+  });
+
+  it("keeps an explicit generated spec outside the working directory as an absolute target", () => {
+    writeProject("browser", 17);
+    const spec = path.join(root, ".features-gen/browser/features/a.feature.spec.js");
+    fs.writeFileSync(spec, fs.readFileSync(spec, "utf8").replace("features/a.feature", feature));
+    expect(exactGeneratedTargets(path.join(root, "nested"), ".features-gen", feature, 7, [spec])).toEqual({
+      targets: [`${spec.split(path.sep).join("/")}:17`],
+    });
+  });
+
+  it("does not infer missing-step skips from a spec with no trustworthy source identity", () => {
+    writeProject("browser", 17);
+    const spec = path.join(root, ".features-gen/browser/features/a.feature.spec.js");
+    fs.writeFileSync(spec, fs.readFileSync(spec, "utf8").replace(/^.*\n/u, ""));
+    expect([...missingStepSkipLines(root, ".features-gen", feature)]).toEqual([]);
+  });
 
   it("resolves an exact target for every generated BDD project", () => {
     const unnamed = path.join(root, ".features-gen", "features/a.feature.spec.js");

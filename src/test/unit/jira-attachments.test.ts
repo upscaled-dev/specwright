@@ -82,6 +82,26 @@ const upload = async ({ files, readSnapshot, ...over }: TestUploadDeps): Promise
 };
 
 describe("uploadJiraAttachments", () => {
+  it("reports a snapshot as pending when no spool can read it", async () => {
+    const file: AttachmentSnapshot = { ref: "unavailable", name: "report.zip", size: 5, sha256: "a".repeat(64), createdAt: 1 };
+    const fetchImpl = vi.fn<FetchLike>();
+    const result = await uploadJiraAttachments({ site: SITE, credentials: { email: EMAIL, token: TOKEN },
+      issueKey: "XNP-9", files: [file], logger: capturingLogger().logger, fetchImpl,
+    });
+    expect(result).toEqual({ uploaded: [], failed: [file], cancelled: [] });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("cancels the current and remaining files when cancellation arrives while reading a snapshot", async () => {
+    const abort = new AbortController();
+    const fetchImpl = vi.fn<FetchLike>();
+    const result = await upload({ files: ["/ws/first.zip", "/ws/second.zip"], fetchImpl, signal: abort.signal,
+      readSnapshot: () => { abort.abort(); return Buffer.from("bytes"); },
+    });
+    expect(result).toEqual({ uploaded: [], failed: [], cancelled: ["/ws/first.zip", "/ws/second.zip"] });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("POSTs each file to the issue attachments endpoint with the no-check token + basic auth", async () => {
     let url = "";
     let headers: Record<string, string> = {};
@@ -322,6 +342,32 @@ describe("fetchJiraAttachmentMeta", () => {
     credentials: { email: EMAIL, token: TOKEN },
     logger: capturingLogger().logger,
     fetchImpl,
+  });
+
+  it("treats an absent response object as unknown settings", async () => {
+    await expect(fetchJiraAttachmentMeta(deps(async () => response(200, null)))).resolves.toEqual({ enabled: true });
+  });
+
+  it.each([429, 503])("retries a read-only metadata HTTP %i response and uses the recovered limit", async (status) => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce({ ...response(status, "retry"), headers: new Headers({ "retry-after": "1" }) })
+      .mockResolvedValueOnce(response(200, { enabled: true, uploadLimit: 1234 }));
+    const sleep = vi.fn(async () => undefined);
+    await expect(fetchJiraAttachmentMeta({ ...deps(fetchImpl), sleep, random: () => 0 })).resolves.toEqual({ enabled: true, uploadLimit: 1234 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(1000, undefined);
+  });
+
+  it.each(["before request", "during request", "during retry"])("preserves cancellation %s instead of returning fallback settings", async (stage) => {
+    const controller = new AbortController();
+    const reason = new Error("publish dialog closed");
+    const fetchImpl = vi.fn(async () => {
+      if (stage === "during request") { controller.abort(reason); throw new Error("fetch aborted"); }
+      return response(503, "retry");
+    });
+    if (stage === "before request") { controller.abort(reason); }
+    const sleep = vi.fn(async () => { controller.abort(reason); });
+    await expect(fetchJiraAttachmentMeta({ ...deps(fetchImpl), signal: controller.signal, sleep, random: () => 0 })).rejects.toBe(reason);
+    expect(fetchImpl).toHaveBeenCalledTimes(stage === "before request" ? 0 : 1);
   });
 
   it("parses enabled + uploadLimit", async () => {

@@ -1,10 +1,10 @@
 /// <reference path="../../webview/client/globals.d.ts" />
 
 import axe from "axe-core";
-import { build } from "esbuild";
 import { JSDOM } from "jsdom";
 import * as vscode from "vscode";
 import { afterEach, describe, expect, it } from "vitest";
+import { browserClientCode } from "./helpers/browser-client-bundle.mjs";
 import {
   XraySetupPanel,
   type XraySetupDelegate,
@@ -30,19 +30,6 @@ const panels = vscode.window as unknown as {
   __webviewPanels: Array<{ webview: { html: string } }>;
   __resetWebviewPanels(): void;
 };
-
-let bundledClient: Promise<string> | undefined;
-
-function clientCode(): Promise<string> {
-  bundledClient ??= build({
-    entryPoints: ["src/webview/xray-setup.ts"],
-    bundle: true,
-    platform: "browser",
-    format: "iife",
-    write: false,
-  }).then((output) => output.outputFiles[0]!.text);
-  return bundledClient;
-}
 
 function delegate(hasCredentials = false, hasJira = false): XraySetupDelegate {
   const connected = {
@@ -91,7 +78,7 @@ async function rig(
       setState: (next: Record<string, unknown>) => {stateCalls.set += 1; state = next;},
     }),
   });
-  dom.window.eval(await clientCode());
+  dom.window.eval(await browserClientCode("xray-setup"));
   const session = dom.window.document.body.dataset["session"] ?? "";
   const documentId = posted[0]?.document ?? "";
   let revision = 0;
@@ -274,5 +261,67 @@ describe("Xray setup browser client", () => {
     client.send({ type: "saved", site: "other.atlassian.net", region: "us", jira: false });
     expect(document.getElementById("project-view")?.textContent).toBe("");
     await expectNoSeriousViolations(client.dom);
+  });
+
+  it("distinguishes missing and unverified tagged projects from unavailable or truncated Jira lists", async () => {
+    const client = await rig();
+    const document = client.dom.window.document;
+    client.send({
+      type: "project-view", hasJira: false, jiraProjects: [], jiraTruncated: false,
+      probed: [
+        { project: "MISSING", totalTests: 0, existsOnSite: false },
+        { project: "UNKNOWN", totalTests: 0 },
+        { project: "SHOP", totalTests: 12, existsOnSite: true },
+      ],
+    });
+    expect(document.getElementById("project-view")?.textContent).toContain("MISSING: not found on this site");
+    expect(document.getElementById("project-view")?.textContent).toContain("UNKNOWN: 0 Xray tests; project may not exist");
+    expect(document.getElementById("project-view")?.textContent).toContain("SHOP: 12 Xray tests");
+    client.send({ type: "project-view", hasJira: true, jiraProjects: [], jiraTruncated: false, probed: [], jiraError: "Forbidden" });
+    expect(document.getElementById("project-view")?.textContent).toBe("Jira project list unavailable: Forbidden");
+    client.send({ type: "project-view", hasJira: true, jiraProjects: [{ key: "SHOP", name: "Shop" }], jiraTruncated: true, probed: [] });
+    expect(document.getElementById("project-view")?.textContent).toContain("Accessible Jira projects (1+, list truncated)");
+    expect(document.getElementById("project-view")?.textContent).toContain("SHOP: Shop");
+    client.send({ type: "project-view", hasJira: false, jiraProjects: [], jiraTruncated: false, probed: [] });
+    expect(document.getElementById("project-view")?.textContent).toBe("");
+    client.dom.window.close();
+  });
+
+  it("clears credential and region validation on edits and reports save, connection, and server outcomes", async () => {
+    const client = await rig();
+    const document = client.dom.window.document;
+    client.send({ type: "form-state", site: "shop.atlassian.net", region: "us", credentials: false, jira: false });
+    const secret = document.getElementById("clientSecret") as HTMLInputElement;
+    const region = document.getElementById("region") as HTMLSelectElement;
+    expect(secret.value).toBe("");
+    client.send({ type: "validation", errors: { clientSecret: "Enter a secret", region: "Pick a region" } });
+    expect(secret.getAttribute("aria-invalid")).toBe("true");
+    expect(region.getAttribute("aria-invalid")).toBe("true");
+    secret.value = "temporary-test-secret";
+    secret.dispatchEvent(new client.dom.window.Event("input", { bubbles: true }));
+    region.value = "eu";
+    region.dispatchEvent(new client.dom.window.Event("change", { bubbles: true }));
+    expect(secret.hasAttribute("aria-invalid")).toBe(false);
+    expect(region.hasAttribute("aria-invalid")).toBe(false);
+    expect(document.getElementById("err-region")?.textContent).toBe("");
+    const submit = new client.dom.window.Event("submit", { bubbles: true, cancelable: true });
+    document.getElementById("setup-form")!.dispatchEvent(submit);
+    expect(submit.defaultPrevented).toBe(true);
+    expect(client.posted.at(-1)?.body).toMatchObject({ type: "save", site: "shop.atlassian.net", region: "eu", test: true });
+    document.getElementById("save")!.click();
+    expect(client.posted.at(-1)?.body).toMatchObject({ type: "save", test: false });
+    client.send({ type: "busy", busy: true, testing: false });
+    expect(document.getElementById("status")?.textContent).toBe("Saving…");
+    client.send({ type: "saved", site: "shop.atlassian.net", region: "eu", jira: false });
+    expect(document.getElementById("status")?.textContent).toContain("Checking connection");
+    client.send({ type: "test-result", ok: false, message: "Connection rejected" });
+    expect(document.getElementById("status")?.classList.contains("error")).toBe(true);
+    client.send({ type: "test-result", ok: true, message: "Connection succeeded" });
+    expect(document.getElementById("status")?.classList.contains("error")).toBe(false);
+    expect(document.getElementById("status")?.textContent).toBe("Connection succeeded");
+    client.send({ type: "error", message: "Server unavailable" });
+    expect(document.getElementById("status")?.textContent).toBe("Server unavailable");
+    expect(document.getElementById("status")?.classList.contains("error")).toBe(true);
+    client.dom.window.close();
   });
 });

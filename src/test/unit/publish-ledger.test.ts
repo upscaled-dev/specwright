@@ -213,6 +213,22 @@ describe("standalone execution entries", () => {
 });
 
 describe("PublishLedger", () => {
+  it("rejects corrupt persisted records while keeping a readable published entry", async () => {
+    const valid = entry({ kind: "published" });
+    const ledger = new PublishLedger(fakeMemento([null, { ...entry(), kind: "unrecognized" }, valid]), logger);
+    await ledger.ready();
+    expect(ledger.entriesForSite("acme.atlassian.net")).toEqual([valid]);
+    await expect(ledger.setPendingAttachments("absent-run", "acme.atlassian.net", [])).resolves.toEqual([]);
+    expect(ledger.entriesForSite("acme.atlassian.net")).toEqual([valid]);
+  });
+
+  it("keeps a non-Error persistence failure visible to the caller without landing memory state", async () => {
+    const memento = fakeMemento();
+    memento.update = () => Promise.reject("workspace storage unavailable");
+    const ledger = new PublishLedger(memento, logger);
+    await expect(ledger.record(entry())).rejects.toThrow("Publish recovery state could not be saved: workspace storage unavailable");
+    expect(ledger.entriesForSite("acme.atlassian.net")).toEqual([]);
+  });
   it("records, persists, and finds an entry", async () => {
     const memento = fakeMemento();
     const ledger = new PublishLedger(memento, logger);

@@ -19,6 +19,13 @@ function snapshot(over: Partial<TraceabilitySnapshot> = {}): TraceabilitySnapsho
 const gherkin: TestCaseMetadata = { key: "CALC-1", testType: { name: "Cucumber", kind: "Gherkin" } };
 
 describe("classifyPreflight", () => {
+  it("classifies an outline result by title against its known untraced declaration", () => {
+    const declared = ref({ kind: "outline", name: "Checkout", line: 4 });
+    const reported = { ...declared, line: 12 };
+    const snap = snapshot({ untraced: [{ scenario: declared, reqKeys: [], malformedTags: ["@TEST_broken"] }] });
+    expect(classifyPreflight([reported], snap)).toEqual([{ scenario: reported, state: "invalid-key", detail: "Broken tag: @TEST_broken" }]);
+    expect(classifyPreflight([ref({ name: "Absent checkout", line: 20 })], snap)[0]?.state).toBe("unmapped");
+  });
   it("is `ready` for a mapped scenario whose target is Gherkin-compatible", () => {
     const scenario = ref();
     const snap = snapshot({ links: [link({ meta: gherkin })] });

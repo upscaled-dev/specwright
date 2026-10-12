@@ -11,6 +11,20 @@ import { LIVE_REPORT_FILE_ENV } from "../../core/live-reporter-protocol";
 
 
 describe("TestExecutor traceability artifact scope", () => {
+  it("keeps one artifact sink per batch until its registration is disposed", () => {
+    const { executor } = makeExecutor(
+      makeConfig({ bddgenCommand: "", workingDirectory: "/abs" }),
+      async () => ({ success: true, output: "", error: "", returnCode: 0 })
+    );
+    const first = executor.registerArtifactSink(4, { contributeShard: vi.fn() });
+
+    expect(() => executor.registerArtifactSink(4, { contributeShard: vi.fn() }))
+      .toThrow("Artifact batch 4 is already registered.");
+    first.dispose();
+    const next = executor.registerArtifactSink(4, { contributeShard: vi.fn() });
+    next.dispose();
+  });
+
   it("filters the artifact to the selected Examples block without filtering the run result", async () => {
     const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "artifact-outline-"));
     const filePath = nodePath.join(root, "features/calc.feature");

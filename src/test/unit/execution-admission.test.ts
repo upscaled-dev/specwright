@@ -369,6 +369,12 @@ describe("ExecutionAdmission", () => {
 
   it.each([
     ["an unknown kind", { kind: "reboot-lock", failure: "x" }],
+    ["a null record", null],
+    ["a primitive record", "stale"],
+    ["an invalid boot id", { ...groupLease, bootId: "unknown" }],
+    ["an invalid process group", { ...groupLease, pgid: 0 }],
+    ["an empty cohort", { ...identifiedLease([]), cohort: { id: "cohort", index: 0, count: 2 } }],
+    ["an unconfirmable cohort", { ...identifiedLease(), survivors: "unconfirmable", cohort: { id: "cohort", index: 0, count: 2 } }],
     ["a record without failure text", { kind: "debug-session" }],
   ])("fails closed for a corrupt durable record with %s", async (_case, value) => {
     const store = new MemoryStore();
@@ -659,5 +665,27 @@ describe("FileAdmissionStore", () => {
     await expect(new ExecutionAdmission(new FileAdmissionStore(directory)).ensureAvailable())
       .rejects.toThrow("more than 256 directory entries");
     fs.rmSync(directory, { recursive: true, force: true });
+  });
+});
+
+
+describe("admission storage write boundaries", () => {
+  it("rejects an oversized write without leaving a lease or temporary file", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "admission-oversized-write-"));
+    const store = new FileAdmissionStore(directory);
+    try {
+      await expect(store.write({ id: "large", value: { ...groupLease, failure: "x".repeat(20_000) } }))
+        .rejects.toThrow("could not be persisted");
+      expect(fs.readdirSync(directory)).toEqual([]);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  it("surfaces removal failure without deleting an unexpected directory", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "admission-remove-failure-"));
+    fs.mkdirSync(path.join(directory, "lease.json"));
+    try {
+      await expect(new FileAdmissionStore(directory).remove("lease")).rejects.toThrow("could not be removed");
+      expect(fs.statSync(path.join(directory, "lease.json")).isDirectory()).toBe(true);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   });
 });

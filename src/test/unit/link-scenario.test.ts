@@ -340,6 +340,18 @@ describe("authorScenarioTest", () => {
   const spec = { project: "CALC", summary: "Login", gherkin: "Scenario: Login\n  Given a user" };
   const noopUi = { confirm: () => Promise.resolve(true), info: (): void => {}, error: (): void => {} };
 
+  it("reports a keyless remote creation even when the provider cannot return an issue id", async () => {
+    const error = vi.fn();
+    const insertTag = vi.fn(() => Promise.resolve());
+    const merge = vi.fn();
+    await authorScenarioTest(spec, "Xray", { ...noopUi, error }, {
+      createTest: () => Promise.resolve({ warnings: [] }), insertTag, merge,
+    });
+    expect(error).toHaveBeenCalledWith("The Xray test was created but its key could not be read back, so the tag was not inserted: add it by hand.");
+    expect(insertTag).not.toHaveBeenCalled();
+    expect(merge).not.toHaveBeenCalled();
+  });
+
   it("never calls createTest when the confirmation modal is dismissed", async () => {
     const createTest = vi.fn(() => Promise.resolve<AuthoredTest>({ key: "CALC-9", warnings: [] }));
     const insertTag = vi.fn(() => Promise.resolve());

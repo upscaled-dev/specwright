@@ -56,6 +56,15 @@ function gateway(identity: ExecutionIdentity) {
 }
 
 describe("ExecutionSelectionOwner", () => {
+  it("rejects a malformed trusted policy rather than using a lower-priority engine", () => {
+    const user = vi.fn(() => "legacy-direct" as const);
+    const owner = new ExecutionSelectionOwner({
+      administratorPolicy: () => "unexpected" as "legacy-direct",
+      userProfile: user,
+    });
+    expect(() => owner.begin()).toThrow("Unsupported execution engine selection: unexpected");
+    expect(user).not.toHaveBeenCalled();
+  });
   it("defaults to a frozen legacy-direct schema selection", () => {
     const selected = new ExecutionSelectionOwner().begin();
 
@@ -84,6 +93,46 @@ describe("ExecutionSelectionOwner", () => {
 });
 
 describe("SelectedExecutionGateway", () => {
+  it("rejects a duplicate prepared operation without consuming the first handle", async () => {
+    const legacy = gateway(complete.identity);
+    const router = new SelectedExecutionGateway(new ExecutionSelectionOwner(), { "legacy-direct": legacy, "core-client": gateway(complete.identity) });
+    const first = await router.prepare(intent);
+    await expect(router.prepare(intent)).rejects.toThrow("already prepared");
+    await expect(router.run(first)).resolves.toEqual(complete);
+  });
+
+  it("rejects overlapping preparation and invocation while a run is active", async () => {
+    const legacy = gateway(complete.identity);
+    let resolve!: (completion: RunCompletion) => void;
+    vi.mocked(legacy.run).mockReturnValue(new Promise((done) => {resolve = done;}));
+    const router = new SelectedExecutionGateway(new ExecutionSelectionOwner(), { "legacy-direct": legacy, "core-client": gateway(complete.identity) });
+    const prepared = await router.prepare(intent);
+    const running = router.run(prepared);
+    await expect(router.prepare(intent)).rejects.toThrow("already in progress");
+    await expect(router.debug(prepared)).rejects.toThrow("already in progress");
+    await router.cancel({ ...prepared });
+    expect(legacy.cancel).not.toHaveBeenCalled();
+    expect(router.running).toBe(true);
+    resolve(complete);
+    await running;
+    expect(router.running).toBe(false);
+  });
+
+  it("cancels an active run before disposing both engines and rejects later selection", async () => {
+    const legacy = gateway(complete.identity);
+    const core = gateway(complete.identity);
+    let resolve!: (completion: RunCompletion) => void;
+    vi.mocked(legacy.run).mockReturnValue(new Promise((done) => {resolve = done;}));
+    vi.mocked(legacy.cancel).mockImplementation(async () => {resolve(complete);});
+    const router = new SelectedExecutionGateway(new ExecutionSelectionOwner(), { "legacy-direct": legacy, "core-client": core });
+    const running = router.run(await router.prepare(intent));
+    await router.dispose();
+    await running;
+    expect(legacy.cancel).toHaveBeenCalledOnce();
+    expect(legacy.dispose).toHaveBeenCalledOnce();
+    expect(core.dispose).toHaveBeenCalledOnce();
+    expect(() => router.discover()).toThrow("has been disposed");
+  });
   it("freezes one engine before prepare and keeps it for the run", async () => {
     let selected: "legacy-direct" | "core-client" = "legacy-direct";
     const legacy = gateway({ engine: "legacy-direct", schemaProfile: LEGACY_SCHEMA_PROFILE });

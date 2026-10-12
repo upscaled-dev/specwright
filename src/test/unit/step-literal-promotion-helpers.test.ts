@@ -77,6 +77,11 @@ describe("findLiteralCandidates", () => {
 });
 
 describe("findLiteralInDefPattern", () => {
+  it("does not treat an unfinished placeholder as a complete parameter", () => {
+    expect(findLiteralInDefPattern("I send {unfinished", "unfinished", 0)).toEqual({ start: 8, end: 18 });
+    expect(findLiteralInDefPattern("{int} apples", "apples", 0)).toEqual({ start: 6, end: 12 });
+  });
+
   it("finds a literal in a plain pattern", () => {
     const pos = findLiteralInDefPattern("I press login", "login", 0);
     expect(pos).toEqual({ start: 8, end: 13 });

@@ -338,3 +338,37 @@ describe("renderScenariosMarkdown", () => {
     expect(md).toContain("<details>");
   });
 });
+
+describe("scenario catalog source boundaries", () => {
+  it("renders named untagged example blocks and stops their table at the next scenario", () => {
+    const rawText = [
+      "Feature: Accounts", "  Scenario Outline: Role <role>", "    Given role <role>",
+      "    Examples: Staff & guests", "      | role |", "      | staff |", "",
+      "  Scenario: Finished", "    Then complete",
+    ].join("\n");
+    const md = renderScenariosMarkdown([{ features: [{ pathRel: "accounts.feature", rawText }] }]);
+    expect(md).toContain("Examples: Staff & guests\n```\n| role |\n| staff |\n```");
+    expect(md).toContain("### Scenario: Finished");
+    expect(md).not.toContain("Tags:");
+  });
+
+  it("retains an unnamed folder and unparsable path in a mixed-root catalog", () => {
+    const md = renderScenariosMarkdown([
+      { folderName: "Named", features: [{ pathRel: "valid.feature", rawText: PROFILE }] },
+      { features: [{ pathRel: "broken.feature", rawText: "This has no feature" }] },
+    ]);
+    expect(md).toContain("broken.feature");
+    expect(md).toContain("Profile");
+    expect(md).toContain("Named");
+  });
+});
+
+
+describe("catalog masthead", () => {
+  it("renders a title without an empty caption when optional branding and statistics are absent", () => {
+    const masthead = renderMasthead("Feature Catalog").join("\n");
+    expect(masthead).toContain("Feature Catalog");
+    expect(masthead).not.toContain("<sub>");
+    expect(masthead).not.toContain("undefined");
+  });
+});

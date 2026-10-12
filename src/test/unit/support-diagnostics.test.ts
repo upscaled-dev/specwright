@@ -2,6 +2,38 @@ import { describe, expect, it } from "vitest";
 import { SupportDiagnostics } from "../../core/support-diagnostics";
 
 describe("SupportDiagnostics", () => {
+  it.each([
+    ["opaque secret", "[redacted]"], [42, "[redacted]"], [true, "[redacted]"],
+    [1n, "[bigint]"], [Symbol("secret"), "[symbol]"], [() => "secret", "[function]"],
+    [null, null], [new Uint8Array([1, 2, 3]), "[binary:3]"],
+  ])("safely represents top-level diagnostic data of type %s", (value, expected) => {
+    const diagnostics = new SupportDiagnostics();
+    diagnostics.record("info", "completed", value);
+    expect(diagnostics.retainedRecords()[0]?.data).toEqual(expected);
+    expect(diagnostics.snapshot({ extensionVersion: "1", configuration: [] })).not.toContain("secret");
+  });
+
+  it("skips class instances and unreadable schema fields without reading their contents", () => {
+    class UntrustedSchema { properties = { "playwrightBddRunner.token": { type: "secret" } }; }
+    const properties = Object.defineProperty({ "playwrightBddRunner.safe": { type: "boolean" } }, "playwrightBddRunner.unreadable", {
+      enumerable: true, get: () => { throw new Error("private schema content"); },
+    });
+    const output = JSON.parse(new SupportDiagnostics().snapshot({ extensionVersion: "1", configuration: [new UntrustedSchema(), { properties }] }));
+    expect(output.configurationSchema).toEqual([{ key: "playwrightBddRunner.safe", type: "boolean" }]);
+    expect(output.truncation.schemaTruncated).toBe(true);
+    expect(output.truncation.knownSkippedSchemaNodes).toBe(2);
+    expect(JSON.stringify(output)).not.toContain("private schema content");
+  });
+
+  it("bounds a single oversized schema group and treats absent descriptors as empty", () => {
+    const properties = Object.fromEntries(Array.from({ length: 50 }, (_, index) => [`playwrightBddRunner.setting${index}`, index ? { type: "string" } : undefined]));
+    const output = JSON.parse(new SupportDiagnostics().snapshot({ extensionVersion: "1", configuration: { properties } }));
+    expect(output.configurationSchema[0]).toEqual({ key: "playwrightBddRunner.setting0" });
+    expect(output.configurationSchema.length).toBeLessThanOrEqual(40);
+    expect(output.truncation.schemaTruncated).toBe(true);
+    expect(output.truncation.knownSkippedSchemaNodes).toBeGreaterThan(0);
+  });
+
   it("retains only redacted, bounded values", () => {
     const diagnostics = new SupportDiagnostics();
     const loop: Record<string, unknown> = { token: "secret", path: "/Users/me/project/file.feature" };
@@ -301,4 +333,29 @@ describe("SupportDiagnostics", () => {
     });
     expect(JSON.stringify(retained)).not.toContain(secret);
   });
+});
+
+it("keeps a full lifecycle history plus a large valid configuration under the snapshot byte limit", () => {
+  const diagnostics = new SupportDiagnostics();
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    diagnostics.record("info", "Legacy execution lifecycle", {
+      operationId: "11111111-2222-4333-8444-555555555555", artifactId: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      operation: "xray.authenticate", engine: "legacy-direct", schemaProfile: "legacy-v1",
+      initiatedBy: "traceability-tree", mode: "debug", state: "complete", captureState: "captured",
+      outcomeCertainty: "confirmed", operationClass: "non-idempotent-write", outcome: "transport",
+      attempt, backoffMs: 100, durationMs: 1_000, cancelled: false, message: "completed", detail: "refreshed",
+    });
+  }
+  const properties = Object.fromEntries(Array.from({ length: 39 }, (_, index) => [
+    `playwrightBddRunner.${String.fromCharCode(65 + index % 26)}${"longSetting".repeat(43)}${"x".repeat(index)}`.slice(0, 511),
+    { type: "string", scope: "resource" },
+  ]));
+  const retained = diagnostics.retainedRecords().length;
+  const json = diagnostics.snapshot({ extensionVersion: "0.7.8", configuration: { properties } });
+  const snapshot = JSON.parse(json) as { logs: unknown[]; configurationSchema: unknown[]; truncation: { snapshotBytes: number } };
+  expect(Buffer.byteLength(json)).toBeLessThanOrEqual(64 * 1024);
+  expect(snapshot.truncation.snapshotBytes).toBe(Buffer.byteLength(json));
+  expect(snapshot.logs.length).toBeLessThan(retained);
+  expect(snapshot.configurationSchema).toHaveLength(39);
+  expect(diagnostics.retainedRecords()).toHaveLength(retained);
 });

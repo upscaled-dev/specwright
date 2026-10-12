@@ -110,3 +110,25 @@ describe("parseBddgenErrors", () => {
     expect(errors[1]?.filePath).toBe("/repo/features/b.feature");
   });
 });
+
+describe("bddgen diagnostic coordinates", () => {
+  it.each([
+    ["block", (line: string, column: string, message: string) => `Error parsing feature file: a.feature\n(${line}:${column}): ${message}`],
+    ["single", (line: string, column: string, message: string) => `a.feature:${line}:${column} - ${message}`],
+    ["msbuild", (line: string, column: string, message: string) => `a.feature(${line},${column}): ${message}`],
+  ])("validates %s coordinates without producing negative diagnostics", (_format, output) => {
+    expect(parseBddgenErrors(output("0", "1", "invalid line"))).toEqual([]);
+    expect(parseBddgenErrors(output("9".repeat(400), "1", "overflow"))).toEqual([]);
+    expect(parseBddgenErrors(output("1", "0", "unknown column")))
+      .toEqual([{ filePath: "a.feature", line: 0, column: undefined, message: "unknown column" }]);
+    expect(parseBddgenErrors(output("1", "9".repeat(400), "overflow column")))
+      .toEqual([{ filePath: "a.feature", line: 0, column: undefined, message: "overflow column" }]);
+    expect(parseBddgenErrors(output("1", "1", "  "))).toEqual([]);
+  });
+
+  it("accepts an omitted column and ignores a block header resembling a diagnostic", () => {
+    expect(parseBddgenErrors("a.feature:2 - missing step"))
+      .toEqual([{ filePath: "a.feature", line: 1, column: undefined, message: "missing step" }]);
+    expect(parseBddgenErrors("Error parsing feature file: a.feature:2 - header")).toEqual([]);
+  });
+});

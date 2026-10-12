@@ -65,6 +65,22 @@ function gatewayEmitting(events: readonly ExecutionEvent[], result: RunCompletio
 }
 
 describe("runOutputFromCompletion", () => {
+  it("retains a separate step list when adapting execution detail", () => {
+    const steps = [{ title: "Given checkout", status: "passed" as const, durationMs: 3 }];
+    const result = scenarioResultFromExecution({ ...completion().results[0]!, steps });
+    steps.push({ title: "Then paid", status: "passed", durationMs: 4 });
+    expect(result.steps).toEqual([{ title: "Given checkout", status: "passed", durationMs: 3 }]);
+  });
+
+  it("reports plural failures when a completed run has no explicit worker error", () => {
+    const source = completion().results[0]!;
+    const failed = { ...source, outcome: "failed" as const };
+    const result = runOutputFromCompletion(completion({ passed: 0, failed: 2, results: [failed, {
+      ...failed, scenario: { ...failed.scenario, line: 8, name: "Cash checkout" },
+    }] }), parser, "/ws");
+    expect(result.error).toBe("2 tests failed");
+    expect(result.success).toBe(false);
+  });
   it("preserves multi-project uncertainty in scenario summaries", () => {
     const source = completion().results[0]!;
     const result = scenarioResultFromExecution({ ...source, flaky: true, attempts: 3, multipleProjects: true });

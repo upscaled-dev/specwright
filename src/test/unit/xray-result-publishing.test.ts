@@ -566,17 +566,19 @@ describe("createXrayResultPublishing: create-mode issue type resolution", () => 
   const infoOf = (postMultipart: ReturnType<typeof spyTransport>["postMultipart"]): { fields: { issuetype: { name: string } } } =>
     JSON.parse((postMultipart.mock.calls[0]![1] as { info: string }).info) as { fields: { issuetype: { name: string } } };
 
-  it("threads a resolved issue type name into the create payload's issuetype.name", async () => {
+  it.each([false, true])("threads a resolved issue type into creation with caller cancellation supplied: %s", async (withSignal) => {
+    const signal = withSignal ? new AbortController().signal : undefined;
     const t = spyTransport();
     const resolveIssueType = vi.fn<IssueTypeResolver>(() => Promise.resolve({ kind: "resolved", name: "Xray Test Execution" }));
     const publishing = createXrayResultPublishing(
       makeDeps({ transport: t.transport, jiraCredentials: () => Promise.resolve(JIRA), resolveIssueType })
     );
 
-    await publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "CALC", summary: "Run" });
+    await publishing.publish(artifact([mapped("a", "CALC-1")]), { mode: "create-new", project: "CALC", summary: "Run" }, signal);
 
     expect(resolveIssueType).toHaveBeenCalledTimes(1);
     expect(resolveIssueType.mock.calls[0]![0]).toMatchObject({ projectKey: "CALC", site: "acme.atlassian.net" });
+    expect(resolveIssueType.mock.calls[0]![0].signal).toBe(signal);
     expect(infoOf(t.postMultipart).fields.issuetype.name).toBe("Xray Test Execution");
   });
 
@@ -884,7 +886,8 @@ describe("createXrayResultPublishing: searchTargets", () => {
     await expect(publishing.searchTargets("execution", "CALC")).rejects.toBeInstanceOf(NotSupportedError);
   });
 
-  it("maps Jira issues to publish targets when credentials are present", async () => {
+  it.each([false, true])("maps named Jira issues with caller cancellation supplied: %s", async (withSignal) => {
+    const signal = withSignal ? new AbortController().signal : undefined;
     const searchIssues = vi.fn<IssueSearcher>(() =>
       Promise.resolve({
         issues: [
@@ -901,9 +904,10 @@ describe("createXrayResultPublishing: searchTargets", () => {
       })
     );
 
-    const targets = await publishing.searchTargets("execution", "XNP");
+    const targets = await publishing.searchTargets("execution", "XNP", signal);
 
     expect(searchIssues).toHaveBeenCalledTimes(1);
+    expect(searchIssues.mock.calls[0]![0].signal).toBe(signal);
     expect(searchIssues.mock.calls[0]![0]).toMatchObject({
       kind: "execution",
       query: "XNP",

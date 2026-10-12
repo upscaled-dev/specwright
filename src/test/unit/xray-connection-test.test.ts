@@ -76,6 +76,8 @@ describe("graphqlFailureMessage", () => {
     expect(
       graphqlFailureMessage({ status: 502, bodyText: "<html><body>Bad Gateway</body></html>", errors: [] })
     ).toBe("Xray GraphQL probe failed (HTTP 502): see output for details.");
+    expect(graphqlFailureMessage({ status: 502, bodyText: "", errors: [] }))
+      .toBe("Xray GraphQL probe failed (HTTP 502): see output for details.");
   });
 });
 
@@ -719,5 +721,129 @@ describe("probeXrayConnection: Jira project view", () => {
     expect(emitted).not.toContain(JIRA_TOKEN);
     expect(emitted).not.toContain(basic);
     expect(emitted).not.toContain(FAKE_SECRET);
+  });
+});
+
+describe("connection probe failure presentation and cancellation", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("keeps the successful connection when the optional error-shape probe exhausts transport retries", async () => {
+    vi.useFakeTimers();
+    const deps = await seededDeps(() => ["CALC-1"]);
+    let shapeFailures = 0;
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/authenticate")) {return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));}
+      const { query } = JSON.parse(String(init?.body)) as { query: string };
+      if (query.includes("__specwright_probe")) {
+        shapeFailures++;
+        return Promise.reject(new Error("Shape endpoint unavailable"));
+      }
+      return Promise.resolve(makeResponse(200, JSON.stringify({ data: { getTests: { total: 1 } } })));
+    }));
+    const pending = probeXrayConnection(deps);
+    await vi.runAllTimersAsync();
+    await expect(pending).resolves.toMatchObject({ ok: true, stage: "ok" });
+    expect(shapeFailures).toBeGreaterThan(1);
+    expect(deps.lines.join("\n")).toContain("invalid-field error-shape probe request error");
+  });
+
+  it("returns an auth failure without transport when credentials are missing", async () => {
+    const deps = await seededDeps();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(probeXrayConnection({ ...deps, credentialStore: mapCredentialStore() }))
+      .resolves.toMatchObject({ ok: false, stage: "auth", message: "No stored Xray credentials for this site." });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("opens Connect when the connection command has no configured site", async () => {
+    const deps = await seededDeps();
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Connect" as never);
+    const execute = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    await runXrayConnectionTest({ ...deps, site: "" });
+    expect(execute).toHaveBeenCalledWith("playwrightBddRunner.traceability.connect");
+  });
+
+  it.each([true, false])("opens output from the connection result (success %s)", async success => {
+    const deps = await seededDeps();
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(
+      makeResponse(success ? 200 : 401, JSON.stringify(FAKE_JWT))
+    )));
+    const show = vi.spyOn(deps.logger, "showOutput");
+    vi.spyOn(vscode.window, success ? "showInformationMessage" : "showErrorMessage")
+      .mockResolvedValue("Show Output" as never);
+    await runXrayConnectionTest(deps);
+    expect(show).toHaveBeenCalledOnce();
+  });
+
+  it.each([FAKE_JWT, JSON.stringify({ token: "unexpected shape" })])(
+    "handles a non-string authentication body without crashing", async body => {
+      const deps = await seededDeps();
+      vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(makeResponse(200, body))));
+      await expect(probeXrayConnection(deps, { authOnly: true })).resolves.toMatchObject({ ok: true });
+      expect(deps.lines.join("\n")).not.toContain(FAKE_SECRET);
+    }
+  );
+
+  it.each([1, 2])("reports a rejected GraphQL shape probe %s", async rejected => {
+    const deps = await seededDeps(() => ["CALC-1"]);
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));
+      }
+      reads++;
+      return Promise.resolve(reads === rejected ? makeResponse(403, "denied")
+        : makeResponse(200, JSON.stringify({ data: { getTests: { total: 0 } } })));
+    }));
+    await expect(probeXrayConnection(deps)).resolves.toMatchObject({
+      ok: false, stage: "graphql", message: "Xray GraphQL probe failed (HTTP 403): denied",
+    });
+    expect(reads).toBe(2);
+  });
+
+  it("does not mistake a null GraphQL body for a successful connection", async () => {
+    const deps = await seededDeps(() => ["CALC-1"]);
+    vi.stubGlobal("fetch", jwtThenGraphql(() => null));
+    await expect(probeXrayConnection(deps)).resolves.toMatchObject({ ok: false, stage: "graphql" });
+  });
+
+  it.each(["graphql", "invalid-field", "jira"])("propagates cancellation during the %s probe", async stage => {
+    const deps = stage === "jira" ? await jiraSeededDeps(() => ["CALC-1"])
+      : await seededDeps(() => ["CALC-1"]);
+    const controller = new AbortController();
+    const reason = new Error("user cancelled connection probe");
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.endsWith("/authenticate")) {
+        return Promise.resolve(makeResponse(200, JSON.stringify(FAKE_JWT)));
+      }
+      reads++;
+      if (stage !== "invalid-field" || reads === 3) {
+        controller.abort(reason);
+        return Promise.reject(reason);
+      }
+      return Promise.resolve(makeResponse(200, JSON.stringify({ data: { getTests: { total: 0 } } })));
+    }));
+    await expect(probeXrayConnection(deps, {}, controller.signal)).rejects.toBe(reason);
+    expect(reads).toBe(stage === "invalid-field" ? 3 : 1);
+  });
+
+  it.each([429, 503])("recovers after HTTP %s using the advertised retry delay", async status => {
+    vi.useFakeTimers();
+    const deps = await seededDeps();
+    const fetchMock = vi.fn().mockResolvedValueOnce(makeResponse(status, "retry", { "Retry-After": "1" }))
+      .mockResolvedValue(makeResponse(200, JSON.stringify(FAKE_JWT)));
+    vi.stubGlobal("fetch", fetchMock);
+    const pending = probeXrayConnection(deps, { authOnly: true });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

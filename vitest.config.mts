@@ -1,5 +1,6 @@
 import { defineConfig } from "vitest/config";
 import * as path from "node:path";
+import { browserClientCoveragePlugin } from "./src/test/unit/helpers/browser-client-bundle.mts";
 
 /**
  * Vitest config for unit tests. Unit tests live under src/test/unit/**.
@@ -9,6 +10,7 @@ import * as path from "node:path";
  * that uses real VS Code APIs belongs in integration tests (npm run test:integration).
  */
 export default defineConfig({
+  plugins: [browserClientCoveragePlugin()],
   test: {
     include: ["src/test/unit/**/*.test.ts"],
     environment: "node",
@@ -18,10 +20,10 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/test/**", "src/extension.ts"],
       thresholds: {
-        lines: 83,
-        statements: 81,
-        functions: 83,
-        branches: 77,
+        lines: 95,
+        statements: 95,
+        functions: 95,
+        branches: 95,
       },
     },
   },

@@ -18,6 +18,54 @@ import { EXECUTION_LIMITS } from "../../core/execution-limits";
 describe("PlaywrightJsonParser", () => {
   const parser = PlaywrightJsonParser.create(Logger.create());
 
+  it("ignores nameless specs and preserves not-yet-run scenarios as skipped", () => {
+    const results = parser.parse(JSON.stringify({ suites: [{ specs: [
+      { tests: [{ results: [{ status: "passed" }] }] },
+      { title: "  ", tests: [{ results: [{ status: "passed" }] }] },
+      { title: "No tests yet" },
+      { title: "Pending run", file: "checkout.feature", tests: [{}] },
+      { title: "No attempts", file: "checkout.feature", tests: [{ results: [] }] },
+    ] }] }));
+    expect(results).toEqual([
+      { scenarioName: "Pending run", featurePath: "checkout.feature", status: "skipped" },
+      { scenarioName: "No attempts", featurePath: "checkout.feature", status: "skipped" },
+    ]);
+  });
+
+  it("retains failed nested Gherkin steps and strips terminal escapes from stacks", () => {
+    const results = parser.parse(JSON.stringify({ suites: [{ specs: [{ title: "Checkout", tests: [{ results: [{
+      status: "failed", error: { stack: "\u001b[31mError: declined\u001b[0m" },
+      steps: [{ title: "fixture", steps: [
+        { title: "Given a basket", duration: 3 }, { title: "When I pay", error: { message: "declined" } },
+        { steps: [{ title: "Then paid", duration: 1 }] },
+      ] }],
+    }] }] }] }] }));
+    expect(results[0]).toMatchObject({ errorStack: "Error: declined", steps: [
+      { title: "Given a basket", status: "passed", durationMs: 3 },
+      { title: "When I pay", status: "failed" }, { title: "Then paid", status: "passed", durationMs: 1 },
+    ] });
+    expect(results[0]!.steps![1]).not.toHaveProperty("durationMs");
+  });
+
+  it("uses a stack-only runner error as the incomplete report explanation", () => {
+    const result = parser.inspect(JSON.stringify({ suites: [], errors: [
+      { stack: "  browser crashed  " }, { message: "", stack: " worker exited " }, {},
+    ] }));
+    expect(result.complete).toBe(false);
+    expect(result.failure).toContain("browser crashed");
+    expect(result.failure).toContain("worker exited");
+  });
+
+  it("uses a path-only source annotation after unrelated annotations", () => {
+    const results = parser.parse(JSON.stringify({ suites: [{ specs: [{ title: "Checkout", file: "generated.spec.js", tests: [{
+      annotations: [{ type: "tag", description: "@smoke" }, { type: "bdd-source", description: "/shop/checkout.feature" }],
+      results: [{ status: "passed" }],
+    }] }] }] }));
+    expect(results[0]).toMatchObject({ featurePath: "/shop/checkout.feature", scenarioName: "Checkout" });
+    expect(results[0]).not.toHaveProperty("lineNumber");
+    expect(parser.toStatusMap(results)["/shop/checkout.feature::Checkout"]).toBe("passed");
+  });
+
   it("returns [] on empty or malformed input", () => {
     expect(parser.parse("")).toEqual([]);
     expect(parser.parse("not json")).toEqual([]);
@@ -237,6 +285,36 @@ describe("PlaywrightJsonParser", () => {
     }
   });
 
+  it("rejects a pre-cancelled report read before accessing the file or creating a worker", async () => {
+    const controller = new AbortController();
+    controller.abort("user cancelled");
+    const createWorker = vi.fn();
+    await expect(readPlaywrightReport("/missing/report.json", controller.signal, createWorker))
+      .rejects.toMatchObject({ name: "AbortError", message: "Playwright report parsing was cancelled." });
+    expect(createWorker).not.toHaveBeenCalled();
+  });
+
+  it("terminates a worker when cancellation wins its creation", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pw-worker-start-cancel-"));
+    const reportPath = path.join(root, "results.json");
+    fs.writeFileSync(reportPath, JSON.stringify({ suites: [{ title: "Checkout" }] }));
+    const controller = new AbortController();
+    const worker = Object.assign(new EventEmitter(), {
+      postMessage: vi.fn(), terminate: vi.fn().mockResolvedValue(1),
+    });
+    try {
+      await expect(readPlaywrightReport(reportPath, controller.signal, () => {
+        controller.abort("user cancelled");
+        return worker as unknown as Worker;
+      })).rejects.toMatchObject({ name: "AbortError" });
+      expect(worker.postMessage).not.toHaveBeenCalled();
+      expect(worker.terminate).toHaveBeenCalledOnce();
+      expect(worker.eventNames()).toEqual([]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("isolates the report worker from parent memory flags and environment", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pw-worker-options-"));
     const reportPath = path.join(tempDir, "results.json");
@@ -272,6 +350,8 @@ describe("PlaywrightJsonParser", () => {
   it.each([
     ["error", () => new Worker('throw new Error("worker failed")', { eval: true }), /worker failed/],
     ["exit", () => new Worker("process.exit(7)", { eval: true }), /exited with code 7/],
+    ["empty exit", () => new Worker("process.exit(0)", { eval: true }), /exited before returning a result/],
+    ["missing result", () => new Worker('require("node:worker_threads").parentPort.postMessage({})', { eval: true }), /returned no result/],
   ])("rejects and terminates when the report worker emits an %s", async (_kind, factory, failure) => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pw-worker-fault-"));
     const reportPath = path.join(tempDir, "results.json");
@@ -600,6 +680,16 @@ describe("PlaywrightJsonParser", () => {
       expect(out).toContain("1 scenario · 0 passed, 1 failed");
     });
 
+    it.each([
+      ["/elsewhere/cart.feature", "/repo", "cart.feature:9"],
+      ["/repo/cart.feature", undefined, "/repo/cart.feature:9"],
+    ])("formats a failure at %s with workspace %s", (featurePath, workspace, expected) => {
+      const out = plain(parser.formatResults([
+        { scenarioName: "Pay", status: "failed", featurePath: featurePath!, lineNumber: 9 },
+      ], workspace));
+      expect(out).toContain(`      ${expected}`);
+    });
+
     it("renders Windows-style failure locations relative with forward slashes", () => {
       const out = plain(parser.formatResults(
         [{
@@ -661,7 +751,7 @@ describe("PlaywrightJsonParser", () => {
       tmpDirs.length = 0;
     });
 
-    it("maps an outline example (no annotation) back to its .feature path + line", () => {
+    it.each([14, undefined, 999])("resolves an unannotated generated test with report line %s", (reportLine) => {
       // playwright-bdd emits "Example #N" titles with no annotation; the source line lives only
       // in the generated spec's bddFileData (spec line 14 → .feature line 18).
       const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pw-bdd-"));
@@ -686,7 +776,7 @@ describe("PlaywrightJsonParser", () => {
           specs: [{
             title: "Example #1",
             file: specRel,
-            line: 14,
+            ...(reportLine === undefined ? {} : { line: reportLine }),
             tests: [{ results: [{ status: "passed", duration: 4 }] }],
           }],
         }],
@@ -694,7 +784,7 @@ describe("PlaywrightJsonParser", () => {
 
       const r = parser.parse(report)[0];
       expect(r?.featurePath).toBe(path.join(projectRoot, "features/test.feature"));
-      expect(r?.lineNumber).toBe(18);
+      expect(r?.lineNumber).toBe(reportLine === 14 ? 18 : undefined);
       expect(r?.status).toBe("passed");
     });
 

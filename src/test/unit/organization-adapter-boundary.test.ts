@@ -35,6 +35,20 @@ describe("organization adapter boundary", () => {
     await expect(adapter.organization!.refreshTestSet("T-1")).rejects.toMatchObject({ code: "malformed-response" });
   });
 
+  it.each([
+    { repositories: [{ projectKey: "T", tests: [], complete: "yes", truncated: false, errors: [] }] },
+    { testSetProjects: [{ projectKey: "T", testSets: [], complete: "yes", truncated: false, errors: [] }] },
+    { testSetProjects: [{ projectKey: "T", testSets: [{ key: "T-1", members: [], remoteMemberCount: 0,
+      membershipComplete: true, truncated: false, errors: [] }], complete: true, truncated: false, errors: [] }] },
+  ])("rejects malformed remote organization data before exposing a snapshot: %j", (override) => {
+    const adapter = validatedAdapter(rawAdapter({
+      onDidChange: new vscode.EventEmitter<void>().event,
+      snapshot: () => ({ ...emptySnapshot, ...override }) as never,
+      sync: async () => {}, refreshTestSet: async () => ({ status: "failed" }),
+    }), async () => {}, () => {});
+    expect(() => adapter.organization!.snapshot()).toThrow(expect.objectContaining({ code: "malformed-response" }));
+  });
+
   it("rejects impossible complete and truncated project snapshots", () => {
     const changed = new vscode.EventEmitter<void>();
     const adapter = validatedAdapter(rawAdapter({
@@ -82,6 +96,18 @@ describe("organization adapter boundary", () => {
     }), () => Promise.resolve(), () => undefined);
 
     expect(() => adapter.organization!.snapshot()).toThrow(expect.objectContaining({ code: "malformed-response" }));
+  });
+
+  it("preserves an incomplete membership with a reported read error even without a size limit", () => {
+    const set = { key: "T-1", issueId: "1", members: [{ key: "T-2" }], remoteMemberCount: 1,
+      membershipComplete: false, truncated: false, errors: ["Membership verification unavailable"] };
+    const snapshot = { ...emptySnapshot, testSetProjects: [{ projectKey: "T", complete: false, truncated: false,
+      errors: set.errors, testSets: [set] }] };
+    const adapter = validatedAdapter(rawAdapter({
+      onDidChange: new vscode.EventEmitter<void>().event, snapshot: () => snapshot,
+      sync: async () => {}, refreshTestSet: async () => ({ status: "incomplete", testSet: set }),
+    }), async () => {}, () => {});
+    expect(adapter.organization!.snapshot()).toEqual(snapshot);
   });
 
   it("accepts last-known members when the current remote total has shrunk", () => {

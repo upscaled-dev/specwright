@@ -225,4 +225,43 @@ describe("TagIndex", () => {
     expect(tags).toEqual(["@alpha", "@beta", "@gamma", "@shared"]);
     idx.dispose();
   });
+  it.each(["", "   "])("falls back from an empty feature pattern %j", async pattern => {
+    const idx = new TagIndex(stubLogger, makeConfig(pattern));
+    await idx.getAllTags();
+    expect(findFilesMock).toHaveBeenCalledWith("**/*.feature", expect.any(String));
+    idx.dispose();
+  });
+
+  it("ignores excluded and unknown watcher deletions without invalidating cached tags", async () => {
+    fileContents.set("/ws/a.feature", "@kept\nFeature: A");
+    const idx = new TagIndex(stubLogger, makeConfig());
+    const tags = await idx.getAllTags();
+    const ignored = vscode.Uri.file("/ws/node_modules/lib/a.feature");
+    watchers[0]!.triggerCreate(ignored);
+    watchers[0]!.triggerChange(ignored);
+    watchers[0]!.triggerDelete(ignored);
+    watchers[0]!.triggerDelete(vscode.Uri.file("/ws/unknown.feature"));
+    expect(await idx.getAllTags()).toBe(tags);
+    expect(readFileMock).toHaveBeenCalledTimes(1);
+    idx.dispose();
+  });
+
+  it("stops a scan disposed before file discovery resolves", async () => {
+    let resolve!: (uris: vscode.Uri[]) => void;
+    findFilesMock.mockReturnValue(new Promise<vscode.Uri[]>(done => { resolve = done; }));
+    const idx = new TagIndex(stubLogger, makeConfig());
+    const pending = idx.getAllTags();
+    idx.dispose();
+    resolve([vscode.Uri.file("/ws/a.feature")]);
+    expect(await pending).toEqual([]);
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it("installs no watcher when first queried after disposal", async () => {
+    const idx = new TagIndex(stubLogger, makeConfig());
+    idx.dispose();
+    expect(await idx.getAllTags()).toEqual([]);
+    expect(watchers).toEqual([]);
+  });
+
 });

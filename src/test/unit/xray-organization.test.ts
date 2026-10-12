@@ -47,6 +47,79 @@ const SHOP_301 = {
 } as const;
 
 describe("XrayOrganizationReader", () => {
+  const rawSet = (tests: unknown = { total: 1, results: [{ jira: { key: "SHOP-101" } }] }) => ({
+    issueId: "301", jira: { key: "SHOP-301" }, tests,
+  });
+  const listBody = (results: unknown, total: unknown = 1) => ({ data: { getTestSets: { total, results } } });
+
+  it.each([null, {}, listBody(null), listBody([null]), listBody([{ jira: { key: "SHOP-301" } }]),
+    listBody([rawSet()], -1), listBody([rawSet()], 1.5)])(
+    "does not claim a complete catalogue for malformed responses: %j", async (body) => {
+      const result = await new XrayOrganizationReader({ readGraphql: vi.fn().mockResolvedValue(body) }).list("SHOP");
+      expect(result.complete).toBe(false);
+    },
+  );
+
+  it.each([
+    { total: 2, results: null },
+    { total: 2, results: [null, { jira: {} }, { jira: { key: "SHOP-101" } }] },
+    { total: "2", results: [{ jira: { key: "SHOP-101" } }] },
+    { total: 51, results: Array.from({ length: 51 }, (_, index) => ({ jira: { key: `SHOP-${index}` } })) },
+  ])("retains usable members but marks malformed or oversized membership incomplete: %j", async (tests) => {
+    const result = await new XrayOrganizationReader({ readGraphql: vi.fn().mockResolvedValue(listBody([rawSet(tests)])) }).list("SHOP");
+    expect(result.testSets[0]).toMatchObject({ key: "SHOP-301", membershipComplete: false });
+    expect(result.testSets[0]!.errors).toContain("Xray returned incomplete Test Set membership data.");
+    expect(result.testSets[0]!.members.length).toBeLessThanOrEqual(50);
+  });
+
+  it("deduplicates case-insensitive membership without inventing extra tests", async () => {
+    const body = listBody([rawSet({ total: 1, results: [{ jira: { key: "shop-101" } }, { jira: { key: "SHOP-101" } }] })]);
+    const result = await new XrayOrganizationReader({ readGraphql: vi.fn().mockResolvedValue(body) }).list("SHOP");
+    expect(result.testSets[0]).toMatchObject({ members: [{ key: "SHOP-101" }], membershipComplete: true });
+  });
+
+  it.each([
+    { errors: [{ message: "permission denied" }] }, listBody([]), listBody(null),
+    listBody([null]), listBody([rawSet(), rawSet()], 2), listBody([rawSet()], 2),
+    listBody([{ ...rawSet(), jira: { key: "SHOP-999" } }]),
+  ])("refuses an exact refresh with ambiguous or mismatched identity: %j", async (body) => {
+    const readGraphql = vi.fn().mockResolvedValue(body);
+    await expect(new XrayOrganizationReader({ readGraphql }).refresh("SHOP-301")).resolves.toBeUndefined();
+    expect(readGraphql).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { errors: [{ message: "permission denied" }] },
+    { data: { getTestSet: null } },
+    { data: { getTestSet: { ...rawSet(), jira: { key: "SHOP-999" } } } },
+    { data: { getTestSet: rawSet({ total: 3, results: [{ jira: { key: "SHOP-101" } }] }) } },
+    { data: { getTestSet: rawSet({ total: 2, results: [] }) } },
+    { data: { getTestSet: rawSet({ total: 2, results: [{ jira: { key: "SHOP-101" } }] }) } },
+  ])("never labels a changed, failed or short membership page complete: %j", async (page) => {
+    const readGraphql = vi.fn().mockResolvedValueOnce(listBody([rawSet({ total: 2, results: [] })])).mockResolvedValueOnce(page);
+    await expect(new XrayOrganizationReader({ readGraphql }).refresh("SHOP-301")).resolves.toBeUndefined();
+    expect(readGraphql).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops at the selected-set membership limit before requesting pages", async () => {
+    const readGraphql = vi.fn().mockResolvedValue(listBody([rawSet({ total: 10_001, results: [] })]));
+    await expect(new XrayOrganizationReader({ readGraphql }).refresh("SHOP-301")).resolves.toMatchObject({
+      membershipComplete: false, truncated: true,
+      errors: ["Test Set membership exceeds the 10000-member run limit."],
+    });
+    expect(readGraphql).toHaveBeenCalledOnce();
+  });
+
+  it("does not request another membership page after cancellation", async () => {
+    const controller = new AbortController();
+    const readGraphql = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      return listBody([rawSet({ total: 2, results: [] })]);
+    });
+    await expect(new XrayOrganizationReader({ readGraphql }).refresh("SHOP-301", controller.signal)).rejects.toThrow();
+    expect(readGraphql).toHaveBeenCalledOnce();
+  });
+
   it("parses a production-shaped SHOP-301 list response with exact membership", async () => {
     const readGraphql = vi.fn().mockResolvedValue({
       data: {
@@ -546,5 +619,218 @@ describe("XrayOrganizationCapability cache isolation", () => {
     await expect(Promise.all(pending)).resolves.toMatchObject([{ status: "failed" }, { status: "failed" }]);
     expect(held.signal()?.aborted).toBe(true);
     held.capability.dispose();
+  });
+});
+
+describe("organization refresh failure boundaries", () => {
+  async function fixture(cached = true, account = vi.fn().mockResolvedValue("account-a")) {
+    const cache = new XrayOrganizationCache(memento(), { endpoint: "xray.example", account: () => Promise.resolve("account-a"), workspaceId: "ws" });
+    if (cached) { await cache.save("account-a", { syncedAt: 1, projects: [project([SHOP_301])], omittedTestSetProjectCount: 0 }); }
+    const reader = { list: vi.fn().mockResolvedValue(project([SHOP_301])), refresh: vi.fn().mockResolvedValue(SHOP_301) };
+    const changed = new vscode.EventEmitter<void>();
+    const capability = new XrayOrganizationCapability({ reader: reader as unknown as XrayOrganizationReader,
+      metadata: metadata(), cache, config: { xrayCacheTtlMinutes: 15 } as ExtensionConfig,
+      logger: Logger.create(), account, onCredentialsChange: changed.event, projectOf: () => "SHOP", now: () => 3 });
+    await vi.waitFor(() => expect(account).toHaveBeenCalled());
+    return { capability, reader, cache, changed, account };
+  }
+
+  it.each(["read", "save"] as const)("retains cached organization when cancellation arrives during the final %s", async (stage) => {
+    const h = await fixture();
+    const abort = new AbortController();
+    if (stage === "read") {
+      h.reader.list.mockImplementation(async () => { abort.abort(); return project([]); });
+    } else {
+      vi.spyOn(h.cache, "save").mockImplementation(async () => { abort.abort(); });
+      h.reader.list.mockResolvedValue(project([]));
+    }
+    try {
+      await h.capability.sync(["SHOP"], abort.signal);
+      expect(h.capability.snapshot().testSetProjects[0]?.testSets).toEqual([SHOP_301]);
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it.each(["startup", "rotation"])("does not warn when a pending %s account lookup fails after disposal", async (stage) => {
+    let reject!: (error: Error) => void;
+    const pending = new Promise<string>((_resolve, fail) => {reject = fail;});
+    const account = vi.fn().mockReturnValue(pending);
+    const h = stage === "startup" ? await fixture(false, account) : await fixture();
+    const warn = vi.spyOn(Logger.prototype, "warn");
+    try {
+      if (stage === "rotation") {h.account.mockReturnValue(pending); h.changed.fire();}
+      await h.capability.dispose();
+      reject(new Error("credential store closed"));
+      await expect(pending).rejects.toThrow("credential store closed");
+      expect(warn).not.toHaveBeenCalled();
+      expect(h.reader.list).not.toHaveBeenCalled();
+      expect(h.reader.refresh).not.toHaveBeenCalled();
+    } finally {warn.mockRestore(); h.changed.dispose();}
+  });
+
+  it("logs an account lookup failure after credential rotation without restoring old data", async () => {
+    const h = await fixture();
+    const logger = vi.spyOn(Logger.prototype, "warn");
+    h.account.mockRejectedValue(new Error("credential store unavailable"));
+    try {
+      h.changed.fire();
+      await vi.waitFor(() => expect(logger).toHaveBeenCalledWith(expect.stringContaining("account lookup failed")));
+      expect(h.capability.snapshot().testSetProjects).toEqual([]);
+    } finally { logger.mockRestore(); await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it("does not start an exact refresh after its pending account lookup is cancelled", async () => {
+    const h = await fixture();
+    let resolveAccount!: (value: string) => void;
+    const account = new Promise<string>((resolve) => { resolveAccount = resolve; });
+    h.account.mockReturnValue(account);
+    h.changed.fire();
+    const abort = new AbortController();
+    const pending = h.capability.refreshTestSet("SHOP-301", abort.signal);
+    abort.abort();
+    resolveAccount("account-b");
+    try {
+      await expect(pending).resolves.toMatchObject({ status: "failed" });
+      expect(h.reader.refresh).not.toHaveBeenCalled();
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it("caps a catalogue that fills the item budget exactly before another set", async () => {
+    const h = await fixture(false);
+    const full = { ...SHOP_301,
+      members: Array.from({ length: ORGANIZATION_ITEM_LIMIT - 2 }, (_, index) => ({ key: `SHOP-${index + 1000}` })),
+      remoteMemberCount: ORGANIZATION_ITEM_LIMIT - 2,
+    };
+    h.reader.list.mockResolvedValue(project([full, { ...SHOP_301, key: "SHOP-302" }]));
+    try {
+      await h.capability.sync(["SHOP"]);
+      expect(h.capability.snapshot().testSetProjects[0]).toMatchObject({
+        complete: false, truncated: true, testSets: [full],
+      });
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it.each([true, false])("reports sync failure with last-known data available: %s", async cached => {
+    const h = await fixture(cached);
+    h.reader.list.mockRejectedValue(new Error("offline"));
+    try {
+      await h.capability.sync(["SHOP"]);
+      const value = h.capability.snapshot().testSetProjects[0]!;
+      expect(value.complete).toBe(false);
+      expect(value.testSets.map(set => set.key)).toEqual(cached ? ["SHOP-301"] : []);
+      expect(value.errors[0]).toContain(cached ? "last-known" : "refresh failed");
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it.each([true, false])("retains only known sets when a partial catalogue omits them (cached: %s)", async cached => {
+    const h = await fixture(cached);
+    h.reader.list.mockResolvedValue({ ...project([]), complete: false });
+    try {
+      await h.capability.sync(["SHOP"]);
+      expect(h.capability.snapshot().testSetProjects[0]?.testSets.map(set => set.key)).toEqual(cached ? ["SHOP-301"] : []);
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it("retains known member details while marking a larger partial catalogue incomplete", async () => {
+    const h = await fixture();
+    h.reader.list.mockResolvedValue(project([{ ...SHOP_301, members: [], remoteMemberCount: 8, membershipComplete: false, truncated: false }]));
+    try {
+      await h.capability.sync(["SHOP"]);
+      expect(h.capability.snapshot().testSetProjects[0]?.testSets[0]).toMatchObject({
+        members: SHOP_301.members, remoteMemberCount: 8, membershipComplete: false, truncated: true, membersLastKnown: true,
+      });
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it.each([true, false])("reports incomplete exact membership with prior data available: %s", async cached => {
+    const h = await fixture(cached);
+    const partial = { ...SHOP_301, members: [], membershipComplete: false };
+    h.reader.refresh.mockResolvedValue(partial);
+    try {
+      const result = await h.capability.refreshTestSet("SHOP-301");
+      expect(result.status).toBe("incomplete");
+      expect(result.testSet).toEqual(cached ? SHOP_301 : partial);
+      expect(h.capability.snapshot().testSetProjects.flatMap(p => p.testSets)).toEqual(cached ? [SHOP_301] : []);
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it("reports a failed exact refresh and retains its cached membership", async () => {
+    const h = await fixture();
+    h.reader.refresh.mockRejectedValue(new Error("offline"));
+    try {
+      await expect(h.capability.refreshTestSet("SHOP-301")).resolves.toEqual({ status: "failed", testSet: SHOP_301 });
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it("starts no read for an already cancelled sync or exact refresh", async () => {
+    const h = await fixture();
+    const controller = new AbortController(); controller.abort();
+    try {
+      await h.capability.sync(["SHOP"], controller.signal);
+      await expect(h.capability.refreshTestSet("SHOP-301", controller.signal)).resolves.toEqual({ status: "failed", testSet: SHOP_301 });
+      expect(h.reader.list).not.toHaveBeenCalled();
+      expect(h.reader.refresh).not.toHaveBeenCalled();
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it("does not replace cached data when cancellation lands during a successful remote read", async () => {
+    const h = await fixture();
+    const controller = new AbortController();
+    h.reader.list.mockImplementation(() => { controller.abort(); return Promise.resolve(project([])); });
+    try {
+      await h.capability.sync(["SHOP", "NEXT"], controller.signal);
+      expect(h.reader.list).toHaveBeenCalledTimes(1);
+      expect(h.capability.snapshot().testSetProjects[0]?.testSets).toEqual([SHOP_301]);
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+
+  it("does not replace cached data when the cancelled remote read rejects", async () => {
+    const h = await fixture();
+    const controller = new AbortController();
+    h.reader.list.mockImplementation(() => { controller.abort(); return Promise.reject(new Error("cancelled")); });
+    try {
+      await h.capability.sync(["SHOP"], controller.signal);
+      expect(h.capability.snapshot().testSetProjects[0]?.testSets).toEqual([SHOP_301]);
+    } finally { await h.capability.dispose(); h.changed.dispose(); }
+  });
+});
+
+
+describe("organization startup account identity", () => {
+  it.each(["sync", "refresh"] as const)("does not start %s when its account lookup disagrees with the loaded cache", async (operation) => {
+    const cache = new XrayOrganizationCache(memento(), { endpoint: "xray.example", account: () => Promise.resolve("account-a"), workspaceId: "ws" });
+    await cache.save("account-a", { syncedAt: 1, projects: [project([SHOP_301])], omittedTestSetProjectCount: 0 });
+    let loadAccount!: (value: string) => void;
+    let requestAccount!: (value: string) => void;
+    const account = vi.fn<() => Promise<string>>()
+      .mockReturnValueOnce(new Promise((resolve) => { loadAccount = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { requestAccount = resolve; }));
+    const reader = { list: vi.fn(), refresh: vi.fn() };
+    const changed = new vscode.EventEmitter<void>();
+    const capability = new XrayOrganizationCapability({
+      reader: reader as unknown as XrayOrganizationReader, metadata: metadata(), cache,
+      config: { xrayCacheTtlMinutes: 15 } as ExtensionConfig, logger: Logger.create(), account,
+      onCredentialsChange: changed.event, projectOf: () => "SHOP",
+    });
+    const loaded = new Promise<void>((resolve) => {
+      const subscription = capability.onDidChange(() => { subscription.dispose(); resolve(); });
+    });
+    const pending = operation === "sync" ? capability.sync(["SHOP"]) : capability.refreshTestSet("SHOP-301");
+    loadAccount("account-a");
+    await loaded;
+    requestAccount("account-b");
+    await pending;
+    expect(reader.list).not.toHaveBeenCalled();
+    expect(reader.refresh).not.toHaveBeenCalled();
+    expect(capability.snapshot().testSetProjects).toEqual([project([SHOP_301])]);
+    expect(cache.loadForAccount("account-b")).toBeUndefined();
+    await capability.dispose(); changed.dispose();
+  });
+
+  it("does not persist organization data without an account identity", async () => {
+    const store = memento();
+    const cache = new XrayOrganizationCache(store, { endpoint: "xray.example", account: () => Promise.resolve(undefined), workspaceId: "ws" });
+    await cache.save(undefined, { syncedAt: 1, projects: [project([SHOP_301])], omittedTestSetProjectCount: 0 });
+    expect(store.keys()).toEqual([]);
+    expect(cache.loadForAccount(undefined)).toBeUndefined();
   });
 });

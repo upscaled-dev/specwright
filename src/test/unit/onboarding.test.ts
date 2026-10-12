@@ -38,6 +38,12 @@ describe("resolveWorkspaceReadiness", () => {
     expect(legacyReady.summary).not.toMatch(/playwright-bdd/i);
   });
 
+  it("asks for a workspace before reporting an open-file-only session ready", () => {
+    const readiness = resolveWorkspaceReadiness({ ...project, workspace: false }, { diagnostics: [] });
+    expect(readiness.readyToRun).toBe(false);
+    expect(readiness.summary).toContain("Open a workspace folder");
+  });
+
   it("keeps project and provider problems in their own capability groups", () => {
     const readiness = resolveWorkspaceReadiness(
       { ...project, featureFiles: 0, stepDefinitions: 0 },
@@ -72,6 +78,17 @@ describe("resolveTraceabilityPanelEnabled", () => {
 
 describe("OnboardingCommands diagnosis recovery", () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it.each(["Configure Step Paths", undefined])("offers step-path recovery and honors the diagnosis choice %s", async choice => {
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(choice as never);
+    const execute = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    const commands = new OnboardingCommands({ diagnose: () => Promise.resolve([]) } as unknown as ExecutionGateway, () => ({
+      projectCapabilities: () => Promise.resolve({ workspace: true, featureFiles: 0, stepDefinitions: 0, stepDefinitionPaths: [] }),
+    }));
+    await commands.diagnoseWorkspace();
+    if (choice === undefined) {expect(execute).not.toHaveBeenCalled();}
+    else {expect(execute).toHaveBeenCalledExactlyOnceWith("workbench.action.openSettings", "playwrightBddRunner.stepDefinitionPaths");}
+  });
 
   it("refreshes discovery before focusing Testing after a ready diagnosis", async () => {
     vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue("Open Testing" as never);

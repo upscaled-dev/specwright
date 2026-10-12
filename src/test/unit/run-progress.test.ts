@@ -1,8 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { DetailBudget } from "../../core/execution-limits";
-import { combineRunProgressObservers, type RunProgressObserver } from "../../core/run-progress";
+import { combineRunProgressObservers, formatRunProgress, type RunProgressObserver } from "../../core/run-progress";
 
 describe("combineRunProgressObservers", () => {
+  it("omits a combined observer when no presentation is attached", () => {
+    expect(combineRunProgressObservers(undefined, undefined)).toBeUndefined();
+  });
+
+  it("shows zero completed when the runner first announces its total", () => {
+    expect(formatRunProgress({ phase: "running", total: 7 })).toBe("Running 0/7");
+  });
+
   it("withholds the detail budget so no invocation is handed a run's whole share", () => {
     const combined = combineRunProgressObservers({ detailBudget: new DetailBudget() });
 

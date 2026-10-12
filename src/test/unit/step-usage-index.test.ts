@@ -136,6 +136,45 @@ describe("StepUsageIndex", () => {
     (vscode.workspace as { createFileSystemWatcher: unknown }).createFileSystemWatcher = originalCreateWatcher;
   });
 
+  it.each(["definitions", "discovery"] as const)("does not continue a scan disposed during %s", async (stage) => {
+    const def = defOf("a basket", "/ws/steps/a.ts", 0);
+    const resolver = makeResolverWithDefs([def]);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    if (stage === "definitions") {
+      resolver.loadAllStepDefs = async () => { entered(); await held; return [def]; };
+    } else {
+      findFilesMock.mockImplementation(async () => { entered(); await held; return [vscode.Uri.file("/ws/a.feature")]; });
+    }
+    const index = new StepUsageIndex(makeConfig({}), resolver, stubLogger);
+    const pending = index.getAllUsages();
+    await started;
+    index.dispose();
+    release();
+    expect(await pending).toEqual(new Map());
+    expect(readFileMock).not.toHaveBeenCalled();
+    if (stage === "definitions") { expect(findFilesMock).not.toHaveBeenCalled(); }
+  });
+
+  it("ignores excluded step-file watcher events without invalidating cached usages", async () => {
+    const def = defOf("a basket", "/ws/steps/a.ts", 0);
+    featureContents.set("/ws/a.feature", "Feature: Checkout\nScenario: Pay\nGiven a basket");
+    const resolver = makeResolverWithDefs([def]);
+    const load = vi.spyOn(resolver, "loadAllStepDefs");
+    const index = new StepUsageIndex(makeConfig({}), resolver, stubLogger);
+    expect(await index.countUsagesForDef(def)).toBe(1);
+    const stepWatcher = watchers.find((watcher) => watcher.pattern.includes("steps"))!;
+    const excluded = vscode.Uri.file("/ws/node_modules/steps/foreign.ts");
+    stepWatcher.triggerCreate(excluded);
+    stepWatcher.triggerChange(excluded);
+    stepWatcher.triggerDelete(excluded);
+    expect(await index.countUsagesForDef(def)).toBe(1);
+    expect(load).toHaveBeenCalledOnce();
+    index.dispose();
+  });
+
   it("is lazy: does not scan until first getUsagesForDef()", () => {
     const def = defOf("I have a thing", "/ws/steps/a.ts", 0);
     const resolver = makeResolverWithDefs([def]);
@@ -173,6 +212,46 @@ describe("StepUsageIndex", () => {
       expect(u.stepText).toBe("I have a thing");
       expect(u.keyword).toBe("Given");
     }
+    idx.dispose();
+  });
+
+  it("keeps counts and references distinct for unrelated definitions", async () => {
+    const first = defOf("a basket", "/ws/steps/a.ts", 0);
+    const second = defOf("a payment", "/ws/steps/a.ts", 1);
+    featureContents.set("/ws/checkout.feature", "Feature: Checkout\nScenario: Pay\nGiven a basket\nWhen a payment\n");
+    const idx = new StepUsageIndex(makeConfig({}), makeResolverWithDefs([first, second]), stubLogger);
+    expect((await idx.getUsagesForDef(first)).map((usage) => usage.stepText)).toEqual(["a basket"]);
+    expect(await idx.countUsagesForDef(second)).toBe(1);
+    idx.dispose();
+  });
+
+  it("returns empty queries and ignores rescan after disposal", async () => {
+    const def = defOf("a basket", "/ws/steps/a.ts", 0);
+    featureContents.set("/ws/checkout.feature", "Feature: Checkout\nScenario: Pay\nGiven a basket\n");
+    const idx = new StepUsageIndex(makeConfig({}), makeResolverWithDefs([def]), stubLogger);
+    expect(await idx.countUsagesForDef(def)).toBe(1);
+    const reads = readFileMock.mock.calls.length;
+    idx.dispose(); idx.rescan();
+    expect(await idx.getAllUsages()).toEqual(new Map());
+    expect(await idx.getUnmatchedSteps()).toEqual(new Map());
+    expect(await idx.getUsagesForDef(def)).toEqual([]);
+    expect(await idx.countUsagesForDef(def)).toBe(0);
+    expect(readFileMock).toHaveBeenCalledTimes(reads);
+  });
+
+  it("uses default feature discovery for a blank pattern without installing empty step watchers", async () => {
+    const def = defOf("a basket", "/ws/steps/a.ts", 0);
+    featureContents.set("/ws/checkout.feature", "Feature: Checkout\nScenario: Pay\nGiven a basket\n");
+    const idx = new StepUsageIndex(makeConfig({ pattern: "  ", stepPaths: [] }), makeResolverWithDefs([def]), stubLogger);
+    expect(await idx.countUsagesForDef(def)).toBe(1);
+    expect(watchers.map((watcher) => watcher.pattern)).toEqual(["**/*.feature"]);
+    const reads = readFileMock.mock.calls.length;
+    for (const watcher of watchers) {
+      watcher.triggerCreate(vscode.Uri.file("/ws/node_modules/vendor.feature"));
+      watcher.triggerDelete(vscode.Uri.file("/ws/.features-gen/vendor.feature"));
+    }
+    expect(await idx.countUsagesForDef(def)).toBe(1);
+    expect(readFileMock).toHaveBeenCalledTimes(reads);
     idx.dispose();
   });
 

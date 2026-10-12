@@ -29,6 +29,15 @@ const bddFileData = [ // bdd-data-start
 `;
 
 describe("parseBddFileData", () => {
+  it.each(["", ","])("reads a final metadata row with trailing delimiter %j", (delimiter) => {
+    const spec = `const bddFileData = [ // bdd-data-start\n{"pwTestLine":11,"pickleLine":8}${delimiter}\n]; // bdd-data-end`;
+    expect(parseBddFileData(spec)?.testLines.get(8)).toBe(11);
+  });
+
+  it("rejects metadata whose closing array terminator was truncated", () => {
+    expect(parseBddFileData('const bddFileData = [ // bdd-data-start\n{"pwTestLine":11,"pickleLine":8}\n// bdd-data-end')).toBeUndefined();
+  });
+
   it("maps gherkin step lines to playwright step lines", () => {
     const data = parseBddFileData(backgroundSpecText);
     expect(data).toBeDefined();

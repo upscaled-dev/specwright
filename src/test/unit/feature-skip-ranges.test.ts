@@ -2,6 +2,14 @@ import { describe, it, expect } from "vitest";
 import { computeSkipRanges } from "../../providers/feature-skip-ranges";
 
 describe("computeSkipRanges", () => {
+  it("skips Examples prose and resumes steps at the next section without a blank line", () => {
+    const skip = computeSkipRanges([
+      "Feature: Checkout", "Scenario Outline: Pay", "Given <method>", "Examples:",
+      "  payment methods", "  | method |", "  | cash |", "Scenario: Cancel", "Given a basket",
+    ].join("\n"));
+    expect([...skip]).toEqual([3, 4, 5, 6]);
+  });
+
   it("returns an empty-ish set for a feature with only step lines", () => {
     const text = [
       "Feature: A",

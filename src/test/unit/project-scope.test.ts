@@ -125,6 +125,9 @@ describe("resolveSyncProjectKeys", () => {
 });
 
 describe("projectProvenance", () => {
+  it("offers no provenance when a clean workspace has no project source", () => {
+    expect([...projectProvenance({})]).toEqual([]);
+  });
   // Required, so a rung added to the interface fails to compile here until this fixture and the label
   // ladder both account for it.
   const everyRung: Required<ProjectUniverseSources> = {

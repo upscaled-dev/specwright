@@ -1,10 +1,11 @@
 /// <reference path="../../webview/client/globals.d.ts" />
 
 import axe from "axe-core";
-import { build } from "esbuild";
 import { JSDOM } from "jsdom";
 import * as vscode from "vscode";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { browserClientCode } from "./helpers/browser-client-bundle.mjs";
+import { EXECUTIONS } from "./helpers/board-panel-driver";
 import { boardFragment } from "../../traceability/board-fragment";
 import { BoardSurface, type BoardSurfaceDeps } from "../../traceability/board-surface";
 import { buildBoardViewModel, type BoardViewModel } from "../../traceability/board-data";
@@ -49,19 +50,6 @@ function documentHtml(): string {
   </body></html>`;
 }
 
-let bundledClient: Promise<string> | undefined;
-
-function clientCode(): Promise<string> {
-  bundledClient ??= build({
-    entryPoints: ["src/webview/coverage-board.ts"],
-    bundle: true,
-    platform: "browser",
-    format: "iife",
-    write: false,
-  }).then((output) => output.outputFiles[0]!.text);
-  return bundledClient;
-}
-
 async function rig(state: Record<string, unknown> = {}): Promise<ClientRig> {
   const dom = new JSDOM(documentHtml(), { pretendToBeVisual: true, runScripts: "outside-only" });
   Object.defineProperty(dom.window.HTMLElement.prototype, "scrollIntoView", { configurable: true, value: () => undefined });
@@ -76,7 +64,7 @@ async function rig(state: Record<string, unknown> = {}): Promise<ClientRig> {
       },
     }),
   });
-  dom.window.eval(await clientCode());
+  dom.window.eval(await browserClientCode("coverage-board"));
   let revision = 0;
   const sendRaw = (message: unknown): void => {
     dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message }));
@@ -542,6 +530,47 @@ describe("coverage board browser client", () => {
     await expectNoSeriousViolations(bridge.client.dom);
   });
 
+  it("offers a keyboard link from a named scenario after the host selects a test", async () => {
+    const model: BoardViewModel = {
+      scenarios: [{ name: "Login", location: "features/login.feature:3", dropId: "scenario-1", pills: [], reqKeys: [] }],
+      available: [{ key: "CALC-1", project: "CALC", pills: [], links: [] }],
+      mapped: [], matrix: [], completeProjects: ["CALC"], availableEmptyText: "No unmapped tests",
+    };
+    const bridge = await bridgeBoardSurface(model, () => undefined);
+    const doc = bridge.client.dom.window.document;
+    doc.querySelector<HTMLInputElement>('input[aria-label="Select test CALC-1"]')!.click();
+    bridge.routeClientMessages();
+    expect(bridge.surface.selectedTests()).toEqual(["CALC-1"]);
+    const button = [...doc.querySelectorAll<HTMLButtonElement>("#scenario-cards button")]
+      .find(item => item.textContent === "Link to selected test")!;
+    expect(doc.getElementById("scenario-cards")?.textContent).toContain("Login");
+    button.click();
+    expect(clientBodies(bridge.client, "board").at(-1)).toEqual({ type: "drop", scenario: "scenario-1", key: "CALC-1" });
+    bridge.client.dom.window.close();
+  });
+
+  it("preserves a focused column search draft across a host repaint", async () => {
+    const client = await rig();
+    const doc = client.dom.window.document;
+    const initial = boardRender();
+    client.send("shell", { type: "activate", tab: "mapping" });
+    client.send("board", initial);
+    const search = doc.getElementById("available-search") as HTMLInputElement;
+    search.focus();
+    expect(doc.activeElement).toBe(search);
+    search.value = "Pay by c";
+    search.dispatchEvent(new client.dom.window.Event("input", { bubbles: true }));
+    expect(clientBodies(client, "board").at(-1)).toEqual({ type: "columnSearch", section: "available", value: "Pay by c" });
+    const refreshed = { ...initial, sections: { ...initial.sections, available: { ...initial.sections.available, query: "Pay" } } };
+    client.send("board", refreshed);
+    expect(search.value).toBe("Pay by c");
+    expect(doc.activeElement).toBe(search);
+    search.blur();
+    client.send("board", refreshed);
+    expect(search.value).toBe("Pay");
+    client.dom.window.close();
+  });
+
   it("ignores malformed, foreign and out-of-order host envelopes before dispatch", async () => {
     const client = await rig();
     const valid = { version: 1, session: "local", revision: 2, surface: "board", body: boardRender() };
@@ -624,6 +653,134 @@ describe("coverage board browser client", () => {
     expect(client.dom.window.document.activeElement).not.toBe(client.dom.window.document.body);
   });
 
+  it("links a dragged test to a named scenario and clears invalid drag targets", async () => {
+    const client = await rig();
+    const doc = client.dom.window.document;
+    client.send("shell", { type: "activate", tab: "mapping" });
+    const render = boardRender();
+    client.send("board", { ...render, scenarios: [{ ...render.scenarios[0]!, pills: ["@smoke"] }] });
+    const scenario = doc.querySelector<HTMLElement>("#scenario-cards .card")!;
+    const test = doc.querySelector<HTMLElement>("#available-cards .card")!;
+    const transfer = { effectAllowed: "none", dropEffect: "none" };
+    const drag = (element: HTMLElement, type: string): Event => {
+      const event = new client.dom.window.Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: transfer });
+      element.dispatchEvent(event);
+      return event;
+    };
+    expect(scenario.textContent).toContain("Login");
+    expect(scenario.querySelector(".pill")?.textContent).toBe("@smoke");
+    expect(drag(scenario, "drop").defaultPrevented).toBe(false);
+    drag(test, "dragstart");
+    expect(transfer.effectAllowed).toBe("link");
+    expect(drag(test, "dragover").defaultPrevented).toBe(false);
+    expect(drag(scenario, "dragover").defaultPrevented).toBe(true);
+    expect(transfer.dropEffect).toBe("link");
+    expect(scenario.classList.contains("drop-target")).toBe(true);
+    drag(scenario, "dragleave");
+    expect(scenario.classList.contains("drop-target")).toBe(false);
+    drag(scenario, "dragover");
+    drag(scenario, "drop");
+    expect(clientBodies(client, "board").at(-1)).toEqual({ type: "drop", scenario: "scenario-1", key: "CALC-1" });
+    drag(test, "dragstart");
+    drag(scenario, "dragover");
+    drag(test, "dragend");
+    expect(doc.querySelector(".drop-target")).toBeNull();
+    expect(drag(scenario, "drop").defaultPrevented).toBe(false);
+    scenario.dispatchEvent(new client.dom.window.Event("dragstart", { bubbles: true }));
+    const reverse = new client.dom.window.Event("dragover", { bubbles: true, cancelable: true });
+    test.dispatchEvent(reverse);
+    expect(reverse.defaultPrevented).toBe(true);
+    expect(test.classList.contains("drop-target")).toBe(true);
+    test.dispatchEvent(new client.dom.window.Event("drop", { bubbles: true, cancelable: true }));
+    expect(clientBodies(client, "board").at(-1)).toEqual({ type: "drop", scenario: "scenario-1", key: "CALC-1" });
+    client.send("board", { type: "syncProgress", text: "Loading CALC tests" });
+    expect(doc.getElementById("sync-strip")?.hidden).toBe(false);
+    expect(doc.getElementById("sync-strip-text")?.textContent).toBe("Loading CALC tests");
+    client.send("board", { type: "syncProgress", text: "" });
+    expect(doc.getElementById("sync-strip")?.hidden).toBe(true);
+    client.dom.window.close();
+  });
+
+  it("restores matrix and execution groups, pages older activity, and keeps filter expansion temporary", async () => {
+    const state = { matrixOpen: ["features/checkout.feature", 7], executionsCollapsed: ["CALC-1", false], executionsShown: 50 };
+    const client = await rig(state);
+    const doc = client.dom.window.document;
+    const activity = EXECUTIONS.find((row) => row.kind === "group")!;
+    const executions: Extract<BoardHostMessage, { type: "render" }>["executions"] = [
+      ...Array.from({ length: 60 }, (_, index) => ({ ...activity, key: `CALC-${index + 1}`, keyLabel: `CALC-${index + 1}`, summary: `Checkout batch ${index + 1}` })),
+      { kind: "unknown", key: "", keyLabel: "Unresolved import", summary: "Target not named", action: "Imported", resultsImported: "1", passRate: "1/1 passed", publishedAt: "2026-07-22", activityCount: 1 },
+    ];
+    const row = { requirement: "", test: "CALC-1", scenario: "Checkout as guest", tag: "", result: "Passed", file: "features/checkout.feature", projects: ["CALC"] };
+    const render: Extract<BoardHostMessage, { type: "render" }> = {
+      ...boardRender(), executions,
+      matrix: [{ file: "features/checkout.feature", count: 1, rows: [row] }, { file: "", count: 1, rows: [{ ...row, file: "", scenario: "" }] }],
+      matrixPage: { filtered: 2, page: 0, pageSize: 25, pageCount: 1 },
+    };
+    client.send("board", render);
+    client.send("shell", { type: "activate", tab: "matrix" });
+    expect(doc.getElementById("matrix-rows")?.textContent).toContain("Checkout as guest");
+    expect(doc.getElementById("matrix-rows")?.textContent).toContain("Available tests");
+    expect(doc.querySelector("#matrix-rows .hole")).not.toBeNull();
+    doc.querySelector<HTMLButtonElement>("#matrix-rows .group-toggle")!.click();
+    expect(doc.getElementById("matrix-rows")?.textContent).not.toContain("Checkout as guest");
+    expect(state.matrixOpen).toEqual([]);
+
+    client.send("shell", { type: "activate", tab: "executions" });
+    const firstToggle = (): HTMLButtonElement => doc.querySelector<HTMLButtonElement>("#executions-rows .execution-toggle")!;
+    expect(firstToggle().getAttribute("aria-expanded")).toBe("false");
+    firstToggle().click();
+    expect(state.executionsCollapsed).toEqual([]);
+    firstToggle().click();
+    expect(state.executionsCollapsed).toEqual(["CALC-1"]);
+    expect(doc.getElementById("executions-rows")?.textContent).not.toContain("Checkout batch 60");
+    doc.querySelector<HTMLButtonElement>("#executions-rows .older-cell button")!.click();
+    expect(doc.getElementById("executions-rows")?.textContent).toContain("Checkout batch 60");
+    expect(doc.getElementById("executions-rows")?.textContent).toContain("Unresolved import");
+    expect(doc.querySelector("#executions-rows .older-cell")).toBeNull();
+    expect(state.executionsShown).toBe(100);
+    doc.querySelector<HTMLAnchorElement>("#executions-rows .link")!.click();
+    expect(clientBodies(client, "board").at(-1)).toEqual({ type: "open", key: "CALC-1" });
+
+    client.send("board", { ...render, filtering: true });
+    expect(firstToggle().getAttribute("aria-expanded")).toBe("true");
+    firstToggle().click();
+    doc.querySelector<HTMLButtonElement>("#matrix-rows .group-toggle")!.click();
+    expect(state.executionsCollapsed).toEqual(["CALC-1"]);
+    expect(state.matrixOpen).toEqual([]);
+    client.send("board", render);
+    expect(firstToggle().getAttribute("aria-expanded")).toBe("false");
+    client.send("board", { ...render, filtering: true, executions: [] });
+    expect(doc.getElementById("executions-empty")?.textContent).toBe("No executions match this filter.");
+    client.dom.window.close();
+  });
+
+  it("moves through visible coverage tabs by click, Home, End, and arrow keys", async () => {
+    const client = await rig();
+    const doc = client.dom.window.document;
+    client.send("shell", { type: "activate", tab: "mapping" });
+    const key = (id: string, value: string): void => {
+      doc.getElementById(id)!.dispatchEvent(new client.dom.window.KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true }));
+    };
+    doc.getElementById("tab-matrix")!.click();
+    expect(clientBodies(client, "shell").at(-1)).toEqual({ type: "tab", tab: "matrix" });
+    key("tab-matrix", "Home");
+    expect(doc.activeElement?.id).toBe("tab-mapping");
+    key("tab-mapping", "End");
+    expect(doc.activeElement?.id).toBe("tab-publish");
+    key("tab-publish", "ArrowLeft");
+    expect(doc.activeElement?.id).toBe("tab-executions");
+    key("tab-executions", "ArrowRight");
+    expect(doc.activeElement?.id).toBe("tab-publish");
+    const posted = client.posted.length;
+    key("tab-publish", "Enter");
+    expect(client.posted).toHaveLength(posted);
+    client.send("shell", { type: "linkTab", visible: true });
+    key("tab-publish", "End");
+    expect(doc.activeElement?.id).toBe("tab-link");
+    client.dom.window.close();
+  });
+
   it("keeps Sync persistent and restores collapsed Mapping sections with live counts and focus", async () => {
     const client = await rig();
     client.send("shell", { type: "activate", tab: "mapping" });
@@ -685,6 +842,14 @@ describe("coverage board browser client", () => {
     expect(restored.dom.window.document.getElementById("available-toggle")?.getAttribute("aria-expanded")).toBe("false");
     expect(restored.dom.window.document.getElementById("available-content")?.hidden).toBe(true);
     expect(restored.dom.window.document.getElementById("mapped-toggle")?.getAttribute("aria-expanded")).toBe("true");
+    restored.send("shell", { type: "activate", tab: "mapping" });
+    const restoredToggle = restored.dom.window.document.getElementById("available-toggle") as HTMLButtonElement;
+    restoredToggle.focus();
+    restoredToggle.click();
+    expect(restoredToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(restored.dom.window.document.getElementById("available-content")?.hidden).toBe(false);
+    expect(restored.state["mappingCollapsed"]).toEqual([]);
+    expect(restored.dom.window.document.activeElement).toBe(restoredToggle);
   });
 
   it("implements combobox navigation and keyboard confirmation", async () => {
@@ -717,6 +882,249 @@ describe("coverage board browser client", () => {
 
     expect(clientBodies(client, "link")).toContainEqual({ type: "openLinked", key: "CALC-2" });
     expect(clientBodies(client, "link").filter((message) => message.type === "confirm")).toEqual([]);
+  });
+
+  it("keeps the highlighted link choice through appended results and skips hints when choices disappear", async () => {
+    const client = await rig();
+    const doc = client.dom.window.document;
+    client.send("shell", { type: "linkTab", visible: true, title: "Link checkout" });
+    client.send("shell", { type: "activate", tab: "link" });
+    client.send("link", { type: "reset", title: "Link checkout", searchPlaceholder: "Search tests" });
+    const hint = { id: "hint", key: "Choose a test or create one", kind: "hint" } as const;
+    const checkout = { id: "CALC-7", key: "CALC-7", summary: "Checkout", kind: "test" } as const;
+    const create = { id: "create", key: "Create checkout test", kind: "create" } as const;
+    const search = doc.getElementById("link-search") as HTMLInputElement;
+    client.send("link", { type: "rows", rows: [hint, checkout, create] });
+    expect(search.getAttribute("aria-activedescendant")).toBe("link-option-1");
+    doc.getElementById("link-option-2")!.dispatchEvent(new client.dom.window.MouseEvent("mousemove", { bubbles: true }));
+    doc.getElementById("link-option-2")!.dispatchEvent(new client.dom.window.MouseEvent("mousemove", { bubbles: true }));
+    client.send("link", { type: "rows", rows: [hint, checkout, create, { id: "CALC-8", key: "CALC-8", kind: "test" }] });
+    expect(doc.querySelector('#link-results [aria-selected="true"]')?.textContent).toBe("Create checkout test");
+    search.dispatchEvent(new client.dom.window.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    expect(doc.querySelector('#link-results [aria-selected="true"]')?.textContent).toBe("CALC-7Checkout");
+    const postedBeforeTab = client.posted.length;
+    const tab = new client.dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    search.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(false);
+    expect(client.posted).toHaveLength(postedBeforeTab);
+    expect(search.getAttribute("aria-activedescendant")).toBe("link-option-1");
+    doc.getElementById("link-option-2")!.dispatchEvent(new client.dom.window.MouseEvent("mousemove", { bubbles: true }));
+    search.dispatchEvent(new client.dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(clientBodies(client, "link").at(-1)).toEqual({ type: "confirm", id: "create" });
+
+    client.send("link", { type: "rows", rows: [hint, checkout, { id: "CALC-8", key: "CALC-8", kind: "test" }] });
+    expect(doc.querySelector('#link-results [aria-selected="true"]')?.textContent).toBe("CALC-8");
+    doc.getElementById("link-option-1")!.click();
+    expect(clientBodies(client, "link").at(-1)).toEqual({ type: "confirm", id: "CALC-7" });
+    client.send("link", { type: "rows", rows: [hint] });
+    const confirmations = clientBodies(client, "link").filter((message) => message.type === "confirm").length;
+    search.dispatchEvent(new client.dom.window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    search.dispatchEvent(new client.dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(search.getAttribute("aria-expanded")).toBe("false");
+    expect(search.hasAttribute("aria-activedescendant")).toBe(false);
+    expect(clientBodies(client, "link").filter((message) => message.type === "confirm")).toHaveLength(confirmations);
+    client.dom.window.close();
+  });
+
+  it("shows missing linked tests, routes unlink and search, and ignores keys when the link pane is hidden", async () => {
+    const client = await rig();
+    const doc = client.dom.window.document;
+    client.send("shell", { type: "linkTab", visible: true, title: "Link checkout" });
+    client.send("shell", { type: "activate", tab: "link" });
+    client.send("link", { type: "reset", title: "Link checkout", searchPlaceholder: "Search tests" });
+    client.send("link", { type: "linked", rows: [{ key: "CALC-9", remoteMissing: true }, { key: "CALC-10" }] });
+    expect(doc.getElementById("link-linked")?.textContent).toContain("CALC-9⚠ not found on remote");
+    const unlink = [...doc.querySelectorAll<HTMLButtonElement>("#link-linked button")].find((button) => button.textContent === "Unlink")!;
+    unlink.click();
+    expect(clientBodies(client, "link").at(-1)).toEqual({ type: "unlink", key: "CALC-9" });
+    const search = doc.getElementById("link-search") as HTMLInputElement;
+    search.value = "checkout";
+    search.dispatchEvent(new client.dom.window.Event("input", { bubbles: true }));
+    expect(clientBodies(client, "link").at(-1)).toEqual({ type: "search", value: "checkout" });
+    client.send("link", { type: "busy", busy: true });
+    expect(doc.getElementById("link-busy")?.hidden).toBe(false);
+    client.send("link", { type: "busy", busy: false });
+    expect(doc.getElementById("link-busy")?.hidden).toBe(true);
+    search.dispatchEvent(new client.dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(clientBodies(client, "link").at(-1)).toEqual({ type: "cancel" });
+    client.send("shell", { type: "activate", tab: "mapping" });
+    const before = client.posted.length;
+    search.dispatchEvent(new client.dom.window.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    expect(client.posted).toHaveLength(before);
+    client.dom.window.close();
+  });
+
+  it("merges remote project choices with known keys and retires chosen or dismissed publish searches", async () => {
+    const client = await rig();
+    vi.useFakeTimers();
+    try {
+      const doc = client.dom.window.document;
+      client.send("shell", { type: "activate", tab: "publish" });
+      client.send("publish", { type: "model", model: { ...publishModel, jiraSearchAvailable: true, knownProjectKeys: ["CALC", "CARDS", "PAY"] } });
+      const project = doc.getElementById("project") as HTMLInputElement;
+      project.focus();
+      expect(doc.getElementById("project-results")?.textContent).toContain("PAY");
+      project.value = "C";
+      project.dispatchEvent(new client.dom.window.Event("input", { bubbles: true }));
+      project.value = "CA";
+      project.dispatchEvent(new client.dom.window.Event("input", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(399);
+      expect(clientBodies(client, "publish").filter((message) => message.type === "search")).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      const search = clientBodies(client, "publish").filter((message) => message.type === "search" && "token" in message).at(-1)!;
+      expect(search).toMatchObject({ type: "search", kind: "project", query: "CA" });
+      client.send("publish", { type: "search-result", kind: "project", token: search.token, items: [{ key: "CALC", label: "CALC: Checkout project" }] });
+      expect([...doc.querySelectorAll("#project-results li")].map((row) => row.textContent)).toEqual(["CALC: Checkout project", "CARDS"]);
+      doc.querySelector("#project-results li")!.dispatchEvent(new client.dom.window.MouseEvent("mousedown", { bubbles: true }));
+      expect(project.value).toBe("CALC");
+      client.send("publish", { type: "search-result", kind: "project", token: search.token, items: [{ key: "STALE", label: "Stale project" }] });
+      expect(doc.getElementById("project-results")?.textContent).toBe("");
+      project.focus();
+      project.dispatchEvent(new client.dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      expect(doc.getElementById("project-results")?.textContent).toBe("");
+      project.dispatchEvent(new client.dom.window.Event("focus"));
+      project.blur();
+      expect(doc.getElementById("project-results")?.textContent).toBe("");
+
+      const plan = doc.getElementById("plan") as HTMLInputElement;
+      plan.value = "CALC";
+      plan.dispatchEvent(new client.dom.window.Event("input", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(400);
+      const planSearch = clientBodies(client, "publish").filter((message) => message.type === "search" && "token" in message).at(-1)!;
+      expect(planSearch).toMatchObject({ kind: "test-plan", query: "CALC" });
+      client.send("publish", { type: "search-result", kind: "test-plan", token: planSearch.token, items: [], error: "Jira unavailable" });
+      expect(doc.getElementById("plan-results")?.textContent).toBe("Search failed: Jira unavailable");
+      client.send("publish", { type: "search-result", kind: "test-plan", token: planSearch.token, items: [{ key: "CALC-42", label: "Checkout plan" }] });
+      doc.querySelector("#plan-results li")!.dispatchEvent(new client.dom.window.MouseEvent("mousedown", { bubbles: true }));
+      expect(plan.value).toBe("CALC-42");
+    } finally {
+      client.dom.window.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("validates an append execution and confirms its selected remote target", async () => {
+    const client = await rig();
+    vi.useFakeTimers();
+    try {
+      const doc = client.dom.window.document;
+      client.send("shell", { type: "activate", tab: "publish" });
+      client.send("publish", { type: "model", model: { ...publishModel, jiraSearchAvailable: true } });
+      doc.querySelector<HTMLInputElement>('input[name="publish-mode"][value="append"]')!.click();
+      expect(doc.getElementById("create-fields")?.hidden).toBe(true);
+      expect(doc.getElementById("append-fields")?.hidden).toBe(false);
+      doc.getElementById("publish")!.click();
+      const execution = doc.getElementById("execution") as HTMLInputElement;
+      expect(execution.getAttribute("aria-invalid")).toBe("true");
+      expect(doc.activeElement).toBe(execution);
+      execution.value = "CALC";
+      execution.dispatchEvent(new client.dom.window.Event("input", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(400);
+      const search = clientBodies(client, "publish").filter((message) => message.type === "search" && "token" in message).at(-1)!;
+      expect(search).toMatchObject({ kind: "execution", query: "CALC" });
+      client.send("publish", { type: "search-result", kind: "execution", token: search.token, items: [{ key: "CALC-21", label: "Checkout execution" }] });
+      doc.querySelector("#exec-results li")!.dispatchEvent(new client.dom.window.MouseEvent("mousedown", { bubbles: true }));
+      expect(execution.value).toBe("CALC-21");
+      doc.getElementById("publish")!.click();
+      expect(clientBodies(client, "publish").at(-1)).toEqual({ type: "confirm", runId: "run-1", request: { mode: "append", executionKey: "CALC-21" }, attachments: [] });
+    } finally {
+      client.dom.window.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("distinguishes published and uncertain runs while confirming scoped creation fields", async () => {
+    const client = await rig();
+    const doc = client.dom.window.document;
+    const base = { ...publishModel.runs[0]!, project: { value: "CALC", fromDerivation: false, fromScope: true }, defaultSummary: "Checkout results", prefillPlanKey: "CALC-42" };
+    const runs = [
+      { ...base, id: "append", label: "Appended checkout", republish: { target: "CALC-21", publishedAt: 1, mode: "append" as const } },
+      { ...base, id: "create", label: "Created checkout", republish: { target: "CALC-22", publishedAt: 1, mode: "create-new" as const } },
+      { ...base, id: "uncertain", label: "Uncertain checkout", republish: { target: "CALC-23", publishedAt: 1, outcomeUnknown: true, operationId: "checkout-import" } },
+      { ...base, id: "legacy", label: "Historical checkout", republish: { target: "CALC-24", publishedAt: 1 } },
+    ];
+    client.send("shell", { type: "activate", tab: "publish" });
+    client.send("publish", { type: "model", model: { ...publishModel, runs, selectedRunId: "evicted" } });
+    expect(doc.getElementById("banners")?.textContent).toContain("Already published to CALC-21");
+    expect(doc.getElementById("banners")?.textContent).toContain("(appended)");
+    chooseRun(client, "create");
+    expect(doc.getElementById("banners")?.textContent).toContain("(new execution)");
+    chooseRun(client, "uncertain");
+    expect(doc.getElementById("banners")?.textContent).toContain("possibly succeeded");
+    expect(doc.getElementById("banners")?.textContent).toContain("correlation checkout-import");
+    chooseRun(client, "legacy");
+    expect(doc.getElementById("banners")?.textContent).toContain("Already published to CALC-24");
+    expect(doc.getElementById("banners")?.textContent).not.toContain("()");
+    expect(doc.getElementById("project-hint")?.textContent).toBe("from the board's project scope");
+    expect(doc.getElementById("project-hint")?.hidden).toBe(false);
+    (doc.getElementById("environments") as HTMLInputElement).value = " qa, , staging ";
+    doc.getElementById("publish")!.click();
+    expect(clientBodies(client, "publish").at(-1)).toEqual({
+      type: "confirm", runId: "legacy",
+      request: { mode: "create-new", project: "CALC", summary: "Checkout results", testPlanKey: "CALC-42", environments: ["qa", "staging"] },
+      attachments: [],
+    });
+    client.dom.window.close();
+  });
+
+  it("deduplicates browsed attachments, names their sizes, and excludes over-limit or unchecked files", async () => {
+    const client = await rig();
+    const doc = client.dom.window.document;
+    const tiny = { path: "/ws/results.json", name: "results.json", size: 12 };
+    const model: PublishDialogModel = {
+      ...publishModel,
+      runs: [{ ...publishModel.runs[0]!, project: { value: "CALC", fromDerivation: true }, defaultSummary: "Checkout evidence" }],
+      attachments: {
+        available: true, uploadLimitBytes: 1024 * 1024, evidenceStream: "issue",
+        suggestions: [tiny, { path: "/ws/trace.zip", name: "trace.zip", size: 4096 }, { path: "/ws/large.zip", name: "large.zip", size: 2 * 1024 * 1024 }, tiny],
+      },
+    };
+    client.send("shell", { type: "activate", tab: "publish" });
+    client.send("publish", { type: "model", model });
+    expect(doc.querySelectorAll(".attach-row")).toHaveLength(3);
+    expect(doc.getElementById("attach-list")?.textContent).toContain("12 B");
+    expect(doc.getElementById("attach-list")?.textContent).toContain("4 KB");
+    expect(doc.getElementById("attach-list")?.textContent).toContain("2.0 MBover limit");
+    expect(doc.getElementById("attach-hint")?.textContent).toContain("Per-test evidence uploads to the execution's Jira issue");
+    expect(doc.querySelector<HTMLInputElement>('[data-path="/ws/large.zip"]')?.disabled).toBe(true);
+    doc.getElementById("browse")!.click();
+    expect(clientBodies(client, "publish").at(-1)).toEqual({ type: "browse" });
+    client.send("publish", { type: "browse-result", items: [tiny, { path: "/ws/browser.zip", name: "browser.zip", size: 64 }] });
+    expect(doc.querySelectorAll(".attach-row")).toHaveLength(4);
+    doc.querySelector<HTMLInputElement>('[data-path="/ws/trace.zip"]')!.click();
+    doc.getElementById("publish")!.click();
+    expect(clientBodies(client, "publish").at(-1)).toMatchObject({ type: "confirm", attachments: ["/ws/results.json", "/ws/browser.zip"] });
+    client.send("publish", { type: "model", model: { ...model, attachments: { ...model.attachments, evidenceStream: "both" } } });
+    expect(doc.getElementById("attach-hint")?.textContent).toContain("result payload and the Jira issue");
+    client.dom.window.close();
+  });
+
+  it("keeps an empty publish list and an active import distinct while runs arrive or are evicted", async () => {
+    const client = await rig();
+    const doc = client.dom.window.document;
+    client.send("shell", { type: "activate", tab: "publish" });
+    client.send("publish", { type: "model", model: { ...publishModel, runs: [], selectedRunId: "" } });
+    expect(doc.getElementById("publish-empty")?.hidden).toBe(false);
+    client.send("publish", { type: "runs", runs: publishModel.runs, selectedRunId: "run-1" });
+    expect(doc.getElementById("publish-form")?.hidden).toBe(false);
+    client.send("publish", { type: "publish-busy", busy: true });
+    client.send("publish", { type: "runs", runs: [], selectedRunId: "" });
+    expect(doc.getElementById("publish-busy")?.hidden).toBe(false);
+    client.send("publish", { type: "publish-busy", busy: false });
+    expect(doc.getElementById("publish-empty")?.hidden).toBe(false);
+    client.send("publish", { type: "retry", runs: publishModel.runs, selectedRunId: "run-1" });
+    expect(doc.getElementById("publish-form")?.hidden).toBe(false);
+    client.send("publish", { type: "retry", runs: [], selectedRunId: "" });
+    expect(doc.getElementById("publish-empty")?.hidden).toBe(false);
+    client.send("publish", { type: "settled" });
+    client.send("publish", { type: "runs", runs: publishModel.runs, selectedRunId: "run-1" });
+    client.send("publish", { type: "browse-result", items: [{ path: "/ws/late.zip", name: "late.zip", size: 1 }] });
+    client.send("publish", { type: "pending-result", runId: "run-1", remaining: 1 });
+    client.send("publish", { type: "attachment-error", text: "Late upload failure" });
+    expect(doc.getElementById("publish-idle")?.hidden).toBe(false);
+    expect(doc.getElementById("attach-list")?.textContent).toBe("");
+    expect(doc.getElementById("attach-hint")?.textContent).not.toContain("Late upload failure");
+    client.dom.window.close();
   });
 
   it("announces publish state and focuses the first invalid field", async () => {
@@ -764,7 +1172,44 @@ describe("coverage board browser client", () => {
     expect(client.dom.window.document.querySelector<HTMLButtonElement>("#banners button")?.disabled).toBe(true);
     client.send("publish", { type: "pending-busy", runId: "run-1", busy: false });
     expect(client.dom.window.document.querySelector<HTMLButtonElement>("#banners button")?.disabled).toBe(false);
+    client.send("publish", { type: "pending-result", runId: "run-1", remaining: 1 });
+    expect(client.dom.window.document.getElementById("banners")?.textContent).toContain("1 attachment file");
+    client.send("publish", { type: "pending-result", runId: "run-1", remaining: 0 });
+    expect(client.dom.window.document.querySelector("#banners button")).toBeNull();
     await expectNoSeriousViolations(client.dom);
+  });
+
+  it("keeps ordinary publish input and local project choices usable without Jira search", async () => {
+    const client = await rig();
+    vi.useFakeTimers();
+    try {
+      const doc = client.dom.window.document;
+      client.send("shell", { type: "activate", tab: "publish" });
+      client.send("publish", { type: "model", model: { ...publishModel, jiraSearchAvailable: false, knownProjectKeys: ["CALC"] } });
+      doc.querySelector<HTMLInputElement>('input[name="publish-mode"][value="append"]')!.click();
+      expect(doc.getElementById("append-fields")?.hidden).toBe(false);
+      const execution = doc.getElementById("execution") as HTMLInputElement;
+      execution.value = "CALC-21";
+      execution.dispatchEvent(new client.dom.window.Event("input", { bubbles: true }));
+      expect(execution.value).toBe("CALC-21");
+      doc.querySelector<HTMLInputElement>('input[name="publish-mode"][value="create-new"]')!.click();
+      expect(doc.getElementById("create-fields")?.hidden).toBe(false);
+      for (const id of ["plan", "project"]) {
+        const input = doc.getElementById(id) as HTMLInputElement;
+        input.value = "CA";
+        input.dispatchEvent(new client.dom.window.Event("input", { bubbles: true }));
+      }
+      expect(doc.getElementById("project-results")?.textContent).toBe("CALC");
+      const tab = new client.dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+      doc.getElementById("project")!.dispatchEvent(tab);
+      expect(tab.defaultPrevented).toBe(false);
+      expect(doc.getElementById("project-results")?.textContent).toBe("CALC");
+      await vi.advanceTimersByTimeAsync(400);
+      expect(clientBodies(client, "publish").filter(message => message.type === "search")).toEqual([]);
+    } finally {
+      client.dom.window.close();
+      vi.useRealTimers();
+    }
   });
 
   it("retires run A after success or failure while run B is selected", async () => {
@@ -853,6 +1298,41 @@ describe("coverage board browser client", () => {
     expect(clientBodies(client, "publish").filter((message) => message.type === "confirm")).toEqual([]);
     expect(client.dom.window.document.getElementById("attach-hint")?.textContent).toBe("Choose at most 64 attachments.");
     expect(client.dom.window.document.getElementById("publish-busy")?.hidden).toBe(true);
+  });
+
+  it("keeps the 64 offered attachments when a later picker response exceeds the limit", async () => {
+    const client = await rig();
+    const suggestions = Array.from({ length: 64 }, (_, index) => ({
+      path: `/ws/file-${index}.zip`, name: `file-${index}.zip`, size: 100,
+    }));
+    client.send("publish", { type: "model", model: {
+      ...publishModel,
+      runs: [{ ...publishModel.runs[0]!, project: { value: "CALC", fromDerivation: true }, defaultSummary: "Checkout evidence" }],
+      attachments: { ...publishModel.attachments, available: true, uploadLimitBytes: 1024, suggestions },
+    } });
+    client.send("publish", { type: "browse-result", items: [{ path: "/ws/overflow.zip", name: "overflow.zip", size: 10 }] });
+    expect(client.dom.window.document.querySelectorAll(".attach-row")).toHaveLength(64);
+    expect(client.dom.window.document.getElementById("attach-list")?.textContent).not.toContain("overflow.zip");
+    expect(client.dom.window.document.getElementById("attach-hint")?.textContent).toBe("Choose at most 64 attachments.");
+    client.dom.window.document.getElementById("publish")!.click();
+    expect(clientBodies(client, "publish").at(-1)).toMatchObject({ type: "confirm", attachments: suggestions.map(file => file.path) });
+    client.dom.window.close();
+  });
+
+  it("ignores pending-upload events for evicted runs and preserves the selected run banner", async () => {
+    const client = await rig();
+    const doc = client.dom.window.document;
+    client.send("publish", { type: "model", model: pendingPublishModel() });
+    const banner = doc.getElementById("banners")!.textContent;
+    client.send("publish", { type: "pending-busy", runId: "evicted", busy: true });
+    client.send("publish", { type: "pending-result", runId: "evicted", remaining: 1 });
+    expect(doc.getElementById("banners")!.textContent).toBe(banner);
+    client.send("publish", { type: "pending-result", runId: "run-b", remaining: 0 });
+    expect(doc.getElementById("banners")!.textContent).toBe(banner);
+    chooseRun(client, "run-b");
+    expect(doc.getElementById("banners")?.textContent).not.toContain("attachment files waiting");
+    expect(doc.querySelector("#banners button")).toBeNull();
+    client.dom.window.close();
   });
 
   it("clears a debounced search after cancel is acknowledged so no late remote work or UI update starts", async () => {

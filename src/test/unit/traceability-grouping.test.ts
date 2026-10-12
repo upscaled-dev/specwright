@@ -156,6 +156,22 @@ describe("switchDefaultProject command handler", () => {
     ]);
   });
 
+  it("validates the manual project key before saving it", async () => {
+    const updates = stubConfig({}, {});
+    vi.spyOn(vscode.window, "showInputBox").mockImplementation(async (options) => {
+      expect(options?.validateInput?.("12BAD")).toBe("Enter a project key such as CALC.");
+      expect(options?.validateInput?.("calc_2")).toBeUndefined();
+      return "calc_2";
+    });
+    const handlers = captureHandlers(makeContext());
+
+    await handlers.get("playwrightBddRunner.traceability.switchDefaultProject")!();
+
+    expect(updates).toEqual([
+      { key: "xray.defaultProjectKey", value: "CALC_2", target: vscode.ConfigurationTarget.Global },
+    ]);
+  });
+
   it("writes the key back to the Workspace when the setting is pinned there", async () => {
     const updates = stubConfig({}, { workspaceValue: "OLD" });
     vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("new");
@@ -285,6 +301,20 @@ describe("switchDefaultProject: Jira project QuickPick branch", () => {
 
     expect(input).toHaveBeenCalledOnce();
     expect(win.__quickPicks).toHaveLength(0);
+    expect(updates).toEqual([
+      { key: "xray.defaultProjectKey", value: "PAY", target: vscode.ConfigurationTarget.Global },
+    ]);
+  });
+
+  it("uses the manual key prompt without a Jira site even when credentials are stored", async () => {
+    const updates = stubConfig({ "xray.siteUrl": "", "xray.defaultProjectKey": "CALC" });
+    const input = vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("pay");
+    const handlers = withJira();
+
+    await handlers.get(CMD)!();
+
+    expect(mockSearch).not.toHaveBeenCalled();
+    expect(input).toHaveBeenCalledOnce();
     expect(updates).toEqual([
       { key: "xray.defaultProjectKey", value: "PAY", target: vscode.ConfigurationTarget.Global },
     ]);
@@ -575,5 +605,60 @@ describe("selectSyncProjects command handler", () => {
     expect(quickPick).not.toHaveBeenCalled();
     expect(updates).toEqual([]);
     expect(String(info.mock.calls[0]?.[0])).toContain("No projects to choose from yet");
+  });
+});
+
+describe("traceability sync command", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("syncs the board's working project alongside known test keys and reports the result", async () => {
+    const scope = projectScopeStore(memento(), () => undefined);
+    scope.set("PAY");
+    let syncedAt = 0;
+    const sync = vi.fn(async (_scope: unknown) => {syncedAt += 1;});
+    const metadata = {
+      sync,
+      snapshot: () => ({
+        tests: new Map([["CALC-7", { key: "CALC-7" }]]),
+        errors: [],
+        syncedAt,
+        catalogueProjects: ["CALC", "PAY"],
+      }),
+    };
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const handlers = captureHandlers(makeContext(), (manager) => manager.setTraceabilitySubsystem({
+      getActiveAdapter: () => ({ metadata, keyGrammar: { projectOf: () => "CALC" } }),
+      knownTestKeys: () => ["CALC-7"],
+      tagDerivedProjectKeys: () => [],
+      projectScope: () => scope,
+    } as unknown as TraceabilitySubsystem));
+
+    await handlers.get("playwrightBddRunner.traceability.sync")!();
+
+    expect(sync).toHaveBeenCalledOnce();
+    expect(sync.mock.calls[0]?.[0]).toEqual({ testKeys: ["CALC-7"], projectKeys: ["CALC", "PAY"] });
+    expect(info).toHaveBeenCalledWith("Synced 1 remote test.");
+  });
+
+  it("offers the output channel when the tracker returns sync errors", async () => {
+    const logger = makeContext().logger;
+    const showOutput = vi.spyOn(logger, "showOutput");
+    const error = vi.spyOn(vscode.window, "showErrorMessage")
+      .mockResolvedValue("Show Output" as never);
+    const metadata = {
+      sync: vi.fn().mockResolvedValue(undefined),
+      snapshot: () => ({ tests: new Map(), errors: ["permission denied"], syncedAt: 0, catalogueProjects: [] }),
+    };
+    const handlers = captureHandlers(makeContext({ logger }), (manager) => manager.setTraceabilitySubsystem({
+      getActiveAdapter: () => ({ metadata, keyGrammar: { projectOf: () => "CALC" } }),
+      knownTestKeys: () => [],
+      tagDerivedProjectKeys: () => [],
+      projectScope: () => NO_PROJECT_SCOPE,
+    } as unknown as TraceabilitySubsystem));
+
+    await handlers.get("playwrightBddRunner.traceability.sync")!();
+
+    expect(error).toHaveBeenCalledWith("Sync completed with errors: see the output channel for details.", "Show Output");
+    expect(showOutput).toHaveBeenCalledOnce();
   });
 });

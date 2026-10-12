@@ -92,6 +92,18 @@ describe("UnusedStepDiagnosticsProvider", () => {
     (vscode.languages as unknown as { __resetCounters: () => void }).__resetCounters();
   });
 
+  it("ignores remote documents even when their path has a step definition extension", async () => {
+    const doc = new FakeDocument('Given("unused", async () => {});', "/ws/steps/a.ts");
+    doc.uri.scheme = "vscode-remote";
+    const provider = new UnusedStepDiagnosticsProvider(
+      makeFakeResolver([doc.fileName]), makeFakeIndex().asIndex, [doc.fileName], stubLogger
+    );
+    provider.start();
+    await provider.refreshDocument(doc as unknown as vscode.TextDocument);
+    expect(probeCollection(provider).getDiagnostics(doc.uri)).toEqual([]);
+    provider.dispose();
+  });
+
   it("emits an Information diagnostic for a def with zero usages", async () => {
     const filePath = "/ws/steps/a.ts";
     const source = `Given("I am never called", async () => {});`;

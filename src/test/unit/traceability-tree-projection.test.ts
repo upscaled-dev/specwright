@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import * as vscode from "vscode";
+import { describe, expect, it, vi } from "vitest";
 import { formatSyncedAgo, projectTraceabilityTree } from "../../traceability/traceability-tree-projection";
 import type { TraceabilityModel, TraceabilitySnapshot } from "../../traceability/traceability-model";
 
@@ -43,6 +44,15 @@ describe("traceability tree projection", () => {
     expect(projection.rows.map((row) => row.label)).toEqual(["math.feature", "subtracts", "adds"]);
     expect(projection.rows[0]?.description).toBe("1 untraced");
     expect(projection.rows[0]?.actions.map((action) => action.id)).toEqual(["run"]);
+  });
+
+  it("shows workspace-relative paths for files inside an open workspace", () => {
+    const folders = vi.spyOn(vscode.workspace, "workspaceFolders", "get").mockReturnValue([{ uri: vscode.Uri.file("/workspace"), name: "shop", index: 0 }]);
+    try {
+      const projection = projectTraceabilityTree(model, "Xray", "file", true, undefined, true);
+      expect(projection.rows[0]?.label).toBe("features/math.feature");
+      expect(projection.rows[0]?.actions.map((action) => action.id)).toEqual(["run"]);
+    } finally {folders.mockRestore();}
   });
 
   it("adds the connection row with its advertised setup and project actions", () => {
@@ -239,5 +249,26 @@ describe("traceability tree projection", () => {
     expect(stale.description).toContain("(stale)");
     const cached = projectTraceabilityTree(model, "Xray", "test", true, { state: "unreachable", label: "site", message: "detail", sync: { syncedAt: Date.now() - 60_000, stale: true } }, true).rows[0]!;
     expect(cached.description).toContain("showing data synced 1m ago");
+  });
+});
+
+describe("file-grouped traceability completeness", () => {
+  it("sorts files with unmapped scenarios first, then sorts mapped files by path", () => {
+    const links = ["z", "a", "m"].map(name => ({ ...snapshot.links[0]!, scenario: { ...snapshot.links[0]!.scenario, filePath: `/workspace/${name}.feature`, name } }));
+    const untraced = ["d", "b"].map(name => ({ ...snapshot.untraced[0]!, scenario: { ...snapshot.untraced[0]!.scenario, filePath: `/workspace/${name}.feature`, name } }));
+    const value = { ...snapshot, links, untraced };
+    const result = projectTraceabilityTree({ snapshot: value } as TraceabilityModel, "Xray", "file", true, undefined, true);
+    expect(result.rows.filter(row => row.icon === "file").map(row => row.label)).toEqual(["b.feature", "d.feature", "a.feature", "m.feature", "z.feature"]);
+  });
+
+  it("shows an orphan without a summary in its existing project group", () => {
+    const value = { ...snapshot, completeProjects: ["CALC"], orphans: [{ testKey: "CALC-99", meta: { key: "CALC-99" } }] };
+    const result = projectTraceabilityTree({ snapshot: value } as TraceabilityModel, "Xray", "file", true, undefined, true);
+    expect(result.rows.find(row => row.label === "CALC-99")).toMatchObject({ tooltip: "CALC-99", description: undefined });
+  });
+
+  it("explains a missing remote test without inventing a project", () => {
+    const value = { ...snapshot, links: [{ ...snapshot.links[0]!, project: undefined, remoteMissing: true }] };
+    expect(row(value, "CALC-1")?.tooltip).toContain("CALC-1 was not found on the connected site.");
   });
 });

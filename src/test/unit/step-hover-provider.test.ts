@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { StepHoverProvider } from "../../providers/step-hover-provider";
 import { StepResolver, ParsedStepDefWithFile } from "../../providers/step-resolver";
@@ -44,6 +44,15 @@ function defOf(
 }
 
 describe("StepHoverProvider basic shape", () => {
+  it("does not show stale hover data after loading step definitions fails", async () => {
+    const resolver = makeResolverWithDefs([]);
+    vi.spyOn(resolver, "loadAllStepDefs").mockRejectedValue(new Error("file unavailable"));
+    const provider = new StepHoverProvider(["steps/*.ts"], resolver);
+    await expect(provider.provideHover(
+      new FakeDocument("Given a basket") as unknown as vscode.TextDocument, pos(0, 8)
+    )).resolves.toBeUndefined();
+  });
+
   it("returns undefined for non-step lines (comment)", async () => {
     const defs = [defOf("I have a thing", "/ws/features/steps/a.ts", 5)];
     const provider = new StepHoverProvider(["features/steps/**/*.ts"], makeResolverWithDefs(defs));

@@ -15,6 +15,7 @@ describe("StepResolver source formats", () => {
     for (const extension of ["ts", "mts", "cts", "js", "mjs", "cjs"]) {
       expect(isStepSourceFile(`/repo/features/steps/example.${extension}`)).toBe(true);
     }
+    expect(isStepSourceFile("/repo/features/steps/extensionless")).toBe(false);
     expect(isStepSourceFile("/repo/features/steps/example.tsx")).toBe(false);
     expect(isStepSourceFile("/repo/features/steps/example.json")).toBe(false);
   });
@@ -807,6 +808,17 @@ describe("StepResolver.loadAllStepDefs structural-copy dedupe", () => {
     return abs;
   }
 
+  it("deduplicates regex definitions while tolerating empty source files", async () => {
+    const source = STEP_SOURCE.replace("'I open the dashboard'", "/I open .+/");
+    const original = write("e2e/steps/login.steps.ts", source);
+    const copy = write("reports/e2e/steps/login.steps.ts", source);
+    const empty = write("e2e/steps/empty.ts", "export {};");
+    vi.spyOn(resolver, "findStepFiles").mockResolvedValue([empty, copy, original]);
+    const defs = await resolver.loadAllStepDefs(["**/*.ts"]);
+    expect(defs).toHaveLength(1);
+    expect(defs[0]).toMatchObject({ filePath: original, isRegex: true });
+  });
+
   it("drops a report copy that mirrors the original's path structure", async () => {
     const original = write("e2e/steps/login.steps.ts", STEP_SOURCE);
     const copy = write("reports/e2e/steps/login.steps.ts", STEP_SOURCE);
@@ -878,5 +890,24 @@ describe("StepResolver.parseStepFile mtime cache", () => {
     expect(second.map((d) => d.pattern)).toEqual(["first step", "second step"]);
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+
+describe("step discovery failures", () => {
+  it.each([new Error("unavailable"), "unavailable"])("returns no definitions after discovery fails: %s", async error => {
+    const find = vi.spyOn(vscode.workspace, "findFiles").mockRejectedValue(error);
+    const resolver = makeResolver();
+    try { expect(await resolver.loadAllStepDefs(["**/*.ts"])).toEqual([]); }
+    finally { resolver.dispose(); find.mockRestore(); }
+  });
+
+  it("treats a directory named like a step source as unreadable", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "step-source-directory-"));
+    const directory = path.join(root, "steps.ts");
+    fs.mkdirSync(directory);
+    const resolver = makeResolver();
+    try { expect(resolver.parseStepFile(directory)).toEqual([]); }
+    finally { resolver.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 });

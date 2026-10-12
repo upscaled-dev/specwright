@@ -11,6 +11,7 @@ import { ExternalRef, SyncProgress, SyncScope, TraceabilityAdapter } from "../..
 import { XrayCredentialStore } from "../../xray/xray-credential-store";
 import { createXrayAdapterFactory } from "../../xray/xray-adapter-factory";
 import { InMemoryTraceabilityAdapter } from "../../traceability/in-memory-adapter";
+import { PublishLedger } from "../../traceability/publish-ledger";
 import { BoardPanel, BoardPanelDeps } from "../../traceability/board-panel";
 import type { TraceabilitySubsystem } from "../../traceability/traceability-subsystem";
 import { NO_MAPPING_PAGE_SIZE } from "../../traceability/mapping-page-size";
@@ -113,6 +114,17 @@ describe("traceability browse/copy command handlers", () => {
     expect(envHooks.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-1"]);
   });
 
+  it("opens and copies a key passed directly by the board command", async () => {
+    const context = makeContext({
+      traceabilityAdapter: stubAdapter((key) => `https://acme.atlassian.net/browse/${key}`),
+    });
+    const handlers = captureHandlers(context);
+    await handlers.get("playwrightBddRunner.traceability.openIssue")!("CALC-9");
+    await handlers.get("playwrightBddRunner.traceability.copyKey")!("CALC-9");
+    expect(envHooks.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-9"]);
+    expect(envHooks.__clipboardText).toBe("CALC-9");
+  });
+
   it("warns and opens nothing when the adapter yields no browse URL", async () => {
     const warn = vi.spyOn(vscode.window, "showWarningMessage");
     await openIssue(stubAdapter(() => undefined), { testKey: "CALC-1" });
@@ -139,6 +151,15 @@ describe("traceability browse/copy command handlers", () => {
   it("no-ops when the item carries no issue key", async () => {
     await openIssue(stubAdapter((key) => `https://acme.atlassian.net/browse/${key}`), { notAKey: true });
     expect(envHooks.__openExternalCalls).toEqual([]);
+  });
+
+  it("refuses to copy an item without an issue key", async () => {
+    const error = vi.spyOn(vscode.window, "showErrorMessage");
+    const handlers = captureHandlers(makeContext({ traceabilityAdapter: stubAdapter(() => undefined) }));
+    await handlers.get("playwrightBddRunner.traceability.copyKey")!({ testKey: 4 });
+    expect(error).toHaveBeenCalledWith("Copy issue key: no issue key on this item.");
+    expect(envHooks.__clipboardText).toBe("");
+    error.mockRestore();
   });
 
   it("copies the issue key to the clipboard", async () => {
@@ -317,6 +338,25 @@ describe("traceability linkScenario command", () => {
     expect(error.mock.calls[0]?.[0]).toBe("Could not link 5: the feature file edit was not applied.");
   });
 
+  it("reports an already linked scenario without writing the same tag twice", async () => {
+    const adapter = await syncedAdapter();
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(
+      fakeDoc("Feature: F\n\n@TC-5\nScenario: A\n  Given x\n")
+    );
+    const apply = vi.spyOn(vscode.workspace, "applyEdit");
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
+
+    const taggedScenario = {
+      ...untracedNode,
+      item: { scenario: { ...untracedNode.item.scenario, line: 4 } },
+    };
+    await confirmLink(handlers.get("playwrightBddRunner.traceability.linkScenario")!(taggedScenario), "5");
+
+    expect(apply).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith("Scenario already linked to 5.");
+  });
+
   it("opens the Coverage Board and reveals the contextual Link tab", async () => {
     const adapter = await syncedAdapter();
     const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter }));
@@ -328,6 +368,130 @@ describe("traceability linkScenario command", () => {
     expect(boardPosts(board).find((m) => m.type === "linkTab" && m["visible"] === true)).toBeDefined();
 
     await confirmLink(pending, "5");
+  });
+
+  it.each(["create failed", "tag threw", "warning with key", "warning without key", "project cancelled", "association cancelled"] as const)(
+    "reports the single-create outcome safely when %s", async (mode) => {
+      const base = await syncedAdapter();
+      const created = mode === "warning without key"
+        ? { issueId: "99", warnings: ["field was ignored"] }
+        : { key: "9", warnings: mode === "warning with key" ? ["field was ignored"] : [] };
+      const createTest = vi.fn().mockImplementation(async () => {
+        if (mode === "create failed") { throw new Error("tracker unavailable"); }
+        return created;
+      });
+      const adapter: TraceabilityAdapter = {
+        id: base.id, label: base.label, keyGrammar: base.keyGrammar, metadata: base.metadata,
+        browseUrl: () => undefined,
+        testAuthoring: { createTest, ...(mode === "association cancelled" ? {
+          resolveTestContainer: vi.fn(), addTestsToContainer: vi.fn(),
+        } : {}) },
+      };
+      const input = vi.spyOn(vscode.window, "showInputBox").mockImplementation(async (options) => {
+        expect(options?.validateInput?.("   ")).toBe("Enter a project key.");
+        expect(options?.validateInput?.(" calc ")).toBeUndefined();
+        return mode === "project cancelled" ? undefined : " calc ";
+      });
+      vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+      vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Create test" as never);
+      vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(fakeDoc("Feature: F\n\nScenario: A\n  Given x\n"));
+      const apply = vi.spyOn(vscode.workspace, "applyEdit").mockImplementation(async () => {
+        if (mode === "tag threw") { throw new Error("editor closed"); }
+        return true;
+      });
+      const error = vi.spyOn(vscode.window, "showErrorMessage");
+      const logger = Logger.create();
+      const warning = vi.spyOn(logger, "warn");
+      const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter, logger,
+        config: configWith({ "xray.defaultProjectKey": "" }),
+      }));
+      await confirmLink(handlers.get("playwrightBddRunner.traceability.linkScenario")!(untracedNode), " create");
+      expect(input).toHaveBeenCalledOnce();
+      if (mode === "project cancelled" || mode === "association cancelled") {
+        expect(createTest).not.toHaveBeenCalled();
+        expect(apply).not.toHaveBeenCalled();
+      } else {
+        expect(createTest).toHaveBeenCalledOnce();
+        expect(createTest.mock.calls[0]?.[0]).toMatchObject({ project: "CALC", summary: "A" });
+      }
+      if (mode === "create failed") { expect(error).toHaveBeenCalledWith("Could not create the In-Memory test: tracker unavailable"); }
+      if (mode === "tag threw") { expect(error).toHaveBeenCalledWith("The In-Memory test 9 was created, but linking the scenario failed: editor closed"); }
+      if (mode.startsWith("warning")) {
+        expect(warning).toHaveBeenCalledWith("In-Memory returned warnings creating a test", expect.objectContaining({ warnings: expect.stringContaining("field was ignored") }));
+      }
+      if (mode === "warning without key") {
+        expect(apply).not.toHaveBeenCalled();
+        expect(error).toHaveBeenCalledWith(expect.stringContaining("issue id 99"));
+      }
+      base.dispose();
+    }
+  );
+
+  it.each(["linked", "missing", "rejected"] as const)("shows and unlinks an existing picker row when %s", async (mode) => {
+    const adapter = await syncedAdapter();
+    const scenario: ScenarioRef = { filePath: "/ws/a.feature", line: 4, name: "A", kind: "scenario" };
+    let source = "Feature: F\n\n@TC-5\nScenario: A\n  Given x\n";
+    vi.spyOn(vscode.workspace, "openTextDocument").mockImplementation(async () => fakeDoc(source));
+    const apply = vi.spyOn(vscode.workspace, "applyEdit").mockImplementation(async (edit) => {
+      if (mode === "rejected") { return false; }
+      source = applyWsEdit(source, (edit as unknown as { __entries: EditEntry[] }).__entries);
+      return true;
+    });
+    const errors = vi.spyOn(vscode.window, "showErrorMessage");
+    const changed = new vscode.EventEmitter<void>();
+    const manager = CommandManager.create(makeContext({ traceabilityAdapter: adapter }));
+    manager.setTraceabilitySubsystem({
+      traceabilityPanelActive: true, connected: true, getActiveAdapter: () => adapter,
+      getSnapshot: () => ({ links: [{ testKey: "5", scenario, reqKeys: [],
+        ...(mode === "missing" ? { remoteMissing: true } : { meta: { key: "5", summary: "Five" } }),
+      }], untraced: [], orphans: [], stale: false, completeProjects: [], errors: [] }),
+      knownTestKeys: () => ["5"], tagDerivedProjectKeys: () => [], projectScope: () => NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE, onDidChangeSnapshot: changed.event,
+    } as unknown as TraceabilitySubsystem);
+    const pending = traceabilityCommands(manager).linkScenario({ kind: "link", link: { scenario } });
+    const panel = win.__webviewPanels.at(-1)!;
+    await receiveBoard(panel, "shell", { type: "ready" });
+    expect(boardPosts(panel).filter((post) => post.type === "linked").at(-1)).toMatchObject({
+      rows: [{ key: "5", ...(mode === "missing" ? { remoteMissing: true } : { summary: "Five" }) }],
+    });
+    await receiveBoard(panel, "link", { type: "unlink", key: "5" });
+    await vi.waitFor(() => {
+      if (mode === "rejected") { expect(errors).toHaveBeenCalledWith(expect.stringContaining("Could not unlink")); }
+      else { expect(boardPosts(panel).filter((post) => post.type === "linked").at(-1)).toMatchObject({ rows: [] }); }
+    });
+    expect(apply).toHaveBeenCalledOnce();
+    expect(source.includes("@TC-5")).toBe(mode === "rejected");
+    await receiveBoard(panel, "link", { type: "cancel" });
+    await pending;
+    manager.dispose(); changed.dispose(); adapter.dispose();
+  });
+
+  it("merges a newly linked remote search result without repeating its tag write", async () => {
+    vi.useFakeTimers();
+    const base = await syncedAdapter();
+    const mergeKeys = vi.fn().mockRejectedValue(new Error("metadata offline"));
+    const logger = Logger.create(); const warn = vi.spyOn(logger, "warn");
+    const adapter: TraceabilityAdapter = {
+      id: base.id, label: base.label, keyGrammar: base.keyGrammar, metadata: base.metadata,
+      browseUrl: () => undefined,
+      remoteSearch: { search: async () => ({ tests: [{ key: "9", summary: "Remote checkout" }], complete: true }), mergeKeys },
+    };
+    vi.spyOn(vscode.workspace, "openTextDocument").mockResolvedValue(fakeDoc("Feature: F\n\nScenario: A\n  Given x\n"));
+    const apply = vi.spyOn(vscode.workspace, "applyEdit").mockResolvedValue(true);
+    try {
+      const handlers = captureHandlers(makeContext({ traceabilityAdapter: adapter, logger }));
+      const pending = handlers.get("playwrightBddRunner.traceability.linkScenario")!(untracedNode);
+      const panel = win.__webviewPanels.at(-1)!;
+      await receiveBoard(panel, "shell", { type: "ready" });
+      await receiveBoard(panel, "link", { type: "search", value: "remote" });
+      await vi.advanceTimersByTimeAsync(400);
+      expect(boardPosts(panel).filter((post) => post.type === "rows").at(-1)).toMatchObject({ rows: [{ id: "9", key: "9", summary: "Remote checkout", kind: "test" }] });
+      await receiveBoard(panel, "link", { type: "confirm", id: "9" });
+      await pending;
+      expect(mergeKeys).toHaveBeenCalledWith(["9"]);
+      expect(warn).toHaveBeenCalledWith("Xray metadata merge for a newly linked test failed", { error: "metadata offline" });
+      expect(apply).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); base.dispose(); }
   });
 
   it("quietly forces a project sync after a newly created test is tagged", async () => {
@@ -1317,13 +1481,24 @@ describe("traceability board drag-to-link drop handler", () => {
     const subsystem = {
       getActiveAdapter: () => adapter,
       getSnapshot: () => snapshot,
+      projectScope: () => NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
     } as unknown as TraceabilitySubsystem;
     mgr.setTraceabilitySubsystem(subsystem);
     return { mgr, applied };
   }
 
   const drop = (mgr: CommandManager, dropId: string, key: string): Promise<void> =>
-    linkCommands(mgr).applyBoardDrop(dropId, key);
+    traceabilityBoardDeps(mgr).applyDrop!(dropId, key);
+
+  it.each(["applyDrop", "applyUnlink"] as const)("ignores %s after the active adapter disconnects", async (method) => {
+    const { mgr, applied } = harness(dropSnapshot());
+    const commands = traceabilityBoardDeps(mgr);
+    mgr.setTraceabilitySubsystem({ getActiveAdapter: () => undefined } as unknown as TraceabilitySubsystem);
+    await commands[method]!(scenarioDropId(A), "5");
+    expect(applied).toEqual([]);
+    mgr.dispose();
+  });
 
   it("writes the tag via a single WorkspaceEdit inserting the grammar-built tag", async () => {
     const { mgr, applied } = harness(dropSnapshot());
@@ -1376,6 +1551,8 @@ describe("traceability board drag-to-link drop handler", () => {
     mgr.setTraceabilitySubsystem({
       getActiveAdapter: () => adapter,
       getSnapshot: () => dropSnapshot(),
+      projectScope: () => NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
     } as unknown as TraceabilitySubsystem);
 
     await expect(drop(mgr, scenarioDropId(A), "5")).resolves.toBeUndefined();
@@ -1433,12 +1610,14 @@ describe("traceability board unlink handler", () => {
     mgr.setTraceabilitySubsystem({
       getActiveAdapter: () => adapter,
       getSnapshot: () => snapshot,
+      projectScope: () => NO_PROJECT_SCOPE,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
     } as unknown as TraceabilitySubsystem);
     return { mgr, applied };
   }
 
   const unlink = (mgr: CommandManager, dropId: string, key: string): Promise<void> =>
-    linkCommands(mgr).applyBoardUnlink(dropId, key);
+    traceabilityBoardDeps(mgr).applyUnlink!(dropId, key);
 
   it("routes a valid pair through applyTagRemove with the exact ref and key", async () => {
     const { mgr } = harness(unlinkSnapshot());
@@ -1530,3 +1709,76 @@ describe("traceability bulkCreateTests wiring", () => {
 });
 
 // The board is rebuilt from settings, so a settings edit only reaches an open one through a rebuild.
+
+describe("board authoring entry-point prerequisites", () => {
+  afterEach(() => { win.__resetWebviewPanels(); vi.restoreAllMocks(); });
+
+  it.each(["createTestSet", "addToTestSet", "createTestPlan", "addToTestPlan"] as const)(
+    "explains the missing selection when the board requests %s", async action => {
+      const info = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined);
+      const manager = CommandManager.create(makeContext());
+      const deps = traceabilityBoardDeps(manager);
+      deps[action]!();
+      await vi.waitFor(() => expect(info).toHaveBeenCalledWith("Select tests on the Coverage Board's Mapping tab first."));
+      await vi.waitFor(() => expect(deps.mutationActive?.()).toBe(false));
+    }
+  );
+
+  it.each(["addToTestSet", "addToTestPlan"] as const)("explains the missing selection through command %s", async method => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined);
+    const manager = CommandManager.create(makeContext());
+    await traceabilityCommands(manager)[method]();
+    expect(info).toHaveBeenCalledWith("Select tests on the Coverage Board's Mapping tab first.");
+  });
+
+  it("asks users to connect before creating an execution from the board", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined);
+    const deps = traceabilityBoardDeps(CommandManager.create(makeContext()));
+    deps.createTestExecution!();
+    await vi.waitFor(() => expect(info).toHaveBeenCalledWith("Connect to your test tracker before creating a Test Execution."));
+    await vi.waitFor(() => expect(deps.mutationActive?.()).toBe(false));
+  });
+
+  it("asks users to connect before pushing a linked row through the board", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined);
+    const deps = traceabilityBoardDeps(CommandManager.create(makeContext()));
+    deps.pushText!("scenario-id", "CALC-1");
+    await vi.waitFor(() => expect(info).toHaveBeenCalledWith("Connect to your test tracker before pushing scenario text."));
+    await vi.waitFor(() => expect(deps.mutationActive?.()).toBe(false));
+  });
+});
+
+
+describe("standalone execution creation through the board", () => {
+  afterEach(() => { win.__resetWebviewPanels(); vi.restoreAllMocks(); });
+
+  it("records a created execution in the ledger and exposes it in the board rows", async () => {
+    const context = makeContext({ config: configWith({ "xray.siteUrl": "acme.atlassian.net", "xray.defaultProject": "CALC" }) });
+    const { store } = mapCredentialStore();
+    await store.setCredentials("acme.atlassian.net", "account", "secret");
+    const ledger = new PublishLedger(memento(), context.logger);
+    const create = vi.fn().mockResolvedValue({ key: "CALC-99", warnings: [] });
+    const adapter = { ...stubAdapter(() => undefined), testAuthoring: { createTest: vi.fn(), createTestExecution: create } };
+    const manager = CommandManager.create(context);
+    manager.setCredentialStore(store);
+    manager.setPublishLedger(ledger);
+    manager.setTraceabilitySubsystem({
+      getActiveAdapter: () => adapter, getSnapshot: () => undefined,
+      projectScope: () => ({ get: () => "CALC", set: () => Promise.resolve() }),
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE, tagDerivedProjectKeys: () => [], knownTestKeys: () => [],
+      rebuildNow: () => Promise.resolve(),
+    } as unknown as TraceabilitySubsystem);
+    vi.spyOn(vscode.window, "showInputBox").mockResolvedValue("Nightly checkout");
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Create Test Execution" as never);
+    const deps = traceabilityBoardDeps(manager);
+    deps.createTestExecution!();
+    await vi.waitFor(() => expect(ledger.entriesForSite("acme.atlassian.net")).toHaveLength(1));
+    await vi.waitFor(() => expect(deps.mutationActive?.()).toBe(false));
+    expect(create).toHaveBeenCalledWith({ project: "CALC", summary: "Nightly checkout" }, expect.any(AbortSignal));
+    expect(ledger.entriesForSite("acme.atlassian.net")[0]).toMatchObject({
+      artifactId: "standalone:CALC-99", executionRef: "CALC-99", account: "account",
+      summary: "Nightly checkout", mode: "created-empty", pendingAttachments: [],
+    });
+    expect(deps.buildExecutions!()).toEqual(expect.arrayContaining([expect.objectContaining({ key: "CALC-99" })]));
+  });
+});

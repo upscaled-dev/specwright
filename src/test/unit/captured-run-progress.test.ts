@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import { runCapturedWithProgress } from "../../commands/captured-run-progress";
 
 describe("runCapturedWithProgress", () => {
-  it("publishes live counts, aborts on cancellation, and completes the open session", async () => {
+  it.each([false, true])("publishes live counts and completes a cancelled session (already cancelled: %s)", async (alreadyCancelled) => {
     const reports: unknown[] = [];
     const complete = vi.fn();
     const end = vi.fn();
@@ -24,7 +24,7 @@ describe("runCapturedWithProgress", () => {
         return task(
           { report: (value) => reports.push(value) },
           {
-            isCancellationRequested: false,
+            isCancellationRequested: alreadyCancelled,
             onCancellationRequested: (listener) => {
               queueMicrotask(listener);
               return { dispose: () => undefined };
@@ -44,7 +44,9 @@ describe("runCapturedWithProgress", () => {
           scenarioName: "first",
           status: "passed",
         }, 127, 500);
-        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+        if (!signal.aborted) { await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })); }
+        progress.onProgress?.({ phase: "finishing" });
+        progress.onTestEnd?.({ featurePath: "/repo/sample.feature", scenarioName: "late", status: "skipped" }, 128, 500);
         return { success: false, output: "", error: "Cancelled", duration: 1 };
       },
       window
@@ -55,8 +57,9 @@ describe("runCapturedWithProgress", () => {
       { message: "Running" },
       { message: "Running 0/500" },
       { message: "Running 127/500" },
+      { message: "Finishing run" },
     ]);
-    expect(onTestEnd).toHaveBeenCalledOnce();
+    expect(onTestEnd).toHaveBeenCalledTimes(2);
     expect(complete).toHaveBeenCalledWith(result);
     expect(end).not.toHaveBeenCalled();
   });

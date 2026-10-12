@@ -31,12 +31,25 @@ describe("openLiveRunSession", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it("disables optional live reporting when its destination directory has disappeared", () => {
+    const errors: Error[] = [];
+    const result = openLiveRunSession({
+      liveReportPath: path.join(root, "removed", "live.jsonl"), reporterPath: "/extension/reporter.js", progress: {},
+      onError: (error) => errors.push(error),
+    });
+    expect(result).toBeUndefined();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: "ENOENT" });
+  });
+
   it("carries real reporter retry and end boundaries while optional stage consumers throw", async () => {
+    const controller = new AbortController();
     const stages: RunProgress[] = [];
     const results: ScenarioResult[] = [];
     const errors: Error[] = [];
     const handle = openLiveRunSession({
       liveReportPath: path.join(root, "live.jsonl"), reporterPath: "/extension/reporter.js",
+      signal: controller.signal,
       progress: {
         onProgress: (progress) => {stages.push(progress); throw new Error("closed progress UI");},
         onTestEnd: (result) => results.push(result),
@@ -64,6 +77,18 @@ describe("openLiveRunSession", () => {
       reporter.onEnd();
       await vi.waitFor(() => expect(stages.at(-1)).toEqual({ phase: "finishing" }));
       expect(handle!.recoverResults([])).toMatchObject([{ status: "passed", attempts: 2 }]);
+      const stagesBeforeAbort = stages.length;
+      const resultsBeforeAbort = results.length;
+      controller.abort();
+      reporter.onBegin({ rootDir: root, configFile: path.join(root, "playwright.config.ts") } as FullConfig,
+        { allTests: () => [test] } as Suite);
+      reporter.onTestBegin(test, { status: "passed", retry: 1, duration: 0 } as TestResult);
+      reporter.onTestEnd(test, { status: "passed", retry: 1, duration: 3 } as TestResult);
+      reporter.onEnd();
+      handle!.stream.finish();
+      expect(stages).toHaveLength(stagesBeforeAbort);
+      expect(results).toHaveLength(resultsBeforeAbort);
+      expect(handle!.recoverResults([])).toMatchObject([{ status: "passed", durationMs: 3 }]);
       expect(errors).toEqual([]);
     } finally {
       if (previous === undefined) {delete process.env[LIVE_REPORT_FILE_ENV];}
@@ -134,6 +159,8 @@ describe("openLiveRunSession", () => {
       },
       record({}),
       record({ status: "passed", retry: 1 }),
+      record({ status: "skipped", retry: 1 }),
+      record({ status: "passed", retry: 1 }),
       record({
         status: "failed",
         retry: 0,
@@ -150,16 +177,18 @@ describe("openLiveRunSession", () => {
       { passed: 0, failed: 0, completed: 0, total: 1 },
       { passed: 0, failed: 1, completed: 1, total: 1 },
       { passed: 1, failed: 0, completed: 1, total: 1 },
+      { passed: 0, failed: 0, completed: 1, total: 1 },
+      { passed: 1, failed: 0, completed: 1, total: 1 },
       { passed: 0, failed: 1, completed: 1, total: 1 },
     ]);
-    expect(results.map((result) => result.status)).toEqual(["failed", "passed", "failed"]);
-    expect(handle!.recoverResults([])).toEqual([results[1], results[2]]);
+    expect(results.map((result) => result.status)).toEqual(["failed", "passed", "skipped", "passed", "failed"]);
+    expect(handle!.recoverResults([])).toEqual([results[3], results[4]]);
     const chromiumFinal = {
-      ...results[1]!,
-      featurePath: results[1]!.featurePath.replaceAll("/", "\\"),
+      ...results[3]!,
+      featurePath: results[3]!.featurePath.replaceAll("/", "\\"),
     };
-    expect(handle!.recoverResults([chromiumFinal])).toEqual([results[2], chromiumFinal]);
-    const finalResults = [chromiumFinal, { ...results[2]!, status: "passed" as const }];
+    expect(handle!.recoverResults([chromiumFinal])).toEqual([results[4], chromiumFinal]);
+    const finalResults = [chromiumFinal, { ...results[4]!, status: "passed" as const }];
     expect(handle!.recoverResults(finalResults)).toEqual(finalResults);
     expect(errors).toEqual([]);
   });

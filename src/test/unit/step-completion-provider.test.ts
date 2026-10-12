@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { StepCompletionProvider } from "../../providers/step-completion-provider";
 import { StepResolver, ParsedStepDefWithFile } from "../../providers/step-resolver";
@@ -49,6 +49,16 @@ describe("StepCompletionProvider context detection", () => {
     ["features/steps/**/*.ts"],
     makeResolverWithDefs(defs)
   );
+
+  it("returns no suggestions when loading definitions fails", async () => {
+    const resolver = makeResolverWithDefs(defs);
+    vi.spyOn(resolver, "loadAllStepDefs").mockRejectedValue(new Error("step file unreadable"));
+    const completion = new StepCompletionProvider(["steps/*.ts"], resolver);
+    const doc = new FakeDocument("Given I have");
+    await expect(completion.provideCompletionItems(
+      doc as unknown as vscode.TextDocument, pos(0, 12)
+    )).resolves.toBeUndefined();
+  });
 
   it("returns undefined for blank lines", async () => {
     const doc = new FakeDocument("");
@@ -183,6 +193,7 @@ describe("StepCompletionProvider deduplication and shape", () => {
     const defs = [
       defOf("I have a widget", "/ws/features/steps/a.ts", 3),
       defOf("I have a widget", "/ws/features/steps/b.ts", 9),
+      defOf("I have a widget", "/ws/features/steps/a.ts", 15),
       defOf("I see a result", "/ws/features/steps/a.ts", 12),
     ];
     const provider = new StepCompletionProvider(
@@ -426,5 +437,17 @@ describe("StepCompletionProvider scenario-boundary keyword resolution", () => {
       pos(4, 14)
     );
     expect(result).toBeUndefined();
+  });
+});
+
+
+describe("completion across non-step lines", () => {
+  it("finds the preceding keyword across a comment and blank line", async () => {
+    const provider = new StepCompletionProvider(["steps/*.ts"], makeResolverWithDefs([
+      defOf("a basket", "/ws/steps/a.ts", 0),
+    ]));
+    const document = new FakeDocument("Scenario: Checkout\nGiven a customer\n# delivery details\n\nAnd a");
+    const items = await provider.provideCompletionItems(document as unknown as vscode.TextDocument, pos(4, 5));
+    expect(items?.map((item) => item.label)).toEqual(["a basket"]);
   });
 });

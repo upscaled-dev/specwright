@@ -208,3 +208,17 @@ describe("buildFileHeader", () => {
     );
   });
 });
+
+describe("inferred parameters with overlapping source text", () => {
+  it.each(['I see "<role>"', 'I see "3.14"', "I see '<role> 3.14'"])("keeps %s as one quoted parameter", text => {
+    expect(inferParameters(text)).toEqual({ pattern: "I see {string}", params: [{ name: "str", type: "string", cucumberType: "{string}" }] });
+  });
+
+  it.each(["abc3", "3abc", "abc-3def"])("keeps digits embedded in %s literal", text => {
+    expect(inferParameters(text)).toEqual({ pattern: text, params: [] });
+  });
+
+  it.each(["< >", "<123-name>"])("uses a safe fallback variable for %s", placeholder => {
+    expect(inferParameters(`I enter ${placeholder}`).params).toEqual([{ name: "str", type: "string", cucumberType: "{string}" }]);
+  });
+});

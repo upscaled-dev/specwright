@@ -138,6 +138,7 @@ describe("readProcessTable", () => {
     ["ISO 8601", "2026-08-18T14:23:59.123+02:00"],
     ["ISO 8601 with sub-millisecond digits", "2026-08-18T12:23:59.1234567Z"],
     ["DMTF", "20260818142359.123456+120"],
+    ["DMTF with a western offset", "20260818102359.123456-120"],
     ["a .NET epoch literal", `/Date(${Date.parse("2026-08-18T12:23:59.123Z")})/`],
   ])("reads a creation instant written as %s", async (_shape, creationDate) => {
     const read = () => Promise.resolve(JSON.stringify([row(100, 4, creationDate)]));
@@ -167,6 +168,7 @@ describe("readProcessTable", () => {
   it.each([
     ["the answer is not JSON", "Get-CimInstance : Access denied"],
     ["a creation instant cannot be read", JSON.stringify([{ ProcessId: 1, ParentProcessId: 0, CreationDate: "yesterday" }])],
+    ["an ISO date names an invalid month", JSON.stringify([{ ProcessId: 1, ParentProcessId: 0, CreationDate: "2026-99-18T14:23:59Z" }])],
     ["a creation instant is not a string", JSON.stringify([{ ProcessId: 1, ParentProcessId: 0, CreationDate: 17870558 }])],
     ["a pid is not a whole number", JSON.stringify([{ ProcessId: "1", ParentProcessId: 0, CreationDate: null }])],
     ["a parent pid is missing", JSON.stringify([{ ProcessId: 1, CreationDate: null }])],
@@ -238,6 +240,11 @@ describe("the default PowerShell reader", () => {
 
     expect(message).toMatch(/^PowerShell exited with code 1: Get-CimInstance : Access denied x+$/);
     expect(message.length).toBeLessThan(260);
+  });
+
+  it("reports an exit failure without appending an empty diagnostic excerpt", async () => {
+    answer(failure({ code: 1 }), "", " \r\n ");
+    await expect(readProcessTable()).rejects.toThrow("PowerShell exited with code 1");
   });
 
   it("names oversized output", async () => {

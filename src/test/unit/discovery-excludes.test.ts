@@ -49,6 +49,13 @@ describe("discovery-excludes", () => {
       expect(fragments).toContain(".features-gen");
     });
 
+    it("excludes the default generated directory when the setting is blank", () => {
+      mockFeaturesGenDir({}, "  ");
+      const fragments = excludedDirFragments(undefined);
+      expect(isUnderExcludedDir("/ws/.features-gen/features/a.spec.js", fragments)).toBe(true);
+      expect(isUnderExcludedDir("/ws/features/a.feature", fragments)).toBe(false);
+    });
+
     it("does not duplicate a featuresGenDir that matches a built-in", () => {
       mockFeaturesGenDir({}, "test-results");
       const fragments = excludedDirFragments(undefined);

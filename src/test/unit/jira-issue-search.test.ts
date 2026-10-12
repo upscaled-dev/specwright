@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "../../utils/logger";
 import { FetchLike, JiraAccessError } from "../../xray/jira-project-search";
@@ -57,6 +57,31 @@ function run(
 }
 
 describe("searchJiraIssues", () => {
+  it.each([null, { issues: null }, { issues: [null, {}, { key: "" }] }])(
+    "ignores malformed issue rows without inventing link targets: %j", async (body) => {
+      expect((await run(async () => response(200, body), capturingLogger().logger)).issues).toEqual([]);
+    },
+  );
+
+  it("caps an oversized server page at 200 selectable issues", async () => {
+    const fetchImpl = vi.fn(async () => response(200, page(Array.from({ length: 205 }, (_, index) => ({ key: `SHOP-${index}`, summary: `Test ${index}` })))));
+    const result = await run(fetchImpl, capturingLogger().logger);
+    expect(result.issues).toHaveLength(200);
+    expect(result.issues.at(-1)?.key).toBe("SHOP-199");
+    expect(result.truncated).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it.each(["before request", "during request"])("preserves cancellation %s without retrying", async (stage) => {
+    const controller = new AbortController();
+    const reason = new Error("picker closed");
+    const fetchImpl = vi.fn(async () => { controller.abort(reason); throw new Error("fetch aborted"); });
+    if (stage === "before request") { controller.abort(reason); }
+    await expect(searchJiraIssues({ site: SITE, credentials: { email: EMAIL, token: TOKEN }, kind: "execution", query: "SHOP", executionIssueType: "Test Execution",
+      logger: capturingLogger().logger, fetchImpl, signal: controller.signal,
+    })).rejects.toBe(reason);
+    expect(fetchImpl).toHaveBeenCalledTimes(stage === "before request" ? 0 : 1);
+  });
   it("returns key/summary pairs, POSTs the scoped JQL, and sends basic auth", async () => {
     const { logger } = capturingLogger();
     let authHeader: string | undefined;
@@ -300,4 +325,17 @@ describe("searchJiraIssues retry/backoff", () => {
     await expect(run(fetchImpl, logger)).rejects.toBeInstanceOf(JiraAccessError);
     expect(calls).toBe(1);
   });
+});
+
+it("uses the host fetch transport when no custom transport is supplied", async () => {
+  const fetch = vi.fn().mockResolvedValue(response(200, page([{ key: "CALC-7", summary: "Checkout run" }])));
+  vi.stubGlobal("fetch", fetch);
+  try {
+    const result = await searchJiraIssues({ site: SITE, credentials: { email: EMAIL, token: TOKEN },
+      kind: "execution", query: "Checkout", executionIssueType: "Test Execution", logger: capturingLogger().logger,
+    });
+    expect(result.issues).toEqual([{ key: "CALC-7", summary: "Checkout run" }]);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0]?.[0]).toBe(SEARCH_URL);
+  } finally { vi.unstubAllGlobals(); }
 });

@@ -7,6 +7,10 @@ describe("humanizeRegexSource", () => {
     expect(result).toEqual({ label: "I have {int} users", humanized: true });
   });
 
+  it("humanizes an unanchored regular expression without removing literal text", () => {
+    expect(humanizeRegexSource("I have (\\d+) items", true)).toEqual({ label: "I have {int} items", humanized: true });
+  });
+
   it("strips leading ^ and trailing $", () => {
     const result = humanizeRegexSource("^I am ready$", true);
     expect(result.label).toBe("I am ready");

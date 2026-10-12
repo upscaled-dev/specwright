@@ -91,7 +91,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     executionGateway?: ExecutionGateway,
     runBddgen = false,
     artifactOwnership: readonly ScenarioRef[] = [],
-    options: { testFilePattern?: () => string; localCapability?: () => boolean } = {}
+    options: { testFilePattern?: () => string; localCapability?: () => boolean; workerCount?: number; workspaceState?: import("vscode").Memento } = {}
   ): {
     provider: PlaywrightBddTestProvider;
     controller: FakeTestController;
@@ -106,6 +106,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
       get: <T>(key: string, defaultValue?: T): T | undefined => {
         if (key === "bddgenCommand" && !runBddgen) {return "" as T;}
         if (key === "testFilePattern" && options.testFilePattern) {return options.testFilePattern() as T;}
+        if (key === "maxParallelProcesses" && options.workerCount !== undefined) {return options.workerCount as T;}
         return defaultValue;
       },
       update: (): Promise<void> => Promise.resolve(),
@@ -164,7 +165,7 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const provider = PlaywrightBddTestProvider.create(
       controller as never,
       context,
-      undefined,
+      options.workspaceState,
       () => options.localCapability?.() ?? executionGateway === undefined
     );
     return { provider, controller, executor, artifactStore, gateway, discoveryManager, config };
@@ -187,8 +188,131 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     await controller.resolveHandler?.(undefined);
     expect(discoveryManager.discoverTestFiles).toHaveBeenCalledTimes(1);
 
+    await controller.resolveHandler?.(controller.find(fixture.featurePath));
+    expect(discoveryManager.discoverTestFiles).toHaveBeenCalledTimes(1);
+
     await controller.refreshHandler?.();
     expect(discoveryManager.discoverTestFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("updates one feature's Test Explorer rows when its watched file changes or is deleted", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller, discoveryManager } = buildProvider(shell);
+    await provider.discoverTests();
+    expect(controller.find(`${fixture.featurePath}:4`)?.label).toBe("Passing scenario");
+
+    fs.writeFileSync(fixture.featurePath, "Feature: Changed\n\nScenario: New login\n  Given credentials\n");
+    await vscode.__fireFileWatcher("change", vscode.Uri.file(fixture.featurePath));
+    expect(controller.find(fixture.featurePath)?.label).toBe("Changed");
+    expect(controller.find(`${fixture.featurePath}:3`)?.label).toBe("New login");
+    expect(controller.find(`${fixture.featurePath}:4`)).toBeUndefined();
+    expect(discoveryManager.discoverTestFiles).toHaveBeenCalledOnce();
+
+    await vscode.__fireFileWatcher("delete", vscode.Uri.file(fixture.featurePath));
+    expect(controller.find(fixture.featurePath)).toBeUndefined();
+    expect(provider.getDiscoveredTests().has(fixture.featurePath)).toBe(false);
+    expect(discoveryManager.discoverTestFiles).toHaveBeenCalledOnce();
+  });
+
+  it("updates a watched feature from a scenario to grouped outline examples", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    fs.writeFileSync(fixture.featurePath, [
+      "Feature: Pricing", "", "  Scenario Outline: Add <count> widgets",
+      "    Given I add <count> widgets", "", "    Examples: Quantities",
+      "      | count |", "      | 2 |", "      | 3 |",
+    ].join("\n"));
+
+    await vscode.__fireFileWatcher("change", vscode.Uri.file(fixture.featurePath));
+
+    const feature = controller.find(fixture.featurePath)!;
+    const children: FakeTestItem[] = [];
+    feature.children.forEach((child) => children.push(child));
+    expect(feature.label).toBe("Pricing");
+    expect(children.map((child) => child.label)).toEqual(["Scenario Outline: Add <count> widgets"]);
+    expect(children[0]?.description).toBe("2 example(s)");
+    const examples: FakeTestItem[] = [];
+    children[0]?.children.forEach((child) => examples.push(child));
+    expect(examples.map((example) => example.label)).toEqual([
+      "1: Add <count> widgets - count: 2",
+      "2: Add <count> widgets - count: 3",
+    ]);
+    expect(controller.find(`${fixture.featurePath}:4`)).toBeUndefined();
+  });
+
+  it("leaves an unparsable feature out of Test Explorer until its content is corrected", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    const uri = vscode.Uri.file(fixture.featurePath) as unknown as import("vscode").Uri;
+    fs.writeFileSync(fixture.featurePath, "This is not a feature\n");
+
+    await provider.addFeatureFileToTestController(uri);
+    expect(controller.find(fixture.featurePath)).toBeUndefined();
+
+    fs.writeFileSync(fixture.featurePath, "Feature: Checkout\n\nScenario: Pay\n  Given a basket\n");
+    await provider.addFeatureFileToTestController(uri);
+    expect(controller.find(fixture.featurePath)?.label).toBe("Checkout");
+    expect(controller.find(`${fixture.featurePath}:3`)?.label).toBe("Pay");
+  });
+
+  it("restores the saved grouping before the first Test Explorer discovery", async () => {
+    const workspaceState = fakeMemento();
+    await workspaceState.update("playwrightBddRunner.organizationStrategyType", "TagBasedOrganization");
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell, undefined, false, [], { workspaceState });
+
+    await provider.discoverTests();
+
+    expect(provider.getOrganizationStrategy().strategyType).toBe("TagBasedOrganization");
+    expect(controller.find("tag:@feature")?.label).toBe("@feature");
+    expect(controller.find(`${fixture.featurePath}:4`)?.label).toBe("Passing scenario");
+  });
+
+  it("keeps the feature tree when a saved grouping name is no longer available", async () => {
+    const workspaceState = fakeMemento();
+    await workspaceState.update("playwrightBddRunner.organizationStrategyType", "RemovedOrganization");
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell, undefined, false, [], { workspaceState });
+
+    await provider.discoverTests();
+
+    expect(provider.getOrganizationStrategy().strategyType).toBe("FeatureBasedOrganization");
+    expect(controller.find(fixture.featurePath)?.label).toBe("Sample feature");
+    expect(controller.find(`${fixture.featurePath}:4`)?.label).toBe("Passing scenario");
+  });
+
+  it("presents canonical outline examples and tags under their feature in Test Explorer", async () => {
+    const feature = fixture.featurePath;
+    const suite = { name: "Sample feature", source: { path: feature, line: 2 } };
+    const gateway = testGateway(async () => ({
+      identity: EXECUTION_IDENTITY, state: "complete", results: [], passed: 0, failed: 0,
+      durationMs: 1, output: "",
+    }), [
+      { id: `${feature}:4`, name: "Passing scenario", source: { path: feature, line: 4 }, suites: [suite], tags: ["@smoke"] },
+      { id: `${feature}:12`, name: "Math 1+2", source: { path: feature, line: 12 }, suites: [suite], tags: ["@outline"],
+        parameterized: { groupName: "Math", groupLine: 7, blockLine: 10, blockName: "Numbers", substitutedName: "Math 1+2" } },
+      { id: `${feature}:13`, name: "Math 3+4", source: { path: feature, line: 13 }, suites: [suite], tags: ["@outline"],
+        parameterized: { groupName: "Math", groupLine: 7, blockLine: 10, blockName: "Numbers", substitutedName: "Math 3+4" } },
+    ]);
+    const { provider, controller } = buildProvider(
+      async () => ({ success: true, output: "", error: "", returnCode: 0 }), gateway
+    );
+
+    await provider.discoverTests();
+
+    const featureItem = controller.find(feature)!;
+    expect(featureItem.label).toBe("Sample feature");
+    expect(featureItem.range?.start.line).toBe(1);
+    expect(controller.find(`${feature}:4`)?.description).toContain("Tags: @smoke");
+    const children: FakeTestItem[] = [];
+    featureItem.children.forEach((child) => children.push(child));
+    const outline = children.find((child) => child.label === "Scenario Outline: Math")!;
+    expect(outline.description).toBe("2 example(s)");
+    expect(outline.range?.start.line).toBe(6);
+    expect(outline.children.size).toBe(2);
+    expect(controller.find(`${feature}:12`)?.label).toBe("Math 1+2");
+    expect(controller.find(`${feature}:13`)?.label).toBe("Math 3+4");
   });
 
   it("admits a Test Explorer run by discovering when the tree has not resolved", async () => {
@@ -201,6 +325,108 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     );
 
     expect(discoveryManager.discoverTestFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs and projects a discovered scenario from an open file without a workspace folder", async () => {
+    const scenario = { filePath: fixture.featurePath, line: 4, name: "Passing scenario", kind: "scenario" as const };
+    const gateway = testGateway(async () => ({
+      identity: EXECUTION_IDENTITY, state: "complete", results: [{
+        scenario, outcome: "passed", durationMs: 5, attempts: 1, flaky: false, evidenceRefs: [],
+      }], passed: 1, failed: 0, durationMs: 5, output: "",
+    }), [{
+      id: `${fixture.featurePath}:4`, name: "Passing scenario",
+      source: { path: fixture.featurePath, line: 4 },
+      suites: [{ name: "Sample feature", source: { path: fixture.featurePath, line: 2 } }], tags: [],
+    }]);
+    const { provider, controller } = buildProvider(
+      async () => ({ success: true, output: "", error: "", returnCode: 0 }), gateway
+    );
+    await provider.discoverTests();
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+    expect(controller.runs.at(-1)!.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    await runItem(controller, controller.find(fixture.featurePath)!);
+    expect(controller.runs.at(-1)!.outcome.passed).toContain(fixture.featurePath);
+    expect(gateway.run).toHaveBeenCalledTimes(2);
+
+    provider.applyExternalRunResult(fixture.featurePath, {
+      success: true, output: "", duration: 5,
+      scenarioResults: { [`${fixture.featurePath}:4`]: "passed" },
+    }, { lineNumber: 4 });
+    expect(controller.runs.at(-1)!.outcome.passed).toContain(`${fixture.featurePath}:4`);
+  });
+
+  it("carries the selected parallel worker count into a scenario run", async () => {
+    const gateway = testGateway(async () => ({
+      identity: EXECUTION_IDENTITY, state: "complete", results: [], passed: 0, failed: 0, durationMs: 0, output: "",
+    }), [{
+      id: `${fixture.featurePath}:4`, name: "Passing scenario", source: { path: fixture.featurePath, line: 4 },
+      suites: [{ name: "Sample feature", source: { path: fixture.featurePath, line: 1 } }], tags: [],
+    }]);
+    const { controller } = buildProvider(async () => ({ success: true, output: "", error: "", returnCode: 0 }), gateway, false, [], { workerCount: 3 });
+    await controller.resolveHandler?.(undefined);
+    const scenario = controller.find(`${fixture.featurePath}:4`);
+    expect(scenario).toBeDefined();
+
+    await controller.profile("Run in Parallel")!.runHandler(
+      new vscode.TestRunRequest([scenario!]), new vscode.CancellationTokenSource().token
+    );
+
+    expect(gateway.prepare).toHaveBeenCalledWith(expect.objectContaining({
+      mode: "run", maxWorkers: 3,
+      targets: [expect.objectContaining({ kind: "scenario" })],
+    }));
+    expect(gateway.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not start a parallel Test Explorer run when its first worker prompt is dismissed", async () => {
+    const gateway = testGateway(async () => ({
+      identity: EXECUTION_IDENTITY, state: "complete", results: [], passed: 0, failed: 0,
+      durationMs: 0, output: "",
+    }));
+    const picker = vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue(undefined);
+    const { controller } = buildProvider(
+      async () => ({ success: true, output: "", error: "", returnCode: 0 }),
+      gateway, false, [], { workspaceState: fakeMemento() }
+    );
+
+    try {
+      await controller.profile("Run in Parallel")!.runHandler(
+        new vscode.TestRunRequest(), new vscode.CancellationTokenSource().token
+      );
+      expect(picker).toHaveBeenCalledOnce();
+      expect(gateway.prepare).not.toHaveBeenCalled();
+      expect(gateway.run).not.toHaveBeenCalled();
+      expect(controller.runs).toEqual([]);
+    } finally {
+      picker.mockRestore();
+    }
+  });
+
+  it("reports an adjusted parallel worker count and runs with that value", async () => {
+    const gateway = testGateway(async () => ({
+      identity: EXECUTION_IDENTITY, state: "complete", results: [], passed: 0, failed: 0, durationMs: 0, output: "",
+    }), [{
+      id: `${fixture.featurePath}:4`, name: "Passing scenario", source: { path: fixture.featurePath, line: 4 },
+      suites: [{ name: "Sample feature", source: { path: fixture.featurePath, line: 1 } }], tags: [],
+    }]);
+    const info = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined);
+    try {
+      const { controller } = buildProvider(async () => ({ success: true, output: "", error: "", returnCode: 0 }), gateway, false, [], { workerCount: 99 });
+      await controller.resolveHandler?.(undefined);
+      await controller.profile("Run in Parallel")!.runHandler(
+        new vscode.TestRunRequest([controller.find(`${fixture.featurePath}:4`)!]), new vscode.CancellationTokenSource().token
+      );
+
+      const prepared = vi.mocked(gateway.prepare).mock.calls[0]?.[0];
+      expect(prepared?.maxWorkers).toBeGreaterThanOrEqual(1);
+      expect(prepared?.maxWorkers).toBeLessThanOrEqual(16);
+      expect(info).toHaveBeenCalledWith(expect.stringContaining(`Using ${prepared?.maxWorkers} workers (auto-adjusted from invalid maxParallelProcesses=99`));
+      expect(gateway.run).toHaveBeenCalledTimes(1);
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it("retries a requested discovery after workspace trust is granted", async () => {
@@ -295,6 +521,256 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     expect(last.outcome.skipped).not.toContain(`${fixture.featurePath}:4`);
   });
 
+  it("shows the three report outcomes on a whole-feature run and fails the feature when an example fails", async () => {
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const report = reportJson(fixture, [
+        { title: "Passing scenario", line: 6, status: "passed" },
+        { title: "Example #1", line: 18, status: "skipped" },
+        { title: "Example #2", line: 24, status: "failed" },
+      ]);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+        fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], report);
+      }
+      return { success: false, output: "", error: "1 failed, 1 skipped", returnCode: 1 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    await runItem(controller, controller.find(fixture.featurePath)!);
+
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:12`);
+    expect(run.outcome.failed.map((failure) => failure.id)).toEqual(
+      expect.arrayContaining([`${fixture.featurePath}:13`, fixture.featurePath])
+    );
+  });
+
+  it("shows a failed scenario's assertion and step stack in the Test Results failure", async () => {
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const report = JSON.parse(reportJson(fixture, [
+        { title: "Passing scenario", line: 6, status: "failed" },
+      ])) as {
+        suites: Array<{ specs: Array<{ tests: Array<{
+          results: Array<{ error?: { message: string; stack: string } }>;
+        }> }> }>;
+      };
+      report.suites[0]!.specs[0]!.tests[0]!.results[0]!.error = {
+        message: "Expected checkout total to be 42",
+        stack: "Error: expected 42\n    at checkout.steps.ts:9:3",
+      };
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {
+        fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], JSON.stringify(report));
+      }
+      return { success: false, output: "", error: "1 test failed", returnCode: 1 };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+
+    const failure = controller.runs.at(-1)!.outcome.failed.find(
+      ({ id }) => id === `${fixture.featurePath}:4`
+    );
+    expect(failure?.message).toContain("Expected checkout total to be 42");
+    expect(failure?.message).toContain("at checkout.steps.ts:9:3");
+  });
+
+  it.each([
+    ["workspace-relative source line", (_featurePath: string) => `features/test.feature:4`],
+    ["workspace-relative scenario title", (_featurePath: string) => `features/test.feature::Passing scenario`],
+    ["absolute scenario title", (featurePath: string) => `${featurePath}::Passing scenario`],
+    ["reporter title suffix", (_featurePath: string) => `chromium::Passing scenario`],
+  ])("maps an external report by %s without passing sibling scenarios", async (_format, keyFor) => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    provider.applyExternalRunResult(fixture.featurePath, {
+      success: true,
+      output: "",
+      duration: 1,
+      scenarioResults: { [keyFor(fixture.featurePath)]: "passed" },
+    });
+
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.passed).not.toContain(`${fixture.featurePath}:12`);
+    expect(run.outcome.passed).not.toContain(`${fixture.featurePath}:13`);
+  });
+
+  it("matches outline example results by substituted title when the reporter has no source line", async () => {
+    fs.writeFileSync(fixture.featurePath, [
+      "Feature: Cart", "", "Scenario Outline: Add <item>", "  Given <item>",
+      "  Examples:", "    | item |", "    | apple |", "    | pear |",
+    ].join("\n"));
+    const cases: ExecutionDefinition[] = [
+      { id: `${fixture.featurePath}:7`, name: "Example #1", source: { path: fixture.featurePath, line: 7 },
+        suites: [{ name: "Cart", source: { path: fixture.featurePath, line: 1 } }], tags: [],
+        parameterized: { groupName: "Add <item>", groupLine: 3, blockLine: 5, substitutedName: "Add apple" } },
+      { id: `${fixture.featurePath}:8`, name: "Example #2", source: { path: fixture.featurePath, line: 8 },
+        suites: [{ name: "Cart", source: { path: fixture.featurePath, line: 1 } }], tags: [],
+        parameterized: { groupName: "Add <item>", groupLine: 3, blockLine: 5, substitutedName: "Add pear" } },
+    ];
+    const gateway = testGateway(async () => ({
+      identity: EXECUTION_IDENTITY, state: "complete", results: [], passed: 0, failed: 0, durationMs: 1, output: "",
+    }), cases);
+    const { provider, controller } = buildProvider(
+      async () => ({ success: true, output: "", error: "", returnCode: 0 }), gateway
+    );
+    await provider.discoverTests();
+
+    provider.applyExternalRunResult(fixture.featurePath, {
+      success: false,
+      output: "",
+      error: "One example failed",
+      duration: 1,
+      scenarioResults: {
+        [`${fixture.featurePath}::Add apple`]: "passed",
+        "features/test.feature::Add pear": "failed",
+      },
+    });
+
+    const run = controller.runs.at(-1)!.outcome;
+    expect(run.passed).toContain(`${fixture.featurePath}:7`);
+    expect(run.failed.map(({ id }) => id)).toContain(`${fixture.featurePath}:8`);
+    expect(run.failed.map(({ id }) => id)).toContain(fixture.featurePath);
+  });
+
+  it("does not transfer an external result to another discovered feature", async () => {
+    const other = path.join(fixture.root, "features", "account.feature");
+    fs.writeFileSync(other, "Feature: Account\nScenario: Reset password\n  Given a user\n");
+    const cases: ExecutionDefinition[] = [
+      { id: `${fixture.featurePath}:4`, name: "Passing scenario", source: { path: fixture.featurePath, line: 4 },
+        suites: [{ name: "Sample feature", source: { path: fixture.featurePath, line: 2 } }], tags: [] },
+      { id: `${other}:2`, name: "Reset password", source: { path: other, line: 2 },
+        suites: [{ name: "Account", source: { path: other, line: 1 } }], tags: [] },
+    ];
+    const gateway = testGateway(async () => ({
+      identity: EXECUTION_IDENTITY, state: "complete", results: [], passed: 0, failed: 0, durationMs: 1, output: "",
+    }), cases);
+    const { provider, controller } = buildProvider(
+      async () => ({ success: true, output: "", error: "", returnCode: 0 }), gateway
+    );
+    await provider.discoverTests();
+
+    provider.applyExternalRunResult(fixture.featurePath, {
+      success: true, output: "", duration: 1,
+      scenarioResults: { [`${fixture.featurePath}:4`]: "passed" },
+    });
+
+    expect(controller.runs.at(-1)!.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(controller.runs.at(-1)!.outcome.passed).not.toContain(`${other}:2`);
+    expect(provider.getItemStatus(`${other}:2`)).toBeUndefined();
+  });
+
+  it("projects mixed external results onto scenarios and rolls a failed outline up to the feature", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    provider.applyExternalRunResult(fixture.featurePath, {
+      success: false,
+      output: "",
+      error: "One example failed",
+      duration: 1,
+      scenarioResults: {
+        [`${fixture.featurePath}:4`]: "passed",
+        [`${fixture.featurePath}:12`]: "skipped",
+        [`${fixture.featurePath}:13`]: "failed",
+      },
+      scenarioDetails: [{
+        featurePath: fixture.featurePath,
+        lineNumber: 13,
+        scenarioName: "Example #2",
+        status: "failed",
+        durationMs: 5,
+        attempts: 1,
+        flaky: false,
+        errorMessage: "One example failed",
+      }],
+    });
+
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.passed).toContain(`${fixture.featurePath}:4`);
+    expect(run.outcome.skipped).toContain(`${fixture.featurePath}:12`);
+    expect(run.outcome.failed.map(({ id }) => id)).toEqual(expect.arrayContaining([
+      `${fixture.featurePath}:13`, fixture.featurePath,
+    ]));
+    expect(run.outcome.failed.find(({ id }) => id === `${fixture.featurePath}:13`)?.message)
+      .toContain("One example failed");
+  });
+
+  it("fails only the targeted external scenario when generation leaves no parseable report", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    provider.applyExternalRunResult(fixture.featurePath, {
+      success: false,
+      output: "bddgen stopped before tests started",
+      error: "bddgen failed: checkout.steps.ts could not compile",
+      duration: 1,
+      scenarioResults: {},
+    }, { lineNumber: 4 });
+
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.failed.map(({ id }) => id)).toEqual([`${fixture.featurePath}:4`]);
+    expect(run.outcome.failed[0]?.message).toContain("checkout.steps.ts could not compile");
+    expect(run.outcome.passed).not.toContain(`${fixture.featurePath}:12`);
+    expect(run.outcome.skipped).not.toContain(`${fixture.featurePath}:13`);
+  });
+
+  it("marks a whole external feature failed when an early runner failure leaves no case results", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    provider.applyExternalRunResult(fixture.featurePath, {
+      success: false,
+      output: "",
+      error: "",
+      duration: 1,
+      scenarioResults: {},
+    });
+
+    const failures = controller.runs.at(-1)!.outcome.failed;
+    expect(failures.map(({ id }) => id)).toEqual(expect.arrayContaining([
+      fixture.featurePath,
+      `${fixture.featurePath}:4`,
+      `${fixture.featurePath}:12`,
+      `${fixture.featurePath}:13`,
+    ]));
+    expect(failures.find(({ id }) => id === `${fixture.featurePath}:4`)?.message)
+      .toContain("Test failed: see the Test Results output panel.");
+  });
+
+  it("clears a previously passing feature when every externally reported case is skipped", async () => {
+    const shell: ShellRunner = async () => ({ success: true, output: "", error: "", returnCode: 0 });
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+    const everyCase = [4, 12, 13].map((line) => `${fixture.featurePath}:${line}`);
+    provider.applyExternalRunResult(fixture.featurePath, {
+      success: true,
+      output: "",
+      duration: 1,
+      scenarioResults: Object.fromEntries(everyCase.map((id) => [id, "passed"])),
+    });
+    expect(provider.getItemStatus(fixture.featurePath)).toBe("passed");
+
+    provider.applyExternalRunResult(fixture.featurePath, {
+      success: true,
+      output: "",
+      duration: 1,
+      scenarioResults: Object.fromEntries(everyCase.map((id) => [id, "skipped"])),
+    });
+
+    const run = controller.runs.at(-1)!;
+    expect(run.outcome.skipped).toEqual(expect.arrayContaining([fixture.featurePath, ...everyCase]));
+    expect(run.outcome.failed).toEqual([]);
+    expect(provider.getItemStatus(fixture.featurePath)).toBeUndefined();
+  });
+
   it("explains a skip caused by bddgen's missing-step skip-scenario marker", async () => {
     // Regenerate the fixture spec with the scenario marked skipped, the shape bddgen writes
     // under missingSteps: "skip-scenario" when a step has no definition.
@@ -351,6 +827,27 @@ describe("PlaywrightBddTestProvider: discover → run → status (integration)",
     const last = controller.runs.at(-1)!;
     expect(last.outcome.skipped).toContain(`${fixture.featurePath}:4`);
     expect(last.outcome.output.join("")).not.toContain("was skipped by bddgen");
+  });
+
+  it("points a skipped run with missing-step output at the scaffold command", async () => {
+    const shell: ShellRunner = async (_cmd, _dir, env) => {
+      const out = reportJson(fixture, [{ title: "Passing scenario", line: 6, status: "skipped" }]);
+      if (env?.["PLAYWRIGHT_JSON_OUTPUT_NAME"]) {fs.writeFileSync(env["PLAYWRIGHT_JSON_OUTPUT_NAME"], out);}
+      return {
+        success: true,
+        output: "Missing step definitions:\nGiven('a completed checkout', () => {});\nUse snippets above to create missing steps.",
+        error: "", returnCode: 0,
+      };
+    };
+    const { provider, controller } = buildProvider(shell);
+    await provider.discoverTests();
+
+    await runItem(controller, controller.find(`${fixture.featurePath}:4`)!);
+
+    const output = controller.runs.at(-1)!.outcome.output.join("");
+    expect(output).toContain("Missing step definitions:");
+    expect(output).toContain('Tip: run "Specwright: Generate Missing Step Definitions" to scaffold these.');
+    expect(controller.runs.at(-1)!.outcome.skipped).toContain(`${fixture.featurePath}:4`);
   });
 
   it("restores a failed verdict with the retirement message and a request scoped to it", async () => {

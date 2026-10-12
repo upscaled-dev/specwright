@@ -282,6 +282,23 @@ function evidenceConfig(
 }
 
 describe("TraceabilitySubsystem evidence-based activation", () => {
+  it("ignores a superseded tag scan and honors the newest evidence result", async () => {
+    const config = evidenceConfig(undefined, false);
+    const resolvers: Array<(value: boolean) => void> = [];
+    const scan = vi.fn(() => new Promise<boolean>(resolve => resolvers.push(resolve)));
+    const { subsystem, view } = build(config, undefined, Logger.create(), makeConnection(), fakeMemento(), scan);
+    const attach = vi.spyOn(view, "attach");
+    const first = subsystem.applyCurrent();
+    await vi.waitFor(() => expect(scan).toHaveBeenCalledTimes(1));
+    const latest = subsystem.applyCurrent();
+    resolvers[0]!(true);
+    await vi.waitFor(() => expect(scan).toHaveBeenCalledTimes(2));
+    resolvers[1]!(false);
+    await Promise.all([first, latest]);
+    expect(subsystem.traceabilityPanelActive).toBe(false);
+    expect(attach).not.toHaveBeenCalled();
+    await subsystem.shutdown();
+  });
   beforeEach(() => treeViews.__resetTreeViewCounters());
   afterEach(() => vi.restoreAllMocks());
 
@@ -601,9 +618,80 @@ describe("TraceabilitySubsystem grouping mode", () => {
     expect(memento.get(GROUPING_KEY)).toBe("file");
     await subsystem.shutdown();
   });
+
+  it("restores the board's project and mapping page size from workspace state", async () => {
+    const state = fakeMemento();
+    const { config } = makeConfig();
+    const first = build(config, undefined, Logger.create(), makeConnection(), state).subsystem;
+    await first.applyCurrent();
+
+    first.projectScope().set("PAY");
+    first.mappingPageSize().set(25);
+    expect(first.projectScope().get(["CALC", "PAY"])).toBe("PAY");
+    expect(first.mappingPageSize().get()).toBe(25);
+    await first.shutdown();
+
+    const reopened = build(config, undefined, Logger.create(), makeConnection(), state).subsystem;
+    await reopened.applyCurrent();
+    expect(reopened.projectScope().get(["CALC", "PAY"])).toBe("PAY");
+    expect(reopened.mappingPageSize().get()).toBe(25);
+    await reopened.shutdown();
+  });
+
+  it("reports failed board preference writes through the subsystem log", async () => {
+    const state = fakeMemento();
+    const error = new Error("workspace state unavailable");
+    vi.spyOn(state, "update").mockRejectedValue(error);
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn");
+    const { subsystem } = build(makeConfig().config, undefined, logger, makeConnection(), state);
+
+    subsystem.projectScope().set("PAY");
+    subsystem.mappingPageSize().set(25);
+
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
+    expect(warn.mock.calls).toEqual(expect.arrayContaining([
+      ["Persisting the board project scope failed", { error: "Error: workspace state unavailable" }],
+      ["Persisting the board mapping page size failed", { error: "Error: workspace state unavailable" }],
+    ]));
+    await subsystem.shutdown();
+  });
 });
 
 describe("TraceabilitySubsystem lifecycle", () => {
+  it("serializes overlapping requested rebuilds into one fresh follow-up snapshot", async () => {
+    const { config } = makeConfig();
+    const { subsystem, discovery } = build(config);
+    await subsystem.applyCurrent();
+    let finish!: (files: string[]) => void;
+    const read = vi.spyOn(discovery, "discoverTestFiles")
+      .mockReturnValueOnce(new Promise<string[]>(resolve => {finish = resolve;}))
+      .mockResolvedValue([]);
+    const first = subsystem.rebuildNow();
+    const second = subsystem.rebuildNow();
+    expect(read).toHaveBeenCalledTimes(1);
+    finish([]);
+    await Promise.all([first, second]);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(subsystem.getSnapshot()?.links).toEqual([]);
+    await subsystem.shutdown();
+  });
+
+  it("coalesces a burst of watcher rebuild requests before discovery starts", async () => {
+    const { config } = makeConfig();
+    const { subsystem, discovery } = build(config);
+    await subsystem.applyCurrent();
+    const read = vi.spyOn(discovery, "discoverTestFiles").mockResolvedValue([]);
+    vi.useFakeTimers();
+    try {
+      subsystem.scheduleRebuild();
+      subsystem.scheduleRebuild();
+      expect(read).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(read).toHaveBeenCalledOnce();
+      await subsystem.shutdown();
+    } finally {vi.useRealTimers();}
+  });
   beforeEach(() => {
     treeViews.__resetTreeViewCounters();
   });
@@ -699,6 +787,7 @@ describe("TraceabilitySubsystem lifecycle", () => {
     const resolve = subsystem.captureKeyResolver();
     const result = { ...outline, line: 10 };
 
+    expect(resolve(result)).toBe("CALC-1");
     expect(resolve(result, outline)).toBe("CALC-1");
     expect(resolve(result, block)).toBe("CALC-2");
     await subsystem.shutdown();
@@ -914,6 +1003,59 @@ describe("TraceabilitySubsystem lifecycle", () => {
 });
 
 describe("TraceabilitySubsystem provider selection", () => {
+  it("cancels an initializing adapter without warning or committing an enabled panel", async () => {
+    const { config, set } = makeConfig();
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn");
+    let finishInitialize!: () => void;
+    const initialize = vi.fn(() => new Promise<void>(resolve => {finishInitialize = resolve;}));
+    const dispose = vi.fn();
+    const { subsystem } = build(config, { xray: { ...fakeAdapter("xray"), initialize, dispose } }, logger);
+    const enabling = subsystem.applyCurrent();
+    await vi.waitFor(() => expect(initialize).toHaveBeenCalledOnce());
+    set({ enableTraceabilityPanel: false });
+    const disabling = subsystem.applyCurrent();
+    await Promise.all([enabling, disabling]);
+    finishInitialize();
+    expect(subsystem.traceabilityPanelActive).toBe(false);
+    expect(subsystem.getActiveAdapter()).toBeUndefined();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(warn).not.toHaveBeenCalled();
+    await subsystem.shutdown();
+  });
+
+  it("skips a superseded provider while disposing the previous adapter", async () => {
+    const { config, set } = makeConfig({ traceabilityProvider: "xray" });
+    let finishDispose!: () => void;
+    const dispose = vi.fn().mockImplementationOnce(() => new Promise<void>(resolve => {finishDispose = resolve;}));
+    const { subsystem, registry } = build(config, { xray: { ...fakeAdapter("xray"), dispose }, azure: fakeAdapter("azure") });
+    const activate = vi.spyOn(registry, "activate");
+    await subsystem.applyCurrent();
+    set({ traceabilityProvider: "azure" });
+    const switching = subsystem.applyCurrent();
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+    set({ traceabilityProvider: "xray" });
+    const restored = subsystem.applyCurrent();
+    finishDispose();
+    await Promise.all([switching, restored]);
+    expect(activate.mock.calls.map(([id]) => id)).toEqual(["xray", "xray"]);
+    expect(subsystem.getActiveAdapter()?.id).toBe("xray");
+    expect(subsystem.traceabilityPanelActive).toBe(true);
+    await subsystem.shutdown();
+  });
+
+  it("stays inactive when neither the configured provider nor a fallback is registered", async () => {
+    const { config } = makeConfig({ traceabilityProvider: "unavailable" });
+    const { subsystem } = build(config, {});
+    await subsystem.applyCurrent();
+    expect(subsystem.traceabilityPanelActive).toBe(false);
+    expect(subsystem.getActiveAdapter()).toBeUndefined();
+    expect(subsystem.getSnapshot()).toBeUndefined();
+    await subsystem.shutdown();
+    await subsystem.applyCurrent();
+    await subsystem.rebuildNow();
+    expect(subsystem.traceabilityPanelActive).toBe(false);
+  });
   beforeEach(() => {
     treeViews.__resetTreeViewCounters();
   });
@@ -1337,6 +1479,38 @@ describe("TraceabilitySubsystem sync staleness row", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps the connection checking when metadata changes before its first verification settles", async () => {
+    const setIndicator = vi.spyOn(TraceabilityViewProvider.prototype, "setConnectionIndicator");
+    const { config } = makeConfig();
+    const deferred = deferredVerifyConnection();
+    const changed = new vscode.EventEmitter<void>();
+    let syncedAt: number | undefined = undefined;
+    const adapter: TraceabilityAdapter = {
+      ...fakeAdapter("xray", deferred.connection),
+      metadata: {
+        onDidChange: changed.event,
+        snapshot: () => ({ tests: new Map(), fetchedScopes: [], catalogueProjects: [], completeProjects: [], verifiedAbsentKeys: [], syncedAt, stale: false, errors: [] }),
+        sync: () => Promise.resolve(),
+      },
+    };
+    const { subsystem } = build(config, { xray: adapter });
+    await subsystem.applyCurrent();
+    await vi.waitFor(() => expect(deferred.resolvers).toHaveLength(1));
+    const checking = indicatorCalls(setIndicator).at(-1);
+    expect(checking?.state).toBe("checking");
+    syncedAt = Date.now();
+    changed.fire();
+    await subsystem.rebuildNow();
+    expect(indicatorCalls(setIndicator).at(-1)).toEqual(checking);
+    expect(deferred.resolvers).toHaveLength(1);
+    deferred.resolvers[0]!({ status: "ok", message: "Connected to acme" });
+    await vi.waitFor(() => expect(indicatorCalls(setIndicator).at(-1)).toEqual({
+      state: "ok", label: "acme.atlassian.net", message: "Connected to acme", sync: { syncedAt, stale: false },
+    }));
+    await subsystem.shutdown();
+    changed.dispose();
+  });
+
   it("carries the metadata snapshot's staleness on the connection row after verify", async () => {
     const setIndicator = vi.spyOn(TraceabilityViewProvider.prototype, "setConnectionIndicator");
     const { config } = makeConfig();
@@ -1366,6 +1540,31 @@ describe("TraceabilitySubsystem sync staleness row", () => {
     const last = indicatorCalls(setIndicator).at(-1);
     expect(last?.state).toBe("ok");
     expect(last?.sync).toEqual({ syncedAt, stale: false });
+    await subsystem.shutdown();
+  });
+
+  it("keeps a verified connection usable when its metadata cache rejects a snapshot", async () => {
+    const setIndicator = vi.spyOn(TraceabilityViewProvider.prototype, "setConnectionIndicator");
+    const { config } = makeConfig();
+    const logger = Logger.create();
+    const warn = vi.spyOn(logger, "warn");
+    const connection = makeConnection(true, () => Promise.resolve({ status: "ok", message: "Connected to acme" }));
+    connection.setLabel("acme.atlassian.net");
+    const adapter: TraceabilityAdapter = {
+      ...fakeAdapter("xray", connection.connection),
+      metadata: {
+        onDidChange: new vscode.EventEmitter<void>().event,
+        snapshot: () => {throw new Error("metadata cache unavailable");},
+        sync: () => Promise.resolve(),
+      },
+    };
+    const { subsystem } = build(config, { xray: adapter }, logger);
+    await subsystem.applyCurrent();
+    await vi.waitFor(() => expect(indicatorCalls(setIndicator).at(-1)).toEqual({
+      state: "ok", label: "acme.atlassian.net", message: "Connected to acme",
+    }));
+    expect(subsystem.connected).toBe(true);
+    expect(warn).toHaveBeenCalledWith("Traceability metadata snapshot was rejected", expect.any(Object));
     await subsystem.shutdown();
   });
 });
@@ -1505,6 +1704,10 @@ Scenario: Untagged by test
     await flush();
 
     expect(subsystem.tagDerivedProjectKeys().sort()).toEqual(["CALC", "MATH", "OPS"]);
+    expect(subsystem.knownTestKeys()).toEqual(["CALC-1"]);
+    expect(subsystem.getActiveAdapter()?.id).toBe("xray");
+    const linked = subsystem.getSnapshot()!.links[0]!;
+    expect(subsystem.captureKeyResolver()(linked.scenario)).toBe("CALC-1");
     await subsystem.shutdown();
   });
 
@@ -1515,6 +1718,9 @@ Scenario: Untagged by test
     await subsystem.applyCurrent();
 
     expect(subsystem.tagDerivedProjectKeys()).toEqual([]);
+    expect(subsystem.knownTestKeys()).toEqual([]);
+    expect(subsystem.captureKeyResolver()({ filePath: "/ws/absent.feature", line: 3, name: "Absent", kind: "scenario" })).toBeUndefined();
+    expect(subsystem.getActiveAdapter()).toBeUndefined();
     await subsystem.shutdown();
   });
 });
