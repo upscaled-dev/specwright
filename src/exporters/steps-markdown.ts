@@ -19,7 +19,7 @@ interface KeywordGroup {
 }
 
 interface SectionPlan {
-  folderName?: string | undefined;
+  folderName: string;
   folderSlug?: string | undefined;
   groups: KeywordGroup[];
 }
@@ -39,7 +39,8 @@ export function renderStepsMarkdown(
   slugger.slug("Contents");
 
   const plans: SectionPlan[] = sections.map((section) => {
-    const folderSlug = multiRoot ? slugger.slug(section.folderName ?? "") : undefined;
+    const folderName = section.folderName ?? "";
+    const folderSlug = multiRoot ? slugger.slug(folderName) : undefined;
     const groups: KeywordGroup[] = [];
     for (const keyword of KEYWORD_ORDER) {
       const defs = section.defs
@@ -48,7 +49,7 @@ export function renderStepsMarkdown(
       if (defs.length === 0) {continue;}
       groups.push({ keyword, defs, slug: slugger.slug(keyword) });
     }
-    return { folderName: section.folderName, folderSlug, groups };
+    return { folderName, folderSlug, groups };
   });
 
   const allDefs = sections.flatMap((s) => s.defs);

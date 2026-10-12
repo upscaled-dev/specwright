@@ -13,6 +13,17 @@ function def(overrides: Partial<StepDefExport> & Pick<StepDefExport, "keyword" |
 }
 
 describe("renderStepsMarkdown", () => {
+  it("renders an unnamed workspace section alongside a named section", () => {
+    const md = renderStepsMarkdown([
+      { defs: [def({ keyword: "Given", humanized: "a basket", usageCount: 1 })] },
+      { folderName: "api", defs: [def({ keyword: "Then", humanized: "a receipt", usageCount: 1 })] },
+    ]);
+    expect(md).toContain("a basket");
+    expect(md).toContain("a receipt");
+    expect(md).toContain("## api");
+    expect(md).not.toContain("undefined");
+  });
+
   it("renders a single-root catalog with summary, contents, collapsible groups, and usage markers", () => {
     const md = renderStepsMarkdown([
       {
