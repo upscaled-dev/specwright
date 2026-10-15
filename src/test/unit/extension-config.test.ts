@@ -322,6 +322,62 @@ describe("ExtensionConfig traceability preference", () => {
   });
 });
 
+describe("ExtensionConfig sync project list", () => {
+  function syncProjectConfig(
+    effective: string[],
+    inspection: Record<string, unknown>
+  ): vscode.WorkspaceConfiguration {
+    return {
+      get: <T>(key: string, fallback?: T): T | undefined =>
+        key === "xray.syncProjectKeys" ? effective as T : fallback,
+      update: (): Promise<void> => Promise.resolve(),
+      inspect: (key: string): Record<string, unknown> =>
+        key === "xray.syncProjectKeys" ? { key, ...inspection } : { key },
+    } as unknown as vscode.WorkspaceConfiguration;
+  }
+
+  it("derives the sync scope when the default empty list was never saved", () => {
+    expect(ExtensionConfig.create(syncProjectConfig([], {}), false).xraySyncProjectKeys).toBeUndefined();
+  });
+
+  it.each(["globalValue", "workspaceValue", "workspaceFolderValue"])(
+    "keeps an explicitly cleared list at the %s scope as an empty sync selection",
+    (scope) => {
+      expect(
+        ExtensionConfig.create(syncProjectConfig([], { [scope]: [] }), false).xraySyncProjectKeys
+      ).toEqual([]);
+    }
+  );
+
+  it("keeps selected projects even when the inspection value is unavailable", () => {
+    expect(
+      ExtensionConfig.create(syncProjectConfig(["CALC"], {}), false).xraySyncProjectKeys
+    ).toEqual(["CALC"]);
+  });
+
+  it("keeps a confirmed clear after reload, then derives again when the setting is reset", () => {
+    let current = syncProjectConfig(["CALC"], { workspaceValue: ["CALC"] });
+    const getConfiguration = vi.spyOn(vscode.workspace, "getConfiguration").mockImplementation(
+      () => current
+    );
+    const config = ExtensionConfig.create(current, false);
+
+    try {
+      expect(config.xraySyncProjectKeys).toEqual(["CALC"]);
+
+      current = syncProjectConfig([], { workspaceValue: [] });
+      config.reload();
+      expect(config.xraySyncProjectKeys).toEqual([]);
+
+      current = syncProjectConfig([], {});
+      config.reload();
+      expect(config.xraySyncProjectKeys).toBeUndefined();
+    } finally {
+      getConfiguration.mockRestore();
+    }
+  });
+});
+
 describe("ExtensionConfig change listeners", () => {
   it("notifies on reload and stops after the listener subscription is disposed", () => {
     const config = ExtensionConfig.create(defaultsOnlyConfig(), false);

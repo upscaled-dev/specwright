@@ -831,6 +831,7 @@ describe("traceability sync command handler", () => {
     tagDerived?: string[];
     testKeys?: string[];
     directory?: string[];
+    derivesProjects?: boolean;
     scope?: ProjectScopeStore;
     completeProjects?: string[];
     commits?: boolean;
@@ -839,7 +840,10 @@ describe("traceability sync command handler", () => {
     const run = over.sync ?? ((): Promise<void> => Promise.resolve());
     let syncedAt: number | undefined;
     const adapter = {
-      keyGrammar: { testPrefix: "TEST_", projectOf: (k: string) => k.split("-")[0] },
+      keyGrammar: {
+        testPrefix: "TEST_",
+        ...(over.derivesProjects === false ? {} : { projectOf: (k: string) => k.split("-")[0] }),
+      },
       metadata: {
         sync: async (scope: SyncScope, signal?: AbortSignal, onProgress?: SyncProgress): Promise<void> => {
           await run(scope, signal, onProgress);
@@ -1013,6 +1017,22 @@ describe("traceability sync command handler", () => {
 
     expect(sync).toHaveBeenCalledWith(
       { testKeys: [], projectKeys: ["SHOP"] },
+      expect.anything(),
+      expect.anything()
+    );
+  });
+
+  it("does not fetch tagged keys outside an explicit selection when their project cannot be derived", async () => {
+    const sync = vi.fn(() => Promise.resolve());
+
+    await runSyncOn(managerFor(syncSubsystem({
+      sync,
+      testKeys: ["SHOP-9"],
+      derivesProjects: false,
+    }), { "xray.syncProjectKeys": ["CALC"] }));
+
+    expect(sync).toHaveBeenCalledWith(
+      { testKeys: [], projectKeys: ["CALC"] },
       expect.anything(),
       expect.anything()
     );
@@ -1316,6 +1336,19 @@ describe("traceability sync command handler", () => {
 
     expect(sync).not.toHaveBeenCalled();
     expect(info).toHaveBeenCalledWith("No projects or tagged tests are selected to sync.");
+  });
+
+  it("honors a quiet sync request when the persisted list is explicitly empty", async () => {
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const sync = vi.fn(() => Promise.resolve());
+    const commands = traceabilityCommands(managerFor(syncSubsystem({ sync, testKeys: ["CALC-1"] }), {
+      "xray.syncProjectKeys": [],
+    }));
+
+    await commands.syncTraceability({ announce: false });
+
+    expect(sync).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
   });
 
   it("reports a cancelled sync as information rather than an error", async () => {
