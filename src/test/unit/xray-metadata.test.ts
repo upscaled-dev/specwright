@@ -31,10 +31,10 @@ function cacheFor(memento: vscode.Memento, account = "account-a"): XrayMetadataC
   });
 }
 
-function fakeConfig(ttlMinutes = 15, projectKeys: string[] = []): ExtensionConfig {
+function fakeConfig(ttlMinutes = 15, projectKeys?: string[]): ExtensionConfig {
   return {
     get xrayCacheTtlMinutes(): number { return ttlMinutes; },
-    get xraySyncProjectKeys(): string[] { return projectKeys; },
+    get xraySyncProjectKeys(): string[] | undefined { return projectKeys; },
   } as unknown as ExtensionConfig;
 }
 
@@ -575,7 +575,7 @@ describe("XrayMetadataCapability staleness", () => {
     let now = 0;
     const capability = makeCapability({
       client: fakeClient({ fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1" }])) }),
-      config: fakeConfig(15),
+      config: fakeConfig(15, []),
       now: () => now,
     });
 
@@ -967,7 +967,7 @@ describe("XrayMetadataCapability.search", () => {
   it("returns an honest empty result (no transport hit) when there is nothing searchable", async () => {
     const searchTests = vi.fn(() => Promise.resolve(outcome([])));
     const capability = makeCapability({
-      config: fakeConfig(15, []),
+      config: fakeConfig(15),
       client: fakeClient({ searchTests }),
     });
 
@@ -994,7 +994,7 @@ describe("XrayMetadataCapability.search", () => {
   it("scopes the JQL to the synced catalogue while the setting is empty", async () => {
     const seen: string[] = [];
     const capability = makeCapability({
-      config: fakeConfig(15, []),
+      config: fakeConfig(15),
       client: fakeClient({
         fetchProjectCatalogue: () => Promise.resolve(outcome([{ key: "CALC-1" }])),
         searchTests: (jql) => {

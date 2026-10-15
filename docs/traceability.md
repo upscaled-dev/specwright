@@ -104,13 +104,13 @@ Repository and Test Set reads use the same project sync scope and offline cache 
 
 ![Traceability panel with mapped tests, untraced scenarios, and local result badges](../images/traceability.png)
 
-Sync always looks up the test keys already referenced by your local tags. To also load a whole project catalogue, which is needed to show available or unmapped Xray tests, name the projects before syncing:
+Use **Select Projects to Sync** to choose which projects Sync refreshes:
 
-- `playwrightBddRunner.xray.syncProjectKeys` is the sync scope whenever it holds a list. Nothing else widens it.
-- While that list is empty, the scope is derived instead from your test and requirement tags, `playwrightBddRunner.xray.defaultProjectKey`, and projects an earlier sync already catalogued.
-- The Coverage Board's View project selector never changes that standing scope. It names the project the board works in, and every sync fetches that one project by name alongside the standing scope: when you pick it, and on every later sync, whether you run it from the board, the panel title, or the command palette.
+- Sync refreshes the checked projects, including their catalogues and locally tagged test keys. Unchecked projects are excluded, even if they appear in local tags, an earlier sync, or the board's View project selector.
+- Accepting the picker saves the checkboxes to `playwrightBddRunner.xray.syncProjectKeys`, including when you accept the initial selection unchanged. Clearing every box saves an empty list and makes ordinary Sync fetch nothing.
+- Before a selection is saved, the scope is derived from your test and requirement tags, `playwrightBddRunner.xray.defaultProjectKey`, and projects an earlier sync already catalogued. Reset the setting at each configured settings scope to restore this automatic behavior.
 
-To choose the catalogues yourself, run **Specwright: Select Projects to Sync** from the Command Palette or the connection row of the Traceability panel. It lists every project your connection can reach, along with the ones your tags, default project, and earlier syncs name, says why each is on offer, and checks the ones currently in scope. Accepting the list writes it to `playwrightBddRunner.xray.syncProjectKeys`. Clear every box to restore the derived scope.
+Run **Specwright: Select Projects to Sync** from the Command Palette, the connection row of the Traceability panel, or **Select projects...** next to **Sync** on the Coverage Board. The picker lists projects your connection can reach, plus those named by your tags, default project, and earlier syncs. The saved selection applies to Sync from the board, panel title, and command palette.
 
 The Coverage Board loads a newly selected project automatically when connected and schedules one quiet, forced project sync after a remote create is confirmed. Both still work under a pinned list: a sync asked for one project by name fetches that project for that run only, and the pinned list stays as written. That post-create sync keeps a newly tagged scenario from remaining **not found on remote** until a manual refresh. **Sync Traceability** remains the on-demand refresh. A remote test is shown as available only after Specwright has completed that project's catalogue sync; an incomplete project catalogue never drives a claim that a test is unlinked. A successful direct lookup can still identify a tagged key that is missing remotely.
 
@@ -127,7 +127,7 @@ Run **Specwright: Open Coverage Board** from the Command Palette or the Traceabi
 | **Executions** | Groups this workspace's local create and publish activity under each Test Execution. Expand or collapse a parent to inspect its history. This is not a complete list of executions in Jira. |
 | **Publish** | Select a completed local run and create a new Test Execution or append results to an existing one. |
 
-Use the **View project** selector at the top of the board to choose the project the board works in. It narrows what the board shows, loads that project, and is the target for create and publish actions. It leaves the standing sync scope alone, and every sync fetches it alongside that scope. Use **Select projects...** next to **Sync** in the Mapping toolbar to change the standing list.
+Use the **View project** selector at the top of the board to choose the project the board works in. It narrows what the board shows, loads that project, and is the target for create and publish actions. Later ordinary syncs follow the checked project list. Use **Select projects...** next to **Sync** in the Mapping toolbar to change that list.
 
 The Matrix shows one page of rows at a time. Use its **Prev** and **Next** controls to reach later rows, or use the board search to filter all synced results before paging. A feature file can appear on more than one page; its Matrix group count shows rows on the current page.
 
@@ -286,9 +286,9 @@ All settings use the `playwrightBddRunner.*` namespace. See the general [setting
 | `traceability.reqTagPrefix` | `REQ_` | Prefix used to recognise requirement tags, for example `@REQ_DEMO-9`. |
 | `xray.siteUrl` | empty | Jira/Xray Cloud host used for setup, Jira access, and browser links. |
 | `xray.apiRegion` | `global` | Xray API region: `global`, `us`, `eu`, or `au`. It must match your tenant. |
-| `xray.syncProjectKeys` | `[]` | Project catalogues every sync fetches. When set, it is the whole sync scope. Empty means the scope is derived from tags, the default project, and earlier syncs. |
+| `xray.syncProjectKeys` | `[]` | Saved projects for ordinary Sync. An explicitly saved empty list syncs nothing. When unset, scope is derived from tags, the default project, and earlier syncs. |
 | `xray.cacheTtlMinutes` | `15` | How long a synced snapshot is considered fresh. Stale data is not refreshed until Sync runs. |
-| `xray.defaultProjectKey` | empty | Prefills new tests and executions. It joins the sync scope only while `xray.syncProjectKeys` is empty. |
+| `xray.defaultProjectKey` | empty | Prefills new tests and executions. It joins the automatic sync scope while `xray.syncProjectKeys` is unset. |
 | `xray.executionIssueType` | `Test Execution` | Work type used when creating a new Test Execution. It must be a standard-level type. |
 | `xray.reportGlob` | `playwright-report/**`, `test-results/**/*.zip` | Workspace globs used to suggest run-level report attachments. |
 | `xray.attachTo` | `evidence` | Sends per-test evidence to the Xray payload, the Jira issue, or both. |

@@ -894,6 +894,7 @@ describe("traceability sync command handler", () => {
   ): CommandManager {
     const workspaceConfig = {
       get: (key: string, fallback: unknown) => (key in settings ? settings[key] : fallback),
+      inspect: (key: string) => key in settings ? { key, workspaceValue: settings[key] } : { key },
     } as unknown as vscode.WorkspaceConfiguration;
     const mgr = CommandManager.create(
       makeContext({ config: ExtensionConfig.create(workspaceConfig, false), logger })
@@ -1011,7 +1012,7 @@ describe("traceability sync command handler", () => {
     await runSyncOn(managerFor(subsystem, { "xray.syncProjectKeys": ["shop"] }));
 
     expect(sync).toHaveBeenCalledWith(
-      { testKeys: ["CALC-1"], projectKeys: ["SHOP"] },
+      { testKeys: [], projectKeys: ["SHOP"] },
       expect.anything(),
       expect.anything()
     );
@@ -1025,10 +1026,7 @@ describe("traceability sync command handler", () => {
     expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["PAY"] }, expect.anything(), expect.anything());
   });
 
-  // One rule for every control: the standing scope plus the board's working project, named for that run.
-  // The palette's Sync Traceability is not an exception, so a project the board is working in is never
-  // reachable from the board and missing from the palette.
-  it("unions the board's working project into the palette sync, alongside the standing scope", async () => {
+  it("does not widen an ordinary palette sync with the board's working project", async () => {
     const sync = vi.fn(() => Promise.resolve());
     const scope = projectScopeStore(memento(), () => undefined);
     scope.set("PAY");
@@ -1037,12 +1035,10 @@ describe("traceability sync command handler", () => {
 
     await runSyncOn(managerFor(syncSubsystem({ sync, directory: ["PAY", "OPS"], scope, catalogueProjects: ["MATH"] })));
 
-    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["MATH", "PAY"] }, expect.anything(), expect.anything());
+    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["MATH"] }, expect.anything(), expect.anything());
   });
 
-  // A pinned list is the standing scope, and the working project rides alongside it for that run without
-  // rewriting it. Both halves matter: dropping either strands one of the two controls.
-  it("adds the working project to a pinned sync list for that run", async () => {
+  it("fetches only the pinned projects when the board is viewing another project", async () => {
     const sync = vi.fn(() => Promise.resolve());
     const scope = projectScopeStore(memento(), () => undefined);
     scope.set("PAY");
@@ -1053,7 +1049,7 @@ describe("traceability sync command handler", () => {
 
     await boardLoads(mgr).runSync();
 
-    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["PAY", "SHOP"] }, expect.anything(), expect.anything());
+    expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["SHOP"] }, expect.anything(), expect.anything());
   });
 
   it("names the working project once when a standing rung already holds it", async () => {
@@ -1067,9 +1063,7 @@ describe("traceability sync command handler", () => {
     expect(sync).toHaveBeenCalledWith({ testKeys: [], projectKeys: ["MATH"] }, expect.anything(), expect.anything());
   });
 
-  // A directory-only project sits on no rung, so once its quiet load fails the board can only get it
-  // through Sync naming it. Without that the selection is stranded and the board never fills.
-  it("names the board's working project on Sync, even after its quiet load failed", async () => {
+  it("does not retry a board project through ordinary Sync after its quiet load failed", async () => {
     let failNext = true;
     const sync = vi.fn(() => {
       if (failNext) {
@@ -1085,14 +1079,14 @@ describe("traceability sync command handler", () => {
     await boardLoads(mgr).autoSync("PAY");
     await boardLoads(mgr).runSync();
 
-    expect(sync).toHaveBeenCalledTimes(2);
+    expect(sync).toHaveBeenCalledOnce();
     expect(sync).toHaveBeenLastCalledWith({ testKeys: [], projectKeys: ["PAY"] }, expect.anything(), expect.anything());
   });
 
   it("coalesces concurrent invocations into a single in-flight run", async () => {
     let resolveSync!: () => void;
     const sync = vi.fn(() => new Promise<void>((resolve) => { resolveSync = resolve; }));
-    const mgr = managerFor(syncSubsystem({ sync }));
+    const mgr = managerFor(syncSubsystem({ sync, tagDerived: ["CALC"] }));
 
     const first = runSyncOn(mgr);
     const second = runSyncOn(mgr);
@@ -1109,7 +1103,7 @@ describe("traceability sync command handler", () => {
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     const resolvers: Array<() => void> = [];
     const sync = vi.fn((_scope: SyncScope) => new Promise<void>((resolve) => resolvers.push(resolve)));
-    const mgr = managerFor(syncSubsystem({ sync }));
+    const mgr = managerFor(syncSubsystem({ sync, tagDerived: ["CALC"] }));
     const { autoSync } = boardLoads(mgr);
 
     const first = runSyncOn(mgr);
@@ -1122,8 +1116,8 @@ describe("traceability sync command handler", () => {
     await flush();
 
     expect(sync).toHaveBeenCalledTimes(2);
-    expect(sync.mock.calls[0]![0]).toEqual({ testKeys: [], projectKeys: [] });
-    expect(sync.mock.calls[1]![0]).toEqual({ testKeys: [], projectKeys: ["PAY"] });
+    expect(sync.mock.calls[0]![0]).toEqual({ testKeys: [], projectKeys: ["CALC"] });
+    expect(sync.mock.calls[1]![0]).toEqual({ testKeys: [], projectKeys: ["CALC", "PAY"] });
 
     // One slot, so the two picks produced one follow-up and that follow-up queues nothing further.
     resolvers[1]!();
@@ -1141,7 +1135,7 @@ describe("traceability sync command handler", () => {
       scopes.push(scope);
       return new Promise<void>((resolve) => resolvers.push(resolve));
     });
-    const mgr = managerFor(syncSubsystem({ sync }));
+    const mgr = managerFor(syncSubsystem({ sync, tagDerived: ["CALC"] }));
     const commands = traceabilityCommands(mgr);
     const recover = commands as unknown as {
       scheduleProjectSync(project: string, diagnostics?: Iterable<string>): void;
@@ -1164,9 +1158,9 @@ describe("traceability sync command handler", () => {
     await flush();
 
     expect(scopes).toEqual([
-      { testKeys: [], projectKeys: [] },
       { testKeys: [], projectKeys: ["CALC"] },
-      { testKeys: [], projectKeys: ["PAY"] },
+      { testKeys: [], projectKeys: ["CALC"] },
+      { testKeys: [], projectKeys: ["CALC", "PAY"] },
     ]);
   });
 
@@ -1176,7 +1170,7 @@ describe("traceability sync command handler", () => {
     const catalogueProjects: string[] = [];
     const resolvers: Array<() => void> = [];
     const sync = vi.fn((_scope: SyncScope) => new Promise<void>((resolve) => resolvers.push(resolve)));
-    const mgr = managerFor(syncSubsystem({ sync, catalogueProjects }));
+    const mgr = managerFor(syncSubsystem({ sync, catalogueProjects, tagDerived: ["CALC"] }));
 
     const first = runSyncOn(mgr);
     void boardLoads(mgr).autoSync("PAY");
@@ -1256,7 +1250,7 @@ describe("traceability sync command handler", () => {
   it("wires the board's Sync button to the serialized sync, so two clicks share one run", async () => {
     let resolveSync!: () => void;
     const sync = vi.fn(() => new Promise<void>((resolve) => { resolveSync = resolve; }));
-    const mgr = managerFor(syncSubsystem({ sync }));
+    const mgr = managerFor(syncSubsystem({ sync, tagDerived: ["CALC"] }));
     const { runSync } = boardLoads(mgr);
 
     const first = runSync();
@@ -1308,12 +1302,20 @@ describe("traceability sync command handler", () => {
     expect(scopeEnabled()).toBe(true);
   });
 
-  it("reports a finished sync as an information toast, zero tests included", async () => {
+  it("does not fetch or misreport cached tests when the persisted list is explicitly empty", async () => {
     const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const sync = vi.fn(() => Promise.resolve());
 
-    await runSyncOn(managerFor(syncSubsystem()));
+    await runSyncOn(managerFor(syncSubsystem({
+      sync,
+      testKeys: ["CALC-1"],
+      tagDerived: ["CALC"],
+      catalogueProjects: ["CALC"],
+      tests: new Map([["CALC-1", { key: "CALC-1" }]]),
+    }), { "xray.syncProjectKeys": [] }));
 
-    expect(info).toHaveBeenCalledWith("Synced 0 remote tests.");
+    expect(sync).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith("No projects or tagged tests are selected to sync.");
   });
 
   it("reports a cancelled sync as information rather than an error", async () => {
@@ -1327,7 +1329,7 @@ describe("traceability sync command handler", () => {
       )
     );
 
-    await runSyncOn(managerFor(syncSubsystem()));
+    await runSyncOn(managerFor(syncSubsystem({ tagDerived: ["CALC"] })));
 
     expect(info).toHaveBeenCalledWith("Sync cancelled.");
     expect(errorToast).not.toHaveBeenCalled();
@@ -1371,7 +1373,7 @@ describe("traceability sync command handler", () => {
   });
 
   it("posts only a clear when a sync reported no pages at all", async () => {
-    const mgr = managerFor(syncSubsystem());
+    const mgr = managerFor(syncSubsystem({ tagDerived: ["CALC"] }));
     const panel = await openBoardFor(mgr);
 
     await runSyncOn(mgr);

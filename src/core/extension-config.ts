@@ -227,8 +227,9 @@ export class ExtensionConfig {
     return this.config.get<string>("xray.apiRegion", "global");
   }
 
-  public get xraySyncProjectKeys(): string[] {
-    return this.config.get<string[]>("xray.syncProjectKeys", []);
+  public get xraySyncProjectKeys(): string[] | undefined {
+    const keys = this.config.get<string[]>("xray.syncProjectKeys", []);
+    return keys.length > 0 || this.hasExplicitValue("xray.syncProjectKeys") ? keys : undefined;
   }
 
   public get xrayCacheTtlMinutes(): number {

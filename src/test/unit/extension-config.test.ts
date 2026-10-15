@@ -93,6 +93,11 @@ describe("ExtensionConfig defaults vs package.json", () => {
 
   for (const [setting, getter] of Object.entries(GETTER_FOR_SETTING)) {
     it(`getter default for "${setting}" matches the declared default`, () => {
+      if (setting === "xray.syncProjectKeys") {
+        expect(declared[setting]).toEqual([]);
+        expect(getter(config)).toBeUndefined();
+        return;
+      }
       expect(getter(config)).toEqual(declared[setting]);
     });
   }

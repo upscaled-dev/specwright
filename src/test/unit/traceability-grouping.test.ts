@@ -39,7 +39,9 @@ function stubConfig(values: Record<string, unknown>, inspected: Record<string, u
   const updates: Update[] = [];
   const wsConfig = {
     get: (key: string, dflt?: unknown): unknown => (key in values ? values[key] : dflt),
-    inspect: (): Record<string, unknown> => inspected,
+    inspect: (key: string): Record<string, unknown> => key === "xray.syncProjectKeys" && key in values
+      ? { key, workspaceValue: values[key] }
+      : { key, ...inspected },
     update: (key: string, value: unknown, target: vscode.ConfigurationTarget): Promise<void> => {
       updates.push({ key, value, target });
       return Promise.resolve();
@@ -470,9 +472,7 @@ describe("selectSyncProjects command handler", () => {
     expect(pickerItems(quickPick.mock.calls).map((item) => item.label)).toEqual(["OPS", "PAY"]);
   });
 
-  // Accepting the boxes as offered is not a decision to pin them: writing the derived union would freeze
-  // the scope, and the next project the workspace tags would stop being synced.
-  it("leaves the setting alone when the user confirms the checked boxes unchanged", async () => {
+  it("pins the checked boxes when the user confirms the derived scope", async () => {
     const updates = stubConfig({ "xray.defaultProjectKey": "PAY" });
     const info = vi.spyOn(vscode.window, "showInformationMessage");
     const quickPick = vi.spyOn(vscode.window, "showQuickPick").mockImplementation(
@@ -488,7 +488,9 @@ describe("selectSyncProjects command handler", () => {
 
     const checked = pickerItems(quickPick.mock.calls).filter((item) => item.picked).map((item) => item.label);
     expect(checked).toEqual(["CALC", "MATH", "PAY"]);
-    expect(updates).toEqual([]);
+    expect(updates).toEqual([
+      { key: "xray.syncProjectKeys", value: ["CALC", "MATH", "PAY"], target: vscode.ConfigurationTarget.Workspace },
+    ]);
     expect(String(info.mock.calls[0]?.[0])).toContain("Syncs will fetch CALC, MATH, PAY");
   });
 
@@ -551,7 +553,7 @@ describe("selectSyncProjects command handler", () => {
     ]);
   });
 
-  it("writes an empty list when every box is cleared, which restores the derived scope", async () => {
+  it("writes an empty list when every box is cleared, which syncs nothing", async () => {
     const updates = stubConfig({ "xray.defaultProjectKey": "PAY", "xray.syncProjectKeys": ["PAY"] });
     vi.spyOn(vscode.window, "showQuickPick").mockResolvedValue([] as never);
     const handlers = captureHandlers(makeContext(), (manager) =>
@@ -611,7 +613,7 @@ describe("selectSyncProjects command handler", () => {
 describe("traceability sync command", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("syncs the board's working project alongside known test keys and reports the result", async () => {
+  it("syncs the derived catalogue scope alongside known test keys and reports the result", async () => {
     const scope = projectScopeStore(memento(), () => undefined);
     scope.set("PAY");
     let syncedAt = 0;
@@ -629,7 +631,7 @@ describe("traceability sync command", () => {
     const handlers = captureHandlers(makeContext(), (manager) => manager.setTraceabilitySubsystem({
       getActiveAdapter: () => ({ metadata, keyGrammar: { projectOf: () => "CALC" } }),
       knownTestKeys: () => ["CALC-7"],
-      tagDerivedProjectKeys: () => [],
+      tagDerivedProjectKeys: () => ["CALC"],
       projectScope: () => scope,
     } as unknown as TraceabilitySubsystem));
 
@@ -652,7 +654,7 @@ describe("traceability sync command", () => {
     const handlers = captureHandlers(makeContext({ logger }), (manager) => manager.setTraceabilitySubsystem({
       getActiveAdapter: () => ({ metadata, keyGrammar: { projectOf: () => "CALC" } }),
       knownTestKeys: () => [],
-      tagDerivedProjectKeys: () => [],
+      tagDerivedProjectKeys: () => ["CALC"],
       projectScope: () => NO_PROJECT_SCOPE,
     } as unknown as TraceabilitySubsystem));
 

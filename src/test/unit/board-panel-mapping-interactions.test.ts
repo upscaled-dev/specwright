@@ -172,7 +172,7 @@ describe("BoardPanel", () => {
     expect(lastRender(panel)?.syncScopeVerb).toMatchObject({
       enabled: true,
       label: "Select projects...",
-      hint: "Choose the projects every sync fetches, alongside the View project.",
+      hint: "Choose the projects every sync fetches.",
     });
   });
 

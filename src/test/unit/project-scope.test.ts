@@ -115,8 +115,8 @@ describe("resolveSyncProjectKeys", () => {
     expect(resolveSyncProjectKeys({ syncSettingKeys: [" pay ", "calc", "CALC", ""] })).toEqual(["CALC", "PAY"]);
   });
 
-  it("falls back to the ladder when the setting holds nothing usable", () => {
-    expect(resolveSyncProjectKeys({ syncSettingKeys: ["  "], tagDerivedKeys: ["calc"] })).toEqual(["CALC"]);
+  it("treats an explicit setting with no usable keys as an empty scope", () => {
+    expect(resolveSyncProjectKeys({ syncSettingKeys: ["  "], tagDerivedKeys: ["calc"] })).toEqual([]);
   });
 
   it("returns nothing when the workspace names no project at all", () => {

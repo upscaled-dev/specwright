@@ -329,16 +329,20 @@ describe("createXrayAdapterFactory verify", () => {
 });
 
 describe("createXrayAdapterFactory organization sync", () => {
-  it("reuses the authoritative catalogued project when a later sync omits projectKeys", async () => {
+  it("does not widen organization reads when a later sync omits projectKeys", async () => {
     const store = new XrayCredentialStore(mapSecretStorage(), trustedWorkspace());
     await store.setCredentials("acme.atlassian.net", "account-a", "secret-a");
     const queries: string[] = [];
+    let rejectMath = false;
     vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
       if (url.endsWith("/authenticate")) {
         return Promise.resolve({ status: 200, ok: true, headers: new Headers(), text: () => Promise.resolve(JSON.stringify("token")) } as Response);
       }
       const query = (JSON.parse(String(init.body)) as { query: string }).query;
       queries.push(query);
+      if (rejectMath && query.includes("MATH")) {
+        return Promise.resolve({ status: 200, ok: true, headers: new Headers(), text: () => Promise.resolve(JSON.stringify({ errors: [{ message: "MATH denied" }] })) } as Response);
+      }
       const body = query.includes("getTestSets")
         ? { data: { getTestSets: { total: 0, results: [] } } }
         : { data: { getTests: { total: 0, results: [] } } };
@@ -360,7 +364,13 @@ describe("createXrayAdapterFactory organization sync", () => {
 
     await adapter.metadata?.sync({ testKeys: ["SHOP-1"] });
 
-    expect(queries.some((query) => query.includes("getTestSets") && query.includes("SHOP"))).toBe(true);
+    expect(queries.some((query) => query.includes("getTestSets") && query.includes("SHOP"))).toBe(false);
+    queries.length = 0;
+    rejectMath = true;
+
+    await adapter.metadata?.sync({ projectKeys: ["MATH"] });
+
+    expect(queries.some((query) => query.includes("getTestSets"))).toBe(false);
     queries.length = 0;
     const prior = adapter.metadata!.snapshot();
     const controller = new AbortController();

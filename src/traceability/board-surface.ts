@@ -520,7 +520,7 @@ export class BoardSurface {
       enabled: this.canSelectSyncProjects(),
       hint: this.deps.syncPickerActive()
         ? "The project picker is already open."
-        : "Choose the projects every sync fetches, alongside the View project.",
+        : "Choose the projects every sync fetches.",
     };
   }
 

@@ -14,6 +14,7 @@ import { createXrayResultPublishing } from "./xray-result-publishing";
 import type { WorkspaceTrust } from "../core/workspace-trust";
 import { trustedAdapter } from "../traceability/trusted-adapter";
 import { currentAdapterVersions } from "../traceability/adapter-contract";
+import { normalizeProjectKeys } from "../traceability/project-scope";
 import {
   XrayOrganizationCache,
   XrayOrganizationCapability,
@@ -128,10 +129,10 @@ export function createXrayAdapterFactory(
         onDidChange: baseMetadata.onDidChange,
         snapshot: () => baseMetadata.snapshot(),
         sync: async (scope, signal, progress) => {
-          const priorProjects = baseMetadata.snapshot().catalogueProjects;
           await baseMetadata.sync(scope, signal, progress);
           const catalogued = baseMetadata.snapshot().catalogueProjects;
-          const projects = catalogued.length > 0 ? catalogued : priorProjects;
+          const requested = new Set(normalizeProjectKeys(scope.projectKeys ?? []));
+          const projects = normalizeProjectKeys(catalogued).filter((key) => requested.has(key));
           // The organization catalogue rides along with the metadata sync it follows. Its failure is
           // reported and left unsynced rather than failing a sync whose metadata already committed.
           if (!signal?.aborted && projects.length > 0) {

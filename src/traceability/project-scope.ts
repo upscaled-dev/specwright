@@ -25,9 +25,9 @@ export interface ProjectUniverseSources {
   // Projects an earlier sync already pulled a catalogue for, so their cards keep a scope to select.
   readonly catalogueKeys?: readonly string[] | undefined;
   readonly defaultKey?: string | undefined;
-  // One project this call asks for, such as a forced project sync, the project the board just opened, or
-  // the one its Sync is working in. It names a single fetch rather than the durable scope, so it is
-  // the one rung allowed to widen an explicit sync setting.
+  // One project this call asks for, such as a forced project sync or the project the board just opened.
+  // It names a single fetch rather than the durable scope, so it is the one rung allowed to widen an
+  // explicit sync setting.
   readonly explicitKey?: string | undefined;
 }
 
@@ -48,17 +48,17 @@ export function resolveProjectUniverse(sources: ProjectUniverseSources): string[
 }
 
 /**
- * The projects one sync fetches a full catalogue for. A non-empty sync setting is the durable answer:
- * the user named the scope, so only a project this call asks for by name (`explicitKey`) joins it, and
- * only for that call. Otherwise the universe ladder minus the provider directory, since a sync fetches
- * one catalogue per project and covering every accessible project is not a scope. The directory is
- * dropped here rather than left to the caller, so a source bag built for a dropdown cannot leak a
- * site-wide fetch into a sync. The board's working project is not a rung either: it rides as
- * `explicitKey` on the calls that mean it, never as standing scope.
+ * The projects one sync fetches a full catalogue for. A present sync setting is the durable answer,
+ * including an empty list: the user named the scope, so only a project this call asks for by name
+ * (`explicitKey`) joins it, and only for that call. Otherwise the universe ladder minus the provider
+ * directory, since a sync fetches one catalogue per project and covering every accessible project is
+ * not a scope. The directory is dropped here rather than left to the caller, so a source bag built for
+ * a dropdown cannot leak a site-wide fetch into a sync. The board's working project is not a rung
+ * either: it rides as `explicitKey` on the calls that mean it, never as standing scope.
  */
 export function resolveSyncProjectKeys(sources: ProjectUniverseSources): string[] {
   const chosen = normalizeProjectKeys(sources.syncSettingKeys ?? []);
-  return chosen.length > 0
+  return sources.syncSettingKeys !== undefined
     ? normalizeProjectKeys([...chosen, sources.explicitKey ?? ""])
     : resolveProjectUniverse({ ...sources, directoryProjects: undefined });
 }

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Sync respects the projects checked in Select Projects to Sync, including tagged test lookups. The viewed project and previously synced projects no longer widen ordinary Sync.
+- Accepting the project picker saves the exact selection. Clearing all checkboxes syncs nothing, including after reloading the workspace.
+- A failed project fetch no longer refreshes unchecked projects from the previous catalogue.
+
 
 ## [0.7.9] - 2026-10-12
 ### Changed

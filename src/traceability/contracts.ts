@@ -113,9 +113,9 @@ export interface TestSetRefreshResult {
   readonly testSet?: RemoteTestSet | undefined;
 }
 
-// The scope of a sync. `projectKeys` requests a full catalogue for orphan detection (an empty set
-// means "derive from the keys the local tags reference"); `testKeys` are the specific keys the
-// local join needs metadata for.
+// The scope of one resolved sync. `projectKeys` requests full catalogues for orphan detection;
+// `testKeys` are the specific keys the local join needs metadata for. Empty lists make no remote
+// metadata request; command configuration decides whether a scope is derived before reaching here.
 export interface SyncScope {
   readonly projectKeys?: readonly string[] | undefined;
   readonly testKeys?: readonly string[] | undefined;

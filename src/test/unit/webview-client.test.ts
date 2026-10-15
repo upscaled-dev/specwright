@@ -138,7 +138,7 @@ async function bridgeBoardSurface(
   return { client, surface, routeClientMessages };
 }
 
-const PICKER_HINT = "Choose the projects every sync fetches, alongside the View project.";
+const PICKER_HINT = "Choose the projects every sync fetches.";
 
 function boardRender(selected = false): Extract<BoardHostMessage, { type: "render" }> {
   const section = { total: 1, filtered: 1, page: 0, pageSize: 25, pageCount: 1, query: "", filtering: false, selection: "none" } as const;

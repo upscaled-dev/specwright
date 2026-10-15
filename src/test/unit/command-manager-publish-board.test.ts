@@ -611,6 +611,139 @@ describe("traceability openBoard command handler", () => {
     expect(String(info.mock.calls[0]?.[0])).toContain("Enable the Traceability panel");
   });
 
+  it("pins picker checks through reload, syncs only them, and renders their catalogue in the bundled board", async () => {
+    let configuredKeys: string[] | undefined;
+    const workspaceConfig = {
+      get: <T>(key: string, fallback?: T): T | undefined => key === "xray.syncProjectKeys"
+        ? (configuredKeys as T | undefined) ?? fallback
+        : key === "xray.siteUrl"
+          ? "acme.atlassian.net" as T
+          : key === "xray.defaultProjectKey"
+            ? "MATH" as T
+            : fallback,
+      inspect: (key: string) => configuredKeys === undefined || key !== "xray.syncProjectKeys"
+        ? { key }
+        : { key, workspaceValue: configuredKeys },
+      update: (key: string, value: unknown): Promise<void> => {
+        if (key === "xray.syncProjectKeys") {configuredKeys = value as string[];}
+        return Promise.resolve();
+      },
+    } as unknown as vscode.WorkspaceConfiguration;
+    const context = makeContext({ config: ExtensionConfig.create(workspaceConfig, false) });
+    const { store: credentials } = mapCredentialStore();
+    await credentials.setCredentials("acme.atlassian.net", "client", "secret");
+    await credentials.setJiraCredentials("acme.atlassian.net", "qa@example.com", "jira-token");
+    const adapter = createXrayAdapterFactory(
+      credentials,
+      () => Promise.resolve(connected("acme.atlassian.net")),
+      memento(),
+      { resolveSteps: () => undefined, workspaceRootFor: () => undefined },
+      trustedWorkspace()
+    ).create({ config: context.config, logger: context.logger });
+    const queries: string[] = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      if (url.endsWith("/authenticate")) {return new Response(JSON.stringify("test-jwt"));}
+      if (url.includes("/rest/api/3/project/search")) {
+        return new Response(JSON.stringify({ values: [{ key: "APEX", name: "Apex" }], isLast: true }));
+      }
+      if (url.endsWith("/graphql")) {
+        const { query } = JSON.parse(String(init.body)) as { query: string };
+        queries.push(query);
+        const selected = query.includes("CALC");
+        const data = query.includes("getTestSets")
+          ? { getTestSets: { total: 0, results: [] } }
+          : { getTests: { total: 1, results: [{
+            issueId: "42",
+            jira: selected
+              ? { key: "CALC-42", summary: "Selected remote test" }
+              : { key: "APEX-1", summary: "Previously synced test" },
+            testType: { name: "Cucumber", kind: "Gherkin" },
+          }] } };
+        return new Response(JSON.stringify({ data }));
+      }
+      throw new Error(`Unexpected remote request: ${url}`);
+    });
+    await adapter.metadata!.sync({ projectKeys: ["APEX"] });
+    expect(adapter.metadata!.snapshot().tests.has("CALC-42")).toBe(false);
+    queries.length = 0;
+    let viewedProject: string | undefined = "APEX";
+    const scope: ProjectScopeStore = {
+      get: (known) => viewedProject !== undefined && known.includes(viewedProject) ? viewedProject : undefined,
+      set: (project) => {viewedProject = project;},
+    };
+    const snapshot = (): TraceabilitySnapshot => {
+      const remote = adapter.metadata!.snapshot();
+      return {
+        links: [],
+        untraced: [],
+        orphans: [...remote.tests.values()].map((meta) => ({ testKey: meta.key, meta })),
+        stale: remote.stale,
+        completeProjects: [...remote.completeProjects],
+        errors: [...remote.errors],
+      };
+    };
+    const subsystem = (): TraceabilitySubsystem => ({
+      traceabilityPanelActive: true,
+      connected: true,
+      getActiveAdapter: () => adapter,
+      getSnapshot: snapshot,
+      knownTestKeys: () => ["SHOP-9"],
+      tagDerivedProjectKeys: () => ["CALC", "SHOP"],
+      projectScope: () => scope,
+      mappingPageSize: () => NO_MAPPING_PAGE_SIZE,
+      onDidChangeSnapshot: adapter.metadata!.onDidChange,
+    } as unknown as TraceabilitySubsystem);
+    const pickerManager = CommandManager.create(context);
+    pickerManager.setTraceabilitySubsystem(subsystem());
+    vi.spyOn(vscode.workspace, "getConfiguration").mockReturnValue(workspaceConfig);
+    vi.spyOn(vscode.window, "showQuickPick").mockImplementation((items) => Promise.resolve(
+      (items as readonly { label: string }[]).filter((item) => item.label === "CALC") as never
+    ));
+
+    try {
+      await traceabilityCommands(pickerManager).selectSyncProjects();
+      expect(configuredKeys).toEqual(["CALC"]);
+
+      const reloaded = CommandManager.create({
+        ...context,
+        config: ExtensionConfig.create(workspaceConfig, false),
+      });
+      reloaded.setTraceabilitySubsystem(subsystem());
+      await traceabilityCommands(reloaded).syncTraceability();
+
+      expect(queries.some((query) => query.includes("CALC"))).toBe(true);
+      expect(queries.some((query) => query.includes("SHOP") || query.includes("MATH") || query.includes("APEX"))).toBe(false);
+
+      vi.spyOn(vscode.window, "showQuickPick").mockResolvedValueOnce([] as never);
+      await traceabilityCommands(reloaded).selectSyncProjects();
+      expect(configuredKeys).toEqual([]);
+      const emptyScope = CommandManager.create({
+        ...context,
+        config: ExtensionConfig.create(workspaceConfig, false),
+      });
+      emptyScope.setTraceabilitySubsystem(subsystem());
+      const beforeEmptySync = queries.length;
+      const info = vi.spyOn(vscode.window, "showInformationMessage");
+      await traceabilityCommands(emptyScope).syncTraceability();
+      expect(queries).toHaveLength(beforeEmptySync);
+      expect(info).toHaveBeenLastCalledWith("No projects or tagged tests are selected to sync.");
+
+      scope.set(undefined);
+      openBoard(reloaded);
+      const panel = win.__webviewPanels[0]!;
+      const browser = await connectBrowserClient(panel as unknown as StubPanel);
+      await browser.flushInbound();
+      await browser.pumpHost();
+      expect(browser.dom.window.document.body.textContent).toContain("Selected remote test");
+      browser.dom.window.close();
+    } finally {
+      win.__resetWebviewPanels();
+      await adapter.dispose?.();
+      credentials.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
 });
 
 describe("traceability publishLastRun: Publish tab", () => {

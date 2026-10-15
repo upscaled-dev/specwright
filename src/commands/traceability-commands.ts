@@ -256,9 +256,9 @@ export class TraceabilityCommands {
     return subsystem?.projectScope().get(this.projectUniverse(subsystem.getActiveAdapter()));
   }
 
-  // `explicitKey` is what one call asks for by name, so it survives an explicit sync setting. The board's
-  // working project reaches this resolver that way on every sync (see `syncTraceability`); only Select
-  // Projects to Sync changes the standing list.
+  // `explicitKey` is what one call asks for by name, so it survives an explicit sync setting. Only
+  // per-project loads and post-create reconciliation name one; Select Projects to Sync changes the
+  // standing list.
   private syncProjectKeys(
     adapter: TraceabilityAdapter | undefined,
     explicitKey?: string
@@ -267,6 +267,17 @@ export class TraceabilityCommands {
       ...this.localProjectSources(adapter),
       explicitKey,
     });
+  }
+
+  private syncTestKeys(
+    adapter: TraceabilityAdapter | undefined,
+    projectKeys: readonly string[]
+  ): string[] {
+    const testKeys = this.deps.subsystem()?.knownTestKeys() ?? [];
+    if (this.deps.config.xraySyncProjectKeys === undefined) {return testKeys;}
+    const projects = new Set(projectKeys);
+    const projectOf = adapter?.keyGrammar.projectOf;
+    return projectOf ? testKeys.filter((key) => projects.has(projectOf(key))) : [];
   }
 
   private boardTabIcon(): { light: vscode.Uri; dark: vscode.Uri } | undefined {
@@ -325,10 +336,9 @@ export class TraceabilityCommands {
         "Push scenario text from the board failed"
       ),
       runSync: () => this.boardPrivileged(() => this.syncTraceability()),
-      // The same resolution that run would take, off cached sources only: the working project rides as
-      // `explicitKey` exactly as `syncTraceability` defaults it.
+      // The same resolution an ordinary Sync takes, off cached sources only.
       syncProjects: () =>
-        this.syncProjectKeys(this.deps.subsystem()?.getActiveAdapter(), this.selectedProject()),
+        this.syncProjectKeys(this.deps.subsystem()?.getActiveAdapter()),
       selectSyncProjects: () => this.fireAndForget(
         this.boardPrivileged((signal) => this.selectSyncProjectsTrusted(signal)),
         "Selecting sync projects from the board failed"
@@ -428,21 +438,18 @@ export class TraceabilityCommands {
     await this.refreshBoard("creating an execution");
   }
 
-  // Every sync fetches the selected sync projects plus the project the board is working in, named for
-  // that run. Defaulted here rather than at each entry point, so the palette, the view title, and the
-  // board's Sync cannot drift, and a selection on no rung is never stranded by a failed load. A call
-  // that already names a project keeps its own.
+  // An ordinary Sync fetches the standing scope. Per-project loads and post-create reconciliation name
+  // their project through `explicitKey`, so they remain available without letting the board's View
+  // selection widen palette, view-title, or board Sync.
   public syncTraceability(request: SyncRequest = { announce: true }): Promise<void> {
     this.deps.workspaceTrust.require();
-    const working = request.explicitKey ?? this.selectedProject();
-    const scoped: SyncRequest = { ...request, ...(working ? { explicitKey: working } : {}) };
     if (this.syncInFlight) {
-      if (scoped.explicitKey !== undefined) {
-        this.projectSyncs.enqueue(scoped.explicitKey, scoped.forceProject === true);
+      if (request.explicitKey !== undefined) {
+        this.projectSyncs.enqueue(request.explicitKey, request.forceProject === true);
       }
       return this.syncInFlight;
     }
-    this.syncInFlight = this.operations.sync(() => this.runTraceabilitySyncCommand(scoped)).finally(() => {
+    this.syncInFlight = this.operations.sync(() => this.runTraceabilitySyncCommand(request)).finally(() => {
       this.syncInFlight = undefined;
       this.projectSyncs.poke();
     });
@@ -475,10 +482,15 @@ export class TraceabilityCommands {
       }
       return;
     }
-    const scope: SyncScope = {
-      testKeys: subsystem?.knownTestKeys() ?? [],
-      projectKeys: this.syncProjectKeys(adapter, request.explicitKey),
-    };
+    const projectKeys = this.syncProjectKeys(adapter, request.explicitKey);
+    const testKeys = this.syncTestKeys(adapter, projectKeys);
+    if (testKeys.length === 0 && projectKeys.length === 0) {
+      if (request.announce) {
+        vscode.window.showInformationMessage("No projects or tagged tests are selected to sync.");
+      }
+      return;
+    }
+    const scope: SyncScope = { projectKeys, testKeys };
     const controller = new AbortController();
     const syncedAtBefore = metadata.snapshot().syncedAt;
     let counted = false;
@@ -660,21 +672,18 @@ export class TraceabilityCommands {
       })),
       {
         title: "Select Projects to Sync",
-        placeHolder: "Projects every sync fetches, alongside the board's working project. Check none to scope it automatically.",
+        placeHolder: "Only checked projects will sync. Uncheck all to sync nothing.",
         canPickMany: true,
         ignoreFocusOut: true,
       }
     );
     if (picked === undefined) {return;}
     const keys = picked.map((item) => item.label);
-    // Confirming the boxes as offered is not a choice to pin the scope: writing the derived union would
-    // freeze it, and the next tagged project would stop being synced.
-    const edited = keys.length !== scoped.size || keys.some((key) => !scoped.has(key));
     // The write is the refresh: the config listeners rebuild the panel and repaint an open board.
-    if (edited) {await this.writeSyncProjectKeys(keys);}
+    await this.writeSyncProjectKeys(keys);
     vscode.window.showInformationMessage(
       keys.length === 0
-        ? "Sync project list cleared. Tagged projects, the default project, and projects synced earlier are fetched again."
+        ? "Sync project list cleared. Sync will not fetch a project catalogue until you select one."
         : `Syncs will fetch ${keys.join(", ")}.`
     );
   }
