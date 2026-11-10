@@ -15,6 +15,10 @@ import type { TraceabilityAdapter } from "../../traceability/contracts";
 import type { ExtensionConfig } from "../../core/extension-config";
 import { Logger } from "../../utils/logger";
 import { XrayMetadataCapability } from "../../xray/xray-metadata";
+import { FeatureParser } from "../../parsers/feature-parser";
+import { CommandManager } from "../../commands/command-manager";
+import { TraceabilityCommands } from "../../commands/traceability-commands";
+import { captureHandlers, makeContext } from "./helpers/command-manager-harness";
 import type { XrayClient } from "../../xray/xray-client";
 import type { XrayMetadataCache } from "../../xray/xray-metadata-cache";
 import { LINK_FRAGMENT } from "../../traceability/link-picker-panel";
@@ -81,7 +85,8 @@ async function rig(state: Record<string, unknown> = {}): Promise<ClientRig> {
 async function bridgeBoardSurface(
   model: BoardViewModel,
   onContainerAction: (action: "createTestSet" | "addToTestSet" | "createTestPlan" | "addToTestPlan", surface: BoardSurface) => void,
-  scope?: { projects: readonly string[]; project?: string }
+  scope?: { projects: readonly string[]; project?: string },
+  openIssue: (key: string) => void = () => undefined
 ): Promise<{ readonly client: ClientRig; readonly surface: BoardSurface; routeClientMessages(): void }> {
   const client = await rig();
   client.send("shell", { type: "activate", tab: "mapping" });
@@ -113,7 +118,7 @@ async function bridgeBoardSurface(
     syncProjects: () => scope?.projects ?? ["CALC"],
     selectSyncProjects: () => undefined,
     autoSync: () => Promise.resolve(),
-    openIssue: () => undefined,
+    openIssue,
     bulkCreate: () => undefined,
     createTestSet: () => onContainerAction("createTestSet", board.surface!),
     addToTestSet: () => onContainerAction("addToTestSet", board.surface!),
@@ -146,7 +151,7 @@ function boardRender(selected = false): Extract<BoardHostMessage, { type: "rende
   return {
     type: "render",
     scenarios: [{ name: "Login", location: "features/login.feature:3", dropId: "scenario-1", pills: [], reqKeys: [], selected }],
-    available: [{ key: "CALC-1", pills: [], links: [], selected }],
+    available: [{ key: "CALC-1", pills: [], links: [], reqKeys: [], selected }],
     matrixPage: { filtered: 0, page: 0, pageSize: 25, pageCount: 0 },
     mapped: [], sections: { untraced: section, available: section, mapped: { ...section, total: 0, filtered: 0, pageCount: 0 } },
     pageSize: 25, matrix: [], executions: [], availableEmptyText: "No tests",
@@ -171,7 +176,7 @@ function mappingActionRender(): Extract<BoardHostMessage, { type: "render" }> {
 function mappedRender(withLink = true): Extract<BoardHostMessage, { type: "render" }> {
   const base = boardRender();
   const mapped = [{
-    key: "CALC-2", pills: [], selected: false,
+    key: "CALC-2", pills: [], reqKeys: [], selected: false,
     links: withLink ? [{ name: "Mapped login", location: "features/login.feature:3", unlinkId: "scenario-1" }] : [],
   }];
   return {
@@ -220,6 +225,58 @@ async function expectNoSeriousViolations(dom: JSDOM): Promise<void> {
 }
 
 describe("coverage board browser client", () => {
+  it("opens story links from tagged scenarios and synced coverage in the tracker", async () => {
+    const grammar = {
+      testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: /^[A-Z]+-\d+$/u,
+      canonicalizeKey: (key: string) => key.toUpperCase(), projectOf: (key: string) => key.replace(/-\d+$/u, ""),
+    };
+    const adapter: TraceabilityAdapter = {
+      id: "xray", label: "Xray", keyGrammar: grammar,
+      browseUrl: ({ key }) => `https://acme.atlassian.net/browse/${key}`,
+    };
+    let manager: CommandManager | undefined;
+    captureHandlers(makeContext({ traceabilityAdapter: adapter }), (created) => { manager = created; });
+    const commands = (manager as unknown as { traceabilityCommands: TraceabilityCommands }).traceabilityCommands;
+    const deps = (commands as unknown as { boardDeps: () => BoardSurfaceDeps }).boardDeps();
+    const env = vscode.env as unknown as { __resetEnv(): void; __openExternalCalls: string[] };
+    env.__resetEnv();
+    const content = `Feature: Stories
+@REQ_CALC-10 @REQ_CALC-11
+Scenario: Untraced
+  Given a condition
+@TEST_CALC-1 @REQ_CALC-20
+Scenario: Mapped one
+  Given a condition
+@TEST_CALC-1 @REQ_CALC-21
+Scenario: Mapped two
+  Given a condition
+Scenario: No story
+  Given a condition
+`;
+    const scenarios = FeatureParser.create().parseFeatureContent(content)!.scenarios;
+    const snapshot = buildTraceabilitySnapshot([{ filePath: "/ws/story.feature", scenarios }], {}, grammar, {
+      tests: new Map([
+        ["CALC-1", { key: "CALC-1", coverageKeys: ["CALC-20", "CALC-22"] }],
+        ["CALC-2", { key: "CALC-2", coverageKeys: ["CALC-30", "CALC-30", "CALC-31"] }],
+        ["CALC-3", { key: "CALC-3" }],
+      ]),
+      fetchedScopes: ["CALC"], catalogueProjects: ["CALC"], completeProjects: ["CALC"],
+      verifiedAbsentKeys: [], stale: false, errors: [],
+    });
+    const bridge = await bridgeBoardSurface(buildBoardViewModel(snapshot, ["/ws"], "TEST_", true, grammar.projectOf), () => undefined, undefined, deps.openIssue);
+    const doc = bridge.client.dom.window.document;
+    const storyKeys = (selector: string): string[] => [...doc.querySelectorAll<HTMLButtonElement>(`${selector} button`)].map((button) => button.textContent!).filter((label) => label.startsWith("Open story "));
+    expect(storyKeys("#scenario-cards")).toEqual(["Open story CALC-10", "Open story CALC-11"]);
+    expect(storyKeys("#mapped-cards")).toEqual(["Open story CALC-20", "Open story CALC-22", "Open story CALC-21"]);
+    expect(storyKeys("#available-cards")).toEqual(["Open story CALC-30", "Open story CALC-31"]);
+    const button = [...doc.querySelectorAll<HTMLButtonElement>("#mapped-cards button")].find((item) => item.textContent === "Open story CALC-21")!;
+    button.focus();
+    expect(doc.activeElement).toBe(button);
+    button.click();
+    bridge.routeClientMessages();
+    expect(env.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-21"]);
+    bridge.client.dom.window.close();
+  });
   it("filters a named test from the last of three synced projects in All Projects", async () => {
     const projects = ["CALC", "MATH", "SHOP"];
     const catalogues = new Map(projects.map((project) => [project,
@@ -405,11 +462,12 @@ describe("coverage board browser client", () => {
   it("carries one scoped Available and Mapped selection through both Mapping toolbars", async () => {
     const model: BoardViewModel = {
       scenarios: [],
-      available: [{ key: "CALC-1", project: "CALC", pills: [], links: [] }],
+      available: [{ key: "CALC-1", project: "CALC", pills: [], links: [], reqKeys: [] }],
       mapped: [{
         key: "CALC-2",
         project: "CALC",
         pills: ["1 scenario"],
+        reqKeys: [],
         links: [{ name: "Mapped login", location: "features/login.feature:3", unlinkId: "scenario-1" }],
       }],
       matrix: [],
@@ -452,13 +510,14 @@ describe("coverage board browser client", () => {
     const model: BoardViewModel = {
       scenarios: [],
       available: [
-        { key: "CALC-1", project: "CALC", pills: [], links: [] },
-        { key: "CALC-2", project: "CALC", pills: [], links: [] },
+        { key: "CALC-1", project: "CALC", pills: [], links: [], reqKeys: [] },
+        { key: "CALC-2", project: "CALC", pills: [], links: [], reqKeys: [] },
       ],
       mapped: [{
         key: "CALC-3",
         project: "CALC",
         pills: ["1 scenario"],
+        reqKeys: [],
         links: [{ name: "Mapped login", location: "features/login.feature:3", unlinkId: "scenario-1" }],
       }],
       matrix: [],
@@ -533,7 +592,7 @@ describe("coverage board browser client", () => {
   it("offers a keyboard link from a named scenario after the host selects a test", async () => {
     const model: BoardViewModel = {
       scenarios: [{ name: "Login", location: "features/login.feature:3", dropId: "scenario-1", pills: [], reqKeys: [] }],
-      available: [{ key: "CALC-1", project: "CALC", pills: [], links: [] }],
+      available: [{ key: "CALC-1", project: "CALC", pills: [], links: [], reqKeys: [] }],
       mapped: [], matrix: [], completeProjects: ["CALC"], availableEmptyText: "No unmapped tests",
     };
     const bridge = await bridgeBoardSurface(model, () => undefined);

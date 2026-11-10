@@ -186,7 +186,7 @@ describe("webview protocol", () => {
     }));
     const mapped = {
       version: 1, session: "session", revision: 2, surface: "board",
-      body: { ...base, mapped: [{ key: "CALC-1", pills: [], links, selected: false }] },
+      body: { ...base, mapped: [{ key: "CALC-1", pills: [], links, reqKeys: Array.from({ length: 300 }, (_, index) => `CALC-${index}`), selected: false }] },
     };
     expect(isHostEnvelope(mapped, "session", 1)).toBe(true);
 
@@ -215,12 +215,13 @@ describe("webview protocol", () => {
     }));
     const link = { name: "Scenario", location: "features/large.feature:1", unlinkId: "scenario-1" };
     const mapped = Array.from({ length: 100 }, (_, index) => ({
-      key: `CALC-${index}`, pills: Array(64).fill("smoke"), links: Array(64).fill(link), selected: false,
+      key: `CALC-${index}`, pills: Array(64).fill("smoke"), links: Array(64).fill(link), reqKeys: [], selected: false,
     }));
     const envelope = {
       version: 1, session: "session", revision: 2, surface: "board", body: { ...base, scenarios, mapped },
     };
 
+    expect(isHostEnvelope({ ...envelope, body: { ...envelope.body, mapped: mapped.slice(0, 1) } }, "session", 1)).toBe(true);
     expect(isHostEnvelope(envelope, "session", 1)).toBe(false);
   });
 

@@ -168,6 +168,7 @@ describe("buildBoardViewModel: test cards", () => {
       {
         key: "CALC-1",
         pills: ["2 scenarios"],
+        reqKeys: [],
         links: [
           { name: "A", location: "features/login.feature:5", unlinkId: scenarioDropId(ref({ line: 5, name: "A" })) },
           { name: "B", location: "features/login.feature:9", unlinkId: scenarioDropId(ref({ line: 9, name: "B" })) },
@@ -220,7 +221,7 @@ describe("buildBoardViewModel: test cards", () => {
       snapshot({ links: [link({ meta: { key: "CALC-1", summary: "Add two numbers" } })] }),
       ROOTS
     );
-    expect(model.mapped[0]).toEqual({ key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"], links: [loginRow] });
+    expect(model.mapped[0]).toEqual({ key: "CALC-1", summary: "Add two numbers", pills: ["1 scenario"], links: [loginRow], reqKeys: [] });
   });
 
   it("omits the summary on a mapped card with no metadata (offline)", () => {
@@ -241,12 +242,12 @@ describe("buildBoardViewModel: test cards", () => {
       snapshot({ orphans: [orphan({ testKey: "CALC-9", meta: { key: "CALC-9", summary: "Stray" } })] }),
       ROOTS
     );
-    expect(model.available).toEqual([{ key: "CALC-9", summary: "Stray", pills: [], links: [] }]);
+    expect(model.available).toEqual([{ key: "CALC-9", summary: "Stray", pills: [], links: [], reqKeys: [] }]);
   });
 
   it("omits the summary on an available test with none and gives it no rows", () => {
     const model = build(snapshot({ orphans: [orphan()] }), ROOTS);
-    expect(model.available[0]).toEqual({ key: "CALC-9", pills: [], links: [] });
+    expect(model.available[0]).toEqual({ key: "CALC-9", pills: [], links: [], reqKeys: [] });
   });
 
   it("sorts each group by key on its own, keeping mapped tests out of the available one", () => {
@@ -459,12 +460,13 @@ describe("filterBoardViewModel", () => {
       { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: [], reqKeys: ["REQ-7"] },
       { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: [], reqKeys: [] },
     ],
-    available: [{ key: "PAY-9", pills: [], links: [] }],
+    available: [{ key: "PAY-9", pills: [], links: [], reqKeys: [] }],
     mapped: [
       {
         key: "CALC-1",
         summary: "Add two numbers",
         pills: ["2 scenarios"],
+        reqKeys: [],
         links: [
           { name: "Add large numbers", location: "features/calc.feature:9", unlinkId: "id-add-large" },
           { name: "Add small numbers", location: "features/calc.feature:3", unlinkId: "id-add-small" },

@@ -131,6 +131,8 @@ Use the **View project** selector at the top of the board to choose the project 
 
 The Matrix shows one page of rows at a time. Use its **Prev** and **Next** controls to reach later rows, or use the board search to filter all synced results before paging. A feature file can appear on more than one page; its Matrix group count shows rows on the current page.
 
+In Mapping, select **Open story** on a scenario or test card to open that story in the tracker. Scenario tags and synced test coverage provide the keys.
+
 ![Coverage Board Mapping tab](../images/mapping-xray.png)
 
 ![Coverage Board Matrix tab](../images/matrix-xray.png)

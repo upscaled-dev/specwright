@@ -277,6 +277,32 @@ export function installBoard(): void {
     return check;
   }
 
+  function issueLink(key: string, focusKey: string, fallback: string, label = key): HTMLButtonElement {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'key-link';
+    button.textContent = label;
+    button.title = `Open ${key} in the tracker.`;
+    button.dataset["focusKey"] = focusKey;
+    button.dataset["focusFallback"] = fallback;
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      window.__spec.post('board', { type: 'open', key });
+    });
+    return button;
+  }
+
+  function storyLinks(keys: readonly string[], owner: string): HTMLElement | undefined {
+    if (keys.length === 0) { return undefined; }
+    const links = document.createElement('div');
+    links.className = 'meta';
+    keys.forEach((key, index) => {
+      if (index > 0) { links.appendChild(document.createTextNode(', ')); }
+      links.appendChild(issueLink(key, `open-story:${owner}:${key}`, owner, `Open story ${key}`));
+    });
+    return links;
+  }
+
   function paintScenarioCards(container: HTMLElement, cards: readonly SelectableScenarioCard[]): void {
     for (const card of cards) {
       const el = document.createElement('div');
@@ -290,6 +316,8 @@ export function installBoard(): void {
       head.appendChild(title);
       el.appendChild(head);
       el.appendChild(metaEl(card.location));
+      const stories = storyLinks(card.reqKeys, `scenario:${card.dropId}`);
+      if (stories) { el.appendChild(stories); }
       if (card.pills.length > 0) { el.appendChild(pillsEl(card.pills)); }
       if (keyboardTests[0]) {el.appendChild(keyboardLink('Link to selected test', card.dropId, keyboardTests[0], `scenario:${card.dropId}`));}
       wireCardDrag(el, 'scenario', card.dropId, true);
@@ -345,23 +373,12 @@ export function installBoard(): void {
       head.appendChild(selectBox('test', card.key, `Select test ${  card.key}`, card.selected));
       const title = document.createElement('div');
       title.className = 'title key';
-      // The key has always looked like a link; this is the control that makes it one. The click stops
-      // there so the card's drag, its checkbox, and the keyboard link row all behave as before.
-      const open = document.createElement('button');
-      open.type = 'button';
-      open.className = 'key-link';
-      open.textContent = card.key;
-      open.title = `Open ${card.key} in the tracker.`;
-      open.dataset["focusKey"] = `open:${card.key}`;
-      open.dataset["focusFallback"] = `test:${card.key}`;
-      open.addEventListener('click', (event) => {
-        event.stopPropagation();
-        window.__spec.post('board', { type: 'open', key: card.key });
-      });
-      title.appendChild(open);
+      title.appendChild(issueLink(card.key, `open:${card.key}`, `test:${card.key}`));
       head.appendChild(title);
       el.appendChild(head);
       if (card.summary) { el.appendChild(metaEl(card.summary)); }
+      const stories = storyLinks(card.reqKeys, `test:${card.key}`);
+      if (stories) { el.appendChild(stories); }
       if (card.pills.length > 0) { el.appendChild(pillsEl(card.pills)); }
       for (const link of card.links) { el.appendChild(linkRow(link, card.key)); }
       if (keyboardScenarios[0]) {el.appendChild(keyboardLink('Link selected scenario', keyboardScenarios[0], card.key, `test:${card.key}`));}

@@ -95,13 +95,14 @@ export const MODEL: BoardViewModel = {
     { name: "Log in", location: "features/login.feature:5", dropId: "id-login", pills: [], reqKeys: [] },
     { name: "Checkout", location: "features/cart.feature:12", dropId: "id-checkout", pills: [], reqKeys: ["REQ-7"] },
   ],
-  available: [{ key: "PAY-9", project: "PAY", pills: [], links: [] }],
+  available: [{ key: "PAY-9", project: "PAY", pills: [], links: [], reqKeys: [] }],
   mapped: [
     {
       key: "CALC-1",
       summary: "Add two numbers",
       project: "CALC",
       pills: ["1 scenario"],
+      reqKeys: [],
       links: [{ name: "Add two numbers", location: "features/calc.feature:3", unlinkId: "id-add" }],
     },
   ],
@@ -126,9 +127,9 @@ export const MODEL: BoardViewModel = {
 export const LISTS: BoardViewModel = {
   ...MODEL,
   available: [
-    { key: "CALC-10", summary: "Login", project: "CALC", pills: [], links: [] },
-    { key: "CALC-11", summary: "Login again", project: "CALC", pills: [], links: [] },
-    { key: "CALC-12", summary: "Checkout", project: "CALC", pills: [], links: [] },
+    { key: "CALC-10", summary: "Login", project: "CALC", pills: [], links: [], reqKeys: [] },
+    { key: "CALC-11", summary: "Login again", project: "CALC", pills: [], links: [], reqKeys: [] },
+    { key: "CALC-12", summary: "Checkout", project: "CALC", pills: [], links: [], reqKeys: [] },
   ],
 };
 

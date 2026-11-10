@@ -30,7 +30,7 @@ describe("BoardPanel", () => {
     let current = MODEL;
     const { panel } = await openReady({ buildModel: () => current });
     await receive(panel, { type: "tab", tab: "matrix" });
-    current = { ...MODEL, available: [{ key: "NEW-1", pills: [], links: [] }] };
+    current = { ...MODEL, available: [{ key: "NEW-1", pills: [], links: [], reqKeys: [] }] };
     const before = posted(panel).length;
 
     await receive(panel, { type: "ready" });
@@ -275,7 +275,7 @@ describe("BoardPanel", () => {
     const changes = new vscode.EventEmitter<void>();
     const { panel } = await openReady({ buildModel: () => current, onDidChange: changes.event });
 
-    current = { ...MODEL, available: [{ key: "NEW-1", pills: [], links: [] }], mapped: [], matrix: [] };
+    current = { ...MODEL, available: [{ key: "NEW-1", pills: [], links: [], reqKeys: [] }], mapped: [], matrix: [] };
     changes.fire();
 
     expect(lastRender(panel)!.available.map((t) => t.key)).toEqual(["NEW-1"]);

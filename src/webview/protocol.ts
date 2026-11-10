@@ -87,6 +87,7 @@ export interface SelectableTestCard {
   readonly project?: string | undefined;
   readonly pills: readonly string[];
   readonly links: readonly BoardTestLink[];
+  readonly reqKeys: readonly string[];
   readonly selected: boolean;
 }
 
@@ -408,8 +409,9 @@ function validBoardLink(value: Record<string, unknown>): boolean {
 }
 
 function validTestCard(value: Record<string, unknown>, budget: ProjectionBudget): boolean {
-  return exactOrOptional(value, ["key", "pills", "links", "selected"], ["summary", "project"]) && text(value["key"]) &&
+  return exactOrOptional(value, ["key", "pills", "links", "reqKeys", "selected"], ["summary", "project"]) && text(value["key"]) &&
     optionalText(value, "summary") && optionalText(value, "project") && projectedStrings(value["pills"], 64, budget) &&
+    projectedStrings(value["reqKeys"], HOST_PROJECTION_LIMIT, budget) &&
     projectedArray(value["links"], (item) => validBoardLink(item), budget) &&
     typeof value["selected"] === "boolean";
 }

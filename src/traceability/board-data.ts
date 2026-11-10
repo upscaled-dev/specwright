@@ -13,8 +13,7 @@ import type {
 // workspace-relative "path:line" the card shows; `dropId` is its unambiguous drag-to-link identity
 // (see `scenarioDropId`), never shown. `pills` are the short markers an outline needs ("outline" plus
 // an example count); a plain scenario carries none, since every card in this column is untraced and a
-// pill saying so on all of them marks nothing. `reqKeys` are carried for the header filter but not
-// shown as pills.
+// pill saying so on all of them marks nothing. `reqKeys` also identify links to stories.
 export interface BoardScenarioCard {
   readonly name: string;
   readonly location: string;
@@ -42,6 +41,7 @@ export interface BoardTestCard {
   readonly project?: string | undefined;
   readonly pills: readonly string[];
   readonly links: readonly BoardTestLink[];
+  readonly reqKeys: readonly string[];
 }
 
 // One row of the Matrix tab, columns left to right. A coverage hole is an empty string: a requirement
@@ -226,6 +226,7 @@ function mappedTestCards(links: readonly TraceLink[], roots: readonly string[], 
       // The pill counts the rows, so the card's headline and the list under it can never disagree.
       pills: [countLabel(rows.length, "scenario")],
       links: rows,
+      reqKeys: [...new Set(group.flatMap((link) => [...link.reqKeys, ...(link.meta?.coverageKeys ?? [])]))],
       ...(summary !== undefined ? { summary } : {}),
     });
   }
@@ -353,6 +354,7 @@ export function buildBoardViewModel(
         project: keyProject(projectOf, orphan.testKey),
         pills: [],
         links: [],
+        reqKeys: [...new Set(orphan.meta.coverageKeys ?? [])],
         ...(summary !== undefined ? { summary } : {}),
       };
     })
