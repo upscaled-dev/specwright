@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.7.12] - 2026-11-12
 ### Fixed
 
 - Keep the Coverage Board Publish form visible and update completed runs without a manual refresh, including runs that finish while the form is loading.
