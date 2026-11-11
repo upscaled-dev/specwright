@@ -248,7 +248,9 @@ describe("BoardPanel", () => {
     await client.pumpHost();
     await expect(retry).resolves.toBeUndefined();
     expect(client.dom.window.document.getElementById("publish-idle")?.hidden).toBe(false);
-    expect(client.dom.window.document.getElementById("publish-form")?.hidden).toBe(true);
+    expect(client.dom.window.document.getElementById("publish-form")?.hidden).toBe(false);
+    expect((client.dom.window.document.getElementById("publish") as HTMLButtonElement).disabled).toBe(true);
+    expect((client.dom.window.document.getElementById("run-select") as HTMLSelectElement).value).toBe("");
     expect(attachPending).toHaveBeenCalledOnce();
     runsChanged.dispose();
   });

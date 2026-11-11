@@ -197,6 +197,13 @@ export class TraceabilityPublishCommands {
 
   public publishLastRun(signal?: AbortSignal): Promise<void> {return this.runPublish(undefined, signal);}
 
+  public async reopenRun(preselectId: string | undefined, signal: AbortSignal, canStart: () => boolean): Promise<void> {
+    // The previous form can settle before its command finishes rebuilding the board. Its caller owns
+    // error reporting; the next form waits for admission to retire even if that command failed.
+    await this.publishInFlight?.catch(() => undefined);
+    if (!signal.aborted && canStart()) {await this.runPublish(preselectId, signal);}
+  }
+
   public runPublish(preselectId?: string, signal?: AbortSignal): Promise<void> {
     if (this.publishInFlight !== undefined) {
       return this.publishInFlight;

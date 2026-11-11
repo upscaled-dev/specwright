@@ -193,9 +193,37 @@ describe("runPublishFlow: no publishable runs", () => {
     expect(attachmentsSpy).toHaveBeenCalledTimes(1);
     expect(presentDialog).toHaveBeenCalledTimes(1);
   });
+
+  it("opens no stale form when the last publishable run disappears during attachment preparation", async () => {
+    let runs = [artifact()];
+    let release!: (model: PublishAttachmentsModel) => void;
+    const attachments = new Promise<PublishAttachmentsModel>((resolve) => {release = resolve;});
+    const d = deps(runs, { runs: () => runs, attachments: () => attachments });
+    const operation = runPublishFlow(d);
+    runs = [];
+    release(ATTACHMENTS_MODEL);
+    await operation;
+
+    expect(d.reportNoRuns).toHaveBeenCalledOnce();
+    expect(d.presentDialog).not.toHaveBeenCalled();
+  });
 });
 
 describe("runPublishFlow: dropdown ordering and preselection", () => {
+  it.each(["old", "evicted"])("reconciles preselection %s against runs available after attachment preparation", async (preselectId) => {
+    let runs = [artifact({ id: preselectId })];
+    let release!: (model: PublishAttachmentsModel) => void;
+    const attachments = new Promise<PublishAttachmentsModel>((resolve) => {release = resolve;});
+    const cap = captureModel({ preselectId, runs: () => runs, attachments: () => attachments });
+    const operation = runPublishFlow(deps(runs, cap.over));
+    runs = [artifact({ id: "new" }), ...(preselectId === "old" ? runs : [])];
+    release(ATTACHMENTS_MODEL);
+    await operation;
+
+    expect(cap.models[0]?.runs.map((run) => run.id)).toEqual(runs.map((run) => run.id));
+    expect(cap.models[0]?.selectedRunId).toBe(preselectId === "old" ? "old" : "new");
+  });
+
   it("keeps the runs newest-first as passed and defaults the selection to the newest", async () => {
     const cap = captureModel();
     const runs = [artifact({ id: "new", createdAt: CREATED_AT + 1000 }), artifact({ id: "old", createdAt: CREATED_AT })];

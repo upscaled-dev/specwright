@@ -1144,6 +1144,284 @@ describe("traceability publishLastRun: Publish tab", () => {
     } as unknown as TraceabilitySubsystem;
   }
 
+  function sealMappedRun(store: RunArtifactStore, name: string): RunArtifact {
+    store.setKeyResolver(() => () => "CALC-1");
+    const handle = store.beginBatch({ kind: "scenario", scenario: {
+      filePath: "/ws/a.feature", line: 3, name, kind: "scenario",
+    } });
+    store.contributeShard(handle, {
+      workingDir: "/ws", command: "playwright test", success: true, exitCode: 0,
+      details: [{ featurePath: "/ws/a.feature", lineNumber: 3, scenarioName: name, status: "passed", durationMs: 10 }],
+    });
+    return store.sealBatch(handle, "complete")!;
+  }
+
+  it("shows a completed mapped run in the selected Publish tab without a refresh", async () => {
+    const store = new RunArtifactStore(memento(), Logger.create());
+    const publish = vi.fn();
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem([], NO_PROJECT_SCOPE, publish));
+    traceabilityCommands(mgr).openBoard();
+    const panel = win.__webviewPanels[0]!;
+    const browser = await connectBrowserClient(panel as unknown as StubPanel);
+    const document = browser.dom.window.document;
+    try {
+      document.getElementById("tab-publish")!.click();
+      await browser.flushInbound();
+      await publishCommands(mgr).runPublish();
+      await browser.pumpHost();
+      expect(document.getElementById("publish-form")?.hidden).toBe(false);
+      expect(document.getElementById("publish-empty")?.textContent).toContain("No completed mapped runs");
+      expect(document.querySelector<HTMLSelectElement>("#run-select")?.options).toHaveLength(0);
+      expect((document.getElementById("publish") as HTMLButtonElement).disabled).toBe(true);
+
+      const sealed = sealMappedRun(store, "Fresh checkout results");
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+      await browser.pumpHost();
+
+      expect(document.getElementById("pane-publish")?.hidden).toBe(false);
+      expect(document.getElementById("publish-form")?.hidden).toBe(false);
+      const selected = document.querySelector<HTMLSelectElement>("#run-select");
+      expect(selected?.value).toBe(sealed.id);
+      expect(selected?.selectedOptions[0]?.textContent).toBe(`${new Date(sealed.createdAt).toLocaleString()} · Scenario`);
+      expect((document.getElementById("publish") as HTMLButtonElement).disabled).toBe(false);
+      expect(publish).not.toHaveBeenCalled();
+      const operation = publishCommands(mgr).runPublish();
+      document.getElementById("cancel")!.click();
+      await browser.flushInbound();
+      await operation;
+    } finally {
+      browser.dom.window.close();
+    }
+  });
+
+  it("includes a run sealed during attachment preparation in the first rendered Publish dropdown", async () => {
+    const store = new RunArtifactStore(memento(), Logger.create());
+    sealMappedRun(store, "Earlier checkout results");
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem());
+    let release!: (model: PublishAttachmentsModel) => void;
+    const preparation = new Promise<PublishAttachmentsModel>((resolve) => {release = resolve;});
+    const commands = publishCommands(mgr);
+    const attachments = vi.spyOn(commands as unknown as { buildPublishAttachments(): Promise<PublishAttachmentsModel> }, "buildPublishAttachments")
+      .mockReturnValue(preparation);
+    const operation = commands.runPublish();
+    await vi.waitFor(() => expect(attachments).toHaveBeenCalledOnce());
+    const panel = win.__webviewPanels[0]!;
+    const browser = await connectBrowserClient(panel as unknown as StubPanel);
+    try {
+      browser.dom.window.document.getElementById("tab-publish")!.click();
+      await browser.flushInbound();
+      await browser.pumpHost();
+      expect(browser.dom.window.document.getElementById("publish-form")?.hidden).toBe(false);
+      expect((browser.dom.window.document.getElementById("publish") as HTMLButtonElement).disabled).toBe(true);
+      const sealed = sealMappedRun(store, "Checkout completed during preparation");
+      release({ available: false, suggestions: [], uploadLimitBytes: 0, evidenceStream: "evidence" });
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+      await browser.pumpHost();
+
+      const document = browser.dom.window.document;
+      expect(document.getElementById("pane-publish")?.hidden).toBe(false);
+      const selected = document.querySelector<HTMLSelectElement>("#run-select");
+      expect(selected?.value).toBe(sealed.id);
+      expect(selected?.selectedOptions[0]?.textContent).toBe(`${new Date(sealed.createdAt).toLocaleString()} · Scenario`);
+      expect((document.getElementById("publish") as HTMLButtonElement).disabled).toBe(false);
+      document.getElementById("cancel")!.click();
+      await browser.flushInbound();
+      await operation;
+    } finally {
+      browser.dom.window.close();
+    }
+  });
+
+  it.each(["run choice", "recorded run", "tab activation"])("keeps the form visible and rearms a settled %s after the previous command retires", async (trigger) => {
+    const store = new RunArtifactStore(memento(), Logger.create());
+    const sealed = sealMappedRun(store, "Checkout awaiting publication");
+    let releasePublish!: (outcome: unknown) => void;
+    const publishing = new Promise<unknown>((resolve) => {releasePublish = resolve;});
+    const publish = vi.fn(() => publishing);
+    let rejectRebuild!: (error: Error) => void;
+    const rebuilding = new Promise<void>((_resolve, reject) => {rejectRebuild = reject;});
+    const rebuildNow = vi.fn(() => rebuilding);
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem({ ...connectedSubsystem([], NO_PROJECT_SCOPE, publish), rebuildNow } as unknown as TraceabilitySubsystem);
+    const commands = publishCommands(mgr);
+    const operation = commands.runPublish();
+    await vi.waitFor(() => expect(win.__webviewPanels).toHaveLength(1));
+    const panel = win.__webviewPanels[0]!;
+    const browser = await connectBrowserClient(panel as unknown as StubPanel);
+    try {
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+      await browser.pumpHost();
+      const document = browser.dom.window.document;
+      document.getElementById("publish")!.click();
+      await browser.flushInbound();
+      await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
+      await browser.pumpHost();
+      expect(document.getElementById("publish-form")?.hidden).toBe(false);
+      expect(document.getElementById("publish-busy")?.hidden).toBe(false);
+      expect(document.querySelector<HTMLFieldSetElement>("#publish-fields")?.disabled).toBe(true);
+      expect((document.getElementById("publish") as HTMLButtonElement).disabled).toBe(true);
+
+      const next = sealMappedRun(store, "Checkout completed while publishing");
+      await browser.pumpHost();
+      expect(document.querySelector<HTMLSelectElement>("#run-select")?.value).toBe(sealed.id);
+      expect(publish).toHaveBeenCalledOnce();
+      releasePublish({ ref: { kind: "execution", key: "CALC-9" }, imported: 1, warnings: [] });
+      await vi.waitFor(() => expect(rebuildNow).toHaveBeenCalledOnce());
+      await browser.pumpHost();
+      expect(document.getElementById("publish-form")?.hidden).toBe(false);
+      expect(document.querySelector<HTMLSelectElement>("#run-select")?.value).toBe("");
+      expect(Array.from(document.querySelector<HTMLSelectElement>("#run-select")!.options)
+        .map((option) => option.value)).toContain(next.id);
+      expect((document.getElementById("publish") as HTMLButtonElement).disabled).toBe(true);
+
+      const select = document.querySelector<HTMLSelectElement>("#run-select")!;
+      let expectedRun = sealed;
+      if (trigger === "run choice") {
+        select.value = sealed.id;
+        select.dispatchEvent(new browser.dom.window.Event("change", { bubbles: true }));
+      } else if (trigger === "recorded run") {
+        expectedRun = sealMappedRun(store, "Checkout completed after settlement");
+      } else {
+        expectedRun = next;
+        document.getElementById("tab-publish")!.click();
+      }
+      await browser.flushInbound();
+      expect(posts(panel, "model", "publish")).toHaveLength(1);
+      rejectRebuild(new Error("Controlled board refresh failure"));
+      await operation;
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(2));
+      await browser.pumpHost();
+      expect(select.value).toBe(expectedRun.id);
+      expect(select.selectedOptions[0]?.textContent).toBe(`${new Date(expectedRun.createdAt).toLocaleString()} · Scenario`);
+      expect((document.getElementById("publish") as HTMLButtonElement).disabled).toBe(false);
+      expect(publish).toHaveBeenCalledOnce();
+      const reopened = commands.runPublish();
+      document.getElementById("cancel")!.click();
+      await browser.flushInbound();
+      await reopened;
+      await browser.pumpHost();
+      expect(document.getElementById("pane-mapping")?.hidden).toBe(false);
+      expect(document.getElementById("publish-form")?.hidden).toBe(false);
+    } finally {
+      browser.dom.window.close();
+    }
+  });
+
+  it.each([false, true])("waits for the board to regain focus before showing a completed run (visible: %s)", async (visible) => {
+    const store = new RunArtifactStore(memento(), Logger.create());
+    const publish = vi.fn();
+    const info = vi.spyOn(vscode.window, "showInformationMessage");
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem([], NO_PROJECT_SCOPE, publish));
+    traceabilityCommands(mgr).openBoard();
+    const panel = win.__webviewPanels[0]! as PublishPanel & {
+      __revealCount: number;
+      __setViewState(active: boolean, visible?: boolean): void;
+    };
+    const browser = await connectBrowserClient(panel as unknown as StubPanel);
+    try {
+      browser.dom.window.document.getElementById("tab-publish")!.click();
+      await browser.flushInbound();
+      await publishCommands(mgr).runPublish();
+      const notices = info.mock.calls.length;
+      panel.__setViewState(false, visible);
+      const reveals = panel.__revealCount;
+      const sealed = sealMappedRun(store, "Checkout completed in the editor");
+      await browser.pumpHost();
+
+      expect(posts(panel, "model", "publish")).toEqual([]);
+      expect(panel.__revealCount).toBe(reveals);
+      expect(publish).not.toHaveBeenCalled();
+      expect(info).toHaveBeenCalledTimes(notices);
+
+      panel.__setViewState(true);
+      panel.__setViewState(true);
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+      await browser.pumpHost();
+      const document = browser.dom.window.document;
+      expect(document.getElementById("publish-form")?.hidden).toBe(false);
+      expect(document.querySelector<HTMLSelectElement>("#run-select")?.value).toBe(sealed.id);
+      expect((document.getElementById("publish") as HTMLButtonElement).disabled).toBe(false);
+      expect(info).toHaveBeenCalledTimes(notices);
+      const operation = publishCommands(mgr).runPublish();
+      document.getElementById("cancel")!.click();
+      await browser.flushInbound();
+      await operation;
+    } finally {
+      browser.dom.window.close();
+    }
+  });
+
+  it("keeps the Mapping tab selected when a mapped run completes", async () => {
+    const store = new RunArtifactStore(memento(), Logger.create());
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem());
+    traceabilityCommands(mgr).openBoard();
+    const panel = win.__webviewPanels[0]!;
+    const browser = await connectBrowserClient(panel as unknown as StubPanel);
+    try {
+      sealMappedRun(store, "Checkout completed while mapping");
+      await browser.pumpHost();
+      expect(browser.dom.window.document.getElementById("pane-mapping")?.hidden).toBe(false);
+      expect(browser.dom.window.document.getElementById("pane-publish")?.hidden).toBe(true);
+      expect(posts(panel, "model", "publish")).toEqual([]);
+    } finally {
+      browser.dom.window.close();
+    }
+  });
+
+  it.each(["tab", "editor"])("preserves a move to another %s while the automatic Publish form prepares", async (destination) => {
+    const store = new RunArtifactStore(memento(), Logger.create());
+    const publish = vi.fn();
+    const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));
+    mgr.setTraceabilitySubsystem(connectedSubsystem([], NO_PROJECT_SCOPE, publish));
+    traceabilityCommands(mgr).openBoard();
+    const panel = win.__webviewPanels[0]! as PublishPanel & {
+      __revealCount: number;
+      __setViewState(active: boolean, visible?: boolean): void;
+    };
+    const browser = await connectBrowserClient(panel as unknown as StubPanel);
+    let release!: (model: PublishAttachmentsModel) => void;
+    const preparation = new Promise<PublishAttachmentsModel>((resolve) => {release = resolve;});
+    try {
+      browser.dom.window.document.getElementById("tab-publish")!.click();
+      await browser.flushInbound();
+      await publishCommands(mgr).runPublish();
+      await browser.pumpHost();
+      const commands = publishCommands(mgr);
+      const attachments = vi.spyOn(commands as unknown as { buildPublishAttachments(): Promise<PublishAttachmentsModel> }, "buildPublishAttachments")
+        .mockReturnValue(preparation);
+      sealMappedRun(store, "Checkout prepared after navigation");
+      await vi.waitFor(() => expect(attachments).toHaveBeenCalledOnce());
+      await browser.pumpHost();
+      if (destination === "tab") {
+        browser.dom.window.document.getElementById("tab-mapping")!.click();
+        await browser.flushInbound();
+      } else {
+        panel.__setViewState(false, true);
+      }
+      const reveals = panel.__revealCount;
+      const activations = posts(panel, "activate", "shell").length;
+      release({ available: false, suggestions: [], uploadLimitBytes: 0, evidenceStream: "evidence" });
+      await vi.waitFor(() => expect(posts(panel, "model", "publish")).toHaveLength(1));
+      await browser.pumpHost();
+
+      expect(panel.__revealCount).toBe(reveals);
+      expect(posts(panel, "activate", "shell")).toHaveLength(activations);
+      if (destination === "tab") {
+        expect(browser.dom.window.document.getElementById("pane-mapping")?.hidden).toBe(false);
+      }
+      expect(publish).not.toHaveBeenCalled();
+      const operation = commands.runPublish();
+      panel.dispose();
+      await operation;
+    } finally {
+      browser.dom.window.close();
+    }
+  });
+
   it("opens the board and presents the run model on the Publish tab", async () => {
     const store = { list: () => [publishableArtifact()] } as unknown as RunArtifactStore;
     const mgr = CommandManager.create(makeContext({ runArtifactStore: store }));

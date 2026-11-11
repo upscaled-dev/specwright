@@ -190,6 +190,8 @@ Use **Specwright: Publish Last Run…** to return to a recorded run. Its dropdow
 - The run finished without being cancelled or cut short.
 - At least one of its results maps to an Xray test and was not excluded during preflight.
 
+The Coverage Board's Publish form stays visible even when there are no runs. Publish becomes available when a completed mapped run is ready, and new runs appear without refreshing the board. If you finish a run in another editor, the board updates when you return without taking focus. After publishing or cancelling, choose a run to prepare it again.
+
 What **Run Locally and Publish…** adds is the preflight above. It checks mappings before running and records your exclusions on the run, so its results reach the Publish tab already reconciled. A Testing view run carries no preflight decisions, so read its result summary in the Publish tab before you publish it.
 
 In the **Publish** tab:

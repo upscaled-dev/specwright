@@ -7,10 +7,8 @@ import { SurfaceFragment, SurfaceHost } from "./webview-host";
 import { WEBVIEW_ATTACHMENT_LIMIT, type PublishClientMessage } from "../webview/protocol";
 
 const IMPORT_HINT = "Create → POST /import/execution/cucumber/multipart · Append → POST /import/execution";
-const IDLE_HINT = "Pick a run to publish and its details appear here.";
-// The dialog is open but its run history emptied underneath it (a clear, or every run aged out). A form
-// over no runs would offer a Publish button with nothing behind it.
-const NO_RUNS_HINT = "No runs left to publish. Run some tests and they appear here.";
+const IDLE_HINT = "Choose a run to prepare its results for publishing.";
+const NO_RUNS_HINT = "No completed mapped runs to publish. Run some tests and they appear here.";
 const ATTACHMENT_LIMIT_HINT = `Choose at most ${WEBVIEW_ATTACHMENT_LIMIT} attachments.`;
 
 // The still-pending count after an in-dialog attach-pending action; 0 clears the banner.
@@ -91,7 +89,8 @@ export class PublishSurface {
   constructor(
     private readonly host: SurfaceHost<"publish">,
     private readonly delegate: PublishDialogDelegate,
-    private readonly startPublish: () => void
+    private readonly startPublish: (canStart?: () => boolean, preselectId?: string) => void,
+    private readonly isActive: () => boolean
   ) {
     host.onMessage((message) => this.handle(message));
     host.onDidDispose(() => this.dispose());
@@ -102,20 +101,21 @@ export class PublishSurface {
 
   public beginFlow(): PublishFlowSession {
     const identity = ++this.flowGeneration;
+    const reveal = !this.isActive();
     this.generation += 1;
     this.resolvePending(undefined);
     this.searchController?.abort();
     this.searchController = undefined;
     this.activeFlow = identity;
     return {
-      present: (model) => this.presentFor(identity, model),
+      present: (model) => this.presentFor(identity, model, reveal),
       presentRetry: (selectedRunId) => this.presentRetryFor(identity, selectedRunId),
       markSettled: () => this.markSettledFor(identity),
       isLatest: () => this.flowGeneration === identity,
     };
   }
 
-  private presentFor(identity: number, model: PublishDialogModel): Promise<PublishDialogResult | undefined> {
+  private presentFor(identity: number, model: PublishDialogModel, reveal: boolean): Promise<PublishDialogResult | undefined> {
     if (this.activeFlow !== identity) {
       return Promise.resolve(undefined);
     }
@@ -126,7 +126,7 @@ export class PublishSurface {
     this.publishing = false;
     this.setModel(model);
     this.paint();
-    this.host.activate();
+    if (reveal || this.isActive()) {this.host.activate();}
     return this.arm();
   }
 
@@ -189,9 +189,8 @@ export class PublishSurface {
       : model;
   }
 
-  // A rebuilt webview (window reload, a move between editor groups) comes back on the idle hint with a
-  // blank form, so a present still waiting repaints its run rather than stranding the user in front of a
-  // dead tab, and one that has already been answered records that its paint is gone.
+  // A rebuilt webview starts with an empty disabled form, so a present still waiting repaints its run.
+  // One that has already been answered records that its paint is gone.
   public rehydrate(): void {
     this.painted = false;
     if ((this.pending || this.publishing) && this.model !== undefined) {
@@ -199,9 +198,8 @@ export class PublishSurface {
     }
   }
 
-  // A run recorded while the dialog sits open belongs in the dropdown without a reopen. Nothing is built
-  // unless a dialog is actually live: re-deriving the options re-reads every publishable run's source, and
-  // the tab has nowhere to put them.
+  // A run recorded while Publish is selected belongs in the form without a reopen. An idle tab starts
+  // the existing flow only when a publishable run is available; hidden tabs wait until they are active.
   //
   // A publish in flight (the confirm resolved, the busy pane up) owns both the screen and the pick it went
   // out with, so the fresh list rides the model and nothing is posted: moving the selection there would
@@ -209,9 +207,14 @@ export class PublishSurface {
   //
   // The `painted` check guards an invariant rather than a live case: every route that arms a pending paints
   // first, so a pending present always has a painted document behind it.
-  private refreshRuns(): void {
+  public refreshRuns(): void {
+    if (this.host.isDisposed()) {return;}
     const model = this.model;
-    if (model === undefined || this.host.isDisposed()) {
+    if (model === undefined) {
+      const canStart = (): boolean => this.canStart() && this.delegate.runOptions().length > 0;
+      if (canStart()) {
+        this.startPublish(canStart);
+      }
       return;
     }
     const runs = this.delegate.runOptions();
@@ -227,21 +230,23 @@ export class PublishSurface {
     }
   }
 
-  // Called in the flow's finally: clears the busy state to an idle placeholder, staying on the Publish
+  // Called in the flow's finally: clears the busy state and retires its selection, staying on the Publish
   // tab (toasts convey the outcome). False when a newer present has already superseded this one, which
   // is also what tells the settling flow it no longer owns the tab.
   //
-  // Settling for a flow that still owned the tab also retires the model: the tab now shows the idle hint,
-  // so there is nothing left for a retry to come back to. Without that, a publish still in flight from an
+  // Settling for a flow that still owned the tab also retires the model: a new selection prepares a fresh
+  // form, so there is nothing left for a retry to come back to. Without that, a publish still in flight from an
   // EARLIER flow could fail later and re-arm itself over whatever model a newer one had left behind.
   private markSettledFor(identity: number): boolean {
     if (this.activeFlow !== identity || this.pending) {
       return false;
     }
+    const runs = this.model?.runs;
     this.activeFlow = undefined;
     this.model = undefined;
     this.painted = false;
     this.publishing = false;
+    if (runs !== undefined) {this.host.post({ type: "runs", runs, selectedRunId: "" });}
     this.host.post({ type: "settled" });
     return true;
   }
@@ -257,7 +262,11 @@ export class PublishSurface {
       }
       return;
     }
-    this.startPublish();
+    this.startPublish(() => this.canStart());
+  }
+
+  private canStart(): boolean {
+    return this.activeFlow === undefined && this.isActive() && !this.host.isDisposed();
   }
 
   public dispose(): void {
@@ -291,6 +300,9 @@ export class PublishSurface {
     } else if (message.type === "selectRun") {
       if (this.pending && this.model?.runs.some((run) => run.id === message.runId)) {
         this.model = { ...this.model, selectedRunId: message.runId };
+      } else if (this.canStart() &&
+          this.delegate.runOptions().some((run) => run.id === message.runId)) {
+        this.startPublish(() => this.canStart(), message.runId);
       }
     } else if (message.type === "search") {
       this.runSearch(message).catch(() => undefined);
@@ -500,15 +512,17 @@ const PUBLISH_CSS = `
   #pane-publish button.link { background: none; color: var(--vscode-textLink-foreground); padding: 0; text-align: left; flex: none; }
   #pane-publish .footer { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-top: 1.25rem; }`;
 
-const PUBLISH_PANE = `<div id="publish-idle" class="idle">${escapeHtml(IDLE_HINT)}</div>
-      <div id="publish-empty" class="idle" hidden>${escapeHtml(NO_RUNS_HINT)}</div>
-      <div id="publish-busy" class="busy" role="status" aria-live="polite" hidden>Publishing…</div>
-      <div id="publish-form" hidden>
-        <h1 id="publish-title"></h1>
+const PUBLISH_PANE = `<div id="publish-form">
+        <h1 id="publish-title">Publish run results</h1>
 
         <label for="run-select">Run</label>
-        <select id="run-select"></select>
+        <select id="run-select" disabled></select>
 
+        <div id="publish-idle" class="idle" hidden>${escapeHtml(IDLE_HINT)}</div>
+        <div id="publish-empty" class="idle">${escapeHtml(NO_RUNS_HINT)}</div>
+        <div id="publish-busy" class="busy" role="status" aria-live="polite" hidden>Publishing…</div>
+
+        <fieldset id="publish-fields" aria-label="Publish details" disabled>
         <p class="subtitle" id="subtitle" aria-live="polite"></p>
         <div id="banners" role="status" aria-live="polite"></div>
 
@@ -555,10 +569,11 @@ const PUBLISH_PANE = `<div id="publish-idle" class="idle">${escapeHtml(IDLE_HINT
         <ul id="attach-list" class="attach-list"></ul>
         <button id="browse" class="link" type="button" hidden>Add files…</button>
         <p class="disabled-note" id="attach-disabled" hidden></p>
+        </fieldset>
 
         <div class="actions">
-          <button id="publish" class="primary" type="button">Publish</button>
-          <button id="cancel" class="secondary" type="button">Cancel</button>
+          <button id="publish" class="primary" type="button" disabled>Publish</button>
+          <button id="cancel" class="secondary" type="button" disabled>Cancel</button>
         </div>
         <p class="footer">${escapeHtml(IMPORT_HINT)}</p>
       </div>`;

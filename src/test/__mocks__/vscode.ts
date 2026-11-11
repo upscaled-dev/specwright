@@ -144,10 +144,14 @@ interface StubWebviewPanel {
   webview: StubWebview;
   __revealCount: number;
   __disposed: boolean;
+  active: boolean;
+  visible: boolean;
   reveal: (column?: unknown) => void;
+  onDidChangeViewState: (listener: () => void) => { dispose: () => void };
   onDidDispose: (listener: () => void) => { dispose: () => void };
   dispose: () => void;
   __receive: (message: unknown) => Promise<void>;
+  __setViewState: (active: boolean, visible?: boolean) => void;
 }
 
 interface StubWebviewPanelSerializer {
@@ -185,13 +189,28 @@ function createStubWebviewPanel(
     },
   };
   const disposeListeners: Array<() => void> = [];
+  const viewStateListeners: Array<() => void> = [];
   const panel: StubWebviewPanel = {
     viewType,
     title,
     webview,
     __revealCount: 0,
     __disposed: false,
+    active: true,
+    visible: true,
     reveal: (): void => { panel.__revealCount += 1; },
+    onDidChangeViewState: (listener) => {
+      viewStateListeners.push(listener);
+      return { dispose: () => {
+        const index = viewStateListeners.indexOf(listener);
+        if (index > -1) {viewStateListeners.splice(index, 1);}
+      } };
+    },
+    __setViewState: (active, visible = active) => {
+      panel.active = active;
+      panel.visible = visible;
+      for (const listener of [...viewStateListeners]) {listener();}
+    },
     onDidDispose: (listener) => {
       disposeListeners.push(listener);
       return {

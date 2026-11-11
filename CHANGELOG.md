@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep the Coverage Board Publish form visible and update completed runs without a manual refresh, including runs that finish while the form is loading.
+
+### Changed
+
+- Place Select Projects before Sync in the Coverage Board toolbar.
 
 ## [0.7.11] - 2026-11-10
 ### Added

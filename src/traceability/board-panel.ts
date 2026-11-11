@@ -44,7 +44,7 @@ export interface BoardPanelDeps extends BoardSurfaceDeps {
   // The Publish tab's callbacks: the search/browse/attach delegate the surface calls into, and the
   // command the shell fires when the tab is activated with no publish already underway.
   readonly publishDelegate: PublishDialogDelegate;
-  startPublish(): void;
+  startPublish(canStart?: () => boolean, preselectId?: string): void;
 }
 
 /**
@@ -81,7 +81,13 @@ export class BoardPanel {
       this.panel.webview.onDidReceiveMessage((message) => this.handleInbound(message))
     );
     this.board = new BoardSurface(this.hostFor("board"), deps);
-    this.publish = new PublishSurface(this.hostFor("publish"), deps.publishDelegate, deps.startPublish);
+    this.publish = new PublishSurface(
+      this.hostFor("publish"), deps.publishDelegate, deps.startPublish,
+      () => this.activeTab === "publish" && this.panel.active
+    );
+    this.disposables.push(this.panel.onDidChangeViewState(() => {
+      if (this.panel.active) {this.publish.refreshRuns();}
+    }));
     this.link = new LinkSurface(this.hostFor("link"));
   }
 

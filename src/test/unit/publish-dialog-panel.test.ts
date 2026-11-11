@@ -126,7 +126,7 @@ function deferredDelegate(): {
     recordRuns: (runs) => {
       state.runs = runs;
       runsChanged.fire();
-      return flush();
+      return Promise.resolve();
     },
     get browseResult() {
       return state.browseResult;
@@ -147,9 +147,9 @@ function target(key: string, label: string): PublishTarget {
   return { id: key, label, ref: { key } };
 }
 
-function surface(delegate: PublishDialogDelegate, startPublish: () => void = () => undefined): { rig: FakeHost; publish: PublishSurface } {
+function surface(delegate: PublishDialogDelegate, startPublish: () => void = () => undefined, isActive = () => false): { rig: FakeHost; publish: PublishSurface } {
   const rig = fakeHost();
-  const publish = new PublishSurface(rig.host, delegate, startPublish);
+  const publish = new PublishSurface(rig.host, delegate, startPublish, isActive);
   return { rig, publish };
 }
 
@@ -649,7 +649,7 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
     expect(replayed.model.runs.map((r) => r.id)).toEqual(["run-1", "run-2"]);
   });
 
-  it("ignores a recorded run while the tab is idle, and stops listening once the board is gone", async () => {
+  it("ignores a recorded run while the idle tab is inactive, and stops listening once the board is gone", async () => {
     const rig0 = deferredDelegate();
     const { rig, publish } = surface(rig0.delegate);
 
@@ -674,9 +674,44 @@ describe("PublishSurface: runs recorded under an open dialog", () => {
 
     expect(runOptionsSpy).not.toHaveBeenCalled();
   });
+
+  it("starts the selected idle tab only when a publishable run exists", async () => {
+    const rig0 = deferredDelegate();
+    const startPublish = vi.fn();
+    const { publish } = surface(rig0.delegate, startPublish, () => true);
+
+    await rig0.recordRuns([]);
+    expect(startPublish).not.toHaveBeenCalled();
+    await rig0.recordRuns(twoRuns);
+    expect(startPublish).toHaveBeenCalledOnce();
+    expect(startPublish.mock.calls[0]?.[0]?.()).toBe(true);
+
+    publish.beginFlow();
+    expect(startPublish.mock.calls[0]?.[0]?.()).toBe(false);
+    await rig0.recordRuns(twoRuns);
+    publish.refreshRuns();
+    expect(startPublish).toHaveBeenCalledOnce();
+  });
 });
 
 describe("PublishSurface: manual activation", () => {
+  it("reopens only an offered idle run, preserving active flow ownership", async () => {
+    const rig0 = deferredDelegate();
+    const startPublish = vi.fn();
+    const { rig, publish } = surface(rig0.delegate, startPublish, () => true);
+    await rig0.recordRuns([runOption(), runOption({ id: "run-2" })]);
+    startPublish.mockClear();
+
+    rig.receive({ type: "selectRun", runId: "evicted" });
+    expect(startPublish).not.toHaveBeenCalled();
+    rig.receive({ type: "selectRun", runId: "run-2" });
+    expect(startPublish).toHaveBeenCalledWith(expect.any(Function), "run-2");
+    startPublish.mockClear();
+    publish.beginFlow();
+    rig.receive({ type: "selectRun", runId: "run-2" });
+    expect(startPublish).not.toHaveBeenCalled();
+  });
+
   it("starts a fresh publish when the tab is activated with none underway", () => {
     const { delegate } = deferredDelegate();
     const startPublish = vi.fn();

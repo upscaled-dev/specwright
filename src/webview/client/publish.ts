@@ -24,7 +24,9 @@ export function installPublish(): void {
   const idleBox = element<HTMLElement>('publish-idle');
   const emptyBox = element<HTMLElement>('publish-empty');
   const busyBox = element<HTMLElement>('publish-busy');
-  const formBox = element<HTMLElement>('publish-form');
+  const fields = element<HTMLFieldSetElement>('publish-fields');
+  const publishButton = element<HTMLButtonElement>('publish');
+  const cancelButton = element<HTMLButtonElement>('cancel');
   const titleEl = element<HTMLElement>('publish-title');
   const runSelect = element<HTMLSelectElement>('run-select');
   const subtitle = element<HTMLElement>('subtitle');
@@ -268,22 +270,27 @@ export function installPublish(): void {
     return merged;
   }
 
-  // The last host-acknowledged pane. Intents never move it: a stale revision can be rejected before it
+  // The last host-acknowledged form state. Intents never move it: a stale revision can be rejected before it
   // reaches the surface, so only model/retry/busy/settled messages may make a transition durable.
   let visible: VisiblePane = 'idle';
 
   function show(which: VisiblePane): void {
     visible = which;
-    idleBox.hidden = which !== 'idle';
-    emptyBox.hidden = which !== 'empty';
+    const live = which === 'form' || which === 'empty';
+    const selected = live && findRun(selectedRunId) !== undefined;
+    idleBox.hidden = which !== 'idle' || runs.length === 0;
+    emptyBox.hidden = which === 'busy' || runs.length > 0;
     busyBox.hidden = which !== 'busy';
-    formBox.hidden = which !== 'form';
+    fields.disabled = !selected;
+    publishButton.disabled = !selected;
+    cancelButton.disabled = !live;
+    runSelect.disabled = which === 'busy' || runs.length === 0;
   }
 
   // A run refresh may reshape only a form the host already acknowledged; it never clears busy or revives
   // a settled dialog. The busy replay following `runs` owns that state explicitly.
   function showForRuns(): void {
-    if (visible === 'form' || visible === 'empty') { show(runs.length === 0 ? 'empty' : 'form'); }
+    show(visible === 'form' || visible === 'empty' ? (runs.length === 0 ? 'empty' : 'form') : visible);
   }
 
   // The dropdown and the selection the host now holds. The fields follow only when the pick actually
@@ -292,7 +299,7 @@ export function installPublish(): void {
   function applyRuns(msg: Extract<PublishHostMessage, { type: "runs" | "retry" }>): void {
     const had = selectedRunId;
     runs = msg.runs.map((run) => ({ ...run }));
-    selectedRunId = msg.selectedRunId;
+    selectedRunId = visible === 'idle' && msg.type === 'runs' ? '' : msg.selectedRunId;
     renderRunOptions();
     const selected = findRun(selectedRunId);
     if (selected && selectedRunId !== had) { applyRun(selected); }
@@ -302,6 +309,12 @@ export function installPublish(): void {
   // run refresh build it the same way; only the refresh leaves the rest of the form standing.
   function renderRunOptions(): void {
     runSelect.textContent = '';
+    if (runs.length > 0 && selectedRunId === '') {
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = 'Choose a run';
+      runSelect.appendChild(placeholder);
+    }
     runs.forEach((run) => {
       const opt = document.createElement('option');
       opt.value = run.id;
@@ -355,12 +368,16 @@ export function installPublish(): void {
       attachDisabled.textContent = attachModel.reason ?? 'Add Jira access in Xray setup to attach run-level files.';
     }
     if (selected) { selectedRunId = selected.id; applyRun(selected); }
-    // A whole-model paint over an emptied list reaches here through a reload or a retry on a rebuilt
-    // document, and a form with nothing in its dropdown offers a Publish button with nothing behind it.
     show(runs.length === 0 ? 'empty' : 'form');
   }
 
   runSelect.addEventListener('change', () => {
+    if (visible === 'idle') {
+      const runId = runSelect.value;
+      runSelect.value = '';
+      if (findRun(runId)) {window.__spec.post('publish', { type: 'selectRun', runId });}
+      return;
+    }
     selectedRunId = runSelect.value;
     const run = findRun(selectedRunId);
     if (run) {
@@ -433,6 +450,8 @@ export function installPublish(): void {
     } else if (msg.type === 'settled') {
       acceptingUpdates = false;
       clearSearchTimers();
+      selectedRunId = '';
+      renderRunOptions();
       show('idle');
     } else if (msg.type === 'publish-busy') {
       acceptingUpdates = !msg.busy;

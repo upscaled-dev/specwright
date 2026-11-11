@@ -18,9 +18,9 @@ import { XrayMetadataCapability } from "../../xray/xray-metadata";
 import { FeatureParser } from "../../parsers/feature-parser";
 import { CommandManager } from "../../commands/command-manager";
 import { TraceabilityCommands } from "../../commands/traceability-commands";
-import { captureHandlers, makeContext } from "./helpers/command-manager-harness";
-import type { XrayClient } from "../../xray/xray-client";
-import type { XrayMetadataCache } from "../../xray/xray-metadata-cache";
+import { captureHandlers, makeContext, memento } from "./helpers/command-manager-harness";
+import { XrayClient } from "../../xray/xray-client";
+import { XrayMetadataCache } from "../../xray/xray-metadata-cache";
 import { LINK_FRAGMENT } from "../../traceability/link-picker-panel";
 import { PUBLISH_FRAGMENT } from "../../traceability/publish-dialog-panel";
 import type { SurfaceHost } from "../../traceability/webview-host";
@@ -230,10 +230,48 @@ describe("coverage board browser client", () => {
       testPrefix: "TEST_", reqPrefix: "REQ_", keyShape: /^[A-Z]+-\d+$/u,
       canonicalizeKey: (key: string) => key.toUpperCase(), projectOf: (key: string) => key.replace(/-\d+$/u, ""),
     };
-    const adapter: TraceabilityAdapter = {
-      id: "xray", label: "Xray", keyGrammar: grammar,
+    const queries: string[] = [];
+    const response = (body: unknown): Response => ({
+      status: 200, ok: true, text: () => Promise.resolve(JSON.stringify(body)),
+    }) as Response;
+    const client = new XrayClient({
+      region: "global", logger: Logger.create(),
+      credentials: () => Promise.resolve({ clientId: "account", clientSecret: "secret" }),
+      fetchImpl: (url, init) => {
+        if (url.endsWith("/authenticate")) {
+          return Promise.resolve(response(`${"a".repeat(140)}.${"b".repeat(140)}.${"c".repeat(140)}`));
+        }
+        queries.push((JSON.parse(String(init.body)) as { query: string }).query);
+        return Promise.resolve(response({ data: { getTests: { total: 3, results: [
+          { jira: { key: "CALC-1" }, coverableIssues: { results: [{ jira: { key: "CALC-20" } }, { jira: { key: "CALC-22" } }] } },
+          { jira: { key: "CALC-2" }, coverableIssues: { results: [{ jira: { key: "CALC-30" } }, { jira: { key: "CALC-30" } }, { jira: { key: "CALC-31" } }] } },
+          { jira: { key: "CALC-3" } },
+        ] } } }));
+      },
+    });
+    const account = (): Promise<string> => Promise.resolve("account");
+    const cache = new XrayMetadataCache(memento(), { endpoint: "xray.cloud.getxray.app", account, workspaceId: "ws" });
+    const makeMetadata = (): XrayMetadataCapability => new XrayMetadataCapability({
+      client, cache, account, config: { xrayCacheTtlMinutes: 15 } as ExtensionConfig,
+      logger: Logger.create(), onCredentialsChange: new vscode.EventEmitter<void>().event,
+      listProjects: () => Promise.resolve(undefined),
+    });
+    const makeAdapter = (metadata: XrayMetadataCapability): TraceabilityAdapter => validatedAdapter({
+      id: "xray", label: "Xray", keyGrammar: grammar, metadata,
       browseUrl: ({ key }) => `https://acme.atlassian.net/browse/${key}`,
-    };
+    }, () => metadata.dispose(), () => undefined);
+    const synced = makeAdapter(makeMetadata());
+    await synced.metadata!.sync({ projectKeys: ["CALC"], testKeys: ["CALC-1"] });
+    expect(queries.length).toBeGreaterThan(0);
+    expect(queries.every((query) => query.includes("coverableIssues(limit: 20)"))).toBe(true);
+    expect(synced.metadata!.snapshot().tests.get("CALC-1")?.coverageKeys).toEqual(["CALC-20", "CALC-22"]);
+    await synced.dispose!();
+    const restoredMetadata = makeMetadata();
+    const restored = new Promise<void>((resolve) => restoredMetadata.onDidChange(() => resolve()));
+    const adapter = makeAdapter(restoredMetadata);
+    await restored;
+    expect(adapter.metadata!.snapshot().tests.get("CALC-1")?.coverageKeys).toEqual(["CALC-20", "CALC-22"]);
+    expect(adapter.metadata!.snapshot().tests.get("CALC-3")?.coverageKeys).toBeUndefined();
     let manager: CommandManager | undefined;
     captureHandlers(makeContext({ traceabilityAdapter: adapter }), (created) => { manager = created; });
     const commands = (manager as unknown as { traceabilityCommands: TraceabilityCommands }).traceabilityCommands;
@@ -254,28 +292,23 @@ Scenario: No story
   Given a condition
 `;
     const scenarios = FeatureParser.create().parseFeatureContent(content)!.scenarios;
-    const snapshot = buildTraceabilitySnapshot([{ filePath: "/ws/story.feature", scenarios }], {}, grammar, {
-      tests: new Map([
-        ["CALC-1", { key: "CALC-1", coverageKeys: ["CALC-20", "CALC-22"] }],
-        ["CALC-2", { key: "CALC-2", coverageKeys: ["CALC-30", "CALC-30", "CALC-31"] }],
-        ["CALC-3", { key: "CALC-3" }],
-      ]),
-      fetchedScopes: ["CALC"], catalogueProjects: ["CALC"], completeProjects: ["CALC"],
-      verifiedAbsentKeys: [], stale: false, errors: [],
-    });
+    const snapshot = buildTraceabilitySnapshot([{ filePath: "/ws/story.feature", scenarios }], {}, grammar, adapter.metadata!.snapshot());
     const bridge = await bridgeBoardSurface(buildBoardViewModel(snapshot, ["/ws"], "TEST_", true, grammar.projectOf), () => undefined, undefined, deps.openIssue);
     const doc = bridge.client.dom.window.document;
     const storyKeys = (selector: string): string[] => [...doc.querySelectorAll<HTMLButtonElement>(`${selector} button`)].map((button) => button.textContent!).filter((label) => label.startsWith("Open story "));
     expect(storyKeys("#scenario-cards")).toEqual(["Open story CALC-10", "Open story CALC-11"]);
     expect(storyKeys("#mapped-cards")).toEqual(["Open story CALC-20", "Open story CALC-22", "Open story CALC-21"]);
     expect(storyKeys("#available-cards")).toEqual(["Open story CALC-30", "Open story CALC-31"]);
-    const button = [...doc.querySelectorAll<HTMLButtonElement>("#mapped-cards button")].find((item) => item.textContent === "Open story CALC-21")!;
+    const noCoverage = [...doc.querySelectorAll<HTMLElement>("#available-cards .card")].find((card) => card.querySelector(".key-link")?.textContent === "CALC-3")!;
+    expect(noCoverage.textContent).not.toContain("Open story");
+    const button = [...doc.querySelectorAll<HTMLButtonElement>("#mapped-cards button")].find((item) => item.textContent === "Open story CALC-22")!;
     button.focus();
     expect(doc.activeElement).toBe(button);
     button.click();
     bridge.routeClientMessages();
-    expect(env.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-21"]);
+    expect(env.__openExternalCalls).toEqual(["https://acme.atlassian.net/browse/CALC-22"]);
     bridge.client.dom.window.close();
+    await adapter.dispose!();
   });
   it("filters a named test from the last of three synced projects in All Projects", async () => {
     const projects = ["CALC", "MATH", "SHOP"];
@@ -872,6 +905,8 @@ Scenario: No story
     expect(syncButtons()).toEqual([false, false]);
     expect(syncHovers()).toEqual(["Syncs PAY, SHOP.", PICKER_HINT]);
     expect(syncLabels()).toEqual(["Sync", "Select projects..."]);
+    expect(Array.from(client.dom.window.document.querySelectorAll<HTMLButtonElement>('#sync-scope, #sync-now'))
+      .map((button) => button.id)).toEqual(["sync-scope", "sync-now"]);
 
     client.send("board", { ...changed, syncVerb: { label: "Sync", enabled: true, hint: "No projects in scope yet. Tag scenarios or select projects to sync." } });
     expect(syncHovers()).toEqual(["No projects in scope yet. Tag scenarios or select projects to sync.", PICKER_HINT]);
@@ -1164,11 +1199,16 @@ Scenario: No story
     client.send("shell", { type: "activate", tab: "publish" });
     client.send("publish", { type: "model", model: { ...publishModel, runs: [], selectedRunId: "" } });
     expect(doc.getElementById("publish-empty")?.hidden).toBe(false);
+    expect(doc.getElementById("publish-form")?.hidden).toBe(false);
+    expect((doc.getElementById("publish") as HTMLButtonElement).disabled).toBe(true);
+    expect((doc.getElementById("cancel") as HTMLButtonElement).disabled).toBe(false);
     client.send("publish", { type: "runs", runs: publishModel.runs, selectedRunId: "run-1" });
     expect(doc.getElementById("publish-form")?.hidden).toBe(false);
     client.send("publish", { type: "publish-busy", busy: true });
     client.send("publish", { type: "runs", runs: [], selectedRunId: "" });
     expect(doc.getElementById("publish-busy")?.hidden).toBe(false);
+    expect(doc.getElementById("publish-form")?.hidden).toBe(false);
+    expect((doc.getElementById("publish") as HTMLButtonElement).disabled).toBe(true);
     client.send("publish", { type: "publish-busy", busy: false });
     expect(doc.getElementById("publish-empty")?.hidden).toBe(false);
     client.send("publish", { type: "retry", runs: publishModel.runs, selectedRunId: "run-1" });
@@ -1181,6 +1221,8 @@ Scenario: No story
     client.send("publish", { type: "pending-result", runId: "run-1", remaining: 1 });
     client.send("publish", { type: "attachment-error", text: "Late upload failure" });
     expect(doc.getElementById("publish-idle")?.hidden).toBe(false);
+    expect(doc.getElementById("publish-form")?.hidden).toBe(false);
+    expect((doc.getElementById("publish") as HTMLButtonElement).disabled).toBe(true);
     expect(doc.getElementById("attach-list")?.textContent).toBe("");
     expect(doc.getElementById("attach-hint")?.textContent).not.toContain("Late upload failure");
     client.dom.window.close();

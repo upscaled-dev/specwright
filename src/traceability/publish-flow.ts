@@ -404,9 +404,7 @@ async function confirmAndPublish(
  * re-offers the dialog.
  */
 export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
-  const runnable = runnableRuns(deps.runs());
-  const newest = runnable[0];
-  if (newest === undefined) {
+  if (runnableRuns(deps.runs()).length === 0) {
     deps.reportNoRuns();
     return;
   }
@@ -414,6 +412,12 @@ export async function runPublishFlow(deps: PublishFlowDeps): Promise<void> {
   // The runs gate passed → the dialog will open, so this is the moment (and only moment) the attachments
   // model + its `attachment/meta` probe are built.
   const attachments = await deps.attachments();
+  const runnable = runnableRuns(deps.runs());
+  const newest = runnable[0];
+  if (newest === undefined) {
+    deps.reportNoRuns();
+    return;
+  }
   const scopedProject = scopedProjectOf(deps);
   const built = runnable.map((artifact) => buildRunOption(artifact, deps, scopedProject));
   const selectedRunId =

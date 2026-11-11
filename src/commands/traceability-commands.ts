@@ -377,8 +377,8 @@ export class TraceabilityCommands {
         "Creating a test execution from the board failed"
       ),
       publishDelegate: this.getPublishCommands().publishDelegate(),
-      startPublish: () => this.fireAndForget(
-        this.boardMutation((signal) => this.getPublishCommands().runPublish(undefined, signal)),
+      startPublish: (canStart, preselectId) => this.fireAndForget(
+        this.boardMutation((signal) => this.getPublishCommands().reopenRun(preselectId, signal, canStart ?? (() => true))),
         "Publish from the board tab failed"
       ),
     };
